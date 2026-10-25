@@ -584,6 +584,3 @@ result; section 9), its fixtures and feature files, and its own teams, channels 
    provider's, for example), which reach beyond one environment. Decide whether test mode is the one accepted
    exception, since it holds no real data, or whether each environment gets its own keys where the provider
    allows it.
-8. Forge's API spec says creating a scheduled job needs only `server:view`, though a `server:create-schedulers`
-   scope exists. Test it with a token that has only `server:view`. If it holds, every Forge token counts as root
-   (D20), and Forge should hear about it.
