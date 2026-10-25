@@ -73,7 +73,7 @@ t_label_needs_a_release() {
   world
   event "Fixes the export." regression
   check; expect_rc 1
-  expect_out "::error title=regression label::This PR has the regression label but names no release. Add a line 'Breaks: v1.2.3' with the release that shipped the problem."
+  expect_out "::error title=regression label::This PR has the regression label but names no release. Add a line 'Breaks: v1.2.3' with the release that shipped the problem, outside any HTML comment or code block."
 }
 
 t_release_needs_the_label() {
@@ -127,6 +127,97 @@ t_body_cannot_send_workflow_commands() {
   case "$out" in *"::add-mask"* | *"::set-output"*) fail "printed text from the PR body" ;; *) ok ;; esac
 }
 
+t_examples_are_not_read() {
+  world
+  # A PR template can show the lines in a comment or a code block without marking every PR.
+  event $'## Regression\r\n\r\n<!--\r\nBreaks: v1.2.3\r\nReported: 2026-10-14\r\n-->\r\n\r\n## Summary\r\n' type:chore
+  check; expect_rc 0; expect_out "not marked as a regression fix: nothing to check"
+  event $'For example:\n\n```\nBreaks: v1.2.3\n```\n\n~~~~ text\nBreaks: v1.2.3\n~~~\n~~~~\n' type:chore
+  check; expect_rc 0; expect_out "not marked as a regression fix: nothing to check"
+  # The line after the examples is the one read.
+  event $'<!-- for example\nBreaks: v0.0.1 -->\n```\nBreaks: v0.0.2\n```\nBreaks: v1.2.3\nReported: 2026-10-14' regression
+  check; expect_rc 0
+  expect_out "regression fix: the problem shipped in v1.2.3 (released 2026-10-13T10:02:11Z), first reported 2026-10-14"
+}
+
+t_unclosed_examples_run_to_the_end() {
+  world
+  # As on GitHub, a fence, or a comment that starts a line, a list item or a quote, hides the rest of the
+  # body when it is never closed.
+  local start
+  for start in '```' '<!-- a note' '- <!-- a note' '> <!-- a note'; do
+    event "Fixes the export."$'\n'"$start"$'\n\nBreaks: v1.2.3' regression
+    check; expect_rc 1; expect_out_has "has the regression label but names no release"
+  done
+  # Three backticks with another backtick later on the line are inline code, not a fence.
+  event $'```inline```\nBreaks: v1.2.3' regression
+  check; expect_rc 0; expect_out_has "the problem shipped in v1.2.3"
+}
+
+t_comments_inside_a_line() {
+  world
+  # A comment hides only itself; what follows it on the line counts.
+  event $'Breaks: v1.2.3 <!-- the export bug -->\nReported: <!-- by support --> 2026-10-14' regression
+  check; expect_rc 0
+  expect_out "regression fix: the problem shipped in v1.2.3 (released 2026-10-13T10:02:11Z), first reported 2026-10-14"
+  event $'<!-- a note --> Breaks: v1.2.3' regression
+  check; expect_rc 0; expect_out_has "the problem shipped in v1.2.3"
+  event $'<!--\na note\n--> Breaks: v1.2.3' regression
+  check; expect_rc 0; expect_out_has "the problem shipped in v1.2.3"
+  # One opened inside a line and not closed on it is text, as GitHub shows `<!--` in inline code.
+  event $'The `<!--[if mso]>` block broke Outlook.\n\nBreaks: v1.2.3' regression
+  check; expect_rc 0; expect_out_has "the problem shipped in v1.2.3"
+  # <!--> is an empty comment, not an open one.
+  event $'<!-->\nBreaks: v1.2.3' regression
+  check; expect_rc 0; expect_out_has "the problem shipped in v1.2.3"
+}
+
+t_comments_and_fences_nest() {
+  world
+  # Whichever opens first holds the other: a fence inside a comment, or a comment inside a fence, opens
+  # nothing.
+  event $'<!--\n```\n-->\nBreaks: v1.2.3' regression
+  check; expect_rc 0; expect_out_has "the problem shipped in v1.2.3"
+  event $'```html\n<!-- the header\n```\nBreaks: v1.2.3' regression
+  check; expect_rc 0; expect_out_has "the problem shipped in v1.2.3"
+  # Inside a comment only "-->" ends it, not a line that starts with > or ->.
+  event $'<!--\n> a quoted example\n-> an arrow\nBreaks: v0.0.1\n-->\nBreaks: v1.2.3' regression
+  check; expect_rc 0; expect_out_has "the problem shipped in v1.2.3"
+}
+
+t_fence_rules() {
+  world
+  # A fence closes on one at least as long (with CRLF too), and may follow a list marker.
+  event $'```\r\nBreaks: v0.0.1\r\n````\r\nBreaks: v1.2.3\r\n' regression
+  check; expect_rc 0; expect_out_has "the problem shipped in v1.2.3"
+  event $'- ```\n  Breaks: v0.0.1\n  ```\n\nBreaks: v1.2.3' regression
+  check; expect_rc 0; expect_out_has "the problem shipped in v1.2.3"
+}
+
+t_lines_without_a_value_are_passed_over() {
+  world
+  # A template's line left empty marks nothing; filled in, it is read without its comment.
+  local line='Breaks: <!-- the release that shipped the problem this PR fixes, such as v1.2.3; leave empty if none -->'
+  event $'## Regression\r\n\r\n'"$line"$'\r\n' type:chore
+  check; expect_rc 0; expect_out "not marked as a regression fix: nothing to check"
+  event "${line/Breaks: /Breaks: v1.2.3 }" regression
+  check; expect_rc 0; expect_out_has "the problem shipped in v1.2.3"
+  event "${line/Breaks: /Breaks: v1.2.3 }" type:bug
+  check; expect_rc 1; expect_out_has "names the release it fixes (v1.2.3) but has no regression label"
+  # Left empty, it does not hide a line further down.
+  event "$line"$'\n\nFixes the export.\nBreaks: v1.2.3' regression
+  check; expect_rc 0; expect_out_has "the problem shipped in v1.2.3"
+}
+
+t_unreadable_body_is_an_error() {
+  world
+  # Without body.jq beside it, the check fails with an annotation instead of passing.
+  cp "$CHECK" "$T/check.sh"
+  event "Breaks: v1.2.3" regression
+  run "$T/check.sh" "$T/event.json"; expect_rc 1
+  expect_out "::error title=regression label::Could not read the pull request from the event file; the error is above."
+}
+
 t_gh_warnings_are_not_the_date() {
   world
   touch "$FAKE/gh-warn"
@@ -142,10 +233,11 @@ t_custom_label() {
 
 t_measures() {
   world
+  # #13's body opens with a template's example, which the measures skip as the check does.
   jq -n '[
     {number: 12, title: "fix: export", url: "u", createdAt: "2026-10-15T09:00:00Z", body: "Breaks: v1.2.3\nReported: 2026-10-13T16:02:11Z"},
     {number: 11, title: "fix: totals", url: "u", createdAt: "2026-10-14T10:02:11Z", body: "Breaks: v1.2.3"},
-    {number: 13, title: "fix: login", url: "u", createdAt: "2026-10-21T00:00:00Z", body: "Breaks: v1.3.0"},
+    {number: 13, title: "fix: login", url: "u", createdAt: "2026-10-21T00:00:00Z", body: "<!--\nBreaks: v1.2.3\n-->\nBreaks: v1.3.0"},
     {number: 14, title: "fix: old", url: "u", createdAt: "2026-10-22T00:00:00Z", body: "Breaks: v0.9.0"}
   ]' >"$FAKE/prs.json"
   jq -n '[
@@ -191,6 +283,34 @@ t_titles_are_cleaned() {
   case "$out" in *$'\e'*) fail "printed a control character from a PR title" ;; *) ok ;; esac
 }
 
+t_measures_read_bodies_as_the_check_does() {
+  world
+  jq -n '[
+    {number: 31, title: "fix: outlook", url: "u", createdAt: "2026-10-14T10:02:11Z", body: "The `<!--[if mso]>` block broke.\n\nBreaks: v1.2.3"},
+    {number: 30, title: "fix: blank", url: "u", createdAt: "2026-10-14T10:02:11Z", body: null}
+  ]' >"$FAKE/prs.json"
+  echo '[{"tagName": "v1.2.3", "publishedAt": "2026-10-13T10:02:11Z", "isDraft": false}]' >"$FAKE/releases.json"
+  run "$MEASURE" example/shop 2026-10-01; expect_rc 0
+  expect_out_has "  #30  no Breaks line outside comments and code blocks: fix: blank"
+  expect_out_has "  #31  v1.2.3, released 2026-10-13 10:02 UTC, reported after 1d: fix: outlook"
+  expect_out_has "Production problems per release: 1 (1 over 1)"
+}
+
+t_runs_from_a_checkout_with_any_cdpath() {
+  world
+  echo '[]' >"$FAKE/prs.json"
+  echo '[]' >"$FAKE/releases.json"
+  event "Breaks: v1.2.3" regression
+  # An exported CDPATH can make cd print the directory into a path; both run here by a relative path.
+  cd "$ROOT" || exit 1
+  CDPATH=".:$T" run actions/regression-label/check.sh "$T/event.json"
+  expect_rc 0; expect_out_has "the problem shipped in v1.2.3"
+  CDPATH=".:$T" run tools/regressions.sh example/shop 2026-10-01; expect_rc 0; expect_out_has "  none"
+  # Copied out of a checkout, the tool says where it must run.
+  cp "$MEASURE" "$T/regressions.sh"
+  run "$T/regressions.sh" example/shop 2026-10-01; expect_rc 2; expect_err_has "run it from a checkout of mroom"
+}
+
 test_case unmarked-pr-passes t_unmarked_pr_passes
 test_case label-and-release t_label_and_release
 test_case label-needs-a-release t_label_needs_a_release
@@ -199,9 +319,18 @@ test_case release-must-be-one-tag t_release_must_be_one_tag
 test_case release-must-exist-and-be-published t_release_must_exist_and_be_published
 test_case reported t_reported
 test_case body-cannot-send-workflow-commands t_body_cannot_send_workflow_commands
+test_case examples-are-not-read t_examples_are_not_read
+test_case unclosed-examples-run-to-the-end t_unclosed_examples_run_to_the_end
+test_case comments-inside-a-line t_comments_inside_a_line
+test_case comments-and-fences-nest t_comments_and_fences_nest
+test_case fence-rules t_fence_rules
+test_case lines-without-a-value-are-passed-over t_lines_without_a_value_are_passed_over
+test_case unreadable-body-is-an-error t_unreadable_body_is_an_error
 test_case gh-warnings-are-not-the-date t_gh_warnings_are_not_the_date
 test_case custom-label t_custom_label
 test_case measures t_measures
 test_case measures-with-nothing t_measures_with_nothing
 test_case titles-are-cleaned t_titles_are_cleaned
+test_case measures-read-bodies-as-the-check-does t_measures_read_bodies_as_the_check_does
+test_case runs-from-a-checkout-with-any-cdpath t_runs_from_a_checkout_with_any_cdpath
 finish
