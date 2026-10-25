@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# mroom — the box CLI of mroom (Machine Room). Phase 1 is under way: only the commands below work yet.
+#
+#   mroom config get <dotted.key> [--json] [--default <value>]
+#                              a value from the app's mroom.toml (found by walking up from here, or
+#                              $MROOM_CONFIG): strings raw, lists one item per line, --json for JSON
+#   mroom config validate      check mroom.toml: missing required keys and wrong types fail, unknown
+#                              keys warn
+#   mroom config path [--box]  where mroom.toml is (--box: where box.env is read from)
+#   mroom config keys          every mroom.toml key, its type and whether it is required
+#   mroom config box [<KEY>]   a value from ~/.config/mroom/box.env (parsed, never sourced; $MROOM_BOX_ENV
+#                              overrides the path); no KEY prints every key that is set
+#   mroom watchdog run|status|report
+#                              the box reports its own failures (MCP servers, processes killed for lack
+#                              of memory, box jobs, scheduled workflows) to its log channel
+#   mroom job run <name> [--every <duration>] -- <command...> | mroom job list
+#                              a box job that records how it ended, so the watchdog sees it fail or stop
+#   mroom version [--source]   the installed version (--source: the release or checkout it came from)
+#   mroom help
+#
+# Coming in later phases (see docs/design.md, section 11): status, sessions, resume, restart, doctor,
+# site, update, wt, user, keys, baseline, env, init, guard, default (phase 1).
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+
+die() { echo "mroom: $1" >&2; exit "${2:-1}"; }
+
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; }
+
+not_yet() { die "$1: not yet: phase $2 (see docs/design.md, section 11)"; }
+
+cmd="${1:-help}"
+[ "$#" -gt 0 ] && shift
+
+case "$cmd" in
+  help | -h | --help) usage ;;
+  version | --version)
+    case "${1:-}" in
+      "") cat "$ROOT/VERSION" ;;
+      --source) if [ -f "$ROOT/SOURCE" ]; then cat "$ROOT/SOURCE"; else echo "checkout $ROOT (not installed)"; fi ;;
+      *) die "version takes only --source" 2 ;;
+    esac
+    ;;
+  config)
+    command -v python3 >/dev/null 2>&1 || die "config needs python3 >= 3.11, and there is no python3 on PATH"
+    exec python3 "$ROOT/lib/core/config.py" "$@"
+    ;;
+  watchdog) exec "$ROOT/lib/watchdog" "$@" ;;
+  job) exec "$ROOT/lib/job" "$@" ;;
+  status | sessions | resume | restart | doctor | site | update | wt | user | keys | baseline | env | init | guard | default)
+    not_yet "$cmd" 1
+    ;;
+  *) die "unknown command '$cmd' (mroom help lists the commands)" 2 ;;
+esac

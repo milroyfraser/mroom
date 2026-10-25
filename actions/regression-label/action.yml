@@ -1,0 +1,20 @@
+name: regression label
+description: >-
+  A pull request that fixes a production problem carries the regression label and names the release
+  that caused it in its body (Breaks: v1.2.3, and optionally Reported: <date or UTC time>). This check
+  keeps the label and the line together and the release real, so the problems per release and the time
+  to the first report can be counted (tools/regressions.sh).
+inputs:
+  label:
+    description: The label's name
+    default: regression
+runs:
+  using: composite
+  steps:
+    - name: Check the regression label and the Breaks line
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        REGRESSION_LABEL: ${{ inputs.label }}
+      run: '"$GITHUB_ACTION_PATH/check.sh" "$GITHUB_EVENT_PATH"'

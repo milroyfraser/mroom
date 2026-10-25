@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# job — box jobs that record how they ended, so the watchdog can tell when one fails or stops running.
+#
+#   mroom job run <name> [--every <duration>] -- <command> [<arg>...]
+#                              runs the command, appends its output to the job's log, records when it
+#                              started and ended and its exit code, and exits with that code. A second
+#                              run of the same job while one is going exits at once (code 0). --every
+#                              (10m, 2h, 1d) is how often it should run: the watchdog reports a job that
+#                              has not finished a run within twice that.
+#   mroom job list             each job's last run: when, how long it took, its exit code, and its state
+#
+# A job's files are in ~/.local/state/mroom/jobs/ (or $XDG_STATE_HOME/mroom/jobs/), readable only by the
+# box user: <name>.json (the record), <name>.log (its output; the previous log moves to <name>.log.1 past
+# 1 MiB) and <name>.lock. To stop watching a job that no longer runs, delete its <name>.json.
+set -euo pipefail
+umask 077
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+MROOM_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+# shellcheck source=lib/core/util.sh
+. "$MROOM_ROOT/lib/core/util.sh"
+# shellcheck source=lib/core/jobs.sh
+. "$MROOM_ROOT/lib/core/jobs.sh"
+
+LOG_MAX_BYTES=1048576
+
+die() { echo "mroom job: $1" >&2; exit "${2:-1}"; }
+warn() { echo "mroom job: $1" >&2; }
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; }
+
+# write_record <file> <jq filter> [jq args...]: replaces the record in one rename, so a reader never sees
+# half a file. A failure (a full disk) is reported, never fatal: the job itself still runs.
+write_record() {
+  local file="$1" filter="$2"
+  shift 2
+  if ! { jq -n "$@" "$filter" >"$file.tmp" && mv "$file.tmp" "$file"; } 2>/dev/null; then
+    rm -f "$file.tmp"
+    warn "could not write $file, so the watchdog will not see this run"
+  fi
+}
+
+cmd_run() {
+  local name every_secs=null
+  [ "$#" -gt 0 ] || die "run needs a job name" 2
+  name="$1"
+  shift
+  [[ "$name" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || die "a job name is lowercase letters, digits and -, at most 40 (got '$name')" 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --every)
+        [ "$#" -ge 2 ] || die "--every needs a duration, such as 10m, 2h or 1d" 2
+        every_secs="$(dur_secs "$2")" || die "--every takes a duration such as 10m, 2h or 1d (got '$2')" 2
+        [ "$every_secs" -gt 0 ] || die "--every must be more than 0" 2
+        shift 2
+        ;;
+      --) shift; break ;;
+      *) die "unknown option '$1' (the command goes after --)" 2 ;;
+    esac
+  done
+  [ "$#" -gt 0 ] || die "run needs a command after --" 2
+  need flock jq
+
+  local dir record log start end rc=0 previous='{}'
+  dir="$(jobs_dir)"
+  record="$dir/$name.json" log="$dir/$name.log"
+
+  exec 9>"$dir/$name.lock"
+  if ! flock -n 9; then
+    echo "job $name is already running"
+    exit 0
+  fi
+
+  start="$(mroom_now)"
+  if jq -e 'type == "object"' "$record" >/dev/null 2>&1; then previous="$(cat "$record")"; fi
+  # shellcheck disable=SC2016  # a jq filter: $prev and the rest are jq variables
+  write_record "$record" '$prev + {name: $name, every: $every, running: true, started: $start, log: $log}' \
+    --argjson prev "$previous" --arg name "$name" --argjson every "$every_secs" --argjson start "$start" --arg log "$log"
+
+  if [ -f "$log" ] && [ "$(wc -c <"$log")" -gt "$LOG_MAX_BYTES" ]; then mv "$log" "$log.1"; fi
+  printf '== %s: %s\n' "$(utc_text "$start")" "$*" >>"$log" 2>/dev/null || warn "could not write $log"
+  # fd 9 holds the lock; the command must not inherit it, or a process it leaves behind would keep the
+  # lock and every later run would think the job is still going.
+  "$@" 9>&- >>"$log" 2>&1 || rc=$?
+  end="$(mroom_now)"
+  printf '== exit %s after %s\n' "$rc" "$(dur_text $((end - start)))" >>"$log" 2>/dev/null || true
+
+  # shellcheck disable=SC2016  # a jq filter
+  write_record "$record" '{name: $name, every: $every, running: false, started: $start, ended: $end, exit: $rc, log: $log}' \
+    --arg name "$name" --argjson every "$every_secs" --argjson start "$start" --argjson end "$end" \
+    --argjson rc "$rc" --arg log "$log"
+  echo "job $name: exit $rc after $(dur_text $((end - start))); log: $log"
+  exit "$rc"
+}
+
+cmd_list() {
+  [ "$#" = 0 ] || die "list takes no arguments" 2
+  need jq
+  local dir file now files=() last took state every
+  dir="$(jobs_dir)"
+  now="$(mroom_now)"
+  shopt -s nullglob
+  files=("$dir"/*.json)
+  shopt -u nullglob
+  if [ "${#files[@]}" = 0 ]; then
+    echo "no jobs have run yet (they record themselves in $dir)"
+    return 0
+  fi
+  printf '%-20s %-22s %-8s %-5s %-6s %s\n' JOB "LAST RUN" TOOK EXIT EVERY STATE
+  for file in "${files[@]}"; do
+    if ! job_read "$file"; then
+      printf '%-20s %s\n' "$(basename "$file" .json)" "unreadable record: $(home_short "$file")"
+      continue
+    fi
+    last="never" took="-" every="-" state="ok"
+    if [ -n "$JOB_ENDED" ]; then last="$(utc_text "$JOB_ENDED")" took="$(dur_text $((JOB_ENDED - JOB_STARTED)))"; fi
+    if [ "$JOB_RUNNING" = true ]; then took="running"; fi
+    if [ -n "$JOB_EVERY" ]; then every="$(dur_text "$JOB_EVERY")"; fi
+    if job_failed && job_overdue "$now"; then state="failed, overdue"
+    elif job_failed; then state="failed"
+    elif job_overdue "$now"; then state="overdue"; fi
+    printf '%-20s %-22s %-8s %-5s %-6s %s\n' "$JOB_NAME" "$last" "$took" "${JOB_EXIT:--}" "$every" "$state"
+  done
+}
+
+cmd="${1:-help}"
+[ "$#" -gt 0 ] && shift
+case "$cmd" in
+  run) cmd_run "$@" ;;
+  list) cmd_list "$@" ;;
+  help | -h | --help) usage ;;
+  *) die "unknown command '$cmd' (mroom job help lists them)" 2 ;;
+esac

@@ -1,0 +1,19 @@
+name: regression label
+
+# mroom checks its own pull requests with its regression label action, from the PR's copy of it.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check:
+    name: regression label
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./actions/regression-label

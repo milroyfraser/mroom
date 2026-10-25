@@ -1,0 +1,47 @@
+# A Laravel API and a separate Vite SPA in two folders of one repository.
+# Every value here is made up; copy it and change what differs.
+
+[app]
+name = "bookings"
+backend_dir = "api"
+frontend_dir = "web"
+package_manager = "pnpm"
+php = "8.4"
+version_path = "/version"
+
+[app.build]
+frontend = "pnpm build"
+frontend_env = { VITE_REVERB_APP_KEY = "env:REVERB_APP_KEY" }
+after_deploy = ["config:clear", "route:cache"]
+daemons = ["horizon", "reverb"]
+queues = ["default", "mail"]
+
+[tests]
+command = "php artisan test --compact --parallel"
+database_pattern = "{app}_{slug}_testing"
+suites_glob = "app/*/Tests"
+
+[issues]
+tracker = "linear"
+id_pattern = "BK-[0-9]+"
+url = "https://linear.app/example/issue/{id}"
+
+[pr]
+required_checks = ["test", "lint", "e2e", "check-title"]
+
+[qa]
+zone = "qa.example.dev"
+max_envs = 5
+ttl_days = 5
+template_database = "qa_template"
+persona_domain = ".test"
+db_read_allowlist = ["users.email", "users.name"]
+
+[qa.parity]
+database = "seeded"
+mail = "catcher"
+broadcast = "same"
+files = "same"
+
+[persona]
+name = "Agent"

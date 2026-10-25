@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: shellcheck and py_compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck every shell script
+        run: |
+          mapfile -t files < <(git ls-files | xargs awk 'FNR == 1 && /^#!.*[ \/](ba)?sh$/ { print FILENAME; nextfile }')
+          printf '%s\n' "${files[@]}"
+          shellcheck --version | head -2
+          shellcheck -x "${files[@]}"
+      - name: py_compile
+        run: git ls-files '*.py' | xargs python3 -m py_compile
+      - name: tag matches VERSION
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          want="v$(tr -d '[:space:]' < VERSION)"
+          [ "$GITHUB_REF_NAME" = "$want" ] || { echo "tag $GITHUB_REF_NAME but VERSION says $want"; exit 1; }
+
+  test:
+    name: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash --version | head -1 && python3 --version
+      - run: tests/run.sh
+
+  install:
+    # Phase 0 "done when": install.sh on a fresh Ubuntu installs mroom and `mroom config get app.name`
+    # reads an example. A bare ubuntu:24.04 container is the fresh box.
+    name: install on fresh Ubuntu
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    container: ubuntu:24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: install.sh names what a bare box is missing
+        run: |
+          if ./install.sh 2> err.txt; then echo "install.sh should refuse a bare box"; exit 1; fi
+          cat err.txt
+          grep -q -- '- python3 >= 3.11' err.txt
+          grep -q -- '- jq' err.txt
+          grep -q -- '- git' err.txt
+      - name: host requirements
+        run: |
+          apt-get update -q
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends python3 jq git
+      - name: install.sh
+        run: ./install.sh && ./install.sh
+      - name: mroom config get app.name reads the examples
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          mroom version
+          test "$(mroom version)" = "$(cat VERSION)"
+          test "$(cd examples/single-app && mroom config get app.name)" = shop
+          test "$(cd examples/two-folder && mroom config get app.name)" = bookings
+          (cd examples/two-folder && mroom config validate)

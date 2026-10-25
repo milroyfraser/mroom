@@ -1,0 +1,311 @@
+#!/usr/bin/env bash
+# watchdog — the box reports its own failures before a person finds them (design section 11, phase 1).
+#
+#   mroom watchdog run [--dry-run]   check everything once, and post what changed to the box's log channel.
+#                                    Schedule it every 10 minutes (README, "Box watchdog"). --dry-run
+#                                    checks everything and prints what it would post; it posts and saves
+#                                    nothing.
+#   mroom watchdog status            what is failing now and when the watchdog last ran; exits 1 while
+#                                    something is failing or the watchdog has stopped running
+#   mroom watchdog report [--since <duration>]
+#                                    the failures and events of that time (default: the last 30d)
+#
+# What it checks:
+#   mcp        each MCP server in box.env's MROOM_WATCH_MCP. It is up when an MCP initialize request gets
+#              a JSON-RPC answer, or a 401 or 403 (it answered and wants a login). Anything else is a
+#              failure: no answer, a redirect, a page that is not JSON-RPC, a 404, a 5xx.
+#   memory     processes the kernel killed for lack of memory (oom_kill in /proc/vmstat, with their names
+#              from journalctl -k when the box user may read the kernel log), and restarts of the box
+#   disk       a filesystem holding / or the home folder that is 90% full or more
+#   jobs       box jobs run through `mroom job run`: a failed last run, no finished run within twice its
+#              --every, or a record it cannot read
+#   workflows  the repository's scheduled GitHub workflows (MROOM_REPO_URL, through gh), once an hour: a
+#              workflow that exists and is switched on, whose newest finished scheduled run failed
+#
+# A failure is posted when two checks in a row have seen it, and once more when it is over; an event (a
+# kill, a restart) is posted at once. A message Slack did not take waits for the next run; at most 50 wait.
+# State and the record are in ~/.local/state/mroom/ (or $XDG_STATE_HOME/mroom/), readable only by the box
+# user: watchdog.json, and watchdog.log with one JSON line per start, end and event. When
+# ~/.config/mroom/secrets/heartbeat.url exists, each finished run calls that URL, so a heartbeat monitor
+# (a Forge scheduled job's heartbeat, for one) notices when the watchdog itself stops.
+set -euo pipefail
+umask 077
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+MROOM_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+# shellcheck source=lib/core/util.sh
+. "$MROOM_ROOT/lib/core/util.sh"
+# shellcheck source=lib/core/chat.sh
+. "$MROOM_ROOT/lib/core/chat.sh"
+# shellcheck source=lib/core/jobs.sh
+. "$MROOM_ROOT/lib/core/jobs.sh"
+# shellcheck source=lib/core/probes.sh
+. "$MROOM_ROOT/lib/core/probes.sh"
+
+PROC="${MROOM_PROC:-/proc}"
+HEARTBEAT_FILE="$HOME/.config/mroom/secrets/heartbeat.url"
+MCP_TIMEOUT=10
+GH_TIMEOUT=60
+JOURNAL_TIMEOUT=20
+WORKFLOWS_EVERY=3600
+STALE_AFTER=1800
+OUTBOX_MAX=50
+DISK_FULL_PCT=90
+LOCK_WAIT="${MROOM_LOCK_WAIT:-60}" # a test seam: how long a run waits for another to finish
+
+die() { echo "mroom watchdog: $1" >&2; exit "${2:-1}"; }
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; }
+
+declare -A SUMMARY=() # probe -> one line for the run's summary
+NEW_BOOT="" NEW_OOM="" NEW_WORKFLOWS_CHECKED=""
+
+# ---- run ----------------------------------------------------------------------------------------
+
+# load_state: copies the saved state to $TMP/state.json (an unreadable one starts again from nothing).
+load_state() {
+  STATE_DIR="$(mroom_state_dir)"
+  STATE_FILE="$STATE_DIR/watchdog.json" LOG_FILE="$STATE_DIR/watchdog.log"
+  if jq -e 'type == "object"' "$STATE_FILE" >/dev/null 2>&1; then
+    cp "$STATE_FILE" "$TMP/state.json"
+  else
+    [ ! -e "$STATE_FILE" ] || echo "mroom watchdog: $STATE_FILE cannot be read; starting again" >&2
+    echo '{}' >"$TMP/state.json"
+  fi
+}
+
+# compare: what changed since the last run, as JSON: the new conditions and pending failures, the messages
+# to post and the lines for the record. A failure seen once waits in pending; seen again by the next check
+# it starts, keeping the time it was first seen. A carried failure (its check did not run) stays as it was.
+# A condition keeps its first message for the record and its latest for `status`.
+compare() {
+  local box
+  box="${BOX[MROOM_BOX_NAME]:-$(hostname -s 2>/dev/null || echo box)}"
+  jq -n --slurpfile state "$TMP/state.json" --rawfile failing "$TMP/failing" --rawfile events "$TMP/events" \
+    --argjson now "$NOW" --arg box "$box" '
+    def esc: gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;");
+    def dur: if . < 0 then 0 else . end | floor
+      | if . < 60 then "\(.)s" elif . < 3600 then "\(. / 60 | floor)m"
+        elif . < 86400 then "\(. / 3600 | floor)h" + (. % 3600 / 60 | floor | if . > 0 then " \(.)m" else "" end)
+        else "\(. / 86400 | floor)d" + (. % 86400 / 3600 | floor | if . > 0 then " \(.)h" else "" end) end;
+    def lines: split("\n") | map(select(length > 0));
+    ($state[0]) as $old | ($old.conditions // {}) as $active | ($old.pending // {}) as $pending
+    | ($failing | lines | map(split("\u001f")
+        | {key: .[0], value: {subject: .[1], message: .[2], carried: (.[3] == "carried")}}) | from_entries) as $seen
+    | [$seen | to_entries[] | select($active[.key] == null and $pending[.key] != null and (.value.carried | not))] as $starting
+    | ($starting | map({key: .key, value: true}) | from_entries) as $started
+    | [$active | to_entries[] | select($seen[.key] == null)] as $ending
+    | ($events | lines) as $happened
+    | "⚠️ *\($box | esc)*: " as $warn
+    | {conditions: (
+         ($active | with_entries(select($seen[.key] != null) | .value.latest = $seen[.key].message))
+         + ($starting | map({key, value: {subject: .value.subject, message: .value.message, latest: .value.message,
+                                          since: $pending[.key].since}}) | from_entries)),
+       pending: ([$seen | to_entries[] | select($active[.key] == null and ($started[.key] | not))
+                  | {key, value: ($pending[.key] // {subject: .value.subject, message: .value.message, since: $now})}]
+                 | from_entries),
+       messages: ([$starting[] | $warn + (.value.message | esc)]
+                  + [$ending[] | "✅ *\($box | esc)*: \(.value.subject | esc): OK again after \($now - .value.since | dur)"]
+                  + [$happened[] | $warn + (. | esc)]),
+       records: ([$starting[] | {at: $now, type: "start", key, subject: .value.subject, message: .value.message,
+                                 since: $pending[.key].since}]
+                 + [$ending[] | {at: $now, type: "end", key, subject: .value.subject, message: .value.message,
+                                 since: .value.since}]
+                 + [$happened[] | {at: $now, type: "event", message: .}])}'
+}
+
+# save_state <changes file> <outbox file>: writes the new state in one rename. The outbox keeps the newest
+# messages; when more than OUTBOX_MAX wait, the oldest go, and one line says how many.
+save_state() {
+  local box
+  box="${BOX[MROOM_BOX_NAME]:-$(hostname -s 2>/dev/null || echo box)}"
+  jq -n --slurpfile old "$TMP/state.json" --slurpfile changes "$1" --slurpfile outbox "$2" \
+    --argjson now "$NOW" --argjson max "$OUTBOX_MAX" --arg box "$box" \
+    --arg boot "$NEW_BOOT" --arg oom "$NEW_OOM" --arg wf "$NEW_WORKFLOWS_CHECKED" '
+    $old[0] as $o | $changes[0] as $c | $outbox[0] as $q
+    | ($q | if length > $max
+            then ["⚠️ *\($box)*: \(length - $max + 1) older messages were not delivered; `mroom watchdog status` shows what is failing now"]
+                 + .[length - $max + 1:]
+            else . end) as $q
+    | {version: 1, last_run: $now, conditions: $c.conditions, pending: $c.pending, outbox: $q,
+       boot_id: (if $boot == "" then $o.boot_id else $boot end),
+       oom_kill: (if $oom == "" then $o.oom_kill else ($oom | tonumber) end),
+       workflows_checked: (if $wf == "" then $o.workflows_checked else ($wf | tonumber) end)}' >"$STATE_FILE.tmp"
+  mv "$STATE_FILE.tmp" "$STATE_FILE"
+  cp "$STATE_FILE" "$TMP/state.json"
+}
+
+# deliver: posts the waiting messages in order, stopping at the first Slack refuses, and keeps the rest.
+deliver() {
+  local message posted=0 unsent=()
+  local -a waiting=()
+  mapfile -t waiting < <(jq -r '.outbox[]' "$TMP/state.json")
+  [ "${#waiting[@]}" -gt 0 ] || { echo "posted 0 message(s)"; return 0; }
+  if ! chat_ready; then
+    echo "not posted, because $(chat_problem); ${#waiting[@]} message(s) wait:"
+    printf '  %s\n' "${waiting[@]}"
+    return 0
+  fi
+  for message in "${waiting[@]}"; do
+    if [ "${#unsent[@]}" = 0 ] && chat_post "$message"; then posted=$((posted + 1)); else unsent+=("$message"); fi
+  done
+  echo "posted $posted message(s)"
+  [ "${#unsent[@]}" = 0 ] || echo "Slack did not take ${#unsent[@]} message(s) ($CHAT_ERROR); they wait for the next run" >&2
+  if [ "${#unsent[@]}" = 0 ]; then echo '[]' >"$TMP/outbox.json"; else printf '%s\n' "${unsent[@]}" | jq -R . | jq -s . >"$TMP/outbox.json"; fi
+  jq '{conditions, pending}' "$TMP/state.json" >"$TMP/kept.json"
+  save_state "$TMP/kept.json" "$TMP/outbox.json"
+}
+
+# heartbeat: calls the URL in secrets/heartbeat.url, through a file descriptor; a failure is only noted.
+heartbeat() {
+  [ -r "$HEARTBEAT_FILE" ] || return 0
+  if ! secret_file_ok "$HEARTBEAT_FILE"; then
+    echo "heartbeat not sent: ~/.config/mroom/secrets/heartbeat.url must belong to you and have mode 600" >&2
+    return 0
+  fi
+  curl -fsS --max-time 10 -o /dev/null -K <(printf 'url = "%s"\n' "$(head -n1 "$HEARTBEAT_FILE")") 2>/dev/null \
+    || echo "the heartbeat call failed" >&2
+}
+
+cmd_run() {
+  DRY=false
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dry-run) DRY=true; shift ;;
+      *) die "unknown option '$1' (mroom watchdog help)" 2 ;;
+    esac
+  done
+  need jq curl flock timeout
+  load_box
+  TMP="$(mktemp -d)"
+  trap 'rm -rf "$TMP"' EXIT
+  load_state
+  if [ "$DRY" = false ]; then
+    # One run at a time, or two runs would both post the same new failure.
+    exec 8>"$STATE_DIR/watchdog.lock"
+    flock -w "$LOCK_WAIT" 8 || die "another watchdog run has held the lock for ${LOCK_WAIT}s; try again later"
+    load_state
+  fi
+  NOW="$(mroom_now)"
+  : >"$TMP/failing"
+  : >"$TMP/events"
+  jq -nc --arg v "$(tr -d '[:space:]' <"$MROOM_ROOT/VERSION")" '{jsonrpc: "2.0", id: 1, method: "initialize",
+    params: {protocolVersion: "2025-06-18", capabilities: {}, clientInfo: {name: "mroom-watchdog", version: $v}}}' >"$TMP/mcp-init"
+
+  probe_mcp
+  probe_memory
+  probe_disk
+  probe_jobs
+  probe_workflows
+  local probe
+  for probe in mcp memory disk jobs workflows; do echo "$probe: ${SUMMARY[$probe]:-}"; done
+
+  compare >"$TMP/changes.json"
+  if [ "$DRY" = true ]; then
+    cut -d $'\x1f' -f3 "$TMP/failing" | sed 's/^/found: /'
+    jq -r '.messages[] | "would post: " + .' "$TMP/changes.json"
+    jq -r 'if (.messages | length) == 0 then "nothing to post" else empty end' "$TMP/changes.json"
+    return 0
+  fi
+  # Record and save first, then post: a run that dies after posting repeats a message at most once.
+  jq -c '.records[]' "$TMP/changes.json" >>"$LOG_FILE"
+  jq -s '.[0].outbox // [] | . + $c[0].messages' --slurpfile c "$TMP/changes.json" "$TMP/state.json" >"$TMP/outbox.json"
+  save_state "$TMP/changes.json" "$TMP/outbox.json"
+  deliver
+  jq -r '"failing now: " + ((.conditions | keys) as $k | if ($k | length) == 0 then "nothing" else ($k | join(", ")) end)
+    + (if (.pending | length) > 0 then "; waiting for a second check: \(.pending | keys | join(", "))" else "" end)' "$TMP/state.json"
+  heartbeat
+}
+
+# ---- status and report --------------------------------------------------------------------------
+
+cmd_status() {
+  [ "$#" = 0 ] || die "status takes no arguments" 2
+  need jq
+  load_box
+  TMP="$(mktemp -d)"
+  trap 'rm -rf "$TMP"' EXIT
+  load_state
+  NOW="$(mroom_now)"
+  local last bad=0 since message problem
+  last="$(state_get '.last_run // empty')"
+  if [ -z "$last" ]; then
+    echo "the watchdog has not run on this box yet (README, \"Box watchdog\", says how to schedule it)"
+    return 1
+  fi
+  echo "last run: $(utc_text "$last") ($(dur_text $((NOW - last))) ago)"
+  if ((NOW - last > STALE_AFTER)); then
+    echo "the watchdog has not run for $(dur_text $((NOW - last))); check its scheduled job"
+    bad=1
+  fi
+  problem="$(chat_problem)"
+  if [ -z "$problem" ]; then echo "chat: posts to ${BOX[MROOM_SLACK_LOG_CHANNEL]}"; else echo "chat: not set up: $problem"; fi
+  jq -r '(.outbox // [] | length) as $n | if $n > 0 then "\($n) message(s) wait for Slack" else empty end' "$TMP/state.json"
+  jq -r '(.pending // {} | length) as $n | if $n > 0 then "\($n) possible failure(s) wait for a second check" else empty end' "$TMP/state.json"
+  while IFS=$'\x1f' read -r since message; do
+    [ -n "$since" ] || continue
+    echo "failing since $(utc_text "$since") ($(dur_text $((NOW - since)))): $message"
+    bad=1
+  done < <(jq -r '.conditions // {} | to_entries[] | [(.value.since | tostring), (.value.latest // .value.message)] | join("\u001f")' "$TMP/state.json")
+  [ "$bad" = 1 ] || echo "nothing is failing"
+  return "$bad"
+}
+
+cmd_report() {
+  local window=30d secs from
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --since)
+        [ "$#" -ge 2 ] || die "--since needs a duration, such as 7d" 2
+        window="$2"
+        shift 2
+        ;;
+      *) die "unknown option '$1' (mroom watchdog help)" 2 ;;
+    esac
+  done
+  secs="$(dur_secs "$window")" || die "--since takes a duration such as 7d or 12h (got '$window')" 2
+  need jq
+  TMP="$(mktemp -d)"
+  trap 'rm -rf "$TMP"' EXIT
+  load_state
+  NOW="$(mroom_now)"
+  from=$((NOW - secs))
+  local since ended message at failures=0 events=0
+  echo "Failures since $(utc_text "$from"):"
+  # One pass pairs each start with its end; a failure that started earlier counts when it was still
+  # going inside the window.
+  while IFS=$'\x1f' read -r since ended message; do
+    [ -n "$since" ] || continue
+    failures=$((failures + 1))
+    if [ -n "$ended" ]; then ended="lasted $(dur_text $((ended - since)))"; else ended="still failing"; fi
+    printf '  %s  %-14s  %s\n' "$(utc_text "$since")" "$ended" "$message"
+  done < <(jq -nRr --argjson from "$from" '
+      reduce (inputs | fromjson? | select(type == "object" and (.type == "start" or .type == "end"))) as $r ({open: {}, done: []};
+        if $r.type == "start" then .open[$r.key] = $r
+        elif .open[$r.key] then .done += [{since: (.open[$r.key].since // .open[$r.key].at), ended: $r.at,
+                                           message: .open[$r.key].message}] | del(.open[$r.key])
+        else . end)
+      | .done + [.open[] | {since: (.since // .at), ended: null, message}]
+      | map(select(.ended == null or .ended >= $from)) | sort_by(.since)[]
+      | [(.since | tostring), (.ended // "" | tostring), .message] | join("\u001f")' "$LOG_FILE" 2>/dev/null || true)
+  [ "$failures" -gt 0 ] || echo "  none"
+  echo "Events:"
+  while IFS=$'\x1f' read -r at message; do
+    [ -n "$at" ] || continue
+    events=$((events + 1))
+    printf '  %s  %s\n' "$(utc_text "$at")" "$message"
+  done < <(jq -nRr --argjson from "$from" \
+    'inputs | fromjson? | select(type == "object" and .type == "event" and .at >= $from) | [(.at | tostring), .message] | join("\u001f")' \
+    "$LOG_FILE" 2>/dev/null || true)
+  [ "$events" -gt 0 ] || echo "  none"
+  echo "$(plural "$failures" failure failures), $(plural "$events" event events)"
+}
+
+cmd="${1:-help}"
+[ "$#" -gt 0 ] && shift
+case "$cmd" in
+  run) cmd_run "$@" ;;
+  status) cmd_status "$@" ;;
+  report) cmd_report "$@" ;;
+  help | -h | --help) usage ;;
+  *) die "unknown command '$cmd' (mroom watchdog help lists them)" 2 ;;
+esac

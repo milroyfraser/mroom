@@ -1,0 +1,38 @@
+# One Laravel app with Vite inside it: backend and frontend are the same folder.
+# Every value here is made up; copy it and change what differs.
+
+[app]
+name = "shop"
+backend_dir = "."
+frontend_dir = "."
+package_manager = "npm"
+php = "8.4"
+
+[app.build]
+frontend = "npm run build"
+after_deploy = ["config:clear"]
+daemons = ["horizon"]
+queues = ["default"]
+
+[tests]
+command = "php artisan test --compact --parallel"
+database_pattern = "{app}_{slug}_testing"
+suites_glob = ""
+
+[issues]
+tracker = "none"
+id_pattern = "SHOP-[0-9]+"
+
+[pr]
+required_checks = ["test"]
+
+[qa]
+zone = "qa.example.dev"
+max_envs = 3
+ttl_days = 5
+template_database = "qa_template"
+persona_domain = ".test"
+db_read_allowlist = []
+
+[persona]
+name = "Agent"

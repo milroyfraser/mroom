@@ -1,0 +1,11 @@
+mroom
+Copyright (c) 2026 Milroy Fraser. Licensed under the MIT License (see LICENSE).
+
+Third-party material
+--------------------
+
+None yet. mroom contains no third-party code today.
+
+The pstack skills that mroom vendors from phase 2 on (see docs/design.md, decision D7) will be listed
+here when they are added, each with its source, the commit it was taken from, its licence, and its
+original copyright notice; each vendored skill also keeps its own LICENSE file.
