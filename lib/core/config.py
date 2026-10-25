@@ -274,7 +274,12 @@ BOX_KEYS = {
     "MROOM_SLACK_LOG_CHANNEL": "the chat channel for box logs",
     "MROOM_ENV": "local | devbox | review | debug | custom",
     "MROOM_WATCH_MCP": "MCP servers the watchdog checks: name=https://host/path items, space-separated",
+    "MROOM_APP_NAME": "the app's name (app.name in mroom.toml); QA databases and roles are <name>_qa_<N>",
+    "MROOM_QA_TEMPLATE": "the Postgres database every QA environment is cloned from",
 }
+# Names the gate builds SQL from, so each is a plain Postgres identifier (design 5.1, D18).
+APP_NAME = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+PG_NAME = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 # One MROOM_WATCH_MCP item: an optional name=, then an http(s) URL of plain characters with no query,
 # fragment or credentials. A bare URL is named by its host, and no two items may share a name.
 WATCH_MCP_ITEM = re.compile(
@@ -303,6 +308,10 @@ def box_value_error(key: str, value: str) -> str | None:
         return f"MROOM_ENV must be one of {', '.join(BOX_ENVS)}"
     if key == "MROOM_WATCH_MCP":
         return watch_mcp_error(value)
+    if key == "MROOM_APP_NAME" and not APP_NAME.match(value):
+        return "MROOM_APP_NAME must match [a-z][a-z0-9_]{0,31}, like app.name"
+    if key == "MROOM_QA_TEMPLATE" and not PG_NAME.match(value):
+        return "MROOM_QA_TEMPLATE must be a plain Postgres name: [a-z][a-z0-9_]{0,62}"
     return None
 
 

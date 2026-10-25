@@ -143,7 +143,7 @@ mroom/
   bin/mroom                     front door (today scripts/dev-box/mroom)
   bin/forge-api                 agent-facing Forge CLI (guards: --write, --secret, path pinning)
   lib/                          box commands: wt, site, site-pull, user, keys, baseline, agent-env, memory-preflight,
-                                job, watchdog
+                                job, watchdog, gate (the forced command CI reaches the box through, 8.2)
   lib/core/                     config reader, forge client, chat adapter (Slack), tracker/errors adapters, job
                                 records, the watchdog's probes, util
   plugin/                       the Claude Code plugin

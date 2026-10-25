@@ -219,6 +219,70 @@ readable only by the box user: `watchdog.json`, and `watchdog.log` with one JSON
 start and end and each event. Its MCP check sends no login, so it finds servers that fail or vanish, not
 an expired login.
 
+## QA gate
+
+CI never gets a shell on the box (design 8.2). The QA runner's SSH key is forced to `mroom gate`, which
+runs only the operations of its role and builds every name itself, so a request can reach nothing but its
+own environment. Phase 2a adds operations one PR at a time; today the `provision` role has:
+
+| Operation | What it does |
+|---|---|
+| `db-create <N>` | a Postgres role and a database of their own for QA environment N, cloned from the template (D18); prints `DB_DATABASE`, `DB_USERNAME` and a new `DB_PASSWORD` for the environment's `.env` |
+| `db-drop <N>` | the environment's database and role |
+
+The client sends only N. The database and role are `<MROOM_APP_NAME>_qa_<N>`, cloned from
+`MROOM_QA_TEMPLATE`, both set by a person in `box.env`. The password reaches Postgres only as a SCRAM
+verifier, through stdin. Each request and refusal is logged, never a secret, to
+`~/.local/state/mroom/gate.log` and to syslog.
+
+**Set up once,** for an app named `shop`. These steps assume Postgres 15 or later.
+
+1. In the box user's `~/.ssh/authorized_keys`, by hand (Forge's SSH key screen stores a bare key, without
+   options):
+
+   ```
+   restrict,command="/home/forge/.local/bin/mroom gate provision" ssh-ed25519 AAAA… mroom-qa-up
+   ```
+
+2. As a Postgres superuser (`sudo -u postgres psql`):
+
+   ```sql
+   CREATE ROLE shop_qa_gate LOGIN CREATEDB CREATEROLE PASSWORD '<a long random password>';
+   CREATE ROLE shop_qa_objects NOLOGIN;           -- owns the template's objects, and nothing else
+   GRANT shop_qa_objects TO shop_qa_gate;
+   CREATE ROLE shop_qa_envs NOLOGIN;              -- every environment's role joins it
+   GRANT shop_qa_envs TO shop_qa_gate WITH ADMIN OPTION;
+   ALTER DATABASE shop_qa_template OWNER TO shop_qa_gate;
+   REVOKE CONNECT ON DATABASE shop_qa_template FROM PUBLIC;   -- and on every other database on the box
+   ```
+
+   The template's objects must belong to `shop_qa_objects`. Build it with that role: give it `LOGIN`
+   and a password while you run the app's migrations and seeders against the template, then take
+   `LOGIN` away again.
+
+3. In `pg_hba.conf`, above the other `host` lines, then reload Postgres. Each environment's role then
+   reaches only the database named after it:
+
+   ```
+   host   sameuser  +shop_qa_envs  127.0.0.1/32  scram-sha-256
+   host   sameuser  +shop_qa_envs  ::1/128       scram-sha-256
+   host   all       +shop_qa_envs  all           reject
+   local  all       +shop_qa_envs                reject
+   ```
+
+4. The gate's connection, in `~/.config/mroom/secrets/pg_service.conf`, mode 600:
+
+   ```
+   [mroom-gate]
+   host=127.0.0.1
+   port=5432
+   dbname=postgres
+   user=shop_qa_gate
+   password=<the gate's password>
+   ```
+
+5. In `box.env`: `MROOM_APP_NAME=shop` and `MROOM_QA_TEMPLATE=shop_qa_template`.
+
 ## Regression label
 
 A pull request that fixes a problem a release caused in production carries the `regression` label and

@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# gate — the one way CI reaches the box (design 8.2). sshd runs `mroom gate <role>` instead of whatever
+# the client asked for, through a line in the box user's ~/.ssh/authorized_keys:
+#
+#   restrict,command="/home/forge/.local/bin/mroom gate provision" ssh-ed25519 AAAA… mroom-qa-up
+#
+# The request comes from SSH_ORIGINAL_COMMAND: one line of plain words, split without any expansion,
+# checked word by word and never passed to a shell. No CI key gets a shell. A role runs only its own
+# operations:
+#
+#   provision   db-create <N>   a database and a role of its own for QA environment N (D18); prints
+#                               DB_DATABASE, DB_USERNAME and a new DB_PASSWORD for the environment's .env
+#               db-drop <N>     the environment's database and its role
+#
+# The client sends only the environment's number. The gate builds every name from box.env, which a person
+# sets: the database and role are <MROOM_APP_NAME>_qa_<N>, cloned from MROOM_QA_TEMPLATE, so no argument
+# can reach another database. It connects as its own Postgres role, through the libpq service mroom-gate
+# in ~/.config/mroom/secrets/pg_service.conf (mode 600). Each request and refusal is logged, never a
+# secret, to ~/.local/state/mroom/gate.log and to syslog. It runs from the installed release, never from
+# an app checkout, so a pull request cannot change it.
+#
+# Exit codes: 0 done, 1 failed or refused, 2 not run as a forced command with a role.
+set -euo pipefail
+umask 077
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+MROOM_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+# shellcheck source=lib/core/util.sh
+. "$MROOM_ROOT/lib/core/util.sh"
+
+MAX_LINE=4096
+role="${1:-}"
+
+gate_log() {
+  local state
+  state="$(mroom_state_dir 2>/dev/null)" || return 0
+  printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${role:-none}" "$*" >>"$state/gate.log" 2>/dev/null || true
+  if command -v logger >/dev/null 2>&1; then logger -t mroom-gate -- "${role:-none} $*" 2>/dev/null || true; fi
+}
+refuse() { gate_log "refused: $*"; echo "mroom gate: refused: $*" >&2; exit 1; }
+fail() { gate_log "failed: $*"; echo "mroom gate: $*" >&2; exit 1; }
+
+case "$role" in
+  provision) ;;
+  -h | --help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; exit 0 ;;
+  *) echo "mroom gate: run it as an SSH forced command: mroom gate provision" >&2; exit 2 ;;
+esac
+
+line="${SSH_ORIGINAL_COMMAND-}"
+[ -n "$line" ] || refuse "empty command"
+((${#line} <= MAX_LINE)) || refuse "command longer than $MAX_LINE characters"
+# One line of plain words: no ; | & $ ( ) ` ' " \ < > * ? spaces in a row, tabs or newlines.
+[[ "$line" =~ ^[A-Za-z0-9_.@+=/:-]+(\ [A-Za-z0-9_.@+=/:-]+)*$ ]] || refuse "characters outside the allowed set"
+# Safe to split: those characters hold nothing to glob, quote or expand, and read -a expands nothing.
+read -r -a words <<<"$line"
+op="${words[0]}"
+
+case "$role:$op" in
+  provision:db-create | provision:db-drop) ;;
+  *) refuse "$role may not run '${op:0:24}'" ;;
+esac
+
+# env_number <word>: the environment's number, 1 to 999999999 with no leading zero.
+env_number() { [[ "$1" =~ ^[1-9][0-9]{0,8}$ ]] || refuse "$op: '${1:0:24}' is not an environment number"; }
+words_are() { [ "${#words[@]}" = "$1" ] || refuse "$op takes $(($1 - 1)) argument(s), got $((${#words[@]} - 1))"; }
+
+load_box || fail "box.env could not be read"
+app="${BOX[MROOM_APP_NAME]:-}"
+[ -n "$app" ] || fail "MROOM_APP_NAME is not set in box.env"
+
+PG_SERVICES="$HOME/.config/mroom/secrets/pg_service.conf"
+
+# pg <database>: runs the SQL on stdin as the gate's role, printing rows unaligned. The SQL never travels
+# on a command line, so neither does anything in it.
+pg() {
+  PGSERVICEFILE="$PG_SERVICES" PGSERVICE=mroom-gate psql -X -q -A -t -v ON_ERROR_STOP=1 -d "$1"
+}
+
+pg_ready() {
+  [ -r "$PG_SERVICES" ] || fail "$(home_short "$PG_SERVICES") is missing; it holds the [mroom-gate] service"
+  secret_file_ok "$PG_SERVICES" || fail "$(home_short "$PG_SERVICES") must be yours and mode 600"
+  need psql python3 flock
+  local ok
+  ok="$(pg postgres <<<"SELECT current_setting('server_version_num')::int >= 150000;" 2>&1)" \
+    || fail "cannot reach Postgres as the gate's role: $(head -n1 <<<"$ok")"
+  [ "$ok" = t ] || fail "Postgres must be 15 or later (D18)"
+}
+
+# env_lock <name>: one request at a time per environment; a second one waits, then gives up.
+env_lock() {
+  exec 9>"$(mroom_state_dir)/gate-$1.lock"
+  flock -w "${MROOM_GATE_LOCK_WAIT:-900}" 9 || fail "another request for $1 is still running"
+}
+
+# new_password: 48 hex characters from the kernel's random source.
+new_password() { od -An -N24 -tx1 /dev/urandom | tr -d ' \n'; }
+
+cmd_db_create() {
+  words_are 2
+  env_number "${words[1]}"
+  local template="${BOX[MROOM_QA_TEMPLATE]:-}" db="${app}_qa_${words[1]}" objects="${app}_qa_objects"
+  local group="${app}_qa_envs" password verifier statement exists out attempt
+  [ -n "$template" ] || fail "MROOM_QA_TEMPLATE is not set in box.env"
+  pg_ready
+  env_lock "$db"
+  password="$(new_password)"
+  [ "${#password}" = 48 ] || fail "could not read random bytes for the password"
+  verifier="$(printf '%s' "$password" | python3 "$MROOM_ROOT/lib/core/scram.py")" || fail "could not make the password verifier"
+
+  # The role first, with a new password each time: the client writes it into the environment's .env.
+  # The gate becomes a member, so it may give the role the database it creates.
+  out="$(pg postgres <<<"SELECT 1 FROM pg_roles WHERE rolname = '$db';" 2>&1)" \
+    || fail "db-create ${words[1]}: $(head -n1 <<<"$out")"
+  if [ "$out" = 1 ]; then
+    statement="ALTER ROLE \"$db\" LOGIN PASSWORD '$verifier';"
+  else
+    statement="CREATE ROLE \"$db\" LOGIN NOINHERIT CONNECTION LIMIT 30 IN ROLE \"$group\" PASSWORD '$verifier';"
+  fi
+  out="$(pg postgres 2>&1 <<SQL
+$statement
+GRANT "$db" TO CURRENT_USER;
+SQL
+)" || fail "db-create ${words[1]}: the role: $(head -n1 <<<"$out")"
+
+  exists="$(pg postgres <<<"SELECT 1 FROM pg_database WHERE datname = '$db';" 2>&1)" \
+    || fail "db-create ${words[1]}: $(head -n1 <<<"$exists")"
+  if [ "$exists" = 1 ]; then
+    echo "database $db: exists"
+  else
+    # CREATE DATABASE … TEMPLATE fails while anything else is connected to the template, which includes
+    # another environment cloning it at the same moment: wait and try again.
+    for attempt in 1 2 3 4 5 6; do
+      if out="$(pg postgres 2>&1 <<<"CREATE DATABASE \"$db\" TEMPLATE \"$template\" OWNER \"$db\";")"; then
+        break
+      fi
+      grep -q 'is being accessed by other users' <<<"$out" || fail "db-create ${words[1]}: $(head -n1 <<<"$out")"
+      [ "$attempt" = 6 ] && fail "db-create ${words[1]}: $template stayed busy; try again later"
+      echo "template $template is busy, trying again ($attempt)" >&2
+      sleep "${MROOM_GATE_RETRY_SLEEP:-20}"
+    done
+    echo "database $db: created"
+  fi
+
+  # A clone's objects keep the template owner, a role that owns nothing else, so this moves only them.
+  # A new database gives PUBLIC CONNECT again, so take it back here too (pg_hba.conf is the other half).
+  out="$(pg "$db" 2>&1 <<SQL
+REASSIGN OWNED BY "$objects" TO "$db";
+REVOKE CONNECT, TEMPORARY ON DATABASE "$db" FROM PUBLIC;
+SQL
+)" || fail "db-create ${words[1]}: handing the objects over: $(head -n1 <<<"$out")"
+
+  gate_log "db-create ${words[1]}: $db ready"
+  printf 'DB_DATABASE=%s\nDB_USERNAME=%s\nDB_PASSWORD=%s\n' "$db" "$db" "$password"
+}
+
+cmd_db_drop() {
+  words_are 2
+  env_number "${words[1]}"
+  local db="${app}_qa_${words[1]}" out
+  pg_ready
+  env_lock "$db"
+  out="$(pg postgres 2>&1 <<SQL
+DROP DATABASE IF EXISTS "$db" WITH (FORCE);
+DROP ROLE IF EXISTS "$db";
+SQL
+)" || fail "db-drop ${words[1]}: $(head -n1 <<<"$out")"
+  gate_log "db-drop ${words[1]}: $db dropped"
+  echo "database $db: dropped"
+}
+
+gate_log "request: ${line:0:200}"
+case "$op" in
+  db-create) cmd_db_create ;;
+  db-drop) cmd_db_drop ;;
+esac
