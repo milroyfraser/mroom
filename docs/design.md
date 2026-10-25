@@ -7,7 +7,7 @@ reaches beyond its own QA environment (D6). mroom is extracted from the machine 
 pilot app), which adopts it back one phase at a time (D8). It ships as a Claude Code plugin, reusable GitHub workflows and a box CLI. Each app
 describes itself in one committed `mroom.toml`, and no mroom script names a company, host, id or channel.
 
-Status: draft, 25 Oct 2026; phase 0 done, phase 1 under way. MIT licence. Repository: `milroyfraser/mroom`.
+Status: draft, 25 Oct 2026. Phase 0 is done; the pilot app adopted phase 1 on 25 Oct, and its measure is counted until 22 Nov. Phase 2a is under way: GitHub's documentation answers open question 1, and spikes on the pilot app's box, with a review of them, answer question 6 and part of question 3 (D14 to D20). MIT licence. Repository: `milroyfraser/mroom`.
 
 ## 1. Requirements, and what mroom is
 
@@ -54,10 +54,10 @@ Commits do not show a person's work, because agents make almost all of them.
 
 ### 1.3 What mroom gives a team
 
-- **A shared agent box**: one worktree, test database and Redis prefix per session; one Claude, GitHub and git
-  identity per developer; a dev site served from a pushed branch under a lock; resume after a restart; nightly
-  Claude Code updates and worktree clean-up; box health (`mroom status`, `mroom doctor`) and a watchdog that
-  reports the box's own failures to chat.
+- **A shared agent box**: one worktree, test database and Redis prefix per session, with every session signing in
+  to Redis as the box's own user (D15); one Claude, GitHub and git identity per developer; a dev site served from
+  a pushed branch under a lock; resume after a restart; nightly Claude Code updates and worktree clean-up; box
+  health (`mroom status`, `mroom doctor`) and a watchdog that reports the box's own failures to chat.
 - **An agent workflow**: `/refine` → `/deliver` → `/implement` → stop at a PR in review; `/release` on a person's
   say-so. Principle skills named at the step that needs them.
 - **Guardrails**: agents never merge, approve, deploy, release or read secrets; enforced by a command parser,
@@ -91,21 +91,47 @@ starts the host's deploy and checks that the new release is live; the host (Forg
 | D11 | CD is in scope: the app reports the commit and tag it runs, the deploy waits until they match the release, and a rollback deploys the previous tag | Release confidence needs to know what is running; a fixed wait and a health ping cannot tell |
 | D12 | QA uses the same services as production wherever each QA environment can have its own copy; any other choice is a swap, declared in `[qa.parity]`. Data is seeded by default; a masked snapshot is opt-in, under the rules of section 9 | Logging mail and using the local disk would move QA away from production; copying production data by default would put customer data at risk |
 | D13 | QA environments use mroom's own Forge client (phase 1), not Laravel Harbor | Harbor creates and removes sites, which that client already does. Its documented setup holds the Forge token in a `pull_request` job (against D6), it creates empty databases where mroom clones a template, and its `.env` merge has open bugs with quotes, `#` and multi-line values |
+| D14 | The QA file store is Garage, not MinIO | MinIO's free binaries are gone: its download server answers 410 and its repository was archived in April 2026. Garage is one binary whose keys are granted bucket by bucket, which is what a key per environment needs; in the spike, a second environment's key got 403 reading and writing the first one's bucket. Garage has no object ACLs or bucket policies, so public files go through its website endpoint, and an app that sets per-file visibility declares that disk a swap (section 9) |
+| D15 | Every client of the box's Redis signs in as an ACL user, and the default user is off. A QA environment's user reaches only keys and channels under its own prefix, and no command that acts on the whole server | Forge site isolation keeps a PR's code out of other users' files, but not out of a Redis with no password: there it could read every environment's data and push jobs onto a queue whose workers run as `forge`. A key pattern limits only commands that name keys, so the commands that flush, watch or list the whole server, or reset its scripts, are denied by name or category (section 8.9). Agent sessions, worktrees and the dev site run as the box's OS user and share one Redis user, since they can read each other's files anyway. That user still must not flush the QA environments' keys, so it is denied `@dangerous` too, or the QA environments use a Redis database it cannot select |
+| D16 | mroom runs one Reverb host for the QA environments, with an app provider that reads its apps from a file | Reverb's default provider reads its apps from config once, when the server starts, so adding an app means a restart. Reverb picks its provider through a Laravel manager, so a provider registered with `ApplicationManager::extend` that reads a file on each lookup adds and removes an environment's app without one, and no environment runs a Reverb process of its own. This comes from Reverb's source; building the host proves it. An environment's public app key comes from its PR number, so qa-plan can build the frontend without secrets, and its secret is random. An app id belongs to one PR only, because a removed app's open sockets stay open until they close |
+| D17 | Each QA site is a Forge isolated site with its own Unix user. The gate puts the PR's code into it as data, so no git credential is on the site, and its nginx config sets `disable_symlinks if_not_owner` | Isolation runs the site's PHP and its queue worker as that user, and an ACL keeps the user out of `forge`'s home; deleting the site removes the user. The spike created the worker with the site user through the API, though Forge's API spec lists only `root` and `forge`, so qa-up reads the new process back and deletes it unless it runs as the site user. A deploy key on the site would let any code there, a dependency's install script included, read the whole repository until someone revoked it, against D6. So qa-up fetches the PR's tree by commit, as data, and the gate unpacks it as the site user, the way `dist/` already arrives. `code-put` replaces the whole tree except `.env` and `storage/`, skips any `.env` in the tarball, and refuses links at `.env`, `storage` and `bootstrap/cache`. QA sites use Forge's standard deployments, because its zero-downtime script clones the repository. nginx runs as `forge` and follows symlinks; without the setting, a PR could link a file in its site to a secret in `forge`'s home and download it |
+| D18 | Each QA environment has its own Postgres role, which owns only that environment's database, and no environment's role can connect to any other database | Isolation and D15 do not cover Postgres either: with one shared login, a PR's code could read, change or drop every QA database, the template and the dev site's database. Postgres lets every role connect to every database by default (`CONNECT` for `PUBLIC`), and every new database gets that grant again, since database-level grants are not copied from the template. So `pg_hba.conf` lets a QA role connect only to the database named after it (`sameuser`, for the group of QA roles), and `db-create` revokes the grant as well. mroom requires 15 or later, where `PUBLIC` can no longer create objects in the `public` schema; doctor checks it, since an upgrade or a restore keeps the old permissions. A cloned database's objects keep the template owner, so the template's objects belong to a role that owns nothing else, and `REASSIGN OWNED` hands them to the environment's role without moving any database |
+| D19 | Mail is caught by Mailpit. Each environment sends with its own SMTP login, `mail-read` matches mail on the login that sent it, and the gate restarts Mailpit when it adds or removes a login | Tested on the box: Mailpit reads its login file only when it starts, so a new login needs a restart. Stored mail survives, and a queued mail that fails during the restart is retried when its job allows more than one try (`mroom doctor --app` checks). Tags can be forged: a mail with an `X-Tags` header or a plus address gets the tag it names, so those sources are turned off, and `mail-read` matches the `Username` field, which only a login sets: SMTP, or the API login only the gate holds |
+| D20 | A Forge token that can add SSH keys, run commands or recipes, read the sudo or database password, edit nginx or deploy scripts, or create daemons or scheduled jobs reaches `forge` or root. Only the `qa` environment holds such a token. The box's token has none of those scopes except nginx, which gives nothing beyond what its users already have as `forge` | Forge's API spec lets a daemon run as `root`; a scheduled job, a recipe and an SSH key take a user of the caller's choice; a deploy script runs as its site's user, which for the dev site is `forge`; and scopes cover the whole account, not one site. qa-up creates workers, so its token reaches root and is guarded by who holds it (sections 8.1, 8.8). Every developer on the box can read the box's token and every agent can use it through `forge-api`, so it keeps reads and site settings, and a person sets up daemons and scheduled jobs with a short-lived token |
 
 ## 3. Host requirements
 
 - Box: Linux with `/proc`, GNU coreutils (`stat -c`, `date -d`, `sha1sum`, `base64 -w0`, `timeout`), bash 5, git, jq, curl, python3
-  ≥ 3.11 (`tomllib`), tmux, flock, supervisord (Forge's), Postgres ≥ 13 with a role that has `CREATEDB` and owns
-  the QA template, Redis with phpredis, PHP and composer, Node and npm or pnpm, `gh`. Root once, for `mroom baseline`.
+  ≥ 3.11 (`tomllib`), tmux, flock, supervisord (Forge's), Postgres ≥ 15 (D18) with a role for the gate that has
+  `CREATEDB` and `CREATEROLE`, belongs to the role that owns the QA template's objects (and nothing else), and can
+  `SET ROLE` to each environment's role, plus a `pg_hba.conf` rule that lets QA roles reach only their own
+  database; Redis ≥ 7 with phpredis, its ACL users in an `aclfile` and the default user off (D15); PHP and
+  composer, Node and npm or pnpm, `gh`, and `fs.protected_hardlinks = 1` (Ubuntu's default). Root once, for
+  `mroom baseline`.
   Phase 0 needs only Linux, bash 5, python3 ≥ 3.11, jq and git; `install.sh` checks these and names what is missing.
 - Installing a release: `install.sh --version vX.Y.Z` downloads it with `gh` when gh is signed in, and with plain
   `curl` otherwise.
-- Forge: one server for the box, a **Forge team that holds only that server**, and a token from an account in
-  only that team.
+- Forge: one server for the box, a **Forge team that holds only that server**, and tokens from an account in
+  only that team. Each token gets only the scopes of the calls its user makes (Forge's API reference names the
+  scope of every endpoint). A token that can create daemons or scheduled jobs, or change a deploy script, counts
+  as root (D20).
 - DNS: a wildcard record `*.<zone>` to the box (or a wildcard certificate in Forge).
-- QA services (section 9): an S3-compatible store on the box (for example MinIO) when `qa.parity.files` is
-  `same`; Reverb on the box, with an app per environment, when `qa.parity.broadcast` is `same`; and a mail catcher
-  with a login (for example Mailpit) when `qa.parity.mail` is `catcher`.
+- QA services (section 9), installed by `mroom baseline`, running as `forge` and listening on localhost only. Browsers
+  reach the ones they need through nginx on the box, on host names under the zone, with TLS:
+  - Garage (D14) when `qa.parity.files` is `same`. Its S3 API gets a host of its own, because S3 signatures cover
+    the host; apps use path-style addressing, so every bucket stays under that host and its certificate. Public
+    files go through its website endpoint. Its secrets come from `rpc_secret_file` and `admin_token_file`, and
+    `metrics_token_file` closes `/metrics`.
+  - mroom's Reverb host (D16) when `qa.parity.broadcast` is `same`, over WebSockets.
+  - Mailpit (D19) when `qa.parity.mail` is `catcher`, run as `mailpit --listen 127.0.0.1:8025 --smtp
+    127.0.0.1:1025 --database <file> --smtp-auth-file <file> --smtp-auth-allow-insecure --tags-username
+    --tags-disable x-tags,plus-addresses --ui-auth-file <file> --max 0 --max-age 7d`. Without TLS, Mailpit
+    refuses to start with a login file unless plain-text login is allowed, which is safe on localhost. By default
+    it keeps only 500 mails for all environments together, so `--max 0` lifts that and `--max-age` trims by age.
+
+  Each service's secrets, data and config sit under `forge`'s home, files mode 600 and directories 700, where no
+  site user can read them. mroom commits the SHA-256 of each binary it was tested with, and `mroom baseline`
+  refuses any other: Garage publishes no checksums, and Mailpit's only digest is the one GitHub keeps.
 - GitHub: a repo with Actions, three environments (`qa`, `persona`, `production`; section 8), a ruleset on the
   default branch.
 - Claude: a Claude subscription per developer (Remote Control), a `CLAUDE_CODE_OAUTH_TOKEN` for Actions.
@@ -129,8 +155,10 @@ mroom/
     hooks/hooks.json            SessionStart banner, PreToolUse guard, WorktreeCreate/Remove
   actions/                      composite actions: qa-up, qa-down, qa-reap, qa-browser, pr-status, triage,
                                 deploy-verify, regression-label, ...
-  .github/workflows/            reusable workflows (on: workflow_call) that call ./actions at the same ref
-                                plus mroom's own CI
+  reverb-host/                  a small Laravel app that runs one Reverb for every QA environment, with an app
+                                provider that reads its apps from a file (D16)
+  .github/workflows/            reusable workflows (on: workflow_call) that check out mroom at job.workflow_sha
+                                and call its actions from there (section 14, question 1), plus mroom's own CI
   templates/                    copied once by `mroom init`: ci-backend, ci-frontend, ci-e2e, deploy-production,
                                 dependabot, .mcp.json, CLAUDE.md policy block, mroom.toml, hooks/*
   settings/                     settings fragments: base, laravel-vite, forge, tracker-linear
@@ -169,9 +197,9 @@ version_path = "/version"          # returns {"release": "<tag>", "commit": "<sh
 
 [app.build]
 frontend = "pnpm build"
-frontend_env = { VITE_REVERB_APP_KEY = "env:REVERB_APP_KEY" }
+frontend_env = { VITE_REVERB_APP_KEY = "env:REVERB_APP_KEY" }   # in QA, mroom sets the key from the PR (D16)
 after_deploy = ["config:clear", "route:cache"]   # artisan commands
-daemons = ["horizon", "reverb"]
+daemons = ["horizon", "reverb"]          # QA skips reverb: mroom's Reverb host serves it (D16)
 queues = ["default", "mail"]
 
 [tests]
@@ -224,7 +252,9 @@ until then a reader passes its own fallback (`mroom config get <key> --default <
   string, whole number ≥ 1 (`qa.max_envs`, `qa.ttl_days`), list of strings, table of strings
   (`app.build.frontend_env`), or one of a fixed set (`app.package_manager`: npm | pnpm; `issues.tracker`:
   linear | none; each `qa.parity.*` key: the values listed above).
-- `app.name` matches `[a-z][a-z0-9_]{0,31}`, since it is built into database names and Redis prefixes.
+- `app.name` matches `[a-z][a-z0-9_]{0,31}`, since it is built into database names and Redis prefixes. A Redis
+  prefix puts `:` after each part (`shop:`, `shop:qa12:`), a character no name contains, so no app's or
+  environment's ACL pattern matches another's keys.
 - `tests.database_pattern` contains `{slug}`, so each worktree gets its own database.
 - `issues.url` contains `{id}`.
 - `issues.id_pattern` compiles as a **Python** regular expression (`re`), not POSIX ERE; patterns used by shell
@@ -270,6 +300,7 @@ from `mroom.toml`; a hook replaces the default, and can call it (`mroom default 
 | `wt-teardown` | `mroom wt done` | drop the worktree's test databases, clear its Redis keys (prefix-guarded) |
 | `test-db-created` | after any test or QA database is created | none (an app might run `CREATE EXTENSION vector` here) |
 | `qa-signin` | browser QA needs to sign a persona in | none: the app must provide `php artisan mroom:signin-code <email>` or this hook |
+| `qa-deploy` | each QA deploy, after the gate unpacks the tree | composer install, `migrate --force`, `after_deploy`; no git and no frontend build, since the frontend arrives as `dist/` (D17) |
 | `qa-fixtures` | each QA deploy, after migrations | `php artisan mroom:qa-fixtures` if it exists |
 
 An app's own hooks (code generation, cache warm-up, test fixtures) live in the app's repository, not in mroom.
@@ -294,22 +325,34 @@ Invariants, each with a test:
 
 1. **No secret next to PR code.** Jobs that hold secrets check out only the default branch of the app (for
    `mroom.toml` and hooks) and mroom's actions at the pinned tag. PR code runs only in jobs with no secrets, and on
-   the box only in a QA site whose `.env` holds credentials for that environment's own resources.
+   the box only in a QA site that runs as its own user (D17) and whose `.env` holds credentials for that
+   environment's own resources. "PR code" here means code that reaches the box through qa-up; what a developer or
+   agent runs in a worktree or on the dev site runs as `forge`, and is trusted as they are.
 2. **QA provisioning keeps PR code away from every secret:**
    - `qa-plan` (`pull_request`, no secrets): scope the change with path rules, build the frontend from the PR with
      public values only, upload `dist/` and `plan.json` as artifacts. A Claude step that judges whether a user
      could notice the change runs later, in a job with default-branch code, boxed as in 8.5, reading the diff as
      data.
-   - `qa-up` (`workflow_run` on qa-plan, environment `qa`, default-branch code only): create the site and
-     database, write `.env`, tell **Forge** to deploy the PR branch (the box pulls it; the runner never executes it),
-     rsync the `dist/` artifact as data.
+   - `qa-up` (`workflow_run` on qa-plan, environment `qa`, default-branch code only): create the site and the
+     environment's services, write `.env`, fetch the PR's tree by commit (GitHub's tarball, as data) and send it
+     and the `dist/` artifact through the gate. The gate records the commit in its own state and unpacks both as
+     the site user. Then **Forge** runs the deploy script (the `qa-deploy` hook), which pulls nothing (D17). The
+     runner never executes PR code.
    - The Forge token belongs to an account whose only team holds the box (`mroom doctor` warns when the token sees
-     another server).
-   - Box operations go through a forced-command SSH gate covering `db-create`, `db-drop`, `redis-clear`, `env-sha`,
-     `signin-code`, `db-read`, and for the QA services `bucket-create`, `bucket-drop`, `reverb-app-add`,
-     `reverb-app-remove`, `mail-read` and `template-load`. No CI key gets a shell on the box. The gate is installed
-     from a release by a person.
-   - QA sites use Forge site isolation (their own Unix user), so a PR's code cannot read the dev site's `.env`.
+     another server). It creates workers, so it counts as root (D20), and only `qa` holds it.
+   - Box operations go through a forced-command SSH gate covering `db-create` (with the environment's role),
+     `db-drop`, `redis-user-add`, `redis-user-remove`, `redis-clear`, `code-put`, `dist-put`, `env-sha`,
+     `signin-code`, `user-clean`, `db-read`, and for the QA services `bucket-create`, `bucket-drop`,
+     `reverb-app-add`, `reverb-app-remove`, `mail-user-add`, `mail-user-remove`, `mail-read`, `mail-clear` and
+     `template-load`. No CI key gets a shell on the box. The gate is installed from a release by a person.
+   - Gate operations that touch a site's files or run its code (unpacking in `code-put` and `dist-put`, hashing
+     `.env` in `env-sha`, and `signin-code`) run as that site's user, through a sudoers rule that `mroom baseline`
+     installs, so the gate never runs a PR's code or follows its links as `forge`. `user-clean` runs as root
+     through the same rule, since it stops another user's processes. The commit `env-sha` reports comes from the
+     gate's own state, written as `forge` outside the site, never from a file the site can write.
+   - QA sites are isolated (D17) and sign in to Redis and Postgres as their own users (D15, D18), so a PR's code
+     cannot read the dev site's `.env` or another environment's data, or push jobs onto a queue whose workers run
+     as `forge`.
 3. **Agents never merge, approve, deploy, release, or read secrets.** Settings fragments plus a `PreToolUse`
    `mroom guard` that parses each Bash command and refuses, among others, `gh api` writes to `/merge`, `/reviews`
    with approve, and `/releases`; `gh pr merge`, `gh pr review --approve`, force-push in any form, reading
@@ -323,14 +366,32 @@ Invariants, each with a test:
 6. **The read-only data boundary is explicit.** `qa.db_read_allowlist` has no default; browser QA refuses to start
    without it, and a test runs the allowlist against the app's schema.
 7. **Shared-box isolation is checked.** `mroom doctor --app` verifies the app honours `DB_DATABASE`,
-   `REDIS_PREFIX`, `CACHE_PREFIX`, `SESSION_COOKIE` and the XSRF cookie name, since environments share one box.
-8. **Secrets per GitHub environment.** `qa` holds the box and Forge credentials; `persona` (default branch only)
+   `DB_USERNAME`, `REDIS_USERNAME`, `REDIS_PREFIX`, `HORIZON_PREFIX`, `CACHE_PREFIX`, `SESSION_COOKIE` and the XSRF
+   cookie name, since environments share one box. `HORIZON_PREFIX` must start with the environment's Redis prefix,
+   because Horizon replaces the connection's prefix with its own.
+8. **Secrets per GitHub environment.** `qa` (default branch only) holds the box and Forge credentials, which reach root (D20); `persona` (default branch only)
    holds the tracker and chat tokens; `production` (release tags only) holds the deploy credential. None is
    readable from a `pull_request` job.
-9. **Each QA environment's services are its own.** Its database, its bucket for each file disk (with its own key)
-   and its Reverb app are created and removed through the gate, and `mroom doctor --app` checks that the app uses
-   them. Only the gate holds the mail catcher's login; `mail-read` returns mail for `qa.persona_domain` addresses in
-   one environment only.
+9. **Each QA environment's services are its own.** Its database and the role that owns it (D18), its app key, its
+   Redis user (D15), a bucket with its own key for each file disk, its Reverb app (D16) and its mail login (D19)
+   are created and removed through the gate, and `mroom doctor --app` checks that the app uses them.
+   - The Redis user reaches keys and channels under the environment's prefix only, and none of the commands that
+     flush, watch or list the whole server or reset its scripts: for example `reset on #<sha256> ~shop:qa12:*
+     &shop:qa12:* +@all -@dangerous -scan -randomkey -client|tracking -pubsub|channels -pubsub|shardchannels
+     -pubsub|numsub -function -script|flush -script|kill`. It starts with `reset`, because `ACL SETUSER` only adds
+     to a user, so running it again would keep an old password. Users live in an `aclfile` that the gate rewrites
+     with `ACL SAVE`, which also keeps `user default off`. Turning the default user off leaves its open connections
+     signed in, so the rollout closes them (`CLIENT KILL USER default`).
+   - Only the gate holds the mail catcher's API login. `mail-read` returns mail for `qa.persona_domain` addresses
+     sent with one environment's login, and teardown deletes that environment's mail (`mail-clear`).
+   - Before qa-down deletes a site, `user-clean` stops the site user's processes and removes its files outside
+     its home, since the next user can be given the same UID.
+   - `mroom doctor` checks the box: the default Redis user is refused; no QA role can reach another database, and
+     `PUBLIC` can neither connect to the QA databases, the template or the dev site's database nor create in their
+     `public` schema; each GitHub environment keeps its branch rule; each QA site's nginx config, set from an nginx
+     template when the site is created, has `disable_symlinks if_not_owner`; each QA worker runs as its site's
+     user; `/home/forge` keeps its `group:isolated:---` entry; each PHP-FPM socket admits only its own site and
+     nginx; and `fs.protected_hardlinks` is 1.
 
 ## 9. The app contract
 
@@ -341,15 +402,28 @@ What a Laravel app must have or add, documented in `docs/app-contract.md` and ch
   describe --tags --exact-match`, `git rev-parse HEAD`) into a file in the release, never from config set
   separately, so the endpoint reports the code that is running. Queue workers and daemons log the same values when
   they start. With a separate SPA, the frontend build writes them to `version.json`. A deploy waits on these
-  (section 10). In a QA environment the PR's own code serves the endpoint, so browser QA reads the deployed commit
-  through the gate (`env-sha`) instead.
+  (section 10). In a QA environment the PR's own code serves the endpoint, so browser QA asks the gate instead:
+  `env-sha` reports the commit the gate recorded when it unpacked the tree (D17). The gate also writes the version
+  file, since a tarball has no git history.
 - Honours the isolation keys in section 8.7; with a separate SPA, also `CLIENT_URL`, `CORS_ALLOWED_ORIGINS` and
   `SANCTUM_STATEFUL_DOMAINS`.
 - Uses the same services as production wherever a QA environment can have its own copy (section 8.9): a bucket for
-  each file disk on the box's S3-compatible store, a Reverb app on the box's Reverb, and SMTP to the box's mail
-  catcher. Any other choice is a *swap*: a driver or service that differs from production. An app whose production
+  each file disk on the box's Garage (D14), an app on mroom's Reverb host (D16), and SMTP to the box's mail catcher
+  with the environment's own login (D19). Any other choice is a *swap*: a driver or service that differs from production. An app whose production
   mailer is an API (Resend, Postmark, SES) swaps to SMTP to reach the catcher; `log` and `local` are swaps too.
   `[qa.parity]` declares each one, and `mroom doctor --app` lists every swap as a known gap from production.
+- Sets each file disk's endpoint to the store's public host, with path-style addressing, not an internal host
+  plus a `temporary_url`: S3 signatures cover the host, and Laravel swaps in `temporary_url` after signing, which
+  breaks the URL.
+- Runs nothing in QA that the environment's Redis user is refused (D15): `cache:clear` and `optimize:clear` (on a
+  Redis store they run `FLUSHDB`), or `cache:prune-stale-tags` and `horizon:clear-metrics` (they use `SCAN`).
+  phpredis reports a refused `FLUSHDB` as success, so `mroom doctor --app` looks for these in the deploy steps and
+  the schedule. The gate's `redis-clear` clears one environment's keys.
+- Runs from GitHub's tarball of the PR's commit (D17): there is no `.git` folder, files marked `export-ignore`
+  are left out, LFS files are pointers unless the repository includes LFS objects in its archives, and git
+  submodules are missing.
+- Installs only from public package registries in QA, since no registry credential reaches the site or qa-plan
+  (question 7).
 - Migrations are expand/contract across two releases, so the previous release can run on the new schema. This is
   what makes a rollback by tag safe (section 10).
 - A Postgres template database. By default (`database = "seeded"`) the app's factories and seeders fill it. A masked
@@ -367,7 +441,9 @@ What a Laravel app must have or add, documented in `docs/app-contract.md` and ch
   persona list the browser agent reads (`php artisan mroom:personas --json` or a committed file).
 - A way to sign a persona in: `mroom:signin-code <email>` (for one-time codes) or a password in the persona list.
 - A test-database guard that accepts `tests.database_pattern` (mroom ships a `TestCase` snippet).
-- A `QA_ENV_TEMPLATE` secret with test-mode keys only.
+- A `QA_ENV_TEMPLATE` secret with third-party test-mode keys only. It holds no credentials for anything on the box
+  and no app key: mroom writes each environment's own (section 8.9). Its test-mode keys are shared by every
+  environment (section 14, question 7).
 
 ## 10. CI/CD defaults (measured)
 
@@ -461,7 +537,7 @@ Phase 2 comes in two steps, so environments work before browser QA depends on th
 |---|---|---|
 | 0. Skeleton (merged, #1) | repo, LICENSE, NOTICE, README, CI (shellcheck, tests), `mroom config`, `install.sh`, release tagging | **Works:** `install.sh` on a fresh Ubuntu box installs `mroom`, `mroom config get app.name` reads an example |
 | 1. Box | `mroom` and `lib/*` generalised (config instead of hard-coded names, slug rules and paths), `forge-api`, Forge client, hooks with defaults, settings fragments, `mroom guard`, plugin hooks (banner, guard, worktree), `mroom init`, box job records (`mroom job run`); a box watchdog (an MCP probe, processes killed for lack of memory, failed box jobs and scheduled workflows, each posted to chat); the `regression` label (a PR that fixes a production problem names the release that caused it, `Breaks: v1.2.3`), so later phases have a baseline | **Works:** a new box is set up from the README, `box.env` and `mroom.toml` alone; no app's name appears in mroom's code. **Moves (4):** fewer box or pipeline failures are noticed by a person before mroom reports them |
-| 2a. QA environments | qa-plan (path rules), qa-up, qa-down, qa-reap, the gate and its operations, Forge site isolation, the app contract, `mroom doctor --app`, the template database (seeded, or the opt-in snapshot), the QA services of `[qa.parity]` (section 8.9), `app.version_path`; slots sized from box memory (a memory budget per environment sets `qa.max_envs`) | **Works:** an example app gets `go-<PR>`/`api-<PR>` with its own database, buckets, Reverb app and mail, and the section 8 invariants are tested. **Moves (3):** fewer production problems per release |
+| 2a. QA environments | qa-plan (path rules), qa-up, qa-down, qa-reap, the gate and its operations, Forge site isolation with code delivered as data (D17), a Redis user (D15), a Postgres role (D18) and an app key per environment, the app contract, `mroom doctor --app`, the template database (seeded, or the opt-in snapshot), the QA services of `[qa.parity]` (section 8.9; D14, D16, D19) with pinned checksums (section 3), `app.version_path`; slots sized from box memory (a memory budget per environment sets `qa.max_envs`) | **Works:** an example app gets `go-<PR>`/`api-<PR>` with its own database and role, app key, Redis user, buckets, Reverb app and mail login, and the section 8 invariants are tested. **Moves (3):** fewer production problems per release |
 | 2b. Browser QA | the runner sandbox (8.5); the plan's Claude step with `blast-radius` (vendored from pstack); the `verify-app` harness (pluggable sign-in) and `qa-engineer` | **Works:** an example app gets a browser QA check on each PR's last commit. **Moves (4):** fewer product PRs reach a person without a needed browser test passing |
 | 3. Agent workflow | skills generalised over the tracker adapter and `mroom.toml`; principles vendored; `mroom check size` (a file over 500 lines may not grow, and a static-analysis baseline may not grow), run by the pre-push hook and CI | **Works:** `/implement` takes an issue to a PR on the example app with tracker `none` and with Linear. **Moves (1):** files over 500 lines stop growing, in number and in lines |
 | 4. PR checks and CI/CD | conventional title, type labels + release notes, Claude review, review findings, auto-tag (optional); CI templates with the section 10 defaults (cache warming, apt cache, vendor cache, measured shards) and `tools/ci-first-push.sh`; the deploy template (the `release` branch), `deploy-verify` and the `production` environment (section 10, patterns 8 to 10) | **Works:** a repo calling the reusable workflows gets the checks, and a deploy in tests (with a fake host) waits until the live commit matches the tag. **Moves (2):** every release confirms its live commit. First-push CI time stays under 4 minutes (the pilot app already has the section 10 patterns) |
@@ -482,6 +558,8 @@ turned into config:
 | `settings/*`, `mroom guard` | the committed permission rules | split into fragments, plus a command parser |
 | `templates/hooks/*` | the lean pre-push and pre-commit hooks | driven by config; one hooks path everywhere |
 | `actions/qa-*`, workflows | the QA environment scripts and workflows | the provisioning of section 8.2 |
+| `reverb-host/` | the dev site's Reverb daemon | one Reverb for every QA environment, its apps read from a file (D16) |
+| `mroom baseline` (QA services) | Garage and Mailpit as run in the phase 2a spikes | pinned binaries with committed checksums; each service's secrets under `forge`'s home |
 | `actions/pr-status`, `review-findings`, `triage` | the PR status notes, review findings and alert triage | persona name, adapters, constants into config |
 | `templates/ci-*`, `deploy-production` | the backend, frontend and end-to-end CI, and the production deploy | placeholders; the deploy points the `release` branch at the tag |
 | `actions/deploy-verify` | the deploy's fixed sleep and health ping | waits until `app.version_path` reports the tag's commit |
@@ -500,14 +578,30 @@ result; section 9), its fixtures and feature files, and its own teams, channels 
 ## 14. Open questions
 
 1. Reusable workflows and their scripts: verify that a `workflow_call` workflow can reference composite actions
-   at its own ref without the caller repeating the version, or document the one-line pin. Phase 2a (QA
-   environments) needs the answer now.
+   at its own ref without the caller repeating the version, or document the one-line pin. **Answered:** GitHub's
+   contexts reference gives `job.workflow_repository` and `job.workflow_sha`, the repository and commit of the
+   workflow file that defines the current job, which in a reusable workflow is the called one. mroom's reusable
+   workflows check out `job.workflow_repository` at `job.workflow_sha` and run their composite actions from that
+   checkout, so the caller pins mroom once. Neither property exists on GitHub Enterprise Server.
 2. Plugins cannot set permissions (to verify): if so, `mroom init` merges the settings fragments into
    `.claude/settings.json`, and `mroom update` re-merges the parts it owns between markers.
 3. Forge site isolation for QA sites: confirm it works with per-PR sites, the queue worker and the box gate.
+   **Partly answered (D17):** a site created with `is_isolated` and `isolated_user` gets its own user and PHP pool,
+   its worker, created through the API, runs as that user, and the user cannot enter `forge`'s home. Still to test:
+   whether one site user can read another's files or connect to another's PHP-FPM socket; whether Forge deploys a
+   site that has no repository; which user Forge writes a site's `.env` as; and the gate's site operations, once
+   the gate is built.
 4. A control-plane package (section 10): build it later only for orchestration, not for speed.
 5. The bot's GitHub identity: PR notes and checks run as `github-actions`; the persona's Linear and Slack apps are
    per team. Document the one-time setup.
 6. QA services (section 8.9): pick the box's S3-compatible store and confirm a key per bucket; confirm the box's
    Reverb can add and remove apps, and how short its restart is if it must restart; decide how the mail catcher
-   tells environments apart (a header, or the sender).
+   tells environments apart (a header, or the sender). **Answered:** Garage, with a key per bucket proven (D14);
+   a Reverb host whose provider reads a file, so no restart (D16, from Reverb's source until the host is built);
+   and Mailpit, which tells environments apart by the SMTP login that sent each mail, and restarts when the gate
+   changes a login (D19).
+7. D6 and shared credentials: `QA_ENV_TEMPLATE` gives every environment the same test-mode keys (a payment
+   provider's, for example), which reach beyond one environment, and an app with private packages would need a
+   registry credential on the site or in qa-plan. Decide whether test mode is the one accepted exception, since it
+   holds no real data, or whether each environment gets its own keys where the provider allows it; and whether
+   private registries are supported at all (section 9 says not for now).
