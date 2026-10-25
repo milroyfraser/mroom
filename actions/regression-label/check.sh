@@ -6,6 +6,9 @@
 #   Reported: 2026-10-20T09:15Z      optional: when the problem was first reported (a date, or a UTC time);
 #                                    without it, the measure uses the time the PR was opened
 #
+# A line inside an HTML comment or a fenced code block does not count, so a PR template can show these
+# lines as an example. body.jq reads the body, for this check and for tools/regressions.sh alike.
+#
 # The check fails when the label and the Breaks line do not come together, when the release does not exist,
 # or when the Reported time is malformed, earlier than the release, or in the future. Together they record
 # two measures of the design (section 1.2): production problems per release, and the time from a release
@@ -16,6 +19,7 @@
 # the release lookup through gh; REGRESSION_LABEL (default regression); MROOM_NOW (epoch seconds) in tests.
 set -euo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EVENT="${1:?usage: check.sh <event.json>}"
 LABEL="${REGRESSION_LABEL:-regression}"
 REPO="${REPO:?REPO (owner/repo) is not set}"
@@ -23,12 +27,8 @@ TAG_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 
 fail() { echo "::error title=regression label::$1"; exit 1; }
 
-# field <Name>: the rest of the first "Name: ..." line of the PR body (any case), trimmed, or nothing.
-field() {
-  jq -r '.pull_request.body // ""' "$EVENT" | tr -d '\r' \
-    | grep -iE "^[[:space:]]*$1:" | head -n1 \
-    | sed -E 's/^[^:]*:[[:space:]]*//; s/[[:space:]]+$//' || true
-}
+# field <Name>: the rest of the PR body's first "Name: ..." line that a reader sees (body.jq), or nothing.
+field() { jq -r -L "$HERE" --arg name "$1" 'include "body"; .pull_request.body | field($name)' "$EVENT"; }
 
 # epoch_of <date or UTC time>: seconds since 1970, or a failure for anything else. jq does the arithmetic,
 # so the check needs no GNU date.

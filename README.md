@@ -230,8 +230,20 @@ Breaks: v1.2.3
 Reported: 2026-10-20T09:15Z    optional: when the problem was first reported (a date, or a UTC time)
 ```
 
-Without a `Reported` line, the time the pull request was opened counts as the first report. Set it up
-once in the app's repository:
+Without a `Reported` line, the time the pull request was opened counts as the first report. A line inside
+an HTML comment or a fenced code block does not count, so a pull request template can show the example:
+
+```markdown
+## Regression
+
+<!--
+Fixes a problem a release caused in production? Add the regression label and name the release:
+Breaks: v1.2.3
+Reported: 2026-10-20
+-->
+```
+
+Set it up once in the app's repository:
 
 ```bash
 gh label create regression --color B60205 --description "Fixes a production problem a release caused"

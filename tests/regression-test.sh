@@ -127,6 +127,31 @@ t_body_cannot_send_workflow_commands() {
   case "$out" in *"::add-mask"* | *"::set-output"*) fail "printed text from the PR body" ;; *) ok ;; esac
 }
 
+t_examples_are_not_read() {
+  world
+  # A PR template can show the lines in a comment or a code block without marking every PR.
+  event $'## Regression\r\n\r\n<!--\r\nBreaks: v1.2.3\r\nReported: 2026-10-14\r\n-->\r\n\r\n## Summary\r\n' type:chore
+  check; expect_rc 0; expect_out "not marked as a regression fix: nothing to check"
+  event $'For example:\n\n```\nBreaks: v1.2.3\n```\n\n~~~~ text\nBreaks: v1.2.3\n~~~\n~~~~\n' type:chore
+  check; expect_rc 0; expect_out "not marked as a regression fix: nothing to check"
+  # The line after the examples is the one read.
+  event $'<!-- for example\nBreaks: v0.0.1 -->\n```\nBreaks: v0.0.2\n```\nBreaks: v1.2.3\nReported: 2026-10-14' regression
+  check; expect_rc 0
+  expect_out "regression fix: the problem shipped in v1.2.3 (released 2026-10-13T10:02:11Z), first reported 2026-10-14"
+}
+
+t_unclosed_examples_run_to_the_end() {
+  world
+  # As on GitHub, a comment or a fence that is never closed hides the rest of the body.
+  event $'Fixes the export.\n<!-- a note\nBreaks: v1.2.3' regression
+  check; expect_rc 1; expect_out_has "has the regression label but names no release"
+  event $'Fixes the export.\n```\nBreaks: v1.2.3' regression
+  check; expect_rc 1; expect_out_has "has the regression label but names no release"
+  # Three backticks with another backtick later on the line are inline code, not a fence.
+  event $'```inline```\nBreaks: v1.2.3' regression
+  check; expect_rc 0; expect_out_has "the problem shipped in v1.2.3"
+}
+
 t_gh_warnings_are_not_the_date() {
   world
   touch "$FAKE/gh-warn"
@@ -142,10 +167,11 @@ t_custom_label() {
 
 t_measures() {
   world
+  # #13's body opens with a template's example, which the measures skip as the check does.
   jq -n '[
     {number: 12, title: "fix: export", url: "u", createdAt: "2026-10-15T09:00:00Z", body: "Breaks: v1.2.3\nReported: 2026-10-13T16:02:11Z"},
     {number: 11, title: "fix: totals", url: "u", createdAt: "2026-10-14T10:02:11Z", body: "Breaks: v1.2.3"},
-    {number: 13, title: "fix: login", url: "u", createdAt: "2026-10-21T00:00:00Z", body: "Breaks: v1.3.0"},
+    {number: 13, title: "fix: login", url: "u", createdAt: "2026-10-21T00:00:00Z", body: "<!--\nBreaks: v1.2.3\n-->\nBreaks: v1.3.0"},
     {number: 14, title: "fix: old", url: "u", createdAt: "2026-10-22T00:00:00Z", body: "Breaks: v0.9.0"}
   ]' >"$FAKE/prs.json"
   jq -n '[
@@ -199,6 +225,8 @@ test_case release-must-be-one-tag t_release_must_be_one_tag
 test_case release-must-exist-and-be-published t_release_must_exist_and_be_published
 test_case reported t_reported
 test_case body-cannot-send-workflow-commands t_body_cannot_send_workflow_commands
+test_case examples-are-not-read t_examples_are_not_read
+test_case unclosed-examples-run-to-the-end t_unclosed_examples_run_to_the_end
 test_case gh-warnings-are-not-the-date t_gh_warnings_are_not_the_date
 test_case custom-label t_custom_label
 test_case measures t_measures

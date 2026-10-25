@@ -6,12 +6,14 @@
 # It reads the merged pull requests that carry the regression label, with their "Breaks: <release>" and
 # optional "Reported: <date or UTC time>" lines (without Reported, the time the PR was opened counts), and
 # the releases published since <since> (default: 90 days ago). A problem counts toward the release it names.
+# It reads each body as the check does (actions/regression-label/body.jq).
 #
 #   tools/regressions.sh example/shop 2026-07-01
 #
 # Env: REGRESSION_LABEL (default regression). Needs gh (signed in) and jq.
 set -euo pipefail
 
+CHECK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../actions/regression-label" && pwd)"
 REPO="${1:?usage: regressions.sh <owner/repo> [<since YYYY-MM-DD>]}"
 LABEL="${REGRESSION_LABEL:-regression}"
 NOW="${MROOM_NOW:-$(date +%s)}"
@@ -28,17 +30,14 @@ releases="$(gh release list -R "$REPO" --limit 1000 --json tagName,publishedAt,i
 recording=true
 gh api "repos/$REPO/labels/$(jq -rn --arg l "$LABEL" '$l | @uri')" >/dev/null 2>&1 || recording=false
 
-jq -nr --argjson prs "$prs" --argjson releases "$releases" --arg since "$SINCE" --arg repo "$REPO" \
-  --arg label "$LABEL" --argjson recording "$recording" '
+jq -nr -L "$CHECK_DIR" --argjson prs "$prs" --argjson releases "$releases" --arg since "$SINCE" \
+  --arg repo "$REPO" --arg label "$LABEL" --argjson recording "$recording" '
+  include "body";
   def epoch:
     if test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$") then . + "T00:00:00Z"
     elif test("T[0-9]{2}:[0-9]{2}Z$") then sub("Z$"; ":00Z")
     else sub("\\.[0-9]+Z$"; "Z") end
     | fromdateiso8601;
-  def field($name):
-    (.body // "") | gsub("\r"; "") | split("\n")
-    | map(select(test("^\\s*" + $name + ":"; "i"))) | (first // "")
-    | sub("^[^:]*:\\s*"; "") | sub("\\s+$"; "");
   def dur:
     floor | if . < 60 then "\(.)s"
     elif . < 3600 then "\(. / 60 | floor)m"
@@ -51,8 +50,8 @@ jq -nr --argjson prs "$prs" --argjson releases "$releases" --arg since "$SINCE" 
 
   ($since + "T00:00:00Z" | fromdateiso8601) as $from
   | ($releases | map(select(.isDraft | not) | {key: .tagName, value: (.publishedAt | epoch)}) | from_entries) as $released
-  | [$prs[] | {number, url, title: (.title | clean), breaks: field("Breaks"), reported: field("Reported"),
-               opened: (.createdAt | epoch)}
+  | [$prs[] | {number, url, title: (.title | clean), breaks: (.body | field("Breaks")),
+               reported: (.body | field("Reported")), opened: (.createdAt | epoch)}
       | .released = $released[.breaks]
       | .reported_at = (if .reported == "" then .opened else (.reported | try epoch catch null) end)
       | .delay = (if .released and .reported_at then ([.reported_at - .released, 0] | max) else null end)]
