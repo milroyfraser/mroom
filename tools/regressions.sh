@@ -6,14 +6,18 @@
 # It reads the merged pull requests that carry the regression label, with their "Breaks: <release>" and
 # optional "Reported: <date or UTC time>" lines (without Reported, the time the PR was opened counts), and
 # the releases published since <since> (default: 90 days ago). A problem counts toward the release it names.
-# It reads each body as the check does (actions/regression-label/body.jq).
+# It reads each body as the check does (actions/regression-label/body.jq), so it runs from a checkout
+# of mroom.
 #
 #   tools/regressions.sh example/shop 2026-07-01
 #
 # Env: REGRESSION_LABEL (default regression). Needs gh (signed in) and jq.
 set -euo pipefail
 
-CHECK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../actions/regression-label" && pwd)"
+CHECK_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/../actions/regression-label" 2>/dev/null && pwd)" || {
+  echo "regressions.sh: run it from a checkout of mroom; it reads bodies with actions/regression-label/body.jq" >&2
+  exit 2
+}
 REPO="${1:?usage: regressions.sh <owner/repo> [<since YYYY-MM-DD>]}"
 LABEL="${REGRESSION_LABEL:-regression}"
 NOW="${MROOM_NOW:-$(date +%s)}"
@@ -31,7 +35,7 @@ recording=true
 gh api "repos/$REPO/labels/$(jq -rn --arg l "$LABEL" '$l | @uri')" >/dev/null 2>&1 || recording=false
 
 jq -nr -L "$CHECK_DIR" --argjson prs "$prs" --argjson releases "$releases" --arg since "$SINCE" \
-  --arg repo "$REPO" --arg label "$LABEL" --argjson recording "$recording" '
+  --arg repo "$REPO" --arg label_name "$LABEL" --argjson recording "$recording" '
   include "body";
   def epoch:
     if test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$") then . + "T00:00:00Z"
@@ -62,13 +66,14 @@ jq -nr -L "$CHECK_DIR" --argjson prs "$prs" --argjson releases "$releases" --arg
   | "Regression fixes merged since \($since) in \($repo):",
     (if ($fixes | length) == 0 then "  none" else empty end),
     ($fixes[] | "  #\(.number)  " + (
-       if .released == null then "\(.breaks | clean): not a published release of this repository"
+       if .breaks == "" then "no Breaks line outside comments and code blocks"
+       elif .released == null then "\(.breaks | clean): not a published release of this repository"
        elif .reported_at == null then "\(.breaks), released \(.released | utc): its Reported line is not a date"
        else "\(.breaks), released \(.released | utc), reported after \(.delay | dur)" end)
        + ": \(.title)"),
     "Releases published since \($since): \($nreleases); with a reported problem: \($broken)",
     if $recording | not then
-      "Production problems per release: not recorded: \($repo) has no \($label) label yet",
+      "Production problems per release: not recorded: \($repo) has no \($label_name) label yet",
       "Time from a release to the first report of a problem: not recorded"
     else
     "Production problems per release: "

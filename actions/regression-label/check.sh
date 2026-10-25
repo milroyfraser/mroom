@@ -6,8 +6,9 @@
 #   Reported: 2026-10-20T09:15Z      optional: when the problem was first reported (a date, or a UTC time);
 #                                    without it, the measure uses the time the PR was opened
 #
-# A line inside an HTML comment or a fenced code block does not count, so a PR template can show these
-# lines as an example. body.jq reads the body, for this check and for tools/regressions.sh alike.
+# Lines inside HTML comments and fenced code blocks do not count, nor does a line with no value, so a PR
+# template can carry these lines for the author to fill in. body.jq reads the body, for this check and for
+# tools/regressions.sh alike.
 #
 # The check fails when the label and the Breaks line do not come together, when the release does not exist,
 # or when the Reported time is malformed, earlier than the release, or in the future. Together they record
@@ -19,7 +20,7 @@
 # the release lookup through gh; REGRESSION_LABEL (default regression); MROOM_NOW (epoch seconds) in tests.
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HERE="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EVENT="${1:?usage: check.sh <event.json>}"
 LABEL="${REGRESSION_LABEL:-regression}"
 REPO="${REPO:?REPO (owner/repo) is not set}"
@@ -27,7 +28,7 @@ TAG_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 
 fail() { echo "::error title=regression label::$1"; exit 1; }
 
-# field <Name>: the rest of the PR body's first "Name: ..." line that a reader sees (body.jq), or nothing.
+# field <Name>: the value of the PR body's first "Name: value" line that a reader sees (body.jq), or nothing.
 field() { jq -r -L "$HERE" --arg name "$1" 'include "body"; .pull_request.body | field($name)' "$EVENT"; }
 
 # epoch_of <date or UTC time>: seconds since 1970, or a failure for anything else. jq does the arithmetic,
@@ -41,16 +42,17 @@ epoch_of() {
     | fromdateiso8601' 2>/dev/null
 }
 
-labeled="$(jq -r --arg l "$LABEL" '[.pull_request.labels[]?.name] | index($l) != null' "$EVENT")"
-breaks="$(field Breaks)"
-reported="$(field Reported)"
+# jq's own error, if any, is in the log above the annotation.
+{ labeled="$(jq -r --arg l "$LABEL" '[.pull_request.labels[]?.name] | index($l) != null' "$EVENT")" &&
+  breaks="$(field Breaks)" && reported="$(field Reported)"; } ||
+  fail "Could not read the pull request from the event file; the error is above."
 
 if [ "$labeled" != true ] && [ -z "$breaks" ]; then
   echo "not marked as a regression fix: nothing to check"
   exit 0
 fi
 if [ -z "$breaks" ]; then
-  fail "This PR has the $LABEL label but names no release. Add a line 'Breaks: v1.2.3' with the release that shipped the problem."
+  fail "This PR has the $LABEL label but names no release. Add a line 'Breaks: v1.2.3' with the release that shipped the problem, outside any HTML comment or code block."
 fi
 if ! [[ "$breaks" =~ $TAG_RE ]]; then
   fail "The Breaks line must name one release tag, such as 'Breaks: v1.2.3'."

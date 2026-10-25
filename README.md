@@ -230,19 +230,17 @@ Breaks: v1.2.3
 Reported: 2026-10-20T09:15Z    optional: when the problem was first reported (a date, or a UTC time)
 ```
 
-Without a `Reported` line, the time the pull request was opened counts as the first report. A line inside
-an HTML comment or a fenced code block does not count, so a pull request template can show the example:
+Without a `Reported` line, the time the pull request was opened counts as the first report. Lines inside
+HTML comments and fenced code blocks do not count, nor does a line with no value, so a pull request
+template can carry the line for the author to fill in:
 
 ```markdown
 ## Regression
 
-<!--
-Fixes a problem a release caused in production? Add the regression label and name the release:
-Breaks: v1.2.3
-Reported: 2026-10-20
--->
+Breaks: <!-- the release that shipped the problem this PR fixes, such as v1.2.3; leave empty if none -->
 ```
 
+Filled in, the line marks the pull request as a regression fix, and the check then asks for the label too.
 Set it up once in the app's repository:
 
 ```bash
@@ -261,6 +259,7 @@ permissions:
 jobs:
   regression-label:
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     steps:
       - uses: milroyfraser/mroom/actions/regression-label@v0.3.0
 ```
@@ -270,7 +269,7 @@ or is a draft, or when `Reported` is malformed, earlier than the release, or in 
 pull request from the event file and prints only values it has checked, so text in a PR body cannot send
 a workflow command.
 
-Count both measures from any machine with `gh` signed in:
+Count both measures from a checkout of mroom, on any machine with `gh` signed in:
 
 ```bash
 tools/regressions.sh example/shop 2026-07-01
