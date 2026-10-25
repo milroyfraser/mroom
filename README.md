@@ -219,6 +219,37 @@ readable only by the box user: `watchdog.json`, and `watchdog.log` with one JSON
 start and end and each event. Its MCP check sends no login, so it finds servers that fail or vanish, not
 an expired login.
 
+## Forge API
+
+`forge-api` calls the Laravel Forge v2 API of this box, for agents and people. Every call is pinned to the
+box's server (`MROOM_FORGE_ORG` and `MROOM_FORGE_SERVER` in `box.env`), and a path is relative to it:
+
+```bash
+forge-api GET sites
+forge-api PUT sites/123/nginx --write --data '{"config":"..."}'
+forge-api --secret GET sites/123/environment
+```
+
+- Reads run freely. POST, PUT, PATCH and DELETE need `--write`, which an agent adds only after you agree.
+- A path that returns secrets, such as a site's env, needs `--secret`, so an allow rule for plain reads
+  never matches it.
+- `--data -` reads the body from stdin. The token and any body reach curl through private files, never its
+  command line.
+- Forge's 502s and 503s are retried, a 429 waits as long as Forge says, and a read that timed out is
+  retried (a write never is, since it may have run).
+
+The token lives in `~/.config/mroom/secrets/forge-token`, mode 600. Give it only the scopes the box's users
+need: a token that can create daemons or scheduled jobs reaches root (design D20). To store it without it
+showing on screen or in history:
+
+```bash
+umask 077; mkdir -p ~/.config/mroom/secrets
+read -rs t; printf '%s' "$t" >~/.config/mroom/secrets/forge-token; unset t
+```
+
+On a runner, the QA actions use the same client (`lib/core/forge.sh`) with `MROOM_FORGE_ORG`,
+`MROOM_FORGE_SERVER` and `MROOM_FORGE_TOKEN` in the environment.
+
 ## Regression label
 
 A pull request that fixes a problem a release caused in production carries the `regression` label and

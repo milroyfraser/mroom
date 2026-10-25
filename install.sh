@@ -7,9 +7,10 @@
 #
 # Options:
 #   --prefix <dir>   install under <dir> instead of ~/.local: <dir>/share/mroom/<version>, <dir>/bin/mroom
-#   --force          replace a <dir>/bin/mroom that is not an mroom install
+#   --force          replace a <dir>/bin/mroom (or <dir>/bin/forge-api) that is not an mroom install
 #
-# It installs into ~/.local/share/mroom/<version> and links ~/.local/bin/mroom to it. Running it again
+# It installs into ~/.local/share/mroom/<version> and links ~/.local/bin/mroom to it, and
+# ~/.local/bin/forge-api too unless a forge-api that is not mroom's is already there. Running it again
 # replaces that version in place, so it is safe to repeat. It never touches ~/.config/mroom.
 # A tagged release is downloaded with `gh release download` when gh is signed in (the repository may be
 # private), and with curl from GitHub's archive URL otherwise.
@@ -60,6 +61,9 @@ while [[ "$prefix" == *//* ]]; do prefix="${prefix//$double/$slash}"; done
 share="$prefix/share/mroom"
 bindir="$prefix/bin"
 link="$bindir/mroom"
+# Commands linked beside mroom when the name is free or already ours. One that belongs to something else
+# is left alone (--force replaces it): it must not stop mroom itself from installing.
+extra_links=(forge-api)
 
 # canon <path>: the absolute path with symlinks, "." and ".." resolved; the last parts need not exist.
 canon() {
@@ -67,12 +71,12 @@ canon() {
   python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null
 }
 
-# is_ours: the link resolves into $share (compared canonically, so another spelling of the same install
-# counts). When either side cannot be resolved, it is not ours.
+# is_ours [<link>]: the link (default: the mroom link) resolves into $share, compared canonically, so
+# another spelling of the same install counts. When either side cannot be resolved, it is not ours.
 is_ours() {
-  [ -L "$link" ] || return 1
-  local target t s
-  target="$(readlink "$link")" || return 1
+  local l="${1:-$link}" target t s
+  [ -L "$l" ] || return 1
+  target="$(readlink "$l")" || return 1
   case "$target" in /*) ;; *) target="$bindir/$target" ;; esac
   t="$(canon "$target")" || return 1
   s="$(canon "$share")" || return 1
@@ -82,6 +86,12 @@ is_ours() {
 
 if [ "$uninstall" = 1 ]; then
   remove_share=1
+  for name in "${extra_links[@]}"; do
+    if is_ours "$bindir/$name"; then
+      rm -f "$bindir/$name"
+      say "removed $bindir/$name"
+    fi
+  done
   if is_ours; then
     rm -f "$link"
     say "removed $link"
@@ -200,6 +210,16 @@ ln -sfn "$dest/bin/mroom" "$link"
 say "installed mroom $have from $source_note"
 say "  $dest"
 say "  $link -> $dest/bin/mroom"
+for name in "${extra_links[@]}"; do
+  [ -x "$dest/bin/$name" ] || continue
+  extra="$bindir/$name"
+  if { [ -e "$extra" ] || [ -L "$extra" ]; } && ! is_ours "$extra" && [ "$force" != 1 ]; then
+    say "  left $extra alone: it is not mroom's (mroom's is $dest/bin/$name; --force replaces it)"
+    continue
+  fi
+  ln -sfn "$dest/bin/$name" "$extra"
+  say "  $extra -> $dest/bin/$name"
+done
 case ":$PATH:" in
   *":$bindir:"*) ;;
   *) say "note: $bindir is not on PATH; add it, for example: export PATH=\"$bindir:\$PATH\"" ;;

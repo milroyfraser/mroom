@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# forge-api — the Laravel Forge v2 API of this box, for agents and people (design section 7).
+#
+#   forge-api GET sites
+#   forge-api GET sites/123/nginx
+#   forge-api PUT sites/123/nginx --write --data '{"config":"..."}'
+#   jq -n '{...}' | forge-api POST sites/123/domains --write --data -
+#   forge-api --secret GET sites/123/environment
+#
+# Every call is pinned to this box's server (MROOM_FORGE_ORG and MROOM_FORGE_SERVER in box.env), and a
+# path is relative to it; one that could climb out is refused. Reads run freely. POST, PUT, PATCH and
+# DELETE need --write, which an agent adds only after the user agrees. A path that returns secrets (a
+# site's env) needs --secret, so an allow rule for plain reads never matches it. The token comes from
+# ~/.config/mroom/secrets/forge-token (mode 600) and is never printed; --data - reads the body from stdin,
+# so a body with secrets in it stays off the command line too.
+#
+# Exit codes: 0 done, 1 Forge or the client failed, 2 refused before calling Forge.
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+MROOM_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+export MROOM_ROOT
+# shellcheck source=lib/core/util.sh
+. "$MROOM_ROOT/lib/core/util.sh"
+# shellcheck source=lib/core/forge.sh
+. "$MROOM_ROOT/lib/core/forge.sh"
+FORGE_NAME=forge-api
+
+refuse() { echo "forge-api: $*" >&2; exit 2; }
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; }
+
+case "${1:-}" in -h | --help) usage; exit 0 ;; esac
+secret=0
+if [ "${1:-}" = --secret ]; then secret=1; shift; fi
+[ "$#" -ge 2 ] || refuse "usage: forge-api [--secret] <GET|POST|PUT|PATCH|DELETE> <path> [--write] [--data JSON|-]"
+method="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
+path="$2"
+shift 2
+
+write=0 data="" has_data=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --write) write=1; shift ;;
+    --data)
+      [ "$#" -ge 2 ] || refuse "--data needs JSON, or - to read it from stdin"
+      if [ "$2" = - ]; then data="$(cat)"; else data="$2"; fi
+      has_data=1
+      shift 2
+      ;;
+    *) refuse "unknown argument: $1" ;;
+  esac
+done
+
+case "$method" in
+  GET) [ "$has_data" = 0 ] || refuse "a GET takes no --data" ;;
+  POST | PUT | PATCH | DELETE) [ "$write" = 1 ] || refuse "$method changes Forge and needs --write (an agent asks the user first)" ;;
+  *) refuse "unsupported method $method" ;;
+esac
+
+# The path is relative to the pinned server: refuse anything that could leave it or smuggle a host in.
+path="${path#/}"
+case "$path" in
+  "" | *..* | *://* | *@* | orgs* | servers* | *%2[eEfF]* | *%5[cC]*)
+    refuse "the path must stay under this box's server, for example sites/123" ;;
+esac
+# Inside a bracket expression a backslash is literal, so "]" goes first and "-" last instead of escaping.
+plain_path='^[]A-Za-z0-9._~/?=&%,[-]+$'
+[[ "$path" =~ $plain_path ]] || refuse "the path has characters a Forge path never needs: $path"
+case "${path%%\?*}" in
+  env | */env | env/* | */env/* | *environment*)
+    [ "$secret" = 1 ] || refuse "$path returns secrets; run it as: forge-api --secret $method $path" ;;
+esac
+if [ "$has_data" = 1 ] && ! jq -e . >/dev/null 2>&1 <<<"$data"; then refuse "--data is not valid JSON"; fi
+
+need curl jq
+body="$(forge "$method" "/$path" "$data")" || exit 1
+printf '%s\n' "$body"

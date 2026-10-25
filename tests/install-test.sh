@@ -150,10 +150,29 @@ t_host_checks() {
   run env PATH="$fake" "$bash_bin" "$INSTALL"; expect_rc 1; expect_err_has "  - python3 >= 3.11 (the python3 on PATH is 3.10.12)"
 }
 
+t_links_forge_api_beside_mroom() {
+  run "$INSTALL"; expect_rc 0; expect_out_has "$HOME/.local/bin/forge-api -> $HOME/.local/share/mroom/$V/bin/forge-api"
+  if [ "$(readlink "$HOME/.local/bin/forge-api")" = "$HOME/.local/share/mroom/$V/bin/forge-api" ]; then ok; else fail "forge-api link"; fi
+  run "$HOME/.local/bin/forge-api" --help; expect_rc 0; expect_out_has "forge-api GET sites"
+}
+
+t_leaves_a_foreign_forge_api_alone() {
+  mkdir -p "$HOME/.local/bin" && ln -s /somewhere/else/forge-api "$HOME/.local/bin/forge-api"
+  run "$INSTALL"; expect_rc 0
+  expect_out_has "left $HOME/.local/bin/forge-api alone: it is not mroom's"
+  if [ "$(readlink "$HOME/.local/bin/forge-api")" = /somewhere/else/forge-api ]; then ok; else fail "foreign link replaced"; fi
+  run "$INSTALL" --uninstall; expect_rc 0
+  if [ "$(readlink "$HOME/.local/bin/forge-api")" = /somewhere/else/forge-api ]; then ok; else fail "foreign link removed"; fi
+  expect_no_file "$HOME/.local/share/mroom"
+  run "$INSTALL" --force; expect_rc 0
+  if [ "$(readlink "$HOME/.local/bin/forge-api")" = "$HOME/.local/share/mroom/$V/bin/forge-api" ]; then ok; else fail "--force did not replace it"; fi
+}
+
 t_uninstall() {
   run "$INSTALL"; expect_rc 0
   mkdir -p "$HOME/.config/mroom" && echo "MROOM_ENV=local" >"$HOME/.config/mroom/box.env"
   run "$INSTALL" --uninstall; expect_rc 0; expect_out_has "removed $HOME/.local/bin/mroom"
+  expect_out_has "removed $HOME/.local/bin/forge-api"; expect_no_file "$HOME/.local/bin/forge-api"
   expect_no_file "$HOME/.local/bin/mroom"; expect_no_file "$HOME/.local/share/mroom"
   expect_file "$HOME/.config/mroom/box.env"
   run "$INSTALL" --uninstall; expect_rc 0
@@ -182,5 +201,7 @@ test_case installs-release t_installs_release
 test_case release-mismatch-and-bad-tag t_release_mismatch_and_bad_tag
 test_case refuses-foreign-link t_refuses_foreign_link
 test_case host-checks t_host_checks
+test_case links-forge-api t_links_forge_api_beside_mroom
+test_case leaves-foreign-forge-api t_leaves_a_foreign_forge_api_alone
 test_case uninstall t_uninstall
 finish
