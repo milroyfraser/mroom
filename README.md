@@ -277,6 +277,10 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 | `env-sha <N>` | `env=` the SHA-256 of the API site's `.env` (or `missing`), and `commit=` the commit `code-put` recorded (or `none`) |
 | `signin-code <N> <email>` | a sign-in code for a persona address, from the app's `php artisan mroom:signin-code <email>` or its `qa-signin` hook |
 | `user-clean <N>` | stops the site user's processes (PHP-FPM's pool workers once: their master starts fresh ones, which end with the site) and deletes its files in `/tmp`, `/var/tmp`, `/dev/shm`, `/var/crash`, `/run/lock` and `/dev/mqueue`, its IPC objects and its crontab, before qa-down deletes the sites |
+| `mail-user-add <N>` | an SMTP login of its own on the box's Mailpit (D19); prints `MAIL_MAILER`, `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME` and a new `MAIL_PASSWORD` |
+| `mail-user-remove <N>` | the environment's SMTP login |
+| `mail-read <N> <email>` | as JSON, the newest five mails the environment's login sent to a persona address: sender, recipients, subject and text |
+| `mail-clear <N>` | every mail the environment's login sent |
 
 The client sends only N. The database, role and Redis user are `<MROOM_APP_NAME>_qa_<N>`, and the
 database is cloned from `MROOM_QA_TEMPLATE`, both set by a person in `box.env`. A password reaches
@@ -336,10 +340,17 @@ The sudoers line lets the box user, and so every agent on the box, run `site-op`
 put any code into a QA site and run its sign-in command. QA sites hold only QA data, and the box user can
 already read every isolated site's files on Forge.
 
+Mail goes to the box's Mailpit, which keeps it (D19). Each environment sends with its own SMTP login, and
+a login sets the mail's `Username` field and its only tag, since the tags an `X-Tags` header or a plus
+address would add are turned off. Mailpit reads its logins only when it starts, so `mail-user-add` and
+`mail-user-remove` stop it and Forge's daemon starts it again, about a second without SMTP, which a queued
+mail with more than one try survives. Only the gate holds the API login: `mail-read` and `mail-clear` act
+only on mail whose `Username` is the environment's login, and `mail-read` only for persona addresses.
+
 **Set up once,** for an app named `shop`, on Postgres 16 or later and Redis 7 or later. Before Postgres 16,
 a role that may create roles may also grant itself the administrator ones, so the gate refuses older
-versions. CI runs these steps against a real Postgres, a real Redis 7 and 8, and real site users and sudo
-(`tests/pg/`, `tests/redis/` and `tests/site/`).
+versions. CI runs these steps against a real Postgres, a real Redis 7 and 8, real site users and sudo, and
+the real Mailpit (`tests/pg/`, `tests/redis/`, `tests/site/` and `tests/mail/`).
 
 1. In the box user's `~/.ssh/authorized_keys`, by hand (Forge's SSH key screen stores a bare key, without
    options):
@@ -479,6 +490,11 @@ versions. CI runs these steps against a real Postgres, a real Redis 7 and 8, and
     Laravel app's folder in the repository, `.`), `MROOM_QA_PHP` (`php`) and `MROOM_QA_PERSONA_DOMAIN`
     (`.test`). A site user's name is at most 32 characters, so an app name of 19 characters or fewer always
     fits.
+
+12. The mail catcher, when `qa.parity.mail` is `catcher` (the default): `mroom baseline mailpit`. It
+    downloads Mailpit at the build `lib/core/pins.txt` names, refuses it unless the archive and the binary
+    match their SHA-256 pins, makes its logins (mode 600, in `~/.config/mroom/secrets`), and prints the
+    Forge daemon to create, which listens on this box only. It can run again: what is in place is kept.
 
 ## Regression label
 

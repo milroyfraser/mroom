@@ -17,11 +17,13 @@
 #                              a box job that records how it ended, so the watchdog sees it fail or stop
 #   mroom gate provision       the forced command of the QA runner's SSH key: the only box operations
 #                              CI may run (design 8.2); never run by hand
+#   mroom baseline mailpit     the QA mail catcher at its pinned build, its logins, and the Forge daemon
+#                              to create (design 8.9)
 #   mroom version [--source]   the installed version (--source: the release or checkout it came from)
 #   mroom help
 #
 # Coming in later phases (see docs/design.md, section 11): status, sessions, resume, restart, doctor,
-# site, update, wt, user, keys, baseline, env, init, guard, default (phase 1).
+# site, update, wt, user, keys, env, init, guard, default (phase 1).
 set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
@@ -52,7 +54,8 @@ case "$cmd" in
   watchdog) exec "$ROOT/lib/watchdog" "$@" ;;
   job) exec "$ROOT/lib/job" "$@" ;;
   gate) exec "$ROOT/lib/gate" "$@" ;;
-  status | sessions | resume | restart | doctor | site | update | wt | user | keys | baseline | env | init | guard | default)
+  baseline) exec "$ROOT/lib/baseline" "$@" ;;
+  status | sessions | resume | restart | doctor | site | update | wt | user | keys | env | init | guard | default)
     not_yet "$cmd" 1
     ;;
   *) die "unknown command '$cmd' (mroom help lists the commands)" 2 ;;

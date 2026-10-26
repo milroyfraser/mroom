@@ -26,6 +26,11 @@
 #               user-clean <N>         stops the site user's processes (PHP-FPM's pool workers end with the
 #                                      site) and deletes its files in /tmp, /var/tmp, /dev/shm, /var/crash,
 #                                      /run/lock and /dev/mqueue, its IPC objects and its crontab
+#               mail-user-add <N>      an SMTP login of its own on the box's Mailpit (D19); prints MAIL_MAILER,
+#                                      MAIL_HOST, MAIL_PORT, MAIL_USERNAME and a new MAIL_PASSWORD
+#               mail-user-remove <N>   the environment's SMTP login
+#               mail-read <N> <email>  the newest mail its login sent to a persona address, as JSON
+#               mail-clear <N>         every mail its login sent
 #
 # The client sends only the environment's number. The gate builds every name from box.env, which a person
 # sets: the database, role and Redis user are <MROOM_APP_NAME>_qa_<N>, the database is cloned from
@@ -94,6 +99,7 @@ case "$role:$op" in
   provision:redis-user-add | provision:redis-user-remove | provision:redis-clear) ;;
   provision:code-put | provision:dist-put | provision:env-put | provision:env-sha) ;;
   provision:signin-code | provision:user-clean) ;;
+  provision:mail-user-add | provision:mail-user-remove | provision:mail-read | provision:mail-clear) ;;
   *) refuse "$role may not run '${op:0:24}'" ;;
 esac
 
@@ -531,15 +537,20 @@ cmd_env_sha() {
   printf 'env=%s\ncommit=%s\n' "$env" "$(recorded_commit)"
 }
 
+# persona <op> <address>: refuses anything but a made-up persona address (MROOM_QA_PERSONA_DOMAIN), so no real
+# person's sign-in code or mail is ever read, and a refused address is never logged.
+persona() {
+  local domain="${BOX[MROOM_QA_PERSONA_DOMAIN]:-.test}"
+  if ! [[ "$2" =~ ^[a-z0-9._+-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || [[ "$2" != *"$domain" ]]; then
+    refuse "$1: not a persona address ending in $domain"
+  fi
+}
+
 cmd_signin_code() {
   words_are 3
   env_number "${words[1]}"
-  local email="${words[2]}" persona="${BOX[MROOM_QA_PERSONA_DOMAIN]:-.test}" code
-  # Only made-up persona addresses: a real person's sign-in code is never printed, and a refused address is
-  # never logged.
-  if ! [[ "$email" =~ ^[a-z0-9._+-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || [[ "$email" != *"$persona" ]]; then
-    refuse "signin-code: not a persona address ending in $persona"
-  fi
+  local email="${words[2]}" code
+  persona signin-code "$email"
   site_ready
   site_user_exists || fail "there is no user $SITE_USER"
   env_lock "site-$SITE_USER"
@@ -565,6 +576,163 @@ cmd_user_clean() {
   echo
 }
 
+MAILPIT_SECRETS="$HOME/.config/mroom/secrets/mailpit.env"
+MAILPIT_LOGINS="$HOME/.config/mroom/secrets/mailpit-smtp.passwd"
+MAILPIT_BIN="$HOME/.local/share/mroom-services/mailpit/current/mailpit"
+MAILPIT_URL="" MAILPIT_AUTH="" SMTP_HOST="" SMTP_PORT="" MAIL_ERR=""
+
+# mail_secret <KEY>: one value from mailpit.env, which mroom baseline mailpit writes; the one reader of it.
+mail_secret() { sed -n "s/^$1=//p" "$MAILPIT_SECRETS" | head -n1 | tr -d '\r'; }
+
+mail_ready() {
+  local file user pass
+  for file in "$MAILPIT_SECRETS" "$MAILPIT_LOGINS"; do
+    [ -r "$file" ] || fail "$(home_short "$file") is missing; run mroom baseline mailpit"
+    secret_file_ok "$file" || fail "$(home_short "$file") must be yours and mode 600"
+  done
+  need curl jq openssl flock base64
+  user="$(mail_secret MAILPIT_API_USER)" pass="$(mail_secret MAILPIT_API_PASSWORD)"
+  if [ -z "$user" ] || [ -z "$pass" ]; then fail "$(home_short "$MAILPIT_SECRETS") must set MAILPIT_API_USER and MAILPIT_API_PASSWORD"; fi
+  [[ "$user" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "MAILPIT_API_USER is not a plain user name"
+  MAILPIT_URL="$(mail_secret MAILPIT_API_URL)" SMTP_HOST="$(mail_secret MAILPIT_SMTP_HOST)" SMTP_PORT="$(mail_secret MAILPIT_SMTP_PORT)"
+  MAILPIT_URL="${MAILPIT_URL:-http://127.0.0.1:8025}" SMTP_HOST="${SMTP_HOST:-127.0.0.1}" SMTP_PORT="${SMTP_PORT:-1025}"
+  # The API and its login stay on this box.
+  [[ "$MAILPIT_URL" =~ ^http://127\.0\.0\.1:[0-9]{1,5}$ ]] || fail "MAILPIT_API_URL must be http://127.0.0.1:<port>"
+  [[ "$SMTP_HOST" =~ ^[A-Za-z0-9.:-]+$ && "$SMTP_PORT" =~ ^[0-9]{1,5}$ ]] || fail "MAILPIT_SMTP_HOST or MAILPIT_SMTP_PORT is not plain"
+  MAILPIT_AUTH="$(printf '%s:%s' "$user" "$pass" | base64 -w0)"
+  gate_tmp
+  MAIL_ERR="$GATE_TMP/mail.err"
+}
+
+# mailpit_api <method> <path> [<json>]: one call to Mailpit's API as the gate's login, printing the body.
+# The login reaches curl on stdin, never a command line.
+mailpit_api() {
+  local args=(-q --silent --show-error --fail --max-time 30 --request "$1" --header @-)
+  if [ -n "${3-}" ]; then args+=(--header "Content-Type: application/json" --data-binary "$3"); fi
+  printf 'Authorization: Basic %s\n' "$MAILPIT_AUTH" | curl "${args[@]}" "$MAILPIT_URL$2" 2>"$MAIL_ERR"
+}
+mail_error() { printable "$(grep -m1 . "$MAIL_ERR" 2>/dev/null || echo "no message")"; }
+
+# mailpit_pids: the Mailpit processes this user runs from the installed binary.
+mailpit_pids() {
+  local bin proc
+  bin="$(readlink -f "$MAILPIT_BIN" 2>/dev/null)" || return 0
+  for proc in /proc/[0-9]*; do
+    if [ -O "$proc" ] && [ "$(readlink "$proc/exe" 2>/dev/null)" = "$bin" ]; then echo "${proc#/proc/}"; fi
+  done
+}
+mailpit_live() { [ "$(curl -q --silent --max-time 2 --output /dev/null --write-out '%{http_code}' "$MAILPIT_URL/livez" 2>/dev/null)" = 200 ]; }
+
+# mailpit_restart: Mailpit reads its logins only when it starts (D19), so the gate stops it and Forge's daemon
+# starts it again; it waits until a new Mailpit answers.
+mailpit_restart() {
+  local old new pid _
+  old="$(mailpit_pids)"
+  [ -n "$old" ] || fail "Mailpit is not running; create its daemon (mroom baseline mailpit)"
+  for pid in $old; do kill -TERM "$pid" 2>/dev/null || true; done
+  for _ in $(seq 1 "${MROOM_GATE_RESTART_WAIT:-120}"); do
+    sleep 0.25
+    new="$(mailpit_pids)"
+    # A new Mailpit: no process left from before, and one that answers.
+    if [ -n "$new" ] && ! grep -qxF -f <(printf '%s\n' "$old") <<<"$new" && mailpit_live; then return 0; fi
+  done
+  fail "Mailpit did not come back within 30 seconds of a restart; check its daemon"
+}
+
+# set_login <user> [<hash>]: rewrites the SMTP login file without the user's line, then with the new one if
+# a hash is given. Returns 1 when nothing changed.
+set_login() {
+  local tmp
+  tmp="$(mktemp "$(dirname "$MAILPIT_LOGINS")/.mailpit-smtp.XXXXXX")"
+  awk -F: -v user="$1" '$1 != user' "$MAILPIT_LOGINS" >"$tmp"
+  if [ -n "${2-}" ]; then printf '%s:%s\n' "$1" "$2" >>"$tmp"; fi
+  if cmp -s "$tmp" "$MAILPIT_LOGINS"; then rm -f "$tmp"; return 1; fi
+  mv -f "$tmp" "$MAILPIT_LOGINS"
+}
+
+# mail_ids <user> [<address>]: the IDs of the mail the user's login sent, to the address if one is given,
+# newest first. The tag only narrows the search: a mail counts only when its Username field, which only a
+# login sets, is the user (D19).
+mail_ids() {
+  local query start=0 page
+  query="$(jq -rn --arg q "tag:\"$1\"" '$q | @uri')"
+  while :; do
+    page="$(mailpit_api GET "/api/v1/search?query=$query&start=$start&limit=500")" || return 1
+    jq -r --arg u "$1" --arg a "${2-}" '.messages[] | select(.Username == $u)
+      | select($a == "" or ([.To[]? | (.Address // "") | ascii_downcase] | index($a)))
+      | .ID | select(test("^[A-Za-z0-9_-]{1,64}$"))' <<<"$page"
+    [ "$(jq '.messages | length' <<<"$page")" = 500 ] || return 0
+    start=$((start + 500))
+  done
+}
+
+cmd_mail_user_add() {
+  words_are 2
+  env_number "${words[1]}"
+  local user="${app}_qa_${words[1]}" password hash
+  mail_ready
+  env_lock mailpit  # one login file and one Mailpit for every environment
+  password="$(new_password)"
+  [ "${#password}" = 48 ] || fail "could not read random bytes for the password"
+  hash="$(printf '%s' "$password" | openssl passwd -6 -stdin)" || fail "openssl could not hash the password"
+  [[ "$hash" =~ ^\$6\$[A-Za-z0-9./]+\$[A-Za-z0-9./]+$ ]] || fail "openssl gave no SHA-512 crypt hash"
+  [ -n "$(mailpit_pids)" ] || fail "Mailpit is not running; create its daemon (mroom baseline mailpit)"
+  set_login "$user" "$hash" || true
+  mailpit_restart
+  gate_log "mail-user-add ${words[1]}: $user ready"
+  printf 'MAIL_MAILER=smtp\nMAIL_HOST=%s\nMAIL_PORT=%s\nMAIL_USERNAME=%s\nMAIL_PASSWORD=%s\n' \
+    "$SMTP_HOST" "$SMTP_PORT" "$user" "$password"
+}
+
+cmd_mail_user_remove() {
+  words_are 2
+  env_number "${words[1]}"
+  local user="${app}_qa_${words[1]}"
+  mail_ready
+  env_lock mailpit
+  [ -n "$(mailpit_pids)" ] || fail "Mailpit is not running; create its daemon (mroom baseline mailpit)"
+  if set_login "$user"; then mailpit_restart; fi
+  gate_log "mail-user-remove ${words[1]}: $user removed"
+  echo "mail user $user: removed"
+}
+
+cmd_mail_read() {
+  words_are 3
+  env_number "${words[1]}"
+  local user="${app}_qa_${words[1]}" address="${words[2]}" ids id found=() mail
+  persona mail-read "$address"
+  mail_ready
+  env_lock mailpit  # not while a restart is under way
+  ids="$(mail_ids "$user" "$address")" || fail "mail-read ${words[1]}: $(mail_error)"
+  for id in $ids; do
+    mail="$(mailpit_api GET "/api/v1/message/$id")" || fail "mail-read ${words[1]}: $(mail_error)"
+    found+=("$mail")
+    [ "${#found[@]}" -lt 5 ] || break
+  done
+  gate_log "mail-read ${words[1]}: ${#found[@]} mails for $address"
+  if [ "${#found[@]}" = 0 ]; then echo '[]'; return 0; fi
+  printf '%s\n' "${found[@]}" | jq -s '[.[] | {id: .ID, date: .Date, from: .From.Address, to: [.To[]?.Address],
+    subject: .Subject, text: ((.Text // "") | .[0:32768])}]'
+}
+
+cmd_mail_clear() {
+  words_are 2
+  env_number "${words[1]}"
+  local user="${app}_qa_${words[1]}" text ids=() batch count
+  mail_ready
+  env_lock mailpit
+  text="$(mail_ids "$user")" || fail "mail-clear ${words[1]}: $(mail_error)"
+  [ -z "$text" ] || mapfile -t ids <<<"$text"
+  count="${#ids[@]}"
+  while [ "${#ids[@]}" -gt 0 ]; do
+    batch="$(jq -nc '{IDs: $ARGS.positional}' --args "${ids[@]:0:500}")"
+    mailpit_api DELETE /api/v1/messages "$batch" >/dev/null || fail "mail-clear ${words[1]}: $(mail_error)"
+    ids=("${ids[@]:500}")
+  done
+  gate_log "mail-clear ${words[1]}: $count mails of $user deleted"
+  echo "mail of $user: $count deleted"
+}
+
 # The operation and its environment only: each operation logs what it did, and an argument it refuses, such
 # as an address that is no persona's, never reaches the log.
 first="${words[1]:-}"
@@ -582,4 +750,8 @@ case "$op" in
   env-sha) cmd_env_sha ;;
   signin-code) cmd_signin_code ;;
   user-clean) cmd_user_clean ;;
+  mail-user-add) cmd_mail_user_add ;;
+  mail-user-remove) cmd_mail_user_remove ;;
+  mail-read) cmd_mail_read ;;
+  mail-clear) cmd_mail_clear ;;
 esac

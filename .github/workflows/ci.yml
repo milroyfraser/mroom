@@ -110,6 +110,16 @@ jobs:
       - uses: actions/checkout@v4
       - run: tests/site/gate-real-test.sh
 
+  gate-mail:
+    # The gate's mail operations against the real Mailpit, which mroom baseline mailpit downloads at its
+    # pinned build and checks: logins, restarts, reading and clearing one environment's mail.
+    name: gate on a real Mailpit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/mail/gate-real-test.sh
+
   install:
     # Phase 0 "done when": install.sh on a fresh Ubuntu installs mroom and `mroom config get app.name`
     # reads an example. A bare ubuntu:24.04 container is the fresh box.

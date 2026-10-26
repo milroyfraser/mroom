@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# baseline — sets up the QA services a box runs beside Forge's own (design 3, 8.9). Phase 2a's first part:
+#
+#   mroom baseline mailpit   the QA mail catcher (D19): Mailpit at the build lib/core/pins.txt names, checked
+#                            against its SHA-256, its folders and logins, and the Forge daemon that runs it
+#
+# It runs as the box user and changes nothing outside the box user's home. It can run again: a binary that
+# matches its pin and logins that exist are kept. Services live in ~/.local/share/mroom-services, which an
+# uninstall of mroom leaves alone, and their logins in ~/.config/mroom/secrets, files mode 600 and folders
+# 700, where no site user can read them. A Forge token that can create daemons reaches root (D20), so a
+# person creates the daemon from what this prints.
+set -euo pipefail
+umask 077
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+MROOM_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+# shellcheck source=lib/core/util.sh
+. "$MROOM_ROOT/lib/core/util.sh"
+
+PINS="${MROOM_PINS:-$MROOM_ROOT/lib/core/pins.txt}"
+SERVICES="$HOME/.local/share/mroom-services"
+SECRETS="$HOME/.config/mroom/secrets"
+WORK=""
+trap '[ -z "$WORK" ] || rm -rf "$WORK"' EXIT
+
+die() { echo "mroom baseline: $*" >&2; exit 1; }
+
+platform() {
+  case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64) echo linux-amd64 ;;
+    Linux-aarch64 | Linux-arm64) echo linux-arm64 ;;
+    *) die "no service builds are pinned for $(uname -s) $(uname -m)" ;;
+  esac
+}
+
+# new_password: 48 hex characters from the kernel's random source.
+new_password() { od -An -N24 -tx1 /dev/urandom | tr -d ' \n'; }
+
+# crypt: the SHA-512 crypt hash of stdin, a format Mailpit reads in its login files.
+crypt() { openssl passwd -6 -stdin; }
+
+# install_pinned <name>: the pinned build of <name> for this platform in $SERVICES/<name>/<version>, and
+# $SERVICES/<name>/current pointing at it. The archive and the binary must both match their SHA-256 pins,
+# or nothing is installed.
+install_pinned() {
+  local name="$1" platform line version archive_sha binary_sha url dir got
+  platform="$(platform)"
+  line="$(awk -v n="$name" -v p="$platform" '$1 == n && $3 == p { print $2, $4, $5, $6; exit }' "$PINS")"
+  read -r version archive_sha binary_sha url <<<"$line"
+  [ -n "${url:-}" ] || die "$(home_short "$PINS") pins no $name build for $platform"
+  [[ "$version" =~ ^v[0-9]+(\.[0-9]+)*$ && "$archive_sha" =~ ^[0-9a-f]{64}$ && "$binary_sha" =~ ^[0-9a-f]{64}$ ]] \
+    || die "the $name pin in $(home_short "$PINS") is malformed"
+  [[ "$url" =~ ^https://[A-Za-z0-9._/-]+$ ]] || die "the $name pin's URL is not a plain https URL"
+  dir="$SERVICES/$name/$version"
+  if [ -f "$dir/$name" ] && [ "$(sha256sum "$dir/$name" | cut -d' ' -f1)" = "$binary_sha" ]; then
+    echo "$name $version: installed, and matches its pin"
+  else
+    need curl tar sha256sum
+    WORK="$(mktemp -d)"
+    curl -q --fail --silent --show-error --location --proto '=https' --max-time 300 --max-filesize 200000000 \
+      --output "$WORK/archive" "$url" || die "could not download $url"
+    got="$(sha256sum "$WORK/archive" | cut -d' ' -f1)"
+    [ "$got" = "$archive_sha" ] || die "$name $version: the download's SHA-256 is $got, not the pinned $archive_sha; nothing installed"
+    mkdir "$WORK/unpacked"
+    tar -xzf "$WORK/archive" -C "$WORK/unpacked" || die "$name $version: the archive does not unpack"
+    if [ ! -f "$WORK/unpacked/$name" ] || [ -L "$WORK/unpacked/$name" ]; then
+      die "$name $version: the archive holds no $name binary"
+    fi
+    got="$(sha256sum "$WORK/unpacked/$name" | cut -d' ' -f1)"
+    [ "$got" = "$binary_sha" ] || die "$name $version: the binary's SHA-256 is $got, not the pinned $binary_sha; nothing installed"
+    mkdir -p "$dir"
+    install -m 700 "$WORK/unpacked/$name" "$dir/.$name.new"
+    mv -f "$dir/.$name.new" "$dir/$name"
+    echo "$name $version: installed, SHA-256 $binary_sha"
+  fi
+  chmod 700 "$SERVICES" "$SERVICES/$name" "$dir"
+  ln -sfn "$version" "$SERVICES/$name/current"
+}
+
+setup_mailpit() {
+  local base="$SERVICES/mailpit" password
+  install_pinned mailpit
+  need openssl
+  mkdir -p "$base/data" "$SECRETS"
+  chmod 700 "$base/data" "$SECRETS"
+  # The SMTP logins, one per environment, which the gate adds and removes. A login no one knows keeps the
+  # file from being empty.
+  if [ ! -s "$SECRETS/mailpit-smtp.passwd" ]; then
+    printf 'mroom-none:%s\n' "$(new_password | crypt)" >"$SECRETS/mailpit-smtp.passwd"
+    echo "SMTP logins: $(home_short "$SECRETS/mailpit-smtp.passwd") made"
+  fi
+  # The API login, which only the gate holds: environments read their mail through it (mail-read).
+  if [ ! -s "$SECRETS/mailpit.env" ] || [ ! -s "$SECRETS/mailpit-ui.passwd" ]; then
+    password="$(new_password)"
+    printf 'mroom-gate:%s\n' "$(printf '%s' "$password" | crypt)" >"$SECRETS/mailpit-ui.passwd"
+    printf 'MAILPIT_API_USER=mroom-gate\nMAILPIT_API_PASSWORD=%s\n' "$password" >"$SECRETS/mailpit.env"
+    echo "API login: $(home_short "$SECRETS/mailpit.env") made"
+  fi
+  chmod 600 "$SECRETS/mailpit-smtp.passwd" "$SECRETS/mailpit-ui.passwd" "$SECRETS/mailpit.env"
+  cat <<EOF
+
+Mailpit runs as a Forge daemon, which a person creates (a token that can create daemons reaches root, D20).
+In Forge, Server > Daemons, create:
+
+  Command:   $base/current/mailpit --listen 127.0.0.1:8025 --smtp 127.0.0.1:1025 --database $base/data/mailpit.db --smtp-auth-file $SECRETS/mailpit-smtp.passwd --smtp-auth-allow-insecure --tags-username --tags-disable x-tags,plus-addresses --ui-auth-file $SECRETS/mailpit-ui.passwd --max 0 --max-age 7d
+  Directory: $base/data
+  User:      $(id -un)
+
+It listens on this box only. Each environment sends with its own login, the gate restarts Mailpit when it
+adds or removes one (Forge's daemon starts it again), and only the gate reads mail through the API.
+EOF
+  if curl -q --silent --max-time 2 --output /dev/null http://127.0.0.1:8025/livez 2>/dev/null; then
+    echo "Mailpit answers on 127.0.0.1:8025."
+  else
+    echo "Mailpit does not answer on 127.0.0.1:8025 yet."
+  fi
+}
+
+case "${1:-}" in
+  mailpit) [ "$#" = 1 ] || die "usage: mroom baseline mailpit"; setup_mailpit ;;
+  -h | --help | "") awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF" ;;
+  *) die "unknown part '${1:0:40}'; mroom baseline --help lists them" ;;
+esac
