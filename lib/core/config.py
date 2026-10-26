@@ -290,7 +290,10 @@ PG_NAME = re.compile(r"[a-z][a-z0-9_]{0,62}")
 DNS_ZONE = re.compile(r"(?=.{1,200}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
 REPO_DIR = re.compile(r"\.|(?=.{1,200}$)[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*")
 PHP_BINARY = re.compile(r"php(?:[0-9]+(?:\.[0-9]+)?)?")
-PERSONA_DOMAIN = re.compile(r"(?=.{2,200}$)\.[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
+PERSONA_DOMAIN = re.compile(r"(?=.{2,200}$)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
+# A persona domain is made up: a TLD reserved for that (RFC 2606, 6761) or a domain of your own, never a
+# public TLD such as .com, which would let a real address through.
+RESERVED_TLDS = (".test", ".example", ".invalid", ".localhost")
 # One MROOM_WATCH_MCP item: an optional name=, then an http(s) URL of plain characters with no query,
 # fragment or credentials. A bare URL is named by its host, and no two items may share a name.
 WATCH_MCP_ITEM = re.compile(
@@ -332,8 +335,10 @@ def box_value_error(key: str, value: str) -> str | None:
         return "MROOM_QA_BACKEND_DIR must be . or a folder inside the repository, with no . or .. part"
     if key == "MROOM_QA_PHP" and not PHP_BINARY.fullmatch(value):
         return "MROOM_QA_PHP must be a PHP binary's name, such as php8.4"
-    if key == "MROOM_QA_PERSONA_DOMAIN" and not PERSONA_DOMAIN.fullmatch(value):
-        return "MROOM_QA_PERSONA_DOMAIN must be a domain suffix starting with a dot, such as .test"
+    if key == "MROOM_QA_PERSONA_DOMAIN" and not (
+            PERSONA_DOMAIN.fullmatch(value) and (value in RESERVED_TLDS or value.count(".") >= 2)):
+        return ("MROOM_QA_PERSONA_DOMAIN must be a domain suffix starting with a dot: a reserved TLD such as .test, "
+                "or a domain of your own such as .qa.example.com")
     return None
 
 

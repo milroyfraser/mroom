@@ -335,14 +335,15 @@ Invariants, each with a test:
      could notice the change runs later, in a job with default-branch code, boxed as in 8.5, reading the diff as
      data.
    - `qa-up` (`workflow_run` on qa-plan, environment `qa`, default-branch code only): create the site and the
-     environment's services, write `.env`, fetch the PR's tree by commit (GitHub's tarball, as data) and send it
+     environment's services, write `.env` through the gate (`env-put`, as the site user, so nothing follows a link
+     the PR's code left there), fetch the PR's tree by commit (GitHub's tarball, as data) and send it
      and the `dist/` artifact through the gate. The gate records the commit in its own state and unpacks both as
      the site user. Then **Forge** runs the deploy script (the `qa-deploy` hook), which pulls nothing (D17). The
      runner never executes PR code.
    - The Forge token belongs to an account whose only team holds the box (`mroom doctor` warns when the token sees
      another server). It creates workers, so it counts as root (D20), and only `qa` holds it.
    - Box operations go through a forced-command SSH gate covering `db-create` (with the environment's role),
-     `db-drop`, `redis-user-add`, `redis-user-remove`, `redis-clear`, `code-put`, `dist-put`, `env-sha`,
+     `db-drop`, `redis-user-add`, `redis-user-remove`, `redis-clear`, `code-put`, `dist-put`, `env-put`, `env-sha`,
      `signin-code`, `user-clean`, `db-read`, and for the QA services `bucket-create`, `bucket-drop`,
      `reverb-app-add`, `reverb-app-remove`, `mail-user-add`, `mail-user-remove`, `mail-read`, `mail-clear` and
      `template-load`. No CI key gets a shell on the box. The gate is installed from a release by a person.
@@ -351,7 +352,10 @@ Invariants, each with a test:
      root-owned copy of its release's own, through one sudoers rule that lets `forge` run it as any of Forge's
      isolated users and never as root (`mroom baseline` installs both; until then a person does). So the gate
      never runs a PR's code or follows its links as `forge`, and `user-clean` needs no root either: a user may
-     stop its own processes and delete its own files. The commit `env-sha` reports comes from the gate's own
+     stop its own processes and delete its own files. `site-op` runs only as a QA site's user, on that
+     environment's own sites. The rule still lets `forge`, and so every agent on the box, put code into a QA
+     site and run its sign-in command; QA sites hold only QA data, and `forge` can already read every isolated
+     site's files on Forge. The commit `env-sha` reports comes from the gate's own
      state, written as `forge` outside the site, never from a file the site can write.
    - QA sites are isolated (D17) and sign in to Redis and Postgres as their own users (D15, D18), so a PR's code
      cannot read the dev site's `.env` or another environment's data, or push jobs onto a queue whose workers run
@@ -404,12 +408,16 @@ Invariants, each with a test:
    - Only the gate holds the mail catcher's API login. `mail-read` returns mail for `qa.persona_domain` addresses
      sent with one environment's login, and teardown deletes that environment's mail (`mail-clear`).
    - Before qa-down deletes a site, `user-clean` stops the site user's processes and removes its files outside
-     its home (in `/tmp`, `/var/tmp` and `/dev/shm`), as that user, since the next user can be given the same UID.
+     its home (in `/tmp`, `/var/tmp`, `/dev/shm`, `/var/crash`, `/run/lock` and `/dev/mqueue`), its System V IPC
+     objects and its crontab, as that user, since the next user can be given the same UID. qa-down deletes the
+     site's daemons first, since supervisor restarts what is killed; PHP-FPM's master does the same for its
+     pool's workers, which are left to stop when Forge deletes the site.
    - `mroom doctor` checks the box: the default Redis user is refused; no QA role can reach another database, and
      `PUBLIC` can neither connect to the QA databases, the template or the dev site's database nor create in their
      `public` schema; each GitHub environment keeps its branch rule; each QA site's nginx config, set from an nginx
      template when the site is created, has `disable_symlinks if_not_owner`; each QA worker runs as its site's
-     user; `/home/forge` keeps its `group:isolated:---` entry; each PHP-FPM socket admits only its own site and
+     user; `/home/forge` keeps its `group:isolated:---` entry; sshd refuses the isolated group (`DenyGroups
+     isolated`), so a PR's code cannot add a key and log in; each PHP-FPM socket admits only its own site and
      nginx; and `fs.protected_hardlinks` is 1.
 
 ## 9. The app contract

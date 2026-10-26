@@ -2,33 +2,39 @@
 """site-op: the gate's work inside a QA site, run as the site's own user (design 8.2, D17).
 
 `mroom gate` runs it with `sudo -n -u <app>_qa_<N>`. A person installs a root-owned copy at
-/usr/local/libexec/mroom/site-op, and one sudoers line lets the box user run it as any isolated user:
+/usr/local/libexec/mroom/site-op, and one sudoers line lets the box user run it as any of Forge's isolated
+users, never as root:
 
   forge ALL=(%isolated) NOPASSWD: /usr/local/libexec/mroom/site-op
 
-  site-op unpack code <domain> <backend_dir> <commit>        the PR's tree: GitHub's tarball, on stdin
-  site-op unpack dist <domain>                               the frontend's built files: a tarball, on stdin
-  site-op env-sha <domain> <backend_dir>                     the SHA-256 of the site's .env, or "missing"
-  site-op signin-code <domain> <backend_dir> <php> <email>   a sign-in code from the app, for a persona
-  site-op clean                                              stops this user's processes, deletes its files
-                                                             in /tmp, /var/tmp and /dev/shm
+  site-op unpack code api-<N>.<zone> <backend_dir> <commit>   the PR's tree: GitHub's tarball, on stdin
+  site-op unpack dist go-<N>.<zone>                           the frontend's built files: a tarball, on stdin
+  site-op env-put api-<N>.<zone> <backend_dir>                the backend's .env, on stdin
+  site-op env-sha api-<N>.<zone> <backend_dir>                the SHA-256 of the backend's .env, or "missing"
+  site-op signin-code api-<N>.<zone> <backend_dir> <php> <email>   a sign-in code from the app
+  site-op clean                                               stops this user's processes and deletes its
+                                                              files outside its home
 
-It works only in the home of the user it runs as, which can reach nothing the PR's own code cannot, so the
-gate never unpacks a tarball, follows a PR's links or runs its code as the box user. A tarball is unpacked
-with tarfile's data filter: no absolute path, no `..`, no link leading out of the tree, no device file, no
-setuid bit. A code tree replaces the site's whole tree except the backend's .env and storage/; any .env in
-the tarball is skipped, and a link at .env, storage or bootstrap/cache refuses the whole tarball.
-Messages go to stderr; the gate shows the first line.
+It runs only as a QA site's user, <app>_qa_<N> in Forge's isolated group, and only on that environment's own
+sites, so it reaches nothing that user's code cannot: the gate never unpacks a tarball, follows a PR's link
+or runs its code as the box user. A tarball is unpacked with tarfile's data filter (no absolute path, no
+`..`, no link leading out of the tree, no device file, no setuid bit). A code tree replaces the site's whole
+tree except the backend's .env and storage/: any .env in the tarball is skipped, and a link at .env, storage
+or bootstrap/cache refuses the whole tarball. The new tree is built beside the live one and swapped in; a
+failed swap puts everything back, and what an interrupted one leaves is recovered or set aside for a person,
+never deleted. Messages go to stderr; the gate shows the first line.
 """
 
 from __future__ import annotations
 
+import errno
 import grp
 import hashlib
 import json
 import os
 import pwd
 import re
+import resource
 import shutil
 import signal
 import stat
@@ -37,20 +43,31 @@ import sys
 import tarfile
 import tempfile
 import time
+import uuid
 
-# Through sudo, the passwd file gives the home and no setting comes from the environment. Run directly
-# (the tests), $HOME is the home and MROOM_SITE_OP_* may lower the limits.
+# Through sudo, the passwd file gives the user and its home, and no setting comes from the environment. Run
+# directly (the tests), $HOME is the home, MROOM_SITE_OP_USER names the QA user it plays (never for clean),
+# and MROOM_SITE_OP_* may lower the limits or make a rename fail.
 UNDER_SUDO = "SUDO_UID" in os.environ
 
 
+def seam(name: str) -> str:
+    return "" if UNDER_SUDO else os.environ.get(f"MROOM_SITE_OP_{name}", "")
+
+
 def limit(name: str, default: int) -> int:
-    value = "" if UNDER_SUDO else os.environ.get(f"MROOM_SITE_OP_{name}", "")
+    value = seam(name)
     return int(value) if value.isdigit() else default
 
 
 MAX_TARBALL = limit("MAX_TARBALL", 1 << 30)       # bytes as sent
 MAX_UNPACKED = limit("MAX_UNPACKED", 8 << 30)     # bytes of all files unpacked
 MAX_MEMBERS = limit("MAX_MEMBERS", 500_000)
+MAX_HEADER = 1 << 20                              # a long name or pax record, read into memory whole
+MAX_TRAILER = 1 << 20                             # data after the tarball's end
+MEMORY = 4 << 30                                  # address space while unpacking, a backstop
+MAX_ENV = 64 << 10                                # a .env env-put writes
+MAX_ENV_READ = 1 << 20                            # a .env env-sha hashes
 SIGNIN_TIMEOUT = limit("SIGNIN_TIMEOUT", 120)     # seconds
 
 DOMAIN = re.compile(r"(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
@@ -60,22 +77,51 @@ SHORT_COMMIT = re.compile(r"[0-9a-f]{7,40}")
 PHP = re.compile(r"php(?:[0-9]+(?:\.[0-9]+)?)?")
 EMAIL = re.compile(r"[a-z0-9._+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+")
 CODE = re.compile(r"[A-Za-z0-9-]{4,64}")
-QA_USER = re.compile(r"[a-z][a-z0-9_]*_qa_[1-9][0-9]{0,8}")
+QA_USER = re.compile(r"[a-z][a-z0-9_]*_qa_([1-9][0-9]{0,8})")
 SAFE_PATH = "/usr/local/bin:/usr/bin:/bin"
+# Where any user may write, so where a site user's files can outlive it (design 8.9).
+SHARED_FOLDERS = ("/tmp", "/var/tmp", "/dev/shm", "/var/crash", "/run/lock", "/dev/mqueue")
+STOP_SIGNALS = {signal.SIGHUP, signal.SIGINT, signal.SIGTERM}
 
 
 class Refused(Exception):
     pass
 
 
+def stop(signum: int, _frame) -> None:
+    raise Refused(f"stopped by signal {signum}")
+
+
+def isolated(user: pwd.struct_passwd) -> bool:
+    groups = set()
+    for gid in os.getgrouplist(user.pw_name, user.pw_gid):
+        try:
+            groups.add(grp.getgrgid(gid).gr_name)
+        except KeyError:
+            pass
+    return "isolated" in groups
+
+
+def environment() -> str:
+    """The number of the QA environment whose site user this runs as. Through sudo that user must be in
+    Forge's isolated group."""
+    user = pwd.getpwuid(os.getuid())
+    name = seam("USER") or user.pw_name
+    match = QA_USER.fullmatch(name)
+    if not match or (UNDER_SUDO and (user.pw_uid < 1000 or not isolated(user))):
+        raise Refused(f"{name} is not a QA site's isolated user")
+    return match.group(1)
+
+
 def home() -> str:
     return pwd.getpwuid(os.getuid()).pw_dir if UNDER_SUDO else os.environ["HOME"]
 
 
-def site_root(domain: str) -> str:
-    """The site's folder in this user's home, which must be a real folder of this user's own."""
-    if not DOMAIN.fullmatch(domain):
-        raise Refused(f"'{domain[:60]}' is not a site's domain")
+def site_root(domain: str, kind: str) -> str:
+    """The folder of this environment's api- or go- site in this user's home, a real folder of its own."""
+    n = environment()
+    if not (DOMAIN.fullmatch(domain) and domain.startswith(f"{kind}-{n}.")):
+        raise Refused(f"'{domain[:60]}' is not this environment's {kind}-{n} site")
     root = os.path.join(home(), domain)
     try:
         st = os.lstat(root)
@@ -105,18 +151,19 @@ def prefixes(path: str) -> list[str]:
 
 def through_link(root: str, path: str) -> bool:
     """Whether the path, or a folder on the way to it, is a link."""
-    return any(os.path.islink(os.path.join(root, p)) for p in prefixes(path))
+    return any(os.path.islink(os.path.join(root, p)) for p in prefixes(path) if p != ".")
 
 
-def make_removable(path: str) -> None:
-    """Gives this user rwx on every folder below path, so a tarball's read-only folder can still go."""
-    os.chmod(path, stat.S_IMODE(os.lstat(path).st_mode) | 0o700)
+def open_up(path: str) -> None:
+    """Gives this user rwx on its own folders below path, so a tarball's read-only folder can still go."""
     for top, dirs, _files in os.walk(path):
-        for name in dirs:
-            sub = os.path.join(top, name)
-            st = os.lstat(sub)
-            if stat.S_ISDIR(st.st_mode):  # os.walk lists a link to a folder here too
-                os.chmod(sub, stat.S_IMODE(st.st_mode) | 0o700)
+        for sub in [top] + [os.path.join(top, d) for d in dirs]:
+            try:
+                st = os.lstat(sub)
+                if stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid():
+                    os.chmod(sub, stat.S_IMODE(st.st_mode) | 0o700)
+            except OSError:
+                pass
 
 
 def remove(path: str) -> None:
@@ -126,10 +173,17 @@ def remove(path: str) -> None:
     except FileNotFoundError:
         return
     if stat.S_ISDIR(st.st_mode):
-        make_removable(path)
+        open_up(path)
         shutil.rmtree(path)
     else:
         os.unlink(path)
+
+
+def set_aside(path: str, prefix: str) -> str:
+    """Renames a scratch folder to a new name of its own beside it; returns the name."""
+    name = prefix + uuid.uuid4().hex[:8]
+    os.rename(path, os.path.join(os.path.dirname(path), name))
+    return name
 
 
 def kept(backend: str) -> list[str]:
@@ -137,36 +191,69 @@ def kept(backend: str) -> list[str]:
     return [tree_path(backend, ".env"), tree_path(backend, "storage")]
 
 
-def recover(root: str, backend: str | None) -> None:
-    """Undoes what an interrupted put left: puts back the kept items its new tree holds, then removes its
-    scratch folders and upload."""
+def recover(root: str, backend: str | None) -> list[str]:
+    """Clears what an interrupted put left. A kept item its new tree still holds goes back when the live tree
+    lacks it; when the site has its own again (a log written since), the scratch tree is set aside for a
+    person, never deleted. Returns notes for the gate."""
+    notes = []
     for name in sorted(os.listdir(root)):
-        if not name.startswith(".mroom-"):
+        if not name.startswith(".mroom-") or name.startswith(".mroom-kept-"):
             continue
         path = os.path.join(root, name)
-        if name.startswith(".mroom-new-") and backend is not None and os.path.isdir(path):
+        if name.startswith(".mroom-new-") and backend is not None and os.path.isdir(path) and not os.path.islink(path):
             for keep in kept(backend):
                 src, dst = os.path.join(path, keep), os.path.join(root, keep)
-                if os.path.lexists(src) and not through_link(path, keep) and not os.path.lexists(dst):
-                    if not through_link(root, os.path.dirname(keep) or "."):
-                        os.makedirs(os.path.dirname(dst), exist_ok=True)
-                        os.rename(src, dst)
-        remove(path)
+                if (os.path.lexists(src) and not through_link(path, keep) and not os.path.lexists(dst)
+                        and not through_link(root, os.path.dirname(keep) or ".")):
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    os.rename(src, dst)
+            left = [keep for keep in kept(backend) if os.path.lexists(os.path.join(path, keep))]
+            if left:
+                notes.append(f"{' and '.join(left)} from an interrupted put stay in {set_aside(path, '.mroom-kept-')}, "
+                             "since the site has its own again: a person merges them")
+                continue
+        try:
+            remove(path)
+        except OSError:
+            if not name.startswith(".mroom-trash-"):
+                notes.append(f"{name} could not be removed, so it stays as {set_aside(path, '.mroom-trash-')}")
+    return notes
 
 
 def read_upload(root: str) -> str:
     """stdin, at most MAX_TARBALL bytes, into a file of this user's own inside the site."""
     fd, path = tempfile.mkstemp(dir=root, prefix=".mroom-upload-")
-    size = 0
-    with os.fdopen(fd, "wb") as out:
-        while chunk := sys.stdin.buffer.read(1 << 20):
-            size += len(chunk)
-            if size > MAX_TARBALL:
-                raise Refused(f"the tarball is larger than {MAX_TARBALL} bytes")
-            out.write(chunk)
-    if size == 0:
-        raise Refused("no tarball came on stdin")
+    try:
+        size = 0
+        with os.fdopen(fd, "wb") as out:
+            while chunk := sys.stdin.buffer.read(1 << 20):
+                size += len(chunk)
+                if size > MAX_TARBALL:
+                    raise Refused(f"the tarball is larger than {MAX_TARBALL} bytes")
+                out.write(chunk)
+        if size == 0:
+            raise Refused("no tarball came on stdin")
+    except BaseException:
+        remove(path)
+        raise
     return path
+
+
+class BoundedTarInfo(tarfile.TarInfo):
+    """Refuses a long name or a pax record larger than MAX_HEADER, which tarfile would read into memory
+    whole before any member is seen."""
+
+    def _bounded(self) -> None:
+        if self.size > MAX_HEADER:
+            raise Refused(f"the tarball has an extended header larger than {MAX_HEADER} bytes")
+
+    def _proc_pax(self, tf):
+        self._bounded()
+        return super()._proc_pax(tf)
+
+    def _proc_gnulong(self, tf):
+        self._bounded()
+        return super()._proc_gnulong(tf)
 
 
 def plan(tf: tarfile.TarFile, kind: str, commit: str | None, backend: str | None) -> tuple[dict, int]:
@@ -184,7 +271,7 @@ def plan(tf: tarfile.TarFile, kind: str, commit: str | None, backend: str | None
             return name[len(top) + 1:] if top and name.startswith(top + "/") else ""
         return "" if name == "." else name.removeprefix("./")
 
-    renamed, skipped, unpacked, seen_backend = {}, 0, 0, backend in (None, ".")
+    renamed, files, skipped, unpacked, seen_backend = {}, set(), 0, 0, backend in (None, ".")
     # Headers one at a time, so a huge entry is refused before its data is decompressed.
     for count, m in enumerate(tf, 1):
         if count > MAX_MEMBERS:
@@ -212,16 +299,17 @@ def plan(tf: tarfile.TarFile, kind: str, commit: str | None, backend: str | None
             raise Refused(f"{name[:80]} is not a file, folder or link")
         if (m.issym() or m.islnk()) and name in protected:
             raise Refused(f"{name[:80]} may not be a link")
+        changes = {"name": name}
+        if m.islnk():  # a hard link names an earlier entry of the tarball, which must be unpacked too
+            changes["linkname"] = inside(m.linkname)
+            if changes["linkname"] not in files:
+                raise Refused(f"{name[:80]} is a hard link to nothing unpacked before it")
         if m.isfile():
+            files.add(name)
             unpacked += m.size
             if unpacked > MAX_UNPACKED:
                 raise Refused(f"the tarball unpacks to more than {MAX_UNPACKED} bytes")
         seen_backend = seen_backend or name == backend or name.startswith(f"{backend}/")
-        changes = {"name": name}
-        if m.islnk():  # a hard link names another entry of the tarball
-            changes["linkname"] = inside(m.linkname)
-            if not changes["linkname"]:
-                raise Refused(f"{name[:80]} links to something outside the tree")
         renamed[id(m)] = (m, changes)
     if not renamed:
         raise Refused("the tarball holds nothing to unpack")
@@ -230,19 +318,77 @@ def plan(tf: tarfile.TarFile, kind: str, commit: str | None, backend: str | None
     return renamed, skipped
 
 
+def drain(tf: tarfile.TarFile) -> None:
+    """Reads the compressed stream to its end, so gzip checks its checksum and a cut-off upload fails."""
+    trailer = 0
+    while chunk := tf.fileobj.read(1 << 20):
+        trailer += len(chunk)
+        if trailer > MAX_TRAILER:
+            raise Refused("the tarball has data after its end")
+
+
+RENAMES = [0]
+
+
+def rename(src: str, dst: str) -> None:
+    """os.rename, which a test can make fail at its Nth call (MROOM_SITE_OP_FAIL_RENAME)."""
+    RENAMES[0] += 1
+    if seam("FAIL_RENAME") == str(RENAMES[0]):
+        raise OSError(errno.ENOSPC, "No space left on device (a test's)")
+    os.rename(src, dst)
+
+
+def movable(path: str, name: str) -> None:
+    """The entry must be this user's own, to move it, and a folder writable, since moving a folder to a new
+    parent rewrites its '..'."""
+    st = os.lstat(path)
+    if st.st_uid != os.getuid():
+        raise Refused(f"{name[:80]} in the site is not this user's own, so the tree cannot be replaced; "
+                      "a person removes it")
+    if stat.S_ISDIR(st.st_mode) and not st.st_mode & stat.S_IWUSR:
+        os.chmod(path, stat.S_IMODE(st.st_mode) | stat.S_IWUSR)
+
+
+def swap(root: str, staging: str) -> str:
+    """Moves the live tree aside and the new one in, inside the site's own folder, which keeps its own
+    owner and permissions. If a move fails, every move is undone before the error goes on. Returns the
+    folder holding the old tree."""
+    old = tempfile.mkdtemp(dir=root, prefix=".mroom-old-")
+    aside, placed = [], []
+    try:
+        for name in sorted(os.listdir(root)):
+            if not name.startswith(".mroom-"):
+                rename(os.path.join(root, name), os.path.join(old, name))
+                aside.append(name)
+        for name in sorted(os.listdir(staging)):
+            rename(os.path.join(staging, name), os.path.join(root, name))
+            placed.append(name)
+    except BaseException:
+        for name in reversed(placed):
+            os.rename(os.path.join(root, name), os.path.join(staging, name))
+        for name in reversed(aside):
+            os.rename(os.path.join(old, name), os.path.join(root, name))
+        os.rmdir(old)
+        raise
+    return old
+
+
 def unpack(kind: str, domain: str, backend: str | None, commit: str | None) -> None:
-    root = site_root(domain)
+    root = site_root(domain, "api" if kind == "code" else "go")
     if kind == "code":
         backend = backend_dir(backend)
         if not COMMIT.fullmatch(commit):
             raise Refused(f"'{commit[:40]}' is not a commit")
-    recover(root, backend)
+    notes = recover(root, backend)
+    _soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    resource.setrlimit(resource.RLIMIT_AS, (MEMORY if hard == resource.RLIM_INFINITY else min(MEMORY, hard), hard))
     upload = read_upload(root)
     staging = tempfile.mkdtemp(dir=root, prefix=".mroom-new-")
-    started, note = False, ""
+    moved, dropped = [], []
     try:
-        with tarfile.open(upload, "r:*") as tf:
+        with tarfile.open(upload, "r:gz", tarinfo=BoundedTarInfo) as tf:
             renamed, skipped = plan(tf, kind, commit, backend)
+            drain(tf)
 
             def data(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo:
                 original, changes = renamed[id(member)]
@@ -252,8 +398,7 @@ def unpack(kind: str, domain: str, backend: str | None, commit: str | None) -> N
                 tf.extractall(staging, members=[m for m, _ in renamed.values()], filter=data)
             except tarfile.FilterError as e:
                 raise Refused(f"refused: {e}") from None
-        make_removable(staging)
-        dropped = []
+        open_up(staging)
         if kind == "code":
             version = os.path.join(staging, tree_path(backend, "version.json"))
             remove(version)
@@ -261,62 +406,106 @@ def unpack(kind: str, domain: str, backend: str | None, commit: str | None) -> N
                 out.write(json.dumps({"release": None, "commit": commit}) + "\n")
             for keep in kept(backend):
                 remove(os.path.join(staging, keep))
-        # From here the new tree takes the live .env and storage: if anything fails, it stays for the
-        # next put's recover() rather than being removed with them.
-        started = True
-        if kind == "code":
-            for keep in kept(backend):
+        for name in os.listdir(root):
+            if not name.startswith(".mroom-"):
+                movable(os.path.join(root, name), name)
+        # From here the live .env and storage move into the new tree: a stop signal waits until the swap is
+        # done or undone, and a failure puts them back.
+        signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+        try:
+            if kind == "code":
+                for keep in kept(backend):
+                    live = os.path.join(root, keep)
+                    if not os.path.lexists(live):
+                        continue
+                    if through_link(root, keep):
+                        dropped.append(keep)
+                        continue
+                    movable(live, keep)
+                    os.makedirs(os.path.dirname(os.path.join(staging, keep)), exist_ok=True)
+                    rename(live, os.path.join(staging, keep))
+                    moved.append(keep)
+            old = swap(root, staging)
+            moved = []
+        except BaseException:
+            for keep in reversed(list(moved)):
                 if not os.path.lexists(os.path.join(root, keep)):
-                    continue
-                if through_link(root, keep):
-                    dropped.append(keep)
-                    continue
-                os.makedirs(os.path.dirname(os.path.join(staging, keep)), exist_ok=True)
-                os.rename(os.path.join(root, keep), os.path.join(staging, keep))
-        note = swap(root, staging)
-        remove(staging)
+                    os.makedirs(os.path.dirname(os.path.join(root, keep)), exist_ok=True)
+                    os.rename(os.path.join(staging, keep), os.path.join(root, keep))
+                    moved.remove(keep)
+            raise
+        finally:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS)
+        try:
+            remove(old)
+        except OSError:
+            notes.append(f"the old tree stays as {set_aside(old, '.mroom-trash-')} until it can be removed")
     finally:
-        if not started:
-            remove(staging)
         remove(upload)
-    files = sum(1 for m, _ in renamed.values() if not m.isdir())
-    print(f"{domain}: {files} entries unpacked, {skipped} .env skipped"
-          + (f", a link at {' and '.join(dropped)} not kept" if dropped else "") + note)
+        if not moved:  # a kept item that could not go back stays for the next put's recover()
+            remove(staging)
+    entries = sum(1 for m, _ in renamed.values() if not m.isdir())
+    print(f"{domain}: {entries} entries unpacked, {skipped} .env skipped"
+          + (f", a link at {' and '.join(dropped)} not kept" if dropped else "")
+          + "".join(f"; {note}" for note in notes))
 
 
-def swap(root: str, staging: str) -> str:
-    """Moves the live tree aside and the new one in, inside the site's own folder, which keeps its own
-    permissions, then removes the old tree. Returns a note when that last removal failed: the next put
-    removes it."""
-    old = tempfile.mkdtemp(dir=root, prefix=".mroom-old-")
-    for name in os.listdir(root):
-        if not name.startswith(".mroom-"):
-            os.rename(os.path.join(root, name), os.path.join(old, name))
-    for name in os.listdir(staging):
-        os.rename(os.path.join(staging, name), os.path.join(root, name))
+def env_put(domain: str, backend: str) -> None:
+    """Writes the backend's .env from stdin as this user, mode 600, through a new file renamed into place,
+    so a link the PR's code left at .env is replaced, never followed. Prints the hash env-sha would."""
+    root, backend = site_root(domain, "api"), backend_dir(backend)
+    data = sys.stdin.buffer.read(MAX_ENV + 1)
+    if len(data) > MAX_ENV:
+        raise Refused(f"the .env is larger than {MAX_ENV} bytes")
+    if not data.strip() or b"\0" in data:
+        raise Refused("no .env came on stdin")
+    folder = os.path.join(root, backend)
+    if through_link(root, backend) or not os.path.isdir(folder):
+        raise Refused(f"{backend} is not a folder of the site; code-put first")
+    fd, tmp = tempfile.mkstemp(dir=folder, prefix=".mroom-env-")
     try:
-        remove(old)
-    except OSError as e:
-        return f" (the old tree stays until the next put: {e.strerror})"
-    return ""
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        os.rename(tmp, os.path.join(folder, ".env"))
+    except BaseException:
+        remove(tmp)
+        raise
+    print(hashlib.sha256(data.rstrip(b"\n")).hexdigest())
 
 
 def env_sha(domain: str, backend: str) -> None:
-    """The SHA-256 of the backend's .env without its trailing newlines, or "missing" when it is not a
-    plain file reached through no link. Never its content."""
-    root, env = site_root(domain), tree_path(backend_dir(backend), ".env")
-    path = os.path.join(root, env)
-    if through_link(root, env) or not os.path.isfile(path):
+    """The SHA-256 of the backend's .env without its trailing newlines, or "missing" when it is not a plain
+    file reached through no link. Never its content. It checks what env-put or Forge wrote; the PR's own
+    code can change the file afterwards, so it proves nothing about later."""
+    root, env = site_root(domain, "api"), tree_path(backend_dir(backend), ".env")
+    if through_link(root, os.path.dirname(env) or "."):
         print("missing")
         return
-    with open(path, "rb") as f:
-        print(hashlib.sha256(f.read().rstrip(b"\n")).hexdigest())
+    try:
+        fd = os.open(os.path.join(root, env), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as e:
+        if e.errno in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
+            print("missing")
+            return
+        raise
+    with os.fdopen(fd, "rb") as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            print("missing")
+            return
+        if st.st_size > MAX_ENV_READ:
+            raise Refused(f"the .env is larger than {MAX_ENV_READ} bytes")
+        data = f.read(MAX_ENV_READ + 1)
+    print(hashlib.sha256(data.rstrip(b"\n")).hexdigest())
 
 
 def signin_code(domain: str, backend: str, php: str, email: str) -> None:
     """A persona's sign-in code from the app: the qa-signin hook if the tree has one, else
-    `php artisan mroom:signin-code <email>` (design 6, 9)."""
-    root, backend = site_root(domain), backend_dir(backend)
+    `php artisan mroom:signin-code <email>` (design 6, 9). Its output goes to a file, so a process it leaves
+    behind cannot hold the answer back, and its whole session is killed once it ends or times out."""
+    root, backend = site_root(domain, "api"), backend_dir(backend)
     if not PHP.fullmatch(php):
         raise Refused(f"'{php[:40]}' is not a PHP binary's name")
     if not EMAIL.fullmatch(email):
@@ -329,15 +518,34 @@ def signin_code(domain: str, backend: str, php: str, email: str) -> None:
     else:
         raise Refused("the tree has neither .mroom/hooks/qa-signin nor artisan")
     env = {"PATH": SAFE_PATH, "HOME": home(), "LANG": "C.UTF-8", "MROOM_QA_EMAIL": email}
-    try:
-        done = subprocess.run(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                              stderr=subprocess.DEVNULL, timeout=SIGNIN_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        raise Refused(f"the app gave no code within {SIGNIN_TIMEOUT} seconds") from None
-    lines = [line.strip() for line in done.stdout[-65536:].decode("utf-8", "replace").splitlines() if line.strip()]
-    if done.returncode != 0 or not lines or not CODE.fullmatch(lines[-1]):
-        raise Refused(f"the app gave no code (exit {done.returncode})")
+    with tempfile.TemporaryFile() as out:
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=out,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            code = proc.wait(timeout=SIGNIN_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            code = None
+        finally:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            proc.wait()
+        if code is None:
+            raise Refused(f"the app gave no code within {SIGNIN_TIMEOUT} seconds")
+        out.seek(max(0, out.seek(0, os.SEEK_END) - 65536))
+        lines = [line.strip() for line in out.read().decode("utf-8", "replace").splitlines() if line.strip()]
+    if code != 0 or not lines or not CODE.fullmatch(lines[-1]):
+        raise Refused(f"the app gave no code (exit {code})")
     print(lines[-1])
+
+
+def status_uids(pid: int) -> list[int]:
+    with open(f"/proc/{pid}/status") as f:
+        for line in f:
+            if line.startswith("Uid:"):
+                return [int(u) for u in line.split()[1:]]
+    return []
 
 
 def own_processes() -> list[int]:
@@ -347,61 +555,45 @@ def own_processes() -> list[int]:
         if not entry.isdigit() or int(entry) == me:
             continue
         try:
-            with open(f"/proc/{entry}/status") as f:
-                fields = dict(line.split(":", 1) for line in f if ":" in line)
-        except OSError:
+            with open(f"/proc/{entry}/stat") as f:
+                state = f.read().rsplit(")", 1)[1].split()[0]
+            uids = status_uids(int(entry))
+        except (OSError, ValueError, IndexError):
             continue
-        uids = fields.get("Uid", "").split()
-        if len(uids) >= 2 and uid in (int(uids[0]), int(uids[1])) and not fields.get("State", "").strip().startswith("Z"):
+        if len(uids) >= 2 and uid in uids[:2] and state != "Z":
             pids.append(int(entry))
     return pids
 
 
-def clean() -> None:
-    """Before qa-down deletes a site: stops its user's processes and deletes the user's files in the
-    folders anyone may write, since the next site user can be given the same UID (design 8.9). A user may
-    kill its own processes and delete its own files, so this needs no root."""
-    user = pwd.getpwuid(os.getuid())
-    groups = set()
-    for gid in os.getgrouplist(user.pw_name, user.pw_gid):
-        try:
-            groups.add(grp.getgrgid(gid).gr_name)
-        except KeyError:
-            pass
-    if not QA_USER.fullmatch(user.pw_name) or user.pw_uid < 1000 or "isolated" not in groups:
-        raise Refused(f"{user.pw_name} is not a QA site's isolated user")
-    stopped = len(own_processes())
-    for _ in range(20):
-        if not own_processes():
-            break
-        try:
-            os.kill(-1, signal.SIGKILL)  # every process of this user but this one
-        except ProcessLookupError:
-            pass
-        time.sleep(0.25)
-    if own_processes():
-        raise Refused(f"{len(own_processes())} processes of {user.pw_name} kept running")
+def pool_worker(pid: int) -> bool:
+    """Whether the process is a PHP-FPM pool worker: its parent is a root php-fpm master, which replaces a
+    killed worker at once and stops them all when Forge deletes the site."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            ppid = int(f.read().rsplit(")", 1)[1].split()[1])
+        with open(f"/proc/{ppid}/comm") as f:
+            comm = f.read().strip()
+        uids = status_uids(ppid)
+    except (OSError, ValueError, IndexError):
+        return False
+    return comm.startswith("php-fpm") and bool(uids) and uids[0] == 0
+
+
+def sweep_files(uid: int) -> int:
+    """Deletes this user's files and folders in the folders anyone may write."""
     removed = 0
-    for base in ("/tmp", "/var/tmp", "/dev/shm"):
+    for base in SHARED_FOLDERS:
         try:
             device = os.lstat(base).st_dev
         except OSError:
             continue
-        for top, dirs, _files in os.walk(base):  # first open up this user's own folders
-            for name in dirs:
-                path = os.path.join(top, name)
-                try:
-                    st = os.lstat(path)
-                    if st.st_uid == user.pw_uid and stat.S_ISDIR(st.st_mode):
-                        os.chmod(path, stat.S_IMODE(st.st_mode) | 0o700)
-                except OSError:
-                    pass
+        open_up(base)  # this user's own unreadable folders first
         for top, dirs, files in os.walk(base, topdown=False):
             for name in files + dirs:
                 path = os.path.join(top, name)
                 try:
                     st = os.lstat(path)
-                    if st.st_uid != user.pw_uid or st.st_dev != device:
+                    if st.st_uid != uid or st.st_dev != device:
                         continue
                     if stat.S_ISDIR(st.st_mode):
                         os.rmdir(path)
@@ -410,26 +602,80 @@ def clean() -> None:
                     removed += 1
                 except OSError:
                     pass
+    return removed
+
+
+def sweep_ipc(uid: int) -> int:
+    """Removes this user's System V shared memory, semaphores and message queues, which outlive it."""
+    removed = 0
+    for kind, flag, id_name in (("shm", "-m", "shmid"), ("sem", "-s", "semid"), ("msg", "-q", "msqid")):
+        try:
+            with open(f"/proc/sysvipc/{kind}") as f:
+                header, *rows = f.read().splitlines()
+        except (OSError, ValueError):
+            continue
+        cols = header.split()
+        if id_name not in cols or "uid" not in cols:
+            continue
+        for fields in (row.split() for row in rows):
+            if len(fields) == len(cols) and fields[cols.index("uid")] == str(uid):
+                try:
+                    if subprocess.run(["ipcrm", flag, fields[cols.index(id_name)]], env={"PATH": SAFE_PATH},
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL).returncode == 0:
+                        removed += 1
+                except OSError:
+                    pass
+    return removed
+
+
+def clean() -> None:
+    """Before qa-down deletes a site: stops its user's processes and deletes what the user keeps outside its
+    home, since the next site user can be given the same UID (design 8.9). A user may stop its own processes
+    and delete its own files, so this needs no root. PHP-FPM pool workers are left: their root master replaces
+    a killed one at once, and stops them all when Forge deletes the site. The files go in any case."""
+    user = pwd.getpwuid(os.getuid())
+    if not QA_USER.fullmatch(user.pw_name) or user.pw_uid < 1000 or not isolated(user):
+        raise Refused(f"{user.pw_name} is not a QA site's isolated user")
+    stopped, others = set(), []
+    for _ in range(20):
+        others = [pid for pid in own_processes() if not pool_worker(pid)]
+        if not others:
+            break
+        for pid in others:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                stopped.add(pid)
+            except (ProcessLookupError, PermissionError):
+                pass
+        time.sleep(0.25)
+    others = [pid for pid in own_processes() if not pool_worker(pid)]
+    workers = sum(1 for pid in own_processes() if pool_worker(pid))
+    removed = sweep_files(user.pw_uid) + sweep_ipc(user.pw_uid)
     try:
         crontab = subprocess.run(["crontab", "-r"], env={"PATH": SAFE_PATH}, stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
     except OSError:
         crontab = False
-    print(f"{user.pw_name}: {stopped} processes stopped, {removed} files removed outside its home"
-          + (", its crontab removed" if crontab else ""))
-
-
-USAGE = ("usage: site-op unpack code <domain> <backend_dir> <commit> | unpack dist <domain> | "
-         "env-sha <domain> <backend_dir> | signin-code <domain> <backend_dir> <php> <email> | clean")
+    report = (f"{user.pw_name}: {len(stopped)} processes stopped, {removed} files and IPC objects removed outside "
+              "its home" + (", its crontab removed" if crontab else "")
+              + (f", {workers} PHP-FPM pool workers left, which stop when the site goes" if workers else ""))
+    if others:
+        raise Refused(f"{report}; {len(others)} other processes kept coming back (delete the site's daemons first)")
+    print(report)
 
 
 def main(argv: list[str]) -> int:
     os.umask(0o022)
+    for signum in STOP_SIGNALS:
+        signal.signal(signum, stop)
     try:
         if len(argv) == 5 and argv[:2] == ["unpack", "code"]:
             unpack("code", argv[2], argv[3], argv[4])
         elif len(argv) == 3 and argv[:2] == ["unpack", "dist"]:
             unpack("dist", argv[2], None, None)
+        elif len(argv) == 3 and argv[0] == "env-put":
+            env_put(argv[1], argv[2])
         elif len(argv) == 3 and argv[0] == "env-sha":
             env_sha(argv[1], argv[2])
         elif len(argv) == 5 and argv[0] == "signin-code":
@@ -437,12 +683,15 @@ def main(argv: list[str]) -> int:
         elif argv == ["clean"]:
             clean()
         else:
-            raise Refused(USAGE)
+            raise Refused("usage: site-op unpack code|dist ... | env-put ... | env-sha ... | signin-code ... | clean")
     except Refused as e:
         print(f"site-op: {e}", file=sys.stderr)
         return 1
     except (OSError, tarfile.TarError, EOFError) as e:
         print(f"site-op: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:  # never a traceback: the gate shows the first line
+        print(f"site-op: unexpected {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     return 0
 

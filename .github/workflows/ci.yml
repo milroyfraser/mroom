@@ -74,12 +74,39 @@ jobs:
           MROOM_TEST_REDIS_IMAGE: redis:${{ matrix.redis }}
 
   gate-sites:
-    # The gate's site operations with real users and sudo, set up as the README says: a box user holding only
-    # the sudoers line, Forge-style isolated users and a root-owned site-op.
+    # The gate's site operations with real users, sudo and a PHP-FPM pool, set up as the README says: a box
+    # user holding only the sudoers line, Forge-style isolated users and a root-owned site-op.
     name: gate on real site users
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v4
+      - name: PHP-FPM
+        run: |
+          if ! compgen -G '/usr/sbin/php-fpm*' >/dev/null; then
+            sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q php-fpm
+          fi
+      - run: tests/site/gate-real-test.sh
+
+  gate-sites-sudo-rs:
+    # The same with sudo-rs, which newer Ubuntu releases ship as sudo: Ubuntu 26.04 in a container, as root.
+    name: gate on real site users (sudo-rs)
+    runs-on: ubuntu-24.04
+    container: ubuntu:26.04
+    timeout-minutes: 15
+    steps:
+      - name: packages
+        run: |
+          apt-get update -q
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+            ca-certificates git python3 php-cli php-fpm procps sudo-rs
+          command -v sudo >/dev/null || ln -s /usr/lib/cargo/bin/sudo /usr/local/bin/sudo
+          if [ ! -e /etc/sudoers ]; then
+            printf 'Defaults env_reset\nDefaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\nroot ALL=(ALL:ALL) ALL\n@includedir /etc/sudoers.d\n' >/etc/sudoers
+            chmod 440 /etc/sudoers
+          fi
+          mkdir -p /etc/sudoers.d
+          sudo --version | head -n 1 | grep -q sudo-rs
       - uses: actions/checkout@v4
       - run: tests/site/gate-real-test.sh
 

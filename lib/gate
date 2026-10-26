@@ -18,11 +18,14 @@
 #               code-put <N> <commit>  the PR's tree, GitHub's tarball of that commit on stdin, into the
 #                                      environment's API site (D17); the gate records the commit
 #               dist-put <N>           the frontend's built files, a tarball on stdin, into its web site
+#               env-put <N>            the API site's .env, on stdin, written as the site user, so a link
+#                                      the PR's code left there is replaced, never followed; prints env=<SHA>
 #               env-sha <N>            env=<the SHA-256 of the API site's .env, or missing> and
 #                                      commit=<the commit code-put recorded, or none>
 #               signin-code <N> <email>  a sign-in code from the app, for a persona address only
-#               user-clean <N>         stops the site user's processes and deletes its files outside its
-#                                      home, before qa-down deletes the sites
+#               user-clean <N>         stops the site user's processes (PHP-FPM's pool workers end with the
+#                                      site) and deletes its files in /tmp, /var/tmp, /dev/shm, /var/crash,
+#                                      /run/lock and /dev/mqueue, its IPC objects and its crontab
 #
 # The client sends only the environment's number. The gate builds every name from box.env, which a person
 # sets: the database, role and Redis user are <MROOM_APP_NAME>_qa_<N>, the database is cloned from
@@ -89,12 +92,13 @@ op="${words[0]}"
 case "$role:$op" in
   provision:db-create | provision:db-drop) ;;
   provision:redis-user-add | provision:redis-user-remove | provision:redis-clear) ;;
-  provision:code-put | provision:dist-put | provision:env-sha | provision:signin-code | provision:user-clean) ;;
+  provision:code-put | provision:dist-put | provision:env-put | provision:env-sha) ;;
+  provision:signin-code | provision:user-clean) ;;
   *) refuse "$role may not run '${op:0:24}'" ;;
 esac
 
 # env_number <word>: the environment's number, 1 to 999999999 with no leading zero.
-env_number() { [[ "$1" =~ ^[1-9][0-9]{0,8}$ ]] || refuse "$op: '${1:0:24}' is not an environment number"; }
+env_number() { [[ "$1" =~ ^[1-9][0-9]{0,8}$ ]] || refuse "$op: its first argument is not an environment number"; }
 words_are() { [ "${#words[@]}" = "$1" ] || refuse "$op takes $(($1 - 1)) argument(s), got $((${#words[@]} - 1))"; }
 
 load_box || fail "box.env could not be read"
@@ -440,10 +444,13 @@ site_ready() {
   SITE_USER="${app}_qa_${n}" API_DOMAIN="api-${n}.${zone}" WEB_DOMAIN="go-${n}.${zone}"
   ((${#SITE_USER} <= 32)) || fail "$SITE_USER is longer than a user name may be (32); shorten MROOM_APP_NAME"
   need sudo cmp
-  [ -f "$SITE_OP" ] || fail "$SITE_OP is not installed (README, QA gate)"
-  if [ "$(stat -c %u "$SITE_OP")" != "${MROOM_GATE_SITE_OP_OWNER:-0}" ] || [ -w "$SITE_OP" ]; then
-    fail "$SITE_OP must belong to root, and $(id -un) must not be able to change it"
-  fi
+  if [ ! -f "$SITE_OP" ] || [ -L "$SITE_OP" ]; then fail "$SITE_OP is not installed, or is a link (README, QA gate)"; fi
+  local path
+  for path in "$SITE_OP" "$(dirname "$SITE_OP")"; do
+    if [ "$(stat -c %u "$path")" != "${MROOM_GATE_SITE_OP_OWNER:-0}" ] || [ -w "$path" ]; then
+      fail "$path must belong to root, and $(id -un) must not be able to change it"
+    fi
+  done
   cmp -s "$SITE_OP" "$MROOM_ROOT/lib/site-op" || fail "$SITE_OP is not this release's site-op; install it again (README, QA gate)"
   gate_tmp
   SITE_ERR="$GATE_TMP/site.err"
@@ -475,6 +482,8 @@ cmd_code_put() {
   site_user_exists || fail "there is no user $SITE_USER; qa-up creates the site first"
   env_lock "site-$SITE_USER"
   local out
+  # Cleared first, so env-sha never reports a commit for a tree a failed put may have changed.
+  rm -f "$(commit_file)"
   out="$(site_op unpack code "$API_DOMAIN" "$BACKEND" "${words[2]}")" || fail "code-put ${words[1]}: $(site_error)"
   mkdir -p "$(dirname "$(commit_file)")"
   printf '%s\n' "${words[2]}" >"$(commit_file).tmp"
@@ -495,6 +504,19 @@ cmd_dist_put() {
   gate_log "dist-put ${words[1]}: into $WEB_DOMAIN"
   printable "$out"
   echo
+}
+
+cmd_env_put() {
+  words_are 2
+  env_number "${words[1]}"
+  site_ready
+  site_user_exists || fail "there is no user $SITE_USER; qa-up creates the site first"
+  env_lock "site-$SITE_USER"
+  local env
+  env="$(site_op env-put "$API_DOMAIN" "$BACKEND")" || fail "env-put ${words[1]}: $(site_error)"
+  [[ "$env" =~ ^[0-9a-f]{64}$ ]] || fail "env-put ${words[1]}: site-op gave no hash"
+  gate_log "env-put ${words[1]}: .env written into $API_DOMAIN"
+  printf 'env=%s\n' "$env"
 }
 
 cmd_env_sha() {
@@ -520,6 +542,7 @@ cmd_signin_code() {
   fi
   site_ready
   site_user_exists || fail "there is no user $SITE_USER"
+  env_lock "site-$SITE_USER"
   code="$(site_op signin-code "$API_DOMAIN" "$BACKEND" "${BOX[MROOM_QA_PHP]:-php}" "$email")" \
     || fail "signin-code ${words[1]}: $(site_error)"
   [[ "$code" =~ ^[A-Za-z0-9-]{4,64}$ ]] || fail "signin-code ${words[1]}: the app gave no code"
@@ -545,7 +568,8 @@ cmd_user_clean() {
 # The operation and its environment only: each operation logs what it did, and an argument it refuses, such
 # as an address that is no persona's, never reaches the log.
 first="${words[1]:-}"
-gate_log "request: $op ${first:0:12}"
+[[ "$first" =~ ^[0-9]{1,12}$ ]] || first="(not a number)"
+gate_log "request: $op $first"
 case "$op" in
   db-create) cmd_db_create ;;
   db-drop) cmd_db_drop ;;
@@ -554,6 +578,7 @@ case "$op" in
   redis-clear) cmd_redis_clear ;;
   code-put) cmd_code_put ;;
   dist-put) cmd_dist_put ;;
+  env-put) cmd_env_put ;;
   env-sha) cmd_env_sha ;;
   signin-code) cmd_signin_code ;;
   user-clean) cmd_user_clean ;;

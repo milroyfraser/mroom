@@ -273,9 +273,10 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 | `redis-clear <N>` | every key under the environment's prefix, in every Redis database |
 | `code-put <N> <commit>` | the PR's tree, GitHub's tarball of that commit on stdin, into the environment's API site (D17); the gate records the commit |
 | `dist-put <N>` | the frontend's built files, a tarball on stdin, into the environment's web site |
+| `env-put <N>` | the API site's `.env`, on stdin, written as the site user (mode 600), replacing rather than following any link the PR's code left there; prints `env=` its SHA-256 |
 | `env-sha <N>` | `env=` the SHA-256 of the API site's `.env` (or `missing`), and `commit=` the commit `code-put` recorded (or `none`) |
 | `signin-code <N> <email>` | a sign-in code for a persona address, from the app's `php artisan mroom:signin-code <email>` or its `qa-signin` hook |
-| `user-clean <N>` | stops the site user's processes and deletes its files in `/tmp`, `/var/tmp` and `/dev/shm`, before qa-down deletes the sites |
+| `user-clean <N>` | stops the site user's processes, leaving PHP-FPM's pool workers, which end with the site, and deletes its files in `/tmp`, `/var/tmp`, `/dev/shm`, `/var/crash`, `/run/lock` and `/dev/mqueue`, its IPC objects and its crontab, before qa-down deletes the sites |
 
 The client sends only N. The database, role and Redis user are `<MROOM_APP_NAME>_qa_<N>`, and the
 database is cloned from `MROOM_QA_TEMPLATE`, both set by a person in `box.env`. A password reaches
@@ -300,21 +301,33 @@ load: a long script or a large write from one PR slows every environment and the
 
 An environment's two sites, `api-<N>.<MROOM_QA_ZONE>` and `go-<N>.<MROOM_QA_ZONE>`, are Forge isolated
 sites in the home of one user of their own, `<MROOM_APP_NAME>_qa_<N>` (D17); qa-up creates them. The
-gate works in them only through `site-op`, run as that user with `sudo`. So it never unpacks a tarball,
-follows a PR's link or runs its code as the box user, and a PR's code, running as the site user too, can
-change nothing the gate relies on:
+gate works in them only through `site-op`, run as that user with `sudo`, so it never unpacks a tarball,
+follows a PR's link or runs its code as the box user. `site-op` runs only as a QA site's user, and only on
+that environment's own `api-<N>` and `go-<N>` sites:
 
 - **Unpacking** uses Python's safe tarfile filter: no absolute path, no `..`, no link that leaves the
-  tree, no device file, no setuid bit. A code tree must be GitHub's one folder named after the commit, and
-  it replaces the site's whole tree except the backend's `.env` and `storage/`. Any `.env` in the tarball
-  is skipped, a link at `.env`, `storage` or `bootstrap/cache` refuses the tarball, and the gate writes
-  `version.json` (`{"release": null, "commit": "<sha>"}`) into the backend, since a tarball has no git
-  history. The new tree is unpacked beside the live one and moved in only once it is whole.
+  tree, no device file, no setuid bit, and no oversized header. A code tree must be GitHub's one folder
+  named after the commit, a cut-off upload fails on gzip's checksum, and the tree replaces the site's whole
+  tree except the backend's `.env` and `storage/`. Any `.env` in the tarball is skipped, a link at `.env`,
+  `storage` or `bootstrap/cache` refuses the tarball, and the gate writes `version.json`
+  (`{"release": null, "commit": "<sha>"}`) into the backend, since a tarball has no git history.
+- **The swap** builds the new tree beside the live one. If a move fails, every move is undone and the site
+  is as it was. What a killed put leaves is recovered by the next one, or set aside as `.mroom-kept-*` for
+  a person when the site has made its own `.env` or `storage/` since; it is never deleted.
+- **`.env`** is written by `env-put`, as the site user, so neither Forge nor the gate writes through a link
+  the PR's code left there. `env-sha` checks that write; the PR's code can change the file afterwards.
 - **The commit** that `env-sha` reports is the one the gate recorded, as the box user, outside the site.
-- **`signin-code`** reads codes only for addresses ending in `MROOM_QA_PERSONA_DOMAIN` (`.test`), so a real
-  person's code is never printed.
+  `code-put` clears it first, so a failed put leaves `none`.
+- **`signin-code`** asks the app only for addresses ending in `MROOM_QA_PERSONA_DOMAIN` (`.test`); what the
+  app prints is the PR's own code's answer.
 - **`user-clean`** runs as the site user too: a user may stop its own processes and delete its own files,
-  so no rule lets the box user run anything as root.
+  so no rule lets the box user run anything as root. PHP-FPM's master replaces a killed pool worker at
+  once, so pool workers are left to stop with the site; anything else that keeps coming back, such as a
+  daemon not yet deleted, fails the clean, though its files still go.
+
+The sudoers line lets the box user, and so every agent on the box, run `site-op` as any QA site user:
+put any code into a QA site and run its sign-in command. QA sites hold only QA data, and the box user can
+already read every isolated site's files on Forge.
 
 **Set up once,** for an app named `shop`, on Postgres 16 or later and Redis 7 or later. Before Postgres 16,
 a role that may create roles may also grant itself the administrator ones, so the gate refuses older
@@ -439,9 +452,14 @@ versions. CI runs these steps against a real Postgres, a real Redis 7 and 8, and
     release="$(dirname "$(dirname "$(readlink -f ~/.local/bin/mroom)")")"   # the installed release
     sudo install -d -o root -g root -m 755 /usr/local/libexec/mroom
     sudo install -o root -g root -m 755 "$release/lib/site-op" /usr/local/libexec/mroom/site-op
-    echo 'forge ALL=(%isolated) NOPASSWD: /usr/local/libexec/mroom/site-op' | sudo tee /etc/sudoers.d/mroom-gate
-    sudo chmod 440 /etc/sudoers.d/mroom-gate && sudo visudo -cf /etc/sudoers.d/mroom-gate
+    echo 'forge ALL=(%isolated) NOPASSWD: /usr/local/libexec/mroom/site-op' >/tmp/mroom-gate.sudoers
+    sudo visudo -cf /tmp/mroom-gate.sudoers && sudo install -o root -g root -m 440 /tmp/mroom-gate.sudoers /etc/sudoers.d/mroom-gate
+    rm /tmp/mroom-gate.sudoers
     ```
+
+    A QA site's user never needs to log in, but its PR's code could add its own SSH key: add
+    `DenyGroups isolated` to `/etc/ssh/sshd_config` and reload sshd, which also turns off Forge's SFTP for
+    isolated users.
 
 11. In `box.env`: `MROOM_APP_NAME=shop`, `MROOM_QA_TEMPLATE=shop_qa_template` and
     `MROOM_QA_ZONE=qa.example.dev`, and when they differ from the defaults, `MROOM_QA_BACKEND_DIR` (the
