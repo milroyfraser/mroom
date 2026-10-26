@@ -173,6 +173,33 @@ t_gate_names_are_plain_postgres_names() {
   run "$MROOM" config box MROOM_APP_NAME; expect_rc 0; expect_out pgshop
 }
 
+t_qa_site_settings() {
+  box $'MROOM_QA_ZONE=qa.example.dev\nMROOM_QA_BACKEND_DIR=apps/backend\nMROOM_QA_PHP=php8.4\nMROOM_QA_PERSONA_DOMAIN=.test'
+  run "$MROOM" config box MROOM_QA_ZONE; expect_rc 0; expect_out qa.example.dev
+  run "$MROOM" config box MROOM_QA_BACKEND_DIR; expect_rc 0; expect_out apps/backend
+  run "$MROOM" config box MROOM_QA_PHP; expect_rc 0; expect_out php8.4
+  run "$MROOM" config box MROOM_QA_PERSONA_DOMAIN; expect_rc 0; expect_out .test
+  box 'MROOM_QA_BACKEND_DIR=.'
+  run "$MROOM" config box MROOM_QA_BACKEND_DIR; expect_rc 0; expect_out .
+  local bad
+  for bad in QA.example.dev qa..example.dev localhost -qa.example.dev qa.example.dev.; do
+    box "MROOM_QA_ZONE=$bad"
+    run "$MROOM" config box MROOM_QA_ZONE; expect_rc 1; expect_err_has "MROOM_QA_ZONE must be a lowercase DNS zone"
+  done
+  for bad in ../x x/../y /srv/app .hidden a//b a/ x/./y; do
+    box "MROOM_QA_BACKEND_DIR=$bad"
+    run "$MROOM" config box MROOM_QA_BACKEND_DIR; expect_rc 1; expect_err_has "MROOM_QA_BACKEND_DIR must be . or a folder"
+  done
+  for bad in /usr/bin/php php-cli python3 php8.4.1; do
+    box "MROOM_QA_PHP=$bad"
+    run "$MROOM" config box MROOM_QA_PHP; expect_rc 1; expect_err_has "MROOM_QA_PHP must be a PHP binary's name"
+  done
+  for bad in test example.test .Test . .test.; do
+    box "MROOM_QA_PERSONA_DOMAIN=$bad"
+    run "$MROOM" config box MROOM_QA_PERSONA_DOMAIN; expect_rc 1; expect_err_has "MROOM_QA_PERSONA_DOMAIN must be a domain suffix"
+  done
+}
+
 test_case reads-values t_reads_values
 test_case default-path-and-override t_default_path_and_override
 test_case missing-file-or-key t_missing_file_or_key
@@ -188,4 +215,5 @@ test_case duplicate-refused t_duplicate_refused
 test_case unknown-key-asked t_unknown_key_asked
 test_case watch-mcp t_watch_mcp
 test_case gate-names t_gate_names_are_plain_postgres_names
+test_case qa-site-settings t_qa_site_settings
 finish

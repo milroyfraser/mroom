@@ -276,11 +276,21 @@ BOX_KEYS = {
     "MROOM_WATCH_MCP": "MCP servers the watchdog checks: name=https://host/path items, space-separated",
     "MROOM_APP_NAME": "the app's name (app.name in mroom.toml); QA databases and roles are <name>_qa_<N>",
     "MROOM_QA_TEMPLATE": "the Postgres database every QA environment is cloned from",
+    "MROOM_QA_ZONE": "the DNS zone of QA sites: api-<N>.<zone> and go-<N>.<zone>, owned by the user <name>_qa_<N>",
+    "MROOM_QA_BACKEND_DIR": "the Laravel app's folder in the repository; . (the default) for its root",
+    "MROOM_QA_PHP": "the PHP binary QA sites run, such as php8.4; php by default",
+    "MROOM_QA_PERSONA_DOMAIN": "the domain QA personas' addresses end in, such as .test (the default)",
 }
 # Names the gate builds SQL from, so each is a plain Postgres identifier (design 5.1, D18), matched as a
 # whole (fullmatch: "$" alone would let a trailing newline through).
 APP_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}")
 PG_NAME = re.compile(r"[a-z][a-z0-9_]{0,62}")
+# What the gate builds QA site paths and commands from (D17): a DNS zone, a folder inside the repository
+# (no . or .. part), a PHP binary's name and an address suffix.
+DNS_ZONE = re.compile(r"(?=.{1,200}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
+REPO_DIR = re.compile(r"\.|(?=.{1,200}$)[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*")
+PHP_BINARY = re.compile(r"php(?:[0-9]+(?:\.[0-9]+)?)?")
+PERSONA_DOMAIN = re.compile(r"(?=.{2,200}$)\.[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
 # One MROOM_WATCH_MCP item: an optional name=, then an http(s) URL of plain characters with no query,
 # fragment or credentials. A bare URL is named by its host, and no two items may share a name.
 WATCH_MCP_ITEM = re.compile(
@@ -316,6 +326,14 @@ def box_value_error(key: str, value: str) -> str | None:
             return "MROOM_APP_NAME may not be pg or start with pg_: Postgres reserves those role names"
     if key == "MROOM_QA_TEMPLATE" and not PG_NAME.fullmatch(value):
         return "MROOM_QA_TEMPLATE must be a plain Postgres name: [a-z][a-z0-9_]{0,62}"
+    if key == "MROOM_QA_ZONE" and not DNS_ZONE.fullmatch(value):
+        return "MROOM_QA_ZONE must be a lowercase DNS zone, such as qa.example.dev"
+    if key == "MROOM_QA_BACKEND_DIR" and not REPO_DIR.fullmatch(value):
+        return "MROOM_QA_BACKEND_DIR must be . or a folder inside the repository, with no . or .. part"
+    if key == "MROOM_QA_PHP" and not PHP_BINARY.fullmatch(value):
+        return "MROOM_QA_PHP must be a PHP binary's name, such as php8.4"
+    if key == "MROOM_QA_PERSONA_DOMAIN" and not PERSONA_DOMAIN.fullmatch(value):
+        return "MROOM_QA_PERSONA_DOMAIN must be a domain suffix starting with a dot, such as .test"
     return None
 
 

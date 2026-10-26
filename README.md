@@ -271,6 +271,11 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 | `redis-user-add <N>` | a Redis user of its own, limited to its prefix `<app>:qa<N>:` (D15); prints `REDIS_USERNAME`, a new `REDIS_PASSWORD`, `REDIS_PREFIX` and `HORIZON_PREFIX` |
 | `redis-user-remove <N>` | the environment's Redis user, which also closes its connections |
 | `redis-clear <N>` | every key under the environment's prefix, in every Redis database |
+| `code-put <N> <commit>` | the PR's tree, GitHub's tarball of that commit on stdin, into the environment's API site (D17); the gate records the commit |
+| `dist-put <N>` | the frontend's built files, a tarball on stdin, into the environment's web site |
+| `env-sha <N>` | `env=` the SHA-256 of the API site's `.env` (or `missing`), and `commit=` the commit `code-put` recorded (or `none`) |
+| `signin-code <N> <email>` | a sign-in code for a persona address, from the app's `php artisan mroom:signin-code <email>` or its `qa-signin` hook |
+| `user-clean <N>` | stops the site user's processes and deletes its files in `/tmp`, `/var/tmp` and `/dev/shm`, before qa-down deletes the sites |
 
 The client sends only N. The database, role and Redis user are `<MROOM_APP_NAME>_qa_<N>`, and the
 database is cloned from `MROOM_QA_TEMPLATE`, both set by a person in `box.env`. A password reaches
@@ -293,10 +298,28 @@ anything that scans, such as `cache:prune-stale-tags` (SCAN); `redis-clear` empt
 A pattern subscription must be exactly `<prefix>*`. And one Redis keeps environments' data apart, not their
 load: a long script or a large write from one PR slows every environment and the dev site.
 
+An environment's two sites, `api-<N>.<MROOM_QA_ZONE>` and `go-<N>.<MROOM_QA_ZONE>`, are Forge isolated
+sites in the home of one user of their own, `<MROOM_APP_NAME>_qa_<N>` (D17); qa-up creates them. The
+gate works in them only through `site-op`, run as that user with `sudo`. So it never unpacks a tarball,
+follows a PR's link or runs its code as the box user, and a PR's code, running as the site user too, can
+change nothing the gate relies on:
+
+- **Unpacking** uses Python's safe tarfile filter: no absolute path, no `..`, no link that leaves the
+  tree, no device file, no setuid bit. A code tree must be GitHub's one folder named after the commit, and
+  it replaces the site's whole tree except the backend's `.env` and `storage/`. Any `.env` in the tarball
+  is skipped, a link at `.env`, `storage` or `bootstrap/cache` refuses the tarball, and the gate writes
+  `version.json` (`{"release": null, "commit": "<sha>"}`) into the backend, since a tarball has no git
+  history. The new tree is unpacked beside the live one and moved in only once it is whole.
+- **The commit** that `env-sha` reports is the one the gate recorded, as the box user, outside the site.
+- **`signin-code`** reads codes only for addresses ending in `MROOM_QA_PERSONA_DOMAIN` (`.test`), so a real
+  person's code is never printed.
+- **`user-clean`** runs as the site user too: a user may stop its own processes and delete its own files,
+  so no rule lets the box user run anything as root.
+
 **Set up once,** for an app named `shop`, on Postgres 16 or later and Redis 7 or later. Before Postgres 16,
 a role that may create roles may also grant itself the administrator ones, so the gate refuses older
-versions. CI runs these steps against a real Postgres and a real Redis 7 and 8 (`tests/pg/` and
-`tests/redis/`).
+versions. CI runs these steps against a real Postgres, a real Redis 7 and 8, and real site users and sudo
+(`tests/pg/`, `tests/redis/` and `tests/site/`).
 
 1. In the box user's `~/.ssh/authorized_keys`, by hand (Forge's SSH key screen stores a bare key, without
    options):
@@ -408,7 +431,23 @@ versions. CI runs these steps against a real Postgres and a real Redis 7 and 8 (
    Until then Redis is exactly as open as it was. The gate refuses Redis requests while the default user
    is on, since with it any process on the box reaches every key.
 
-10. In `box.env`: `MROOM_APP_NAME=shop` and `MROOM_QA_TEMPLATE=shop_qa_template`.
+10. `site-op`, owned by root so the box user cannot change what runs as a site user, and the one sudoers
+    line that lets the box user run it as any of Forge's isolated users, never as root. Install it again
+    after each mroom upgrade: the gate refuses a copy that is not its release's own.
+
+    ```bash
+    release="$(dirname "$(dirname "$(readlink -f ~/.local/bin/mroom)")")"   # the installed release
+    sudo install -d -o root -g root -m 755 /usr/local/libexec/mroom
+    sudo install -o root -g root -m 755 "$release/lib/site-op" /usr/local/libexec/mroom/site-op
+    echo 'forge ALL=(%isolated) NOPASSWD: /usr/local/libexec/mroom/site-op' | sudo tee /etc/sudoers.d/mroom-gate
+    sudo chmod 440 /etc/sudoers.d/mroom-gate && sudo visudo -cf /etc/sudoers.d/mroom-gate
+    ```
+
+11. In `box.env`: `MROOM_APP_NAME=shop`, `MROOM_QA_TEMPLATE=shop_qa_template` and
+    `MROOM_QA_ZONE=qa.example.dev`, and when they differ from the defaults, `MROOM_QA_BACKEND_DIR` (the
+    Laravel app's folder in the repository, `.`), `MROOM_QA_PHP` (`php`) and `MROOM_QA_PERSONA_DOMAIN`
+    (`.test`). A site user's name is at most 32 characters, so an app name of 19 characters or fewer always
+    fits.
 
 ## Regression label
 
