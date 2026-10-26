@@ -37,12 +37,15 @@
 #                                      and a new key that reaches that bucket alone; public turns on its
 #                                      website access. Prints BUCKET, ACCESS_KEY_ID, SECRET_ACCESS_KEY,
 #                                      REGION, ENDPOINT, PATH_STYLE, and URL for a public one
-#               bucket-drop <N> <disk> the disk's bucket, emptied, its keys and the bucket deleted
+#               bucket-drop <N>        every bucket the environment has, whatever its disks: their keys
+#                                      deleted, and each bucket emptied and deleted
 #
 # The client sends only the environment's number. The gate builds every name from box.env, which a person
 # sets: the database, role and Redis user are <MROOM_APP_NAME>_qa_<N>, the database is cloned from
 # MROOM_QA_TEMPLATE, and the Redis prefix is <MROOM_APP_NAME>:qa<N>:, so no argument can reach another
-# environment. Its sites, api-<N>.<MROOM_QA_ZONE> and go-<N>.<MROOM_QA_ZONE>, live in the home of a Forge
+# environment. Its buckets are <MROOM_APP_NAME>-qa-<N>-<disk>, each _ of the name a -, for the disk name
+# bucket-create also takes: [a-z][a-z0-9]{0,15}, with no - in it, so no disk's bucket is another
+# environment's or another disk's. Its sites, api-<N>.<MROOM_QA_ZONE> and go-<N>.<MROOM_QA_ZONE>, live in the home of a Forge
 # isolated user of its own, also <MROOM_APP_NAME>_qa_<N>. The gate works in them only through site-op, run
 # as that user with sudo from a root-owned copy of this release's lib/site-op, so it never unpacks a
 # tarball, follows a PR's link or runs its code as the box user. It connects to Postgres 16 or later as its own role, through the libpq service mroom-gate
@@ -889,8 +892,12 @@ garage_error() { printable "$(grep -m1 -E 'HTTP|curl' "$GARAGE_ERR" 2>/dev/null 
 
 # disk_name <word>: a file disk's name, as mroom.toml names it.
 disk_name() { [[ "$1" =~ ^[a-z][a-z0-9]{0,15}$ ]] || refuse "$op: the disk's name is not [a-z][a-z0-9]{0,15}"; }
-# bucket_of <N> <disk>: the environment's bucket for the disk, which is also its keys' name.
+# bucket_of <N> <disk>: the environment's bucket for the disk, which is also its keys' name; with no disk,
+# what every one of the environment's buckets starts with.
 bucket_of() { printf '%s-qa-%s-%s\n' "${app//_/-}" "$1" "$2"; }
+# A jq function: whether a name is <prefix><disk>, which, a disk's name having no -, is that prefix's alone.
+# shellcheck disable=SC2016 # jq's own $p
+GARAGE_OURS='def ours($p): startswith($p) and (.[($p | length):] | test("\\A[a-z][a-z0-9]{0,15}\\z"));'
 
 # bucket_id <name>: the bucket's id, or nothing when there is no such bucket.
 bucket_id() {
@@ -960,35 +967,42 @@ cmd_bucket_create() {
 }
 
 cmd_bucket_drop() {
-  words_are 3
+  words_are 2
   env_number "${words[1]}"
-  disk_name "${words[2]}"
-  local bucket id old key count
-  bucket="$(bucket_of "${words[1]}" "${words[2]}")"
+  local prefix buckets keys id bucket key count old=0 dropped=0
+  prefix="$(bucket_of "${words[1]}" "")"
   garage_ready
   env_lock garage
-  id="$(bucket_id "$bucket")"
-  # The environment's keys go first, so nothing writes while the bucket empties.
-  old="$(drop_keys "$bucket")"
-  if [ -z "$id" ]; then
-    gate_log "bucket-drop ${words[1]}: no bucket $bucket ($old keys deleted)"
-    echo "no bucket $bucket, so nothing to drop"
-    return 0
-  fi
-  # Garage deletes only an empty bucket, and empties none itself: a key of the gate's own, for this drop
-  # alone, deletes its objects through the S3 API, and goes however the drop ends (gate_cleanup).
-  drop_keys "mroom-drop-$bucket" >/dev/null
-  key="$(new_key "mroom-drop-$bucket" "$id" true true)"
-  DROP_KEY="$(sed -n 1p <<<"$key")"
-  count="$(printf '%s\n' "$key" | python3 -I "$MROOM_ROOT/lib/s3-empty" "$GARAGE_S3" "$bucket" 2>"$GARAGE_ERR")" \
-    || fail "bucket-drop ${words[1]}: $(printable "$(grep -m1 . "$GARAGE_ERR")")"
-  garage_api POST /v2/CleanupIncompleteUploads "$(jq -nc --arg b "$id" '{bucketId: $b, olderThanSecs: 0}')" >/dev/null \
-    || fail "bucket-drop ${words[1]}: $(garage_error)"
-  garage_api POST "/v2/DeleteBucket?id=$id" >/dev/null || fail "bucket-drop ${words[1]}: $(garage_error)"
-  garage_api POST "/v2/DeleteKey?id=$DROP_KEY" >/dev/null || fail "bucket-drop ${words[1]}: $(garage_error)"
-  DROP_KEY=""
-  gate_log "bucket-drop ${words[1]}: $bucket dropped ($count objects, $old keys deleted)"
-  echo "bucket $bucket: dropped, $count objects deleted"
+  # Every bucket and key of the environment, found by name, whatever disks it has had: a disk the app no
+  # longer has leaves nothing behind.
+  buckets="$(garage_api GET /v2/ListBuckets)" || fail "bucket-drop ${words[1]}: $(garage_error)"
+  keys="$(garage_api GET /v2/ListKeys)" || fail "bucket-drop ${words[1]}: $(garage_error)"
+  # Its keys go first, so nothing writes while its buckets empty, and with them any key a killed drop left.
+  for id in $(jq -r --arg p "$prefix" "$GARAGE_OURS"' .[] | select((.name // "") | ours($p) or ours("mroom-drop-" + $p))
+      | .id | select(test("\\AGK[0-9a-f]{24}\\z"))' <<<"$keys"); do
+    garage_api POST "/v2/DeleteKey?id=$id" >/dev/null || fail "bucket-drop ${words[1]}: $(garage_error)"
+    old=$((old + 1))
+  done
+  while read -r id bucket <&3; do
+    # Garage deletes only an empty bucket, and empties none itself: a key of the gate's own, for this
+    # bucket alone, deletes its objects through the S3 API, and goes when the drop ends, whether it worked
+    # or not (gate_cleanup); the next drop deletes one a killed gate left.
+    key="$(new_key "mroom-drop-$bucket" "$id" true true)"
+    DROP_KEY="$(sed -n 1p <<<"$key")"
+    count="$(printf '%s\n' "$key" | python3 -I "$MROOM_ROOT/lib/s3-empty" "$GARAGE_S3" "$bucket" 2>"$GARAGE_ERR")" \
+      || fail "bucket-drop ${words[1]}: $(printable "$(grep -m1 . "$GARAGE_ERR")")"
+    garage_api POST /v2/CleanupIncompleteUploads "$(jq -nc --arg b "$id" '{bucketId: $b, olderThanSecs: 0}')" >/dev/null \
+      || fail "bucket-drop ${words[1]}: $(garage_error)"
+    garage_api POST "/v2/DeleteBucket?id=$id" >/dev/null || fail "bucket-drop ${words[1]}: $(garage_error)"
+    garage_api POST "/v2/DeleteKey?id=$DROP_KEY" >/dev/null || fail "bucket-drop ${words[1]}: $(garage_error)"
+    DROP_KEY=""
+    gate_log "bucket-drop ${words[1]}: $bucket dropped ($count objects)"
+    echo "bucket $bucket: dropped, $count objects deleted"
+    dropped=$((dropped + 1))
+  done 3< <(jq -r --arg p "$prefix" "$GARAGE_OURS"' .[] | select(.id | test("\\A[0-9a-f]{64}\\z"))
+      | (.globalAliases | map(select(ours($p))) | first) as $a | select($a) | "\(.id) \($a)"' <<<"$buckets")
+  gate_log "bucket-drop ${words[1]}: $dropped buckets dropped, $old keys deleted"
+  if [ "$dropped" = 0 ]; then echo "environment ${words[1]} has no buckets, so nothing to drop"; fi
 }
 
 # The operation and its environment only: each operation logs what it did, and an argument it refuses, such

@@ -363,7 +363,7 @@ t_garage_is_installed_with_its_config_secrets_and_unit() {
   run cat "$secrets/garage-rpc-secret"; expect_true "the RPC secret is not 32 bytes of hex" eval '[[ "$out" =~ ^[0-9a-f]{64}$ ]]'
   run mode "$base/garage.toml"; expect_out 600
   # Its config names its secrets' files, never a secret, and Unix sockets for every endpoint but RPC.
-  for line in "metadata_dir = \"$base/meta\"" "data_dir = \"$base/data\"" "replication_factor = 1" \
+  for line in "metadata_dir = \"$base/meta\"" "data_dir = \"$base/data\"" "replication_factor = 1" "metadata_fsync = true" \
     'rpc_bind_addr = "127.0.0.1:3901"' "rpc_secret_file = \"$secrets/garage-rpc-secret\"" \
     "api_bind_addr = \"$base/run/s3.sock\"" "bind_addr = \"$base/run/web.sock\"" 'root_domain = ".web.mroom.invalid"' \
     "api_bind_addr = \"$base/run/admin.sock\"" "admin_token_file = \"$secrets/garage-admin-token\""; do
@@ -387,6 +387,17 @@ t_garage_is_installed_with_its_config_secrets_and_unit() {
   expect_out_has "proxy_pass http://unix:$base/run/s3.sock;"
   expect_out_has "files.qa.example.dev, public files"
   expect_out_has 'proxy_set_header Host $bucket.web.mroom.invalid;'
+  # Bodies stream to Garage (HTTP/1.1), so nginx stores no unsigned upload; nothing else catches a path; the
+  # Host a client signed reaches Garage as it sent it; and a website redirect keeps the bucket in the path.
+  local lines
+  lines="$(awk '{ sub(/^ +/, ""); print }' <<<"$out")"
+  expect_true "the configs lack a ^~ / block each" eval '[ "$(grep -c -xF "location ^~ / {" <<<"$lines")" = 2 ]'
+  expect_true "a config lets nginx keep a copy of an answer" \
+    eval '[ "$(grep -c -xF "proxy_max_temp_file_size 0;" <<<"$lines")" = 2 ]'
+  for line in "client_max_body_size 5g;" "proxy_http_version 1.1;" "proxy_request_buffering off;" \
+    'proxy_set_header Host $http_host;' "client_max_body_size 1k;" 'proxy_redirect ~^/(.*)$ /$bucket/$1;'; do
+    expect_true "the nginx configs lack: $line" grep -qxF -- "$line" <<<"$lines"
+  done
   # nginx reads a bare { as a block: a regex with a count in it must be quoted.
   expect_out_has 'location ~ "^/([a-z0-9][a-z0-9-]{1,61}[a-z0-9])(/.*)$" {'
   expect_out_has "proxy_pass http://unix:$base/run/web.sock;"

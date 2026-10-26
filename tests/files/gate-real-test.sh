@@ -8,8 +8,11 @@
 # - a public disk's files are served on its website endpoint, a private one's are not;
 # - through an nginx made from the configs baseline prints, S3 signatures still hold and the files host
 #   finds the bucket in the path;
+# - Forge's own location blocks take no path from them, a Host signed with its port holds, an unsigned
+#   upload is refused before nginx keeps any of it, and a website redirect keeps its bucket;
 # - a new key replaces the old one, and the files stay;
-# - bucket-drop empties and deletes the bucket and its keys;
+# - bucket-drop empties and deletes every bucket and key of the environment, keys that start with a slash
+#   too, and no other environment's;
 # - Garage keeps its data when systemd starts it again.
 # CI only: it downloads Garage and installs a systemd unit as root, replacing a box's own, so it refuses to
 # run anywhere but GitHub Actions, and tests/run.sh does not pick it up.
@@ -40,7 +43,8 @@ root_script_of() { sed -n '/^----- run as root -----$/,/^----- end -----$/p' <<<
 garage_run() { echo "$HOME/.local/share/mroom-services/garage/run"; }
 
 # s3 <key output> <unix|host:port> <Host> <method> <path> [<body>]: one signed S3 request, with the key
-# bucket-create printed; prints the HTTP status, then the body.
+# bucket-create printed; prints the HTTP status, then the body. The path is sent as given and signed as
+# Garage checks it: decoded, then encoded again with each / kept.
 s3() {
   S3_KEY="$(field ACCESS_KEY_ID "$1")" S3_SECRET="$(field SECRET_ACCESS_KEY "$1")" python3 -I - "${@:2}" <<'PY'
 import datetime, hashlib, hmac, http.client, os, socket, sys, urllib.parse
@@ -56,7 +60,7 @@ stamp, day = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
 digest = hashlib.sha256(body).hexdigest()
 headers = {"host": host, "x-amz-content-sha256": digest, "x-amz-date": stamp}
 signed = ";".join(sorted(headers))
-canonical = "\n".join([method, path, canonical_query, "".join(f"{k}:{headers[k]}\n" for k in sorted(headers)), signed, digest])
+canonical = "\n".join([method, urllib.parse.quote(urllib.parse.unquote(path), safe="-_.~/"), canonical_query, "".join(f"{k}:{headers[k]}\n" for k in sorted(headers)), signed, digest])
 scope = f"{day}/garage/s3/aws4_request"
 to_sign = "\n".join(["AWS4-HMAC-SHA256", stamp, scope, hashlib.sha256(canonical.encode()).hexdigest()])
 k = ("AWS4" + secret).encode()
@@ -141,6 +145,13 @@ t_the_bucket_operations_against_the_real_garage() {
   expect_true "environment 13 wrote environment 12's bucket: $r" [ "$(status_of "$r")" = 403 ]
   r="$(s3 "$media12" "$(garage_run)/s3.sock" garage.invalid GET /shop-qa-12-files/a.txt)"
   expect_true "one disk's key read another disk's bucket: $r" [ "$(status_of "$r")" = 403 ]
+  # Keys that start with a slash, which Garage reads only from a path with the slash encoded: the drop must
+  # delete them too.
+  local key
+  for key in %2Flead %2F%2Ftwo %2F; do
+    r="$(s3 "$files12" "$(garage_run)/s3.sock" garage.invalid PUT "/shop-qa-12-files/$key" slash12)"
+    expect_true "the key $key could not be written: $r" [ "$(status_of "$r")" = 200 ]
+  done
 
   # Website access: the public disk's files are served, the private one's are not.
   r="$(s3 "$media12" "$(garage_run)/s3.sock" garage.invalid PUT /shop-qa-12-media/hello.txt public12)"
@@ -155,12 +166,14 @@ t_the_bucket_operations_against_the_real_garage() {
   # bucket in the path.
   mkdir -p "$T/nginx"
   {
-    echo "worker_processes 1; pid $T/nginx/nginx.pid; error_log $T/nginx/error.log; events {}"
+    echo "worker_processes 1; pid $T/nginx/nginx.pid; error_log $T/nginx/error.log warn; events {}"
     echo "http { access_log $T/nginx/access.log; client_body_temp_path $T/nginx/body; proxy_temp_path $T/nginx/proxy;"
     echo "fastcgi_temp_path $T/nginx/fcgi; uwsgi_temp_path $T/nginx/uwsgi; scgi_temp_path $T/nginx/scgi;"
-    echo "server { listen 127.0.0.1:8081; server_name s3.qa.example.test;"
+    # Forge's own blocks of a PHP site, left in place: the printed ones must still take every path.
+    forge='location ~ \.php$ { return 418; } location ~ /\.(?!well-known).* { deny all; }'
+    echo "server { listen 127.0.0.1:8081; server_name s3.qa.example.test; $forge"
     sed -n '/^s3.qa.example.test, the S3 API/,/^files.qa.example.test, public files/p' <<<"$baseline_out" | sed '1d;$d'
-    echo "} server { listen 127.0.0.1:8081; server_name files.qa.example.test;"
+    echo "} server { listen 127.0.0.1:8081; server_name files.qa.example.test; $forge"
     sed -n '/^files.qa.example.test, public files/,$p' <<<"$baseline_out" | sed '1d'
     echo "} }"
   } >"$T/nginx/nginx.conf"
@@ -174,6 +187,33 @@ t_the_bucket_operations_against_the_real_garage() {
   expect_true "the files host does not serve a public file: $r" [ "$(body_of "$r")" = public12 ]
   r="$(web 127.0.0.1:8081 files.qa.example.test /shop-qa-12-files/a.txt)"
   expect_true "the files host serves a private file: $r" [ "$(status_of "$r")" = 404 ]
+  # Forge's blocks take no path from the printed ones.
+  r="$(s3 "$files12" 127.0.0.1:8081 s3.qa.example.test PUT /shop-qa-12-files/x.php php12)"
+  expect_true "a .php key did not reach Garage: $r" [ "$(status_of "$r")" = 200 ]
+  r="$(s3 "$files12" 127.0.0.1:8081 s3.qa.example.test PUT /shop-qa-12-files/dir/.keep keep12)"
+  expect_true "a dot folder's key did not reach Garage: $r" [ "$(status_of "$r")" = 200 ]
+  r="$(s3 "$media12" "$(garage_run)/s3.sock" garage.invalid PUT /shop-qa-12-media/x.php php12)"
+  r="$(web 127.0.0.1:8081 files.qa.example.test /shop-qa-12-media/x.php)"
+  expect_true "the files host did not serve a .php file from Garage: $r" [ "$(body_of "$r")" = php12 ]
+  # The Host a client signed reaches Garage as it sent it, port and all.
+  r="$(s3 "$files12" 127.0.0.1:8081 s3.qa.example.test:8081 GET /shop-qa-12-files/a.txt)"
+  expect_true "a request signed with a port failed: $r" [ "$(body_of "$r")" = hello12 ]
+  # An unsigned upload is refused before nginx keeps any of it: 100 MB at 2 MB/s would take 50 seconds.
+  local start code took location
+  start="$(date +%s)"
+  code="$(head -c 104857600 /dev/zero | curl -q -s -o /dev/null -w '%{http_code}' --max-time 20 --limit-rate 2M \
+    -H 'Host: s3.qa.example.test' -H 'Expect:' -T - http://127.0.0.1:8081/shop-qa-12-files/big)" || true
+  took=$(($(date +%s) - start))
+  expect_true "an unsigned upload was not refused at once (HTTP $code after ${took}s)" \
+    eval '[[ "$code" =~ ^[45][0-9][0-9]$ ]] && [ "$took" -lt 10 ]'
+  expect_true "nginx kept an upload's body in a file" eval '! grep -q "buffered to a temporary file" "$T/nginx/error.log"'
+  # A website redirect keeps the bucket in the path.
+  r="$(s3 "$media12" "$(garage_run)/s3.sock" garage.invalid PUT /shop-qa-12-media/docs/index.html docs12)"
+  location="$(curl -q -s --max-time 10 -H 'Host: files.qa.example.test' -o /dev/null -D - \
+    http://127.0.0.1:8081/shop-qa-12-media/docs | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')"
+  expect_true "a website redirect lost its bucket: '$location'" [ "$location" = /shop-qa-12-media/docs/ ]
+  r="$(web 127.0.0.1:8081 files.qa.example.test /shop-qa-12-media/docs/)"
+  expect_true "a folder's index is not served: $r" [ "$(body_of "$r")" = docs12 ]
 
   # A new key replaces the old one, and the files stay.
   old="$files12"
@@ -190,16 +230,20 @@ t_the_bucket_operations_against_the_real_garage() {
   r="$(s3 "$files12" "$(garage_run)/s3.sock" garage.invalid GET /shop-qa-12-files/a.txt)"
   expect_true "a file went with a restart: $r" [ "$(body_of "$r")" = hello12 ]
 
-  # bucket-drop empties and deletes the bucket and its keys; another environment's stays.
-  gate "bucket-drop 12 files"; expect_rc 0; expect_out "bucket shop-qa-12-files: dropped, 1 objects deleted"
+  # bucket-drop empties and deletes every bucket and key of the environment; other environments' stay.
+  gate "bucket-create 1 files"; expect_rc 0
+  gate "bucket-drop 12"; expect_rc 0
+  expect_out_has "bucket shop-qa-12-files: dropped, 6 objects deleted"
+  expect_out_has "bucket shop-qa-12-media: dropped, 3 objects deleted"
   r="$(s3 "$files12" "$(garage_run)/s3.sock" garage.invalid GET /shop-qa-12-files/a.txt)"
   expect_true "a dropped bucket's key still works: $r" [ "$(status_of "$r")" = 403 ]
-  gate "bucket-drop 12 files"; expect_out "no bucket shop-qa-12-files, so nothing to drop"
+  gate "bucket-drop 12"; expect_out "environment 12 has no buckets, so nothing to drop"
   r="$(s3 "$files13" "$(garage_run)/s3.sock" garage.invalid PUT /shop-qa-13-files/c.txt hello13)"
   expect_true "another environment's bucket went: $r" [ "$(status_of "$r")" = 200 ]
   run bash -c 'printf "Authorization: Bearer %s\n" "$(cat "$1")" | curl -q -s --unix-socket "$2" --header @- http://localhost/v2/ListKeys' _ \
     "$HOME/.config/mroom/secrets/garage-admin-token" "$(garage_run)/admin.sock"
-  run jq -r '[.[].name] | sort | join(" ")' <<<"$out"; expect_out "shop-qa-12-media shop-qa-13-files"
+  run jq -r '[.[].name] | sort | join(" ")' <<<"$out"; expect_out "shop-qa-1-files shop-qa-13-files"
+  gate "bucket-drop 1"; expect_rc 0; expect_out "bucket shop-qa-1-files: dropped, 0 objects deleted"
 }
 
 test_case real-garage t_the_bucket_operations_against_the_real_garage

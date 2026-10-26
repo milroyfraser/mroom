@@ -419,8 +419,9 @@ Invariants, each with a test:
      outside the prefix.
    - Each environment's file disk has a bucket of its own on the box's Garage, and a key that reaches that bucket
      alone, made new on every `bucket-create`; only the gate holds Garage's admin token, and only `forge` can
-     reach its endpoints, Unix sockets in its own folder. Teardown empties and deletes the bucket
-     (`bucket-drop`), with a key made for that alone.
+     reach its endpoints, Unix sockets in its own folder. Teardown (`bucket-drop`) finds the environment's
+     buckets and keys by name, deletes the keys, and empties and deletes each bucket, with a key made for
+     that alone.
    - Only the gate holds the mail catcher's API login, and only `forge` can reach its API, a Unix socket in its
      own folder. `mail-read` returns mail sent with one environment's login to `qa.persona_domain` addresses
      alone, and teardown deletes that environment's mail (`mail-clear`). The SMTP port apps send their logins

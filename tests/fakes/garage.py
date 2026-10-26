@@ -5,8 +5,11 @@
 
 Serves both APIs on Unix sockets, as mroom's Garage does, from one in-memory state: buckets, keys and their
 permissions, website access, objects and a one-node layout. The admin API wants the token as a Bearer
-login; the S3 API wants a valid Signature Version 4 from a key allowed on the bucket. Every request is
-logged (method, path, and whether its login was good), never a token or a secret.
+login; the S3 API wants a valid Signature Version 4 from a key allowed on the bucket. As Garage does, it
+reads the key from the path after dropping the slashes it starts with, takes a DELETE of no key for one of
+the bucket (which only an owner may do), and checks a signature against the path decoded and encoded again
+with each / kept. Every request is logged (method, path, and whether its login was good), never a token or
+a secret.
 
 Test controls, on the admin socket with the token: POST /test/seed {"bucket", "keys": [...]} puts objects;
 GET /test/state prints the state, secrets left out; POST /test/fail {"s3_delete": true} makes S3 deletes fail.
@@ -100,6 +103,9 @@ class Admin(Handler):
             bid = secrets.token_hex(32)
             buckets[bid] = {"alias": alias, "website": False, "objects": {}}
             return self.reply(200, bucket_info(bid))
+        if path == "/v2/ListBuckets":
+            return self.reply(200, [{"id": bid, "created": "2026-10-26T00:00:00Z", "globalAliases": [b["alias"]],
+                                     "localAliases": []} for bid, b in buckets.items()])
         if path == "/v2/ListKeys":
             return self.reply(200, [{"id": k, "name": v["name"], "expired": False} for k, v in keys.items()])
         if path == "/v2/CreateKey":
@@ -175,7 +181,8 @@ def signature_ok(handler, url, secret):
     headers = "".join(f"{h}:{handler.headers.get(h, '').strip()}\n" for h in signed.split(";"))
     query = "&".join(f"{urllib.parse.quote(k, safe='-_.~')}={urllib.parse.quote(v, safe='-_.~')}"
                      for k, v in sorted(urllib.parse.parse_qsl(url.query, keep_blank_values=True)))
-    canonical = "\n".join([handler.command, url.path, query, headers, signed,
+    path = urllib.parse.quote(urllib.parse.unquote(url.path), safe="-_.~/")
+    canonical = "\n".join([handler.command, path, query, headers, signed,
                            handler.headers.get("x-amz-content-sha256", "")])
     to_sign = "\n".join(["AWS4-HMAC-SHA256", handler.headers.get("x-amz-date", ""),
                          f"{day}/{region}/{service}/aws4_request", hashlib.sha256(canonical.encode()).hexdigest()])
@@ -196,13 +203,14 @@ class S3(Handler):
             log(f"s3 {self.command} {url.path} login={'good' if good else 'bad'}")
             if not good:
                 return self.reply(403, b"<Error><Code>AccessDenied</Code></Error>", "application/xml")
-            parts = url.path.lstrip("/").split("/", 1)
-            bid = next((i for i, b in state["buckets"].items() if b["alias"] == parts[0]), None)
+            name, _, raw_key = url.path.lstrip("/").partition("/")
+            key_name = urllib.parse.unquote(raw_key.lstrip("/"))
+            bid = next((i for i, b in state["buckets"].items() if b["alias"] == name), None)
             perm = key["perms"].get(bid, {})
             if bid is None:
                 return self.reply(404, b"<Error><Code>NoSuchBucket</Code></Error>", "application/xml")
             objects = state["buckets"][bid]["objects"]
-            if self.command == "GET" and len(parts) == 1:
+            if self.command == "GET" and not key_name:
                 if not perm.get("read"):
                     return self.reply(403, b"<Error><Code>AccessDenied</Code></Error>", "application/xml")
                 q = dict(urllib.parse.parse_qsl(url.query))
@@ -210,14 +218,17 @@ class S3(Handler):
                 enc = (lambda k: urllib.parse.quote(k, safe="")) if q.get("encoding-type") == "url" else (lambda k: k)
                 contents = "".join(f"<Contents><Key>{enc(k)}</Key></Contents>" for k in names)
                 xml = ('<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
-                       f"<Name>{parts[0]}</Name>{contents}<IsTruncated>{'true' if len(objects) > len(names) else 'false'}</IsTruncated>"
+                       f"<Name>{name}</Name>{contents}<IsTruncated>{'true' if len(objects) > len(names) else 'false'}</IsTruncated>"
                        "</ListBucketResult>")
                 return self.reply(200, xml.encode(), "application/xml")
-            if self.command == "DELETE" and len(parts) == 2:
+            if self.command == "DELETE" and not key_name:
+                # DeleteBucket, which only an owner may do.
+                return self.reply(403, b"<Error><Code>AccessDenied</Code></Error>", "application/xml")
+            if self.command == "DELETE":
                 if not perm.get("write") or state["fail"].get("s3_delete"):
                     return self.reply(403 if not perm.get("write") else 500,
                                       b"<Error><Code>InternalError</Code></Error>", "application/xml")
-                objects.pop(urllib.parse.unquote(parts[1]), None)
+                objects.pop(key_name, None)
                 return self.reply(204, b"")
             return self.reply(400, b"<Error><Code>InvalidRequest</Code></Error>", "application/xml")
 

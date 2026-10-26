@@ -7,6 +7,10 @@ Prints how many objects it deleted. The gate runs it to empty a QA environment's
 since Garage deletes only an empty bucket (bucket-drop), with a key of the gate's own, made for that drop
 alone and allowed only that bucket. Requests are signed with AWS Signature Version 4; the key and its
 secret come on stdin, never a command line.
+
+Garage reads an object's key from the path after dropping the slashes it starts with, so a key such as /x
+would name x: every / of a key is sent encoded. It checks the signature against the path decoded and
+encoded again with each / kept, so that is the path signed.
 """
 
 import datetime
@@ -45,15 +49,16 @@ class S3:
     def __init__(self, socket_path: str, key_id: str, secret: str) -> None:
         self.socket_path, self.key_id, self.secret = socket_path, key_id, secret
 
-    def request(self, method: str, path: str, query: dict) -> tuple:
-        """One signed request; path is already encoded, as it is sent."""
+    def request(self, method: str, path: str, query: dict, signed_path: str = "") -> tuple:
+        """One signed request. path is already encoded, as it is sent; signed_path is the path as Garage
+        checks it, when that differs."""
         now = datetime.datetime.now(datetime.timezone.utc)
         stamp, day = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
         empty = hashlib.sha256(b"").hexdigest()
         headers = {"host": HOST, "x-amz-content-sha256": empty, "x-amz-date": stamp}
         canonical_query = "&".join(f"{quote(k)}={quote(v)}" for k, v in sorted(query.items()))
         signed = ";".join(sorted(headers))
-        canonical = "\n".join([method, path, canonical_query,
+        canonical = "\n".join([method, signed_path or path, canonical_query,
                                "".join(f"{k}:{headers[k]}\n" for k in sorted(headers)), signed, empty])
         scope = f"{day}/{REGION}/{SERVICE}/aws4_request"
         to_sign = "\n".join(["AWS4-HMAC-SHA256", stamp, scope, hashlib.sha256(canonical.encode()).hexdigest()])
@@ -92,7 +97,7 @@ def empty(s3: S3, bucket: str) -> int:
             if key in seen:
                 raise SystemExit(f"s3-empty: {bucket} still lists an object it was told to delete")
             seen.add(key)
-            status, body = s3.request("DELETE", f"/{bucket}/{quote(key, safe='-_.~/')}", {})
+            status, body = s3.request("DELETE", f"/{bucket}/{quote(key)}", {}, f"/{bucket}/{quote(key, safe='-_.~/')}")
             if status not in (200, 204):
                 fail(f"deleting an object of {bucket}", status, body)
             deleted += 1

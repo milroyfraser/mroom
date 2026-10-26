@@ -282,10 +282,13 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 | `mail-read <N> <email>` | as JSON, the newest five mails the environment's login sent to a persona address (To, Cc or Bcc), and only to personas: sender, recipients, subject and text |
 | `mail-clear <N>` | every mail the environment's login sent |
 | `bucket-create <N> <disk> [public]` | a bucket on the box's Garage (D14) for one of the app's file disks, and a new key that reaches that bucket alone; `public` turns on its website access. Prints `BUCKET`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `REGION`, `ENDPOINT`, `PATH_STYLE`, and `URL` for a public disk |
-| `bucket-drop <N> <disk>` | the disk's bucket: its keys deleted, the bucket emptied and deleted |
+| `bucket-drop <N>` | every bucket the environment has, whatever its disks: their keys deleted, and each bucket emptied and deleted |
 
-The client sends only N. The database, role and Redis user are `<MROOM_APP_NAME>_qa_<N>`, and the
-database is cloned from `MROOM_QA_TEMPLATE`, both set by a person in `box.env`. A password reaches
+The client sends only N, and the few words some operations also take, each of a fixed form. The
+database, role and Redis user are `<MROOM_APP_NAME>_qa_<N>`, and the database is cloned from
+`MROOM_QA_TEMPLATE`, both set by a person in `box.env`. A bucket is `<MROOM_APP_NAME>-qa-<N>-<disk>`, each
+`_` of the name a `-`, for the disk name `bucket-create` takes: `[a-z][a-z0-9]{0,15}`, with no `-` in it, so
+no disk's bucket is another environment's or another disk's. A password reaches
 Postgres only as a SCRAM verifier, through stdin, and Redis only as its SHA-256. Each request and refusal
 is logged, never a secret, to `~/.local/state/mroom/gate.log` and to syslog.
 
@@ -387,9 +390,11 @@ Files go to the box's Garage (D14), a bucket for each environment and file disk,
   box user can open, and its own RPC stays in a network of its own (`PrivateNetwork`), where no site user can
   reach it. Only the gate holds the admin token. Garage, confined like Mailpit, sees only its build, config,
   data and secrets.
-- **Dropping.** Garage deletes only an empty bucket and empties none itself, so `bucket-drop` deletes the
-  environment's keys first, then every object through the S3 API with a key of its own, made for that drop
-  alone and deleted however the drop ends, and only then the bucket.
+- **Dropping.** `bucket-drop` finds the environment's buckets and keys by name, so a disk the app no longer
+  has leaves nothing behind. Garage deletes only an empty bucket and empties none itself, so the drop
+  deletes the environment's keys first, then each bucket's objects through the S3 API, with a key made for
+  that bucket's drop alone, and only then the bucket. The drop key goes when the drop ends, whether it
+  worked or not; one a killed gate left goes with the next drop of that environment.
 
 **Set up once,** for an app named `shop`, on Postgres 16 or later and Redis 7 or later. Before Postgres 16,
 a role that may create roles may also grant itself the administrator ones, so the gate refuses older
@@ -563,8 +568,9 @@ installs is written out in the step itself.
     refuses any other, and makes its RPC secret and admin and metrics tokens (mode 600, in
     `~/.config/mroom/secrets`). Check the script as for step 12. With `MROOM_QA_ZONE` set, it prints the nginx
     configs of Garage's two hosts: create `s3.<zone>` and `files.<zone>` as sites in Forge, each with its
-    certificate, and put the printed blocks in place of their `location /` block. Forge's nginx runs as the
-    box user, who alone can open Garage's sockets.
+    certificate, and put the printed blocks in place of their `location` blocks. Forge's nginx runs as the
+    box user, who alone can open Garage's sockets. The S3 host streams each body to Garage, so an unsigned
+    upload is refused before nginx stores any of it.
 
 ## Regression label
 

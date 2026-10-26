@@ -2,7 +2,8 @@
 # shellcheck disable=SC2317,SC2016  # t_* run through test_case; a $ in single quotes is for eval, later
 # Tests for the gate's Garage operations (bucket-create, bucket-drop): a bucket per environment and file disk,
 # a key that reaches it alone and is new on every create, website access only for a public disk, and a drop
-# that empties the bucket with a key of its own, which goes however the drop ends. Offline:
+# that finds every bucket and key of the environment by name and empties each bucket with a key of its own,
+# which goes when the drop ends. Offline:
 # tests/fakes/garage.py plays Garage's admin and S3 APIs on Unix sockets, and the gate's real curl and
 # lib/s3-empty talk to it. tests/files/gate-real-test.sh runs the real Garage in CI.
 set -euo pipefail
@@ -99,25 +100,37 @@ t_a_public_disk_gets_website_access_and_a_url() {
   run state; run jq -c '.buckets["shop-qa-12-media"].website' <<<"$out"; expect_out false
 }
 
-t_bucket_drop_empties_and_deletes_the_bucket_and_its_keys() {
+t_bucket_drop_empties_and_deletes_every_bucket_and_key_of_the_environment() {
   world
-  gate "bucket-create 12 files"; expect_rc 0
-  gate "bucket-create 13 files"; expect_rc 0
+  local disk
+  for disk in "12 files" "12 media public" "13 files" "1 files"; do gate "bucket-create $disk"; expect_rc 0; done
+  # A key of a disk the app no longer has, and the key of a drop a killed gate left.
+  admin /v2/CreateKey '{"name": "shop-qa-12-old"}' >/dev/null
+  admin /v2/CreateKey '{"name": "mroom-drop-shop-qa-12-files"}' >/dev/null
   local names=() i
   for i in $(seq 1 1200); do names+=("n/$i.txt"); done
-  seed shop-qa-12-files "a.txt" "dir/b c.pdf" "ü/ñ#?&=.png" "+plus+" "${names[@]}"
+  # Garage reads a key's leading slashes in a path as none, so these are deleted only if sent encoded; a
+  # DELETE of "/" sent as is would be one of the bucket.
+  seed shop-qa-12-files "a.txt" "dir/b c.pdf" "ü/ñ#?&=.png" "+plus+" "50%25" "/lead" "//two" "/" "${names[@]}"
+  seed shop-qa-12-media "pic.png"
   seed shop-qa-13-files "theirs.txt"
-  gate "bucket-drop 12 files"
-  expect_rc 0; expect_out "bucket shop-qa-12-files: dropped, 1204 objects deleted"
+  seed shop-qa-1-files "ones.txt"
+  gate "bucket-drop 12"
+  expect_rc 0
+  expect_out $'bucket shop-qa-12-files: dropped, 1208 objects deleted\nbucket shop-qa-12-media: dropped, 1 objects deleted'
   run state
-  run jq -c '.buckets | keys' <<<"$out"; expect_out '["shop-qa-13-files"]'
+  run jq -c '.buckets | keys' <<<"$out"; expect_out '["shop-qa-1-files","shop-qa-13-files"]'
   run state
-  run jq -r '[.keys[].name] | sort | join(" ")' <<<"$out"; expect_out "shop-qa-13-files"
-  run state; run jq -c '.buckets["shop-qa-13-files"].objects' <<<"$out"; expect_out '["theirs.txt"]'
+  run jq -r '[.keys[].name] | sort | join(" ")' <<<"$out"; expect_out "shop-qa-1-files shop-qa-13-files"
+  run state; run jq -c '[.buckets["shop-qa-13-files"].objects, .buckets["shop-qa-1-files"].objects]' <<<"$out"
+  expect_out '[["theirs.txt"],["ones.txt"]]'
   # Its S3 requests were signed, and good.
-  expect_true "an S3 request was refused" lacks "$(cat "$T/garage.log")" "s3 DELETE /shop-qa-12-files/a.txt login=bad"
-  run grep -c '^s3 DELETE /shop-qa-12-files/.* login=good$' "$T/garage.log"; expect_out 1204
-  gate "bucket-drop 12 files"; expect_rc 0; expect_out "no bucket shop-qa-12-files, so nothing to drop"
+  expect_true "an S3 request was refused" lacks "$(cat "$T/garage.log")" "login=bad"
+  run grep -c '^s3 DELETE /shop-qa-12-.* login=good$' "$T/garage.log"; expect_out 1209
+  expect_true "a key's slash went unencoded" grep -qxF 's3 DELETE /shop-qa-12-files/%2F%2Ftwo login=good' "$T/garage.log"
+  gate "bucket-drop 12"; expect_rc 0; expect_out "environment 12 has no buckets, so nothing to drop"
+  gate "bucket-drop 1"; expect_rc 0; expect_out "bucket shop-qa-1-files: dropped, 1 objects deleted"
+  run state; run jq -c '.buckets | keys' <<<"$out"; expect_out '["shop-qa-13-files"]'
 }
 
 t_a_failed_drop_leaves_no_key_of_its_own() {
@@ -125,7 +138,7 @@ t_a_failed_drop_leaves_no_key_of_its_own() {
   gate "bucket-create 12 files"; expect_rc 0
   seed shop-qa-12-files one.txt two.txt
   admin /test/fail '{"s3_delete": true}' >/dev/null
-  gate "bucket-drop 12 files"
+  gate "bucket-drop 12"
   expect_rc 1; expect_err_has "bucket-drop 12: s3-empty: deleting an object of shop-qa-12-files: HTTP 500 InternalError"
   run state
   run jq -r '[.keys[].name] | length' <<<"$out"; expect_out 0
@@ -137,7 +150,7 @@ t_what_the_gate_refuses() {
   local words
   for words in "bucket-create 12 Files" "bucket-create 12 1files" "bucket-create 12 averyveryverylongdisk" \
     "bucket-create 12 files private" "bucket-create 12 files public more" "bucket-create 0 files" \
-    "bucket-drop 12 files public" "bucket-drop x files"; do
+    "bucket-drop 12 files" "bucket-drop x" "bucket-drop"; do
     gate "$words"; expect_rc 1; expect_err_has "refused"
   done
   run state; run jq -c '.buckets' <<<"$out"; expect_out '{}'
@@ -156,7 +169,7 @@ t_what_the_gate_refuses() {
 
 test_case bucket-create t_bucket_create_makes_a_bucket_and_a_key_for_it_alone
 test_case public t_a_public_disk_gets_website_access_and_a_url
-test_case bucket-drop t_bucket_drop_empties_and_deletes_the_bucket_and_its_keys
+test_case bucket-drop t_bucket_drop_empties_and_deletes_every_bucket_and_key_of_the_environment
 test_case failed-drop t_a_failed_drop_leaves_no_key_of_its_own
 test_case refusals t_what_the_gate_refuses
 finish

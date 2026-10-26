@@ -492,6 +492,8 @@ garage_toml() {
 metadata_dir = "$base/meta"
 data_dir = "$base/data"
 db_engine = "sqlite"
+# One node, so no other copy to rebuild its metadata from after a crash: written through to the disk.
+metadata_fsync = true
 replication_factor = 1
 rpc_bind_addr = "127.0.0.1:3901"
 rpc_public_addr = "127.0.0.1:3901"
@@ -578,27 +580,34 @@ sockets in $(home_short "$base/run"), and its own RPC stays in a network of its 
   cat <<EOF
 
 Browsers and apps reach Garage through nginx, on two hosts of the QA zone. Create each as a site in Forge,
-with its certificate, and put this in place of the site's "location /" block (Forge's nginx runs as $user,
-who alone can open the sockets):
+with its certificate, and put this in place of the site's location blocks (Forge's nginx runs as $user, who
+alone can open the sockets). Its ^~ keeps any of Forge's "location ~" blocks left in place from taking a
+path that ends in .php or holds a dot folder.
 
-s3.$zone, the S3 API: path-style, so every bucket is under this host and its certificate.
+s3.$zone, the S3 API: path-style, so every bucket is under this host and its certificate. Bodies stream
+to Garage, which refuses an unsigned request before reading one, and nginx keeps no copy of any.
 
-    client_max_body_size 0;
-    proxy_request_buffering off;
-    location / {
-        proxy_set_header Host \$host;
+    location ^~ / {
+        client_max_body_size 5g;
+        proxy_http_version 1.1;
+        proxy_request_buffering off;
+        proxy_max_temp_file_size 0;
+        proxy_set_header Host \$http_host;
         proxy_pass http://unix:$base/run/s3.sock;
     }
 
 files.$zone, public files: /<bucket>/<path> reads <path> from a bucket whose website access is on.
 
-    location ~ "^/([a-z0-9][a-z0-9-]{1,61}[a-z0-9])(/.*)\$" {
-        set \$bucket \$1;
-        rewrite ^/[^/]+(/.*)\$ \$1 break;
-        proxy_set_header Host \$bucket.web.mroom.invalid;
-        proxy_pass http://unix:$base/run/web.sock;
-    }
-    location / {
+    location ^~ / {
+        client_max_body_size 1k;
+        location ~ "^/([a-z0-9][a-z0-9-]{1,61}[a-z0-9])(/.*)\$" {
+            set \$bucket \$1;
+            rewrite ^/[^/]+(/.*)\$ \$1 break;
+            proxy_max_temp_file_size 0;
+            proxy_redirect ~^/(.*)\$ /\$bucket/\$1;
+            proxy_set_header Host \$bucket.web.mroom.invalid;
+            proxy_pass http://unix:$base/run/web.sock;
+        }
         return 404;
     }
 EOF

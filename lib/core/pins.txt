@@ -1,8 +1,8 @@
 # The QA services' builds mroom was tested with (design section 3): `mroom baseline` installs nothing else.
 # Mailpit publishes no checksums of its own: the archive's SHA-256 is the digest GitHub keeps for the release
 # asset, and the binary's is the one inside that archive. Garage publishes none at all, and ships a bare
-# binary: both columns hold the SHA-256 of the build mroom was tested with (26 Oct 2026), which CI checks
-# again from GitHub's network on every run.
+# binary: both columns hold the SHA-256 of the build taken on 26 Oct 2026, both builds downloaded again
+# and matched that day. CI downloads the linux-amd64 one again on every run (gate on a real Garage).
 #
 # name     version  platform     archive-sha256                                                    binary-sha256                                                     url
 mailpit    v1.32.0  linux-amd64  4b5993c978e8604c70d43927e2ad103b311bba3b1822fa0cf1d4ee4ec890a93c  262cfa28fae4554be198d1fea5ef83c0f8299317876d658623711c629a8edec8  https://github.com/axllent/mailpit/releases/download/v1.32.0/mailpit-linux-amd64.tar.gz
