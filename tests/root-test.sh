@@ -15,8 +15,10 @@ GROUP_NAME="$(id -gn)"
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 
 world() {
-  mkdir -p "$T/bin" "$T/systemd" "$T/libexec" "$T/sudoers" "$T/served" "$T/home"
-  printf '#!/bin/sh\necho "systemctl $*" >>"$T/systemctl.log"\n' >"$T/bin/systemctl"
+  mkdir -p "$T/bin" "$T/systemd" "$T/libexec" "$T/sudoers" "$T/served" "$T/home" "$T/state"
+  # systemctl: logs each call, and fails a restart while $T/systemctl-fails-restart exists.
+  printf '#!/bin/sh\necho "systemctl $*" >>"$T/systemctl.log"\n[ "$1" != restart ] || [ ! -e "$T/systemctl-fails-restart" ]\n' \
+    >"$T/bin/systemctl"
   # visudo: logs what it checks, and refuses while $T/visudo-refuses exists.
   printf '#!/bin/sh\necho "visudo $*" >>"$T/visudo.log"\n[ ! -e "$T/visudo-refuses" ]\n' >"$T/bin/visudo"
   cat >"$T/bin/curl" <<'FAKE'
@@ -31,7 +33,7 @@ cp "$T/served/$path" "$out"
 FAKE
   chmod +x "$T/bin/systemctl" "$T/bin/visudo" "$T/bin/curl"
   export T PATH="$T/bin:$PATH" MROOM_ROOT_SETUP_TEST=1 MROOM_SYSTEMD_DIR="$T/systemd" MROOM_LIBEXEC_DIR="$T/libexec" \
-    MROOM_SUDOERS_DIR="$T/sudoers"
+    MROOM_SUDOERS_DIR="$T/sudoers" MROOM_ROOT_STATE_DIR="$T/state"
 }
 
 rs() { run "$ROOT/lib/root-setup" --user "$USER_NAME" --home "$T/home" "$@"; }
@@ -182,17 +184,17 @@ t_site_op_and_its_sudoers_line() {
 
   # From a release: downloaded over https alone, and checked.
   rm -r "$T/libexec" "$T/sudoers"; mkdir "$T/libexec" "$T/sudoers"
-  mkdir -p "$T/served/v9.9.9/lib"
-  cp "$ROOT/lib/site-op" "$T/served/v9.9.9/lib/site-op"
+  mkdir -p "$T/served/refs/tags/v9.9.9/lib"
+  cp "$ROOT/lib/site-op" "$T/served/refs/tags/v9.9.9/lib/site-op"
   rs --release v9.9.9 site-op
   expect_rc 0; expect_out_has "site-op: installed from v9.9.9"
   run log_of curl
   expect_out_has "--proto =https --proto-redir =https"
-  expect_out_has "https://raw.githubusercontent.com/milroyfraser/mroom/v9.9.9/lib/site-op"
+  expect_out_has "https://raw.githubusercontent.com/milroyfraser/mroom/refs/tags/v9.9.9/lib/site-op"
   expect_true "the downloaded site-op is not installed" cmp -s "$ROOT/lib/site-op" "$T/libexec/site-op"
   # One that is not the release's is refused, and nothing changes.
   rm -r "$T/libexec" "$T/sudoers"; mkdir "$T/libexec" "$T/sudoers"
-  printf '\necho planted\n' >>"$T/served/v9.9.9/lib/site-op"
+  printf '\necho planted\n' >>"$T/served/refs/tags/v9.9.9/lib/site-op"
   rs --release v9.9.9 site-op
   expect_rc 1; expect_err_has "that site-op is not this release's: its SHA-256 differs; nothing changed"
   expect_no_file "$T/libexec/site-op"; expect_no_file "$T/sudoers/mroom-gate"
@@ -203,6 +205,38 @@ t_site_op_and_its_sudoers_line() {
   rs site-op
   expect_rc 1; expect_err_has "visudo refused the sudoers line; site-op is installed, the line is not"
   expect_no_file "$T/sudoers/mroom-gate"; expect_no_file "$T/sudoers/.mroom-gate.new"
+  # On a box with no visudo, it says the line goes in unchecked.
+  rm "$T/bin/visudo" "$T/visudo-refuses"
+  run env PATH="$T/bin:/usr/bin:/bin" "$ROOT/lib/root-setup" --user "$USER_NAME" --home "$T/home" site-op
+  expect_rc 0; expect_out_has "site-op: this box has no visudo, so the sudoers line goes in unchecked, as this file writes it"
+  expect_file "$T/sudoers/mroom-gate"
+}
+
+t_a_run_that_stops_halfway_is_finished_by_the_next() {
+  world
+  rs --smtp-port 2525 mailpit; expect_rc 0
+  # A new port, and the restarts fail: the units are written, and their restarts left pending.
+  touch "$T/systemctl-fails-restart"
+  rs --smtp-port 2526 mailpit
+  expect_rc 1
+  expect_out_has "systemd units written: mroom-mail-relay.socket mroom-mail-relay.service"
+  expect_file "$T/state/pending/mroom-mail-relay.service"; expect_file "$T/state/pending/port-moved"
+  # The next run finds the files written, and does the restarts still owed.
+  rm "$T/systemctl-fails-restart" "$T/systemctl.log"
+  rs --smtp-port 2526 mailpit
+  expect_rc 0
+  expect_out_has "systemd units: mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service already as this release writes them"
+  expect_out_has "restarted to run their new text: mroom-mail-relay.service"
+  expect_out_has "the SMTP port changed, and was free for a moment: give each QA environment new mail logins (mail-user-add)"
+  run log_of systemctl
+  expect_out_has "systemctl restart mroom-mail-relay.service"
+  expect_out_has "systemctl restart mroom-mail-relay.socket mroom-mail-relay.service"
+  expect_no_file "$T/state/pending/mroom-mail-relay.service"; expect_no_file "$T/state/pending/port-moved"
+  # And the one after has nothing left to do.
+  rm "$T/systemctl.log"
+  rs --smtp-port 2526 mailpit; expect_rc 0
+  run log_of systemctl
+  expect_out $'systemctl daemon-reload\nsystemctl enable --now mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service'
 }
 
 t_what_root_setup_refuses() {
@@ -228,7 +262,7 @@ t_what_root_setup_refuses() {
 --user $USER_NAME --home /home/../root mailpit|is not a plain path
 EOF
   run env -u MROOM_ROOT_SETUP_TEST "$ROOT/lib/root-setup" --user "$USER_NAME" mailpit
-  expect_rc 1; expect_err_has "run this as root, through mroom's root recipe (README, Root steps)"
+  expect_rc 1; expect_err_has "run this as root, through mroom's root recipe (README, \"The root recipe\")"
   # As root, the test setting is refused: its folders come from the environment.
   printf '#!/bin/sh
 if [ "$1" = -u ]; then echo 0; else exec /usr/bin/id "$@"; fi
@@ -250,15 +284,21 @@ t_the_readme_recipe() {
   expect_true "the recipe names no release tag: $v" eval '[[ "$v" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]'
   # Its sum is of lib/root-setup at its tag once the tag exists, and until then (a release PR sets v and sum
   # together) of this checkout's.
-  mkdir -p "$T/served/$v/lib"
+  local served="$T/served/refs/tags/$v/lib"
+  mkdir -p "$served"
   if git -C "$ROOT" rev-parse -q --verify "refs/tags/$v" >/dev/null 2>&1; then
     where="the tag $v"
-    for file in root-setup site-op; do git -C "$ROOT" show "$v:lib/$file" >"$T/served/$v/lib/$file"; done
+    for file in root-setup site-op; do
+      git -C "$ROOT" show "$v:lib/$file" >"$served/$file"
+      # The recipe installs what this checkout holds: a change since that release moves v and sum to the next.
+      expect_true "lib/$file changed since $v: set the README's root recipe to the next release's v, and sum to this lib/root-setup's" \
+        cmp -s "$served/$file" "$ROOT/lib/$file"
+    done
   else
     where="this checkout"
-    cp "$ROOT/lib/root-setup" "$ROOT/lib/site-op" "$T/served/$v/lib/"
+    cp "$ROOT/lib/root-setup" "$ROOT/lib/site-op" "$served/"
   fi
-  expected="$(sha "$T/served/$v/lib/root-setup")"
+  expected="$(sha "$served/root-setup")"
   expect_true "the README's root recipe has sum $sum, but lib/root-setup at $where is $expected" [ "$sum" = "$expected" ]
   # Run, for this test's user, it installs every part from the release.
   text="$(awk -v u="$USER_NAME" '$0 == "user=forge" { $0 = "user=" u } { print }' <<<"$text")"
@@ -267,10 +307,10 @@ t_the_readme_recipe() {
   expect_out_has "site-op: installed from $v"
   expect_out_has "systemd units written: mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service"
   expect_out_has "systemd units written: mroom-garage.service"
-  run log_of curl; expect_out_has "https://raw.githubusercontent.com/milroyfraser/mroom/$v/lib/root-setup"
+  run log_of curl; expect_out_has "https://raw.githubusercontent.com/milroyfraser/mroom/refs/tags/$v/lib/root-setup"
   # A file that is not the one its sum names never runs.
   rm -r "$T/systemd" "$T/libexec" "$T/sudoers"; mkdir "$T/systemd" "$T/libexec" "$T/sudoers"
-  printf '\necho planted\n' >>"$T/served/$v/lib/root-setup"
+  printf '\necho planted\n' >>"$served/root-setup"
   run bash -c "$text"
   expect_true "a file its sum does not name ran" [ "$rc" != 0 ]
   expect_true "a file its sum does not name ran" lacks "$out" "planted"
@@ -284,6 +324,7 @@ test_case mailpit t_the_mailpit_units
 test_case garage t_the_garage_unit
 test_case allowed-lines t_every_unit_line_is_one_mroom_allows
 test_case site-op t_site_op_and_its_sudoers_line
+test_case halfway t_a_run_that_stops_halfway_is_finished_by_the_next
 test_case refusals t_what_root_setup_refuses
 test_case readme-recipe t_the_readme_recipe
 finish

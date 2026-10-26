@@ -414,20 +414,24 @@ services' systemd units, comes from a release, never from the box. Save this as 
 `mroom baseline` say so. It downloads `lib/root-setup` from the release tag `v`, checks it against `sum`,
 and runs it, which installs the `parts` named:
 
-- Take `v` and `sum` from this README at the release the box runs (`mroom version` says which), on GitHub,
-  never from the box. `v` is a tag, never a commit: GitHub serves a fork's commits under this repository's
-  address too. Tag and `sum` together pin the exact file.
+- Take `v` and `sum` from this README at the latest release on GitHub (its Releases page), never from the
+  box, and upgrade the box to that release first. `v` is a tag, never a commit: GitHub serves a fork's commits
+  under this repository's address too. Tag and `sum` together pin the exact file.
+- What root trusts is this repository's tags and README, so nothing on the box may write to it: the box's
+  GitHub credentials must reach only the repositories its agents work in, never this one.
 - `parts`: `site-op` always, `mailpit` when `qa.parity.mail` is `catcher`, `garage` when `qa.parity.files`
   is `same`. `smtp_port` is `box.env`'s `MROOM_QA_SMTP_PORT`, 1025 unless set.
-- Root reads nothing of the box user's: `root-setup` writes each unit from its own text, checks `site-op`
-  against the SHA-256 it holds, and runs again without harm, rewriting and restarting only what changed.
+- `root-setup` reads no file the box user can write: it writes each unit from its own text, checks `site-op`
+  against the SHA-256 it holds, and runs again without harm, rewriting and restarting only what changed, or
+  what a run that stopped halfway left. systemd itself, as root, still resolves the units' bind paths in the
+  box user's home each time a service starts (design D21 notes this limit).
 - Never give a token on the box a `recipe:*` scope: even `recipe:view` runs any saved recipe.
 
 <!-- root-recipe: tests/root-test.sh checks sum against lib/root-setup, and runs this block -->
 ```bash
 set -euo pipefail
 v=v0.4.0
-sum=4dadd6ffb2a06c49850c5f523dff007d990857cc74b81b74b8339c643bf9b9f3
+sum=2474ea7ad8c78bc048870910a268c1894050e9b081209c90eec4e2e0f9bec4a1
 user=forge
 parts=(site-op mailpit garage)
 smtp_port=1025
@@ -435,7 +439,7 @@ smtp_port=1025
 f="$(mktemp)"
 trap 'rm -f "$f"' EXIT
 curl -q -fsSL --proto '=https' --proto-redir '=https' --max-time 60 -o "$f" \
-  "https://raw.githubusercontent.com/milroyfraser/mroom/$v/lib/root-setup"
+  "https://raw.githubusercontent.com/milroyfraser/mroom/refs/tags/$v/lib/root-setup"
 echo "$sum  $f" | sha256sum --check --quiet
 bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
 ```
@@ -553,8 +557,8 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
 10. *As root:* the root recipe with `site-op` in its parts. It installs `site-op`, owned by root so the box
     user cannot change the helper itself, at `/usr/local/libexec/mroom/site-op`, from the release and
     checked against the SHA-256 `lib/root-setup` holds. With it comes the one sudoers line that lets the box
-    user run it as any of Forge's isolated users, never as root, written, checked with `visudo`, and only
-    then put in place as `/etc/sudoers.d/mroom-gate`:
+    user run it as any of Forge's isolated users, never as root, written, checked with `visudo` when the box
+    has it, and only then put in place as `/etc/sudoers.d/mroom-gate`:
     `forge ALL=(%isolated) NOPASSWD: /usr/local/libexec/mroom/site-op`. Run the recipe again after each
     mroom upgrade: the gate refuses a copy that is not its release's own.
 

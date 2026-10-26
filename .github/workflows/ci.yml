@@ -36,6 +36,9 @@ jobs:
         run: |
           want="v$(tr -d '[:space:]' < VERSION)"
           [ "$GITHUB_REF_NAME" = "$want" ] || { echo "tag $GITHUB_REF_NAME but VERSION says $want"; exit 1; }
+          # The README's root recipe names this release: a person takes v and sum from it (design D21).
+          recipe="$(sed -n 's/^v=//p' README.md)"
+          [ "$GITHUB_REF_NAME" = "$recipe" ] || { echo "tag $GITHUB_REF_NAME but the README's root recipe says v=$recipe"; exit 1; }
 
   test:
     name: tests

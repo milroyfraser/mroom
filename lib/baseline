@@ -173,19 +173,24 @@ restart_unit() {
 
 # units_section <part> <port> <intro> <unit...>: whether the installed units are as this release writes them
 # (lib/root-setup holds their text), and when they are not, how a person installs them: mroom's root recipe
-# in Forge, which runs a release's lib/root-setup as root (README, "Root steps"). Nothing this prints is to
-# be run as root: the box user's programs could have changed it.
+# in Forge, which runs a release's lib/root-setup as root (README, "The root recipe"). Nothing this prints is
+# to be run as root: the box user's programs could have changed it.
 units_section() {
   local part="$1" port="$2" intro="$3" systemd="${MROOM_SYSTEMD_DIR:-/etc/systemd/system}" unit stale=() states=()
-  local version source
+  local version source home="${HOME%/}" passwd_home
   shift 3
   for unit in "$@"; do
     if ! [ -f "$systemd/$unit" ] \
-      || [ "$(cat "$systemd/$unit")" != "$(unit_text "$unit" "$(id -un)" "$(id -gn)" "$HOME" "${port:-1025}")" ]; then
+      || [ "$(cat "$systemd/$unit")" != "$(unit_text "$unit" "$(id -un)" "$(id -gn)" "$home" "${port:-1025}")" ]; then
       stale+=("$unit")
     fi
   done
   echo
+  passwd_home="$(getent passwd "$(id -un)" | cut -d: -f6)"
+  if [ "$home" != "$passwd_home" ]; then
+    echo "NOTE: HOME is $home, but /etc/passwd gives $(id -un) the home $passwd_home: the root recipe installs"
+    echo "units for the second, unless it passes --home $home."
+  fi
   if [ "$systemd" != /etc/systemd/system ]; then
     echo "WARNING: MROOM_SYSTEMD_DIR is set, so this compares the units in $systemd, not /etc/systemd/system: a"
     echo "setting for tests."
@@ -202,9 +207,10 @@ units_section() {
   cat <<EOF
 $intro To be installed or updated: ${stale[*]}.
 
-Root installs them with mroom's root recipe (README, "Root steps"): $part in its parts${port:+, smtp_port=$port}.
-Set its v and sum from the README of mroom v$version on GitHub, never from this box, which the box user's
-programs could change. Then run mroom baseline $part again.
+Root installs them with mroom's root recipe (README, "The root recipe"): $part in its parts${port:+, smtp_port=$port}.
+Take its v and sum from the README of the latest release on GitHub, never from this box, which the box user's
+programs could change. This box runs mroom v$version: upgrade it to that release first. Then run mroom
+baseline $part again.
 EOF
   if [[ "$source" != release* ]]; then
     echo "This mroom was installed from a checkout, not a release, and the recipe installs a release's units:"

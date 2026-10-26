@@ -72,7 +72,7 @@ FAKE
 # root_install <part...>: what mroom's root recipe does, here into the test's own folders (lib/root-setup).
 root_install() {
   mkdir -p "$T/systemd" "$T/libexec" "$T/sudoers"
-  run env MROOM_ROOT_SETUP_TEST=1 MROOM_LIBEXEC_DIR="$T/libexec" MROOM_SUDOERS_DIR="$T/sudoers" \
+  run env MROOM_ROOT_SETUP_TEST=1 MROOM_LIBEXEC_DIR="$T/libexec" MROOM_SUDOERS_DIR="$T/sudoers" MROOM_ROOT_STATE_DIR="$T/state" \
     "$ROOT/lib/root-setup" --user "$(id -un)" --home "$HOME" --smtp-port "${PORT:-1025}" "$@"
 }
 
@@ -126,8 +126,9 @@ t_mailpit_is_installed_at_its_pin_with_its_relay_and_logins() {
   # Root installs the units with mroom's root recipe, from a release (lib/root-setup): baseline only says
   # which are missing or out of date, and prints nothing to run as root.
   expect_out_has "To be installed or updated: mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service."
-  expect_out_has "Root installs them with mroom's root recipe (README, \"Root steps\"): mailpit in its parts, smtp_port=$PORT."
-  expect_out_has "Set its v and sum from the README of mroom v$(cat "$ROOT/VERSION") on GitHub, never from this box"
+  expect_out_has "Root installs them with mroom's root recipe (README, \"The root recipe\"): mailpit in its parts, smtp_port=$PORT."
+  expect_out_has "Take its v and sum from the README of the latest release on GitHub, never from this box"
+  expect_out_has "This box runs mroom v$(cat "$ROOT/VERSION"): upgrade it to that release first."
   expect_out_has "This mroom was installed from a checkout, not a release"
   expect_true "baseline printed a unit to run as root" lacks "$out" "ExecStart="
   expect_true "baseline printed a script to run as root" lacks "$out" "systemctl "
@@ -346,7 +347,7 @@ t_garage_is_installed_with_its_config_secrets_and_unit() {
   expect_true "a secret is in the config" eval '! grep -qF "$(cat "$secrets/garage-admin-token")" "$base/garage.toml"'
   run "$MROOM" baseline garage
   expect_out_has "To be installed or updated: mroom-garage.service."
-  expect_out_has "Root installs them with mroom's root recipe (README, \"Root steps\"): garage in its parts."
+  expect_out_has "Root installs them with mroom's root recipe (README, \"The root recipe\"): garage in its parts."
   root_install garage; expect_rc 0
   run "$MROOM" baseline garage
   expect_out_has "systemd units: installed as this mroom writes them (mroom-garage.service inactive)."

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # root-setup — what mroom needs root for on a box, all from one release (design D21). A person runs it as root
 # through mroom's root recipe in Forge, which downloads it from a release tag and checks its SHA-256 (README,
-# "Root steps"), so nothing the box user, or a program running as it, can change reaches root: it reads no
-# file of theirs, and writes what it installs from its own text, or from its release's lib/site-op, checked
-# against the SHA-256 below.
+# "The root recipe"), so nothing the box user, or a program running as it, can change reaches root: it reads
+# no file of theirs, and writes what it installs from its own text, or from its release's lib/site-op,
+# checked against the SHA-256 below.
 #
 #   root-setup --user <name> [--home <dir>] [--smtp-port <port>] [--release <tag>] <part>...
 #
@@ -181,16 +181,20 @@ EOF
 root_die() { echo "root-setup: $*" >&2; exit 1; }
 
 # root_units <user> <group> <home> <port> <unit...>: writes each unit that is not as this release writes it,
-# starts them all, and restarts those that ran from an older text.
+# starts them all, and restarts those that ran from an older text. Each restart is marked pending, in root's
+# own folder, before its unit is written, and cleared once done, so a run that stops halfway (a dropped
+# session, a failing systemctl) leaves it to the next run, which finds the files already written.
 root_units() {
-  local user="$1" group="$2" home="$3" port="$4" unit text written=() restart=() port_moved=""
+  local user="$1" group="$2" home="$3" port="$4" unit text written=() restart=() pending="$STATE_DIR/pending"
   shift 4
+  mkdir -p "$pending"
+  chmod 700 "$STATE_DIR" "$pending"
   for unit in "$@"; do
     text="$(unit_text "$unit" "$user" "$group" "$home" "$port")"
     if [ -f "$SYSTEMD_DIR/$unit" ] && [ "$(cat "$SYSTEMD_DIR/$unit")" = "$text" ]; then continue; fi
     if [ -f "$SYSTEMD_DIR/$unit" ]; then
-      if [ "${unit##*.}" != socket ]; then restart+=("$unit")
-      elif ! grep -qxF "ListenStream=127.0.0.1:$port" "$SYSTEMD_DIR/$unit"; then port_moved=1; fi
+      if [ "${unit##*.}" != socket ]; then : >"$pending/$unit"
+      elif ! grep -qxF "ListenStream=127.0.0.1:$port" "$SYSTEMD_DIR/$unit"; then : >"$pending/port-moved"; fi
     fi
     # Written under a name systemd skips, and only then put in place.
     printf '%s\n' "$text" >"$SYSTEMD_DIR/.$unit.new"
@@ -202,9 +206,17 @@ root_units() {
   else echo "systemd units: $* already as this release writes them"; fi
   systemctl daemon-reload
   systemctl enable --now "$@"
-  if [ "${#restart[@]}" -gt 0 ]; then systemctl restart "${restart[@]}"; fi
-  if [ -n "$port_moved" ]; then
+  for unit in "$@"; do
+    if [ -e "$pending/$unit" ]; then restart+=("$unit"); fi
+  done
+  if [ "${#restart[@]}" -gt 0 ]; then
+    systemctl restart "${restart[@]}"
+    for unit in "${restart[@]}"; do rm -f "$pending/$unit"; done
+    echo "restarted to run their new text: ${restart[*]}"
+  fi
+  if [[ " $* " == *" mroom-mail-relay.socket "* && -e "$pending/port-moved" ]]; then
     systemctl restart mroom-mail-relay.socket mroom-mail-relay.service
+    rm -f "$pending/port-moved"
     echo "the SMTP port changed, and was free for a moment: give each QA environment new mail logins (mail-user-add)"
   fi
 }
@@ -217,11 +229,18 @@ root_site_op() {
   local user="$1" release="$2" src line owner=()
   if [ -z "${MROOM_ROOT_SETUP_TEST:-}" ]; then owner=(-o root -g root); fi
   if [ -n "$release" ]; then
+    # refs/tags/: a tag, never a branch of the same name.
     curl -q -fsSL --proto '=https' --proto-redir '=https' --max-time 60 -o "$ROOT_TMP/site-op" \
-      "https://raw.githubusercontent.com/$ROOT_SETUP_REPO/$release/lib/site-op" || root_die "could not download site-op of $release"
+      "https://raw.githubusercontent.com/$ROOT_SETUP_REPO/refs/tags/$release/lib/site-op" \
+      || root_die "could not download site-op of $release"
   else
     src="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/site-op"
     [ -f "$src" ] || root_die "no --release, and no site-op beside this file: run this through mroom's root recipe"
+    # Beside this file only in a copy root owns, as CI's: never, say, in /tmp, where the recipe downloads it.
+    if [ -z "${MROOM_ROOT_SETUP_TEST:-}" ] \
+      && [ -n "$(find "$src" "$(dirname "$src")" -maxdepth 0 \( ! -user root -o -perm /022 \) 2>/dev/null)" ]; then
+      root_die "$src is not in a folder only root can change: run this through mroom's root recipe, which passes --release"
+    fi
     cat "$src" >"$ROOT_TMP/site-op"
   fi
   echo "$SITE_OP_SHA256  $ROOT_TMP/site-op" | sha256sum --check --status \
@@ -232,7 +251,9 @@ root_site_op() {
   line="$SUDOERS_DIR/.mroom-gate.new"
   printf '%s ALL=(%%isolated) NOPASSWD: %s\n' "$user" "$LIBEXEC_DIR/site-op" >"$line"
   chmod 440 "$line"
-  if command -v visudo >/dev/null 2>&1 && ! visudo -cf "$line" >/dev/null; then
+  if ! command -v visudo >/dev/null 2>&1; then
+    echo "site-op: this box has no visudo, so the sudoers line goes in unchecked, as this file writes it"
+  elif ! visudo -cf "$line" >/dev/null; then
     rm -f "$line"
     root_die "visudo refused the sudoers line; site-op is installed, the line is not"
   fi
@@ -259,11 +280,12 @@ root_main() {
     # anywhere: never as root.
     [ "$(id -u)" != 0 ] || root_die "MROOM_ROOT_SETUP_TEST is a setting for tests: never set it as root"
     SYSTEMD_DIR="${MROOM_SYSTEMD_DIR:?for tests, MROOM_SYSTEMD_DIR}" LIBEXEC_DIR="${MROOM_LIBEXEC_DIR:?for tests, MROOM_LIBEXEC_DIR}"
-    SUDOERS_DIR="${MROOM_SUDOERS_DIR:?for tests, MROOM_SUDOERS_DIR}"
-    echo "WARNING: MROOM_ROOT_SETUP_TEST is set, so this writes to $SYSTEMD_DIR, $LIBEXEC_DIR and $SUDOERS_DIR: a setting for tests"
+    SUDOERS_DIR="${MROOM_SUDOERS_DIR:?for tests, MROOM_SUDOERS_DIR}" STATE_DIR="${MROOM_ROOT_STATE_DIR:?for tests, MROOM_ROOT_STATE_DIR}"
+    echo "WARNING: MROOM_ROOT_SETUP_TEST is set, so this writes to $SYSTEMD_DIR, $LIBEXEC_DIR, $SUDOERS_DIR and $STATE_DIR: a setting for tests"
   else
-    [ "$(id -u)" = 0 ] || root_die "run this as root, through mroom's root recipe (README, Root steps)"
+    [ "$(id -u)" = 0 ] || root_die "run this as root, through mroom's root recipe (README, \"The root recipe\")"
     SYSTEMD_DIR=/etc/systemd/system LIBEXEC_DIR=/usr/local/libexec/mroom SUDOERS_DIR=/etc/sudoers.d
+    STATE_DIR=/var/lib/mroom/root-setup
   fi
   # Each value goes into a unit or a sudoers line as it is, so each must be plain.
   [[ "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || root_die "--user needs the box user's name"
