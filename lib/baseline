@@ -139,7 +139,8 @@ port_status() {
 
 # restart_unit <unit> <path>: stops this box user's process that systemd runs as <unit> from <path> (its
 # binary, or the script it runs), which systemd starts again at once (Restart=always). Only what runs from
-# this home's services is touched. Returns 1 when no such process runs.
+# this home's services is touched. Returns 1 when no such process runs; otherwise returns once it has
+# stopped, within 10 seconds.
 restart_unit() {
   local proc exe arg pids=()
   for proc in /proc/[0-9]*; do
@@ -152,6 +153,11 @@ restart_unit() {
   done
   [ "${#pids[@]}" -gt 0 ] || return 1
   kill -TERM "${pids[@]}" 2>/dev/null || true
+  # Until those processes are gone, so what follows meets the one systemd starts next.
+  for _ in $(seq 1 40); do
+    kill -0 "${pids[@]}" 2>/dev/null || return 0
+    sleep 0.25
+  done
 }
 
 # unit_text <port> <python> <unit>: one of the three systemd units, as this mroom writes it. The socket holds
@@ -275,7 +281,7 @@ root_script() {
 
 setup_mailpit() {
   local base="$SERVICES/mailpit" logins="$SECRETS/mailpit-smtp.passwd" ui="$SECRETS/mailpit-ui.passwd"
-  local env_file="$SECRETS/mailpit.env" port python hash rest content password relay_changed="" mailpit_changed=""
+  local env_file="$SECRETS/mailpit.env" port python hash rest content password relay_changed="" mailpit_changed="" tries=1
   local systemd="${MROOM_SYSTEMD_DIR:-/etc/systemd/system}" unit stale=() restarts=() states=() status
   need curl tar sha256sum openssl python3 flock
   load_box || die "box.env could not be read"
@@ -338,7 +344,7 @@ setup_mailpit() {
     else echo "mail relay: runs the new one from its next start (mroom-mail-relay.service)"; fi
   fi
   if [ -n "$mailpit_changed" ]; then
-    if restart_unit mroom-mailpit.service "$base/"; then echo "Mailpit: restarted to run its build and read its API login"
+    if restart_unit mroom-mailpit.service "$base/"; then echo "Mailpit: restarted to run its build and read its API login"; tries=40
     else echo "Mailpit: runs its build and reads its API login from its next start (mroom-mailpit.service)"; fi
   fi
 
@@ -379,12 +385,16 @@ EOF
     fi
     echo "----- end -----"
   fi
-  if curl -q --silent --fail --max-time 2 --unix-socket "$base/run/http.sock" --output /dev/null \
-    http://localhost/livez 2>/dev/null; then
-    echo "Mailpit answers."
-  else
-    echo "Mailpit does not answer yet."
-  fi
+  # A Mailpit just restarted gets 10 seconds to answer.
+  for _ in $(seq 1 "$tries"); do
+    if curl -q --silent --fail --max-time 2 --unix-socket "$base/run/http.sock" --output /dev/null \
+      http://localhost/livez 2>/dev/null; then
+      tries=0
+      break
+    fi
+    if [ "$tries" -gt 1 ]; then sleep 0.25; fi
+  done
+  if [ "$tries" = 0 ]; then echo "Mailpit answers."; else echo "Mailpit does not answer yet."; fi
   status="$(port_status "$port")"
   case "$status" in
     none) echo "Nothing listens on 127.0.0.1:$port yet." ;;

@@ -219,6 +219,7 @@ t_the_mail_operations_against_the_real_mailpit() {
   rm "$HOME/.config/mroom/secrets/mailpit-ui.passwd"
   run "$MROOM" baseline mailpit
   expect_out_has "Mailpit: restarted to run its build and read its API login"
+  expect_out_has "Mailpit answers."
   wait_ready
   expect_true "baseline did not restart Mailpit" [ "$(main_pid mroom-mailpit.service)" != "$mailpit_pid" ]
   gate "mail-read 25 ada@example.test"; expect_rc 0
