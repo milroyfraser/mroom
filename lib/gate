@@ -305,40 +305,59 @@ redis_ready() {
   fi
 }
 
-# keyless_categories: " -@search -@timeseries", for those this Redis has (Redis 8 bundles them). Their
-# commands take no key arguments, so no key pattern limits them: an index or a label query could read
-# another environment's keys.
-keyless_categories() {
-  local cats c
-  cats="$(rcli ACL CAT)" || return 1
-  cats="$(tr -d '\r' <<<"$cats")"
-  for c in search timeseries; do
-    if grep -qx "$c" <<<"$cats"; then printf ' -@%s' "$c"; fi
+# What an environment's user is given: Redis's own data types and the functions an app needs, never @all.
+# A module's commands carry only its own categories (and @read, @write and the like), so none is in these,
+# and a module command cannot be trusted to name its keys: JSON.MGET declares only its first key and reads
+# the rest, FT.SEARCH and TS.MRANGE take none. A server command added later stays out unless it joins one.
+GRANTED=(keyspace string hash list set sortedset stream bitmap hyperloglog geo pubsub scripting transaction connection)
+# Taken back from those: the commands that flush, watch, list, count or debug the whole server, or reset its
+# scripts (design 8.9). @dangerous holds KEYS, FLUSHALL, SORT, CLIENT LIST, MONITOR and the like.
+WITHHELD=(-@dangerous -scan -randomkey -dbsize '-client|tracking' '-pubsub|channels' '-pubsub|shardchannels'
+  '-pubsub|numsub' '-pubsub|shardnumsub' '-pubsub|numpat' -function '-script|flush' '-script|kill' '-script|debug')
+
+# granted_module_commands: the commands of loaded modules that GRANTED would give an environment, one per
+# line. There must be none.
+granted_module_commands() {
+  local modules m c reply mods="" granted=""
+  modules="$(rcli MODULE LIST)" || return 1
+  while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    reply="$(rcli COMMAND LIST FILTERBY MODULE "$m")" || return 1
+    mods+="$(tr -d '\r' <<<"$reply")"$'\n'
+  done < <(tr -d '\r' <<<"$modules" | awk 'prev == "name" { print } { prev = $0 }')
+  [ -n "${mods//[[:space:]]/}" ] || return 0
+  for c in "${GRANTED[@]}"; do
+    reply="$(rcli COMMAND LIST FILTERBY ACLCAT "$c")" || return 1
+    granted+="$(tr -d '\r' <<<"$reply")"$'\n'
   done
-  return 0
+  grep -x -F -f <(grep . <<<"$mods") <<<"$granted" | sort -u || true
 }
 
 cmd_redis_user_add() {
   words_are 2
   env_number "${words[1]}"
-  local user="${app}_qa_${words[1]}" prefix="${app}:qa${words[1]}:" password hash extra out
+  local user="${app}_qa_${words[1]}" prefix="${app}:qa${words[1]}:" password hash leaks out
   redis_ready
   env_lock "redis-$user"
+  leaks="$(granted_module_commands)" \
+    || fail "redis-user-add ${words[1]}: cannot list Redis's modules and their commands: $(redis_error)"
+  if [ -n "$leaks" ]; then
+    fail "redis-user-add ${words[1]}: a module puts commands in a category environments are given, so its key checks would decide what they reach: $(tr '\n' ' ' <<<"$leaks" | cut -c1-160)"
+  fi
+  # Save first, so a Redis that cannot save its users is refused before a password changes.
+  out="$(rcli ACL SAVE)" \
+    || fail "redis-user-add ${words[1]}: Redis cannot save its users, so nothing was changed: $(redis_error "$out")"
   password="$(new_password)"
   [ "${#password}" = 48 ] || fail "could not read random bytes for the password"
   # Redis stores and compares only this hash, so only the hash leaves the gate.
   hash="$(printf '%s' "$password" | sha256sum | cut -d' ' -f1)"
-  extra="$(keyless_categories)" || fail "redis-user-add ${words[1]}: cannot list Redis's ACL categories: $(redis_error)"
-  # reset first: ACL SETUSER only adds to a user, so running it again would keep the old password. Then
-  # the environment's keys and channels only, and no command that flushes, watches or lists the whole
-  # server or resets its scripts (design 8.9).
-  # shellcheck disable=SC2086  # $extra is zero or more plain -@category words
-  out="$(rcli ACL SETUSER "$user" reset on "#$hash" "~$prefix*" "&$prefix*" +@all -@dangerous -scan -randomkey \
-    '-client|tracking' '-pubsub|channels' '-pubsub|shardchannels' '-pubsub|numsub' '-pubsub|shardnumsub' \
-    -function '-script|flush' '-script|kill' $extra)" || fail "redis-user-add ${words[1]}: $(redis_error "$out")"
+  # reset first: ACL SETUSER only adds to a user, so running it again would keep the old password.
+  out="$(rcli ACL SETUSER "$user" reset on "#$hash" "~$prefix*" "&$prefix*" "${GRANTED[@]/#/+@}" "${WITHHELD[@]}")" \
+    || fail "redis-user-add ${words[1]}: $(redis_error "$out")"
   # A connection signed in with the old password stays signed in: close them, so the app reconnects.
   rcli CLIENT KILL USER "$user" >/dev/null || true
-  out="$(rcli ACL SAVE)" || fail "redis-user-add ${words[1]}: ACL SAVE: $(redis_error "$out")"
+  out="$(rcli ACL SAVE)" \
+    || fail "redis-user-add ${words[1]}: the user changed but was not saved; run redis-user-add again once Redis can save: $(redis_error "$out")"
   gate_log "redis-user-add ${words[1]}: $user ready"
   printf 'REDIS_USERNAME=%s\nREDIS_PASSWORD=%s\nREDIS_PREFIX=%s\nHORIZON_PREFIX=%shorizon:\n' \
     "$user" "$password" "$prefix" "$prefix"
@@ -350,9 +369,12 @@ cmd_redis_user_remove() {
   local user="${app}_qa_${words[1]}" out
   redis_ready
   env_lock "redis-$user"
+  out="$(rcli ACL SAVE)" \
+    || fail "redis-user-remove ${words[1]}: Redis cannot save its users, so nothing was changed: $(redis_error "$out")"
   # ACL DELUSER also closes the connections signed in as the user.
   out="$(rcli ACL DELUSER "$user")" || fail "redis-user-remove ${words[1]}: $(redis_error "$out")"
-  out="$(rcli ACL SAVE)" || fail "redis-user-remove ${words[1]}: ACL SAVE: $(redis_error "$out")"
+  out="$(rcli ACL SAVE)" \
+    || fail "redis-user-remove ${words[1]}: the user is gone but was not saved; run redis-user-remove again once Redis can save: $(redis_error "$out")"
   gate_log "redis-user-remove ${words[1]}: $user removed"
   echo "redis user $user: removed"
 }
@@ -360,11 +382,11 @@ cmd_redis_user_remove() {
 # One step of redis-clear, run inside Redis: SCAN from the cursor in ARGV[1] for keys matching ARGV[2], then
 # UNLINK what it found, 500 at a time. Key names never leave Redis: a name may hold a newline, and read back
 # line by line it would become two names, one of them outside the prefix. Replies with the next cursor and
-# how many keys went.
+# how many keys UNLINK removed (SCAN may return a key twice).
 CLEAR_STEP="local r = redis.call('SCAN', ARGV[1], 'MATCH', ARGV[2], 'COUNT', 1000)
-local keys = r[2]
-for i = 1, #keys, 500 do redis.call('UNLINK', unpack(keys, i, math.min(i + 499, #keys))) end
-return {r[1], #keys}"
+local keys, n = r[2], 0
+for i = 1, #keys, 500 do n = n + redis.call('UNLINK', unpack(keys, i, math.min(i + 499, #keys))) end
+return {r[1], n}"
 
 cmd_redis_clear() {
   words_are 2

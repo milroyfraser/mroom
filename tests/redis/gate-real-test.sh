@@ -2,9 +2,10 @@
 # shellcheck disable=SC2317,SC2016  # t_* run through test_case; a $ in single quotes is for eval, later
 # The gate against a real Redis (the image in MROOM_TEST_REDIS_IMAGE, redis:8 by default), set up as the
 # README's "QA gate" section says: what a fake redis-cli cannot show. Each environment's user reaches only
-# its own prefix and none of the commands that act on the whole server; a new password replaces the old one
-# and closes old connections; users survive a restart; redis-clear deletes exactly the prefix's keys, even
-# one whose name holds a newline. CI only: it needs Docker, so tests/run.sh does not pick it up.
+# its own prefix, may run no module command and none of the commands that act on the whole server, yet may
+# run what a Laravel app sends; a new password replaces the old one and closes old connections; users
+# survive a restart; redis-clear deletes exactly the prefix's keys, even one whose name holds a newline.
+# CI only: it needs Docker, so tests/run.sh does not pick it up.
 set -euo pipefail
 SUITE=gate-redis-real
 # shellcheck source=tests/lib.sh
@@ -26,8 +27,18 @@ denied() {
   echo "    refused, but not for permission: $o" >&2
   return 1
 }
+# may <user> <command...>: ACL DRYRUN says the user may run it, without running it.
+may() {
+  local user="$1" o
+  shift
+  o="$(as mroom-gate "$GATE_PW" ACL DRYRUN "$user" "$@" 2>&1)" || true
+  [ "$o" = OK ] && return 0
+  echo "    $o" >&2
+  return 1
+}
 gate() { run env SSH_ORIGINAL_COMMAND="$1" "$MROOM" gate provision; }
 password_of() { sed -n 's/^REDIS_PASSWORD=//p' <<<"$1"; }
+acl_file() { docker exec "$NAME" cat /acl/users.acl; }
 
 wait_for_redis() {
   local _
@@ -42,7 +53,8 @@ wait_for_redis() {
 
 # start_redis: the README's setup: users in an aclfile, the gate's own user, the default user off. The
 # folder is not /data, which the image's entrypoint would hand to its redis user; Redis rewrites the file
-# on ACL SAVE, so the folder is open to it.
+# on ACL SAVE, so the folder is open to it. The image's umask makes the rewritten file 600, so it is read
+# through the container.
 start_redis() {
   ACL_DIR="$T/acl"
   mkdir -p "$ACL_DIR" "$T/bin"
@@ -61,17 +73,47 @@ start_redis() {
   wait_for_redis
 }
 
+# module_sweep <user>: every command of every loaded module, put to ACL DRYRUN for that user with as many
+# arguments as its arity asks, inside the container so two hundred checks take a second. A container such
+# as FT.CONFIG is skipped, since its subcommands are listed and checked. Prints "denied", or
+# "allowed <command>" or "unchecked <command>" (a reply that is neither) for each.
+module_sweep() {
+  local script
+  script="$(cat <<'SWEEP'
+user="$1"
+r() { redis-cli --no-auth-warning --user mroom-gate "$@"; }
+list="$(r MODULE LIST | awk 'prev == "name" { print } { prev = $0 }' | while read -r m; do
+  r COMMAND LIST FILTERBY MODULE "$m"
+done | sort -u)"
+echo "$list" | while read -r c; do
+  [ -n "$c" ] || continue
+  if echo "$list" | awk -v p="$c|" 'index($0, p) == 1 { found = 1 } END { exit !found }'; then continue; fi
+  arity="$(r COMMAND INFO "$c" | sed -n 2p)"
+  arity="${arity#-}"
+  set -- $(echo "$c" | tr '|' ' ')
+  while [ "$#" -lt "${arity:-1}" ]; do set -- "$@" shop:qa12:a; done
+  case "$(r ACL DRYRUN "$user" "$@" 2>&1)" in
+    OK) echo "allowed $c" ;;
+    *"no permissions to run"*) echo denied ;;
+    *) echo "unchecked $c" ;;
+  esac
+done
+SWEEP
+)"
+  REDISCLI_AUTH="$GATE_PW" docker exec -e REDISCLI_AUTH "$NAME" sh -c "$script" sweep "$1" </dev/null
+}
+
 t_the_gate_on_a_real_redis() {
   start_redis
   mkdir -p "$HOME/.config/mroom/secrets"
   printf 'MROOM_APP_NAME=shop\n' >"$HOME/.config/mroom/box.env"
   printf 'REDIS_GATE_USER=mroom-gate\nREDIS_GATE_PASSWORD=%s\n' "$GATE_PW" >"$HOME/.config/mroom/secrets/redis-gate.env"
   chmod 600 "$HOME/.config/mroom/secrets/redis-gate.env"
-  local cats pw12 pw13 old sub c clients
-  cats="$(as mroom-gate "$GATE_PW" ACL CAT | tr -d '\r')"
-  echo "  $IMAGE: $(as mroom-gate "$GATE_PW" INFO server | tr -d '\r' | grep '^redis_version:'), keyless categories: $(grep -x -E 'search|timeseries' <<<"$cats" | tr '\n' ' ')"
+  local modules pw12 pw13 old sub c args sweep acl clients
+  modules="$(as mroom-gate "$GATE_PW" MODULE LIST | tr -d '\r' | awk 'prev == "name" { print } { prev = $0 }' | tr '\n' ' ')"
+  echo "  $IMAGE: $(as mroom-gate "$GATE_PW" INFO server | tr -d '\r' | grep '^redis_version:'), modules: ${modules:-none}"
   if [[ "$IMAGE" == redis:8* ]]; then
-    expect_true "this Redis 8 has no @search, so the rule for it goes untested" grep -qx search <<<"$cats"
+    expect_true "this Redis 8 has no modules, so their commands go unchecked" [ -n "$modules" ]
   fi
   expect_true "the default user signed in" eval '! redis-cli -e PING >/dev/null 2>&1'
 
@@ -83,16 +125,71 @@ t_the_gate_on_a_real_redis() {
   expect_true "env 12 read env 13's key" denied shop_qa_12 "$pw12" GET shop:qa13:a
   expect_true "env 12 wrote outside its prefix" denied shop_qa_12 "$pw12" SET cache:a 1
   expect_true "env 12 published on env 13's channel" denied shop_qa_12 "$pw12" PUBLISH shop:qa13:events x
-  for c in "KEYS *" "SCAN 0" RANDOMKEY FLUSHALL FLUSHDB "SWAPDB 0 1" INFO "CONFIG GET maxmemory" "CLIENT LIST" \
-    "ACL LIST" "PUBSUB CHANNELS" "PUBSUB SHARDCHANNELS" "PUBSUB NUMSUB x" "PUBSUB SHARDNUMSUB x" "FUNCTION LIST" \
-    "SCRIPT FLUSH" "CLIENT TRACKING on"; do
-    # shellcheck disable=SC2086  # each command is plain words
-    expect_true "env 12 may run $c" denied shop_qa_12 "$pw12" $c
+  expect_true "env 12 reached env 13's key from a script" denied shop_qa_12 "$pw12" EVAL "return redis.call('GET', 'shop:qa13:a')" 0
+  for c in "KEYS *" "SCAN 0" RANDOMKEY DBSIZE FLUSHALL FLUSHDB "SWAPDB 0 1" INFO TIME "MEMORY STATS" \
+    "CONFIG GET maxmemory" "CLIENT LIST" "ACL LIST" "PUBSUB CHANNELS" "PUBSUB SHARDCHANNELS" "PUBSUB NUMSUB x" \
+    "PUBSUB SHARDNUMSUB x" "PUBSUB NUMPAT" "FUNCTION LIST" "SCRIPT FLUSH" "SCRIPT DEBUG YES" "CLIENT TRACKING on"; do
+    read -r -a args <<<"$c"
+    expect_true "env 12 may run $c" denied shop_qa_12 "$pw12" "${args[@]}"
   done
-  if grep -qx search <<<"$cats"; then expect_true "env 12 listed every index" denied shop_qa_12 "$pw12" FT._LIST; fi
-  if grep -qx timeseries <<<"$cats"; then
+
+  # No module command at all: a module's key specs decide what its commands reach, and some name only
+  # their first key. JSON.MGET read other environments' documents before this rule.
+  if [ -n "$modules" ]; then
+    expect_true "env 12 read another environment's JSON" denied shop_qa_12 "$pw12" JSON.MGET shop:qa12:x shop:qa13:a '$'
+    expect_true "env 12 merged another environment's sketch" denied shop_qa_12 "$pw12" CMS.MERGE shop:qa12:c 1 shop:qa13:c
+    expect_true "env 12 listed every index" denied shop_qa_12 "$pw12" FT._LIST
     expect_true "env 12 queried every time series" denied shop_qa_12 "$pw12" TS.QUERYINDEX a=b
+    sweep="$(module_sweep shop_qa_12)"
+    echo "  module commands denied: $(grep -c -x denied <<<"$sweep" || true)"
+    expect_true "env 12 may run module commands: $(grep -v -x denied <<<"$sweep" | tr '\n' ' ')" \
+      eval '! grep -q -v -x denied <<<"$sweep"'
   fi
+
+  # What a Laravel app and Horizon send: the cache, locks, queues, sessions, tags, broadcasting, Pulse.
+  while read -r -a args; do
+    expect_true "env 12 may not run ${args[*]}, which an app needs" may shop_qa_12 "${args[@]}" </dev/null
+  done <<'NEEDED'
+GET shop:qa12:k
+SET shop:qa12:k v EX 60 NX
+SETEX shop:qa12:k 60 v
+MGET shop:qa12:a shop:qa12:b
+INCRBY shop:qa12:k 1
+DEL shop:qa12:k
+UNLINK shop:qa12:a shop:qa12:b
+EXISTS shop:qa12:k
+EXPIRE shop:qa12:k 60
+TTL shop:qa12:k
+TYPE shop:qa12:k
+HSET shop:qa12:h f v
+HGETALL shop:qa12:h
+HINCRBY shop:qa12:h f 1
+RPUSH shop:qa12:queues:default job
+LPOP shop:qa12:queues:default
+BLPOP shop:qa12:queues:default 1
+LLEN shop:qa12:queues:default
+ZADD shop:qa12:queues:default:delayed 1 job
+ZRANGEBYSCORE shop:qa12:queues:default:delayed -inf +inf
+ZREMRANGEBYSCORE shop:qa12:queues:default:delayed -inf +inf
+ZCARD shop:qa12:queues:default:delayed
+ZSCAN shop:qa12:tag:entries 0
+SADD shop:qa12:s m
+SMEMBERS shop:qa12:s
+EVAL return(1) 0
+EVALSHA e0e1f9fabfc9d4800c877a703b823ac0578ff8db 0
+SCRIPT LOAD return(1)
+MULTI
+EXEC
+WATCH shop:qa12:k
+PING
+SELECT 1
+CLIENT SETNAME app
+PUBLISH shop:qa12:events x
+SUBSCRIBE shop:qa12:events
+PSUBSCRIBE shop:qa12:*
+XADD shop:qa12:pulse * k v
+XRANGE shop:qa12:pulse - +
+NEEDED
 
   # A second request: a new password, the old one refused, and its open connections closed.
   as shop_qa_12 "$pw12" SUBSCRIBE shop:qa12:events >/dev/null 2>&1 &
@@ -138,8 +235,10 @@ t_the_gate_on_a_real_redis() {
 
   gate "redis-user-remove 12"; expect_rc 0
   expect_true "env 12's user still signs in" cannot shop_qa_12 "$pw12" PING
-  expect_true "the aclfile still holds env 12's user" eval '! grep -q "^user shop_qa_12 " "$ACL_DIR/users.acl"'
-  expect_true "the aclfile lost env 13's user" grep -q "^user shop_qa_13 " "$ACL_DIR/users.acl"
+  acl="$(acl_file)" || acl=""
+  expect_true "the aclfile could not be read" [ -n "$acl" ]
+  expect_true "the aclfile still holds env 12's user" eval '! grep -q "^user shop_qa_12 " <<<"$acl"'
+  expect_true "the aclfile lost env 13's user" grep -q "^user shop_qa_13 " <<<"$acl"
 
   # With the default user on, any process on the box reaches every key: the gate refuses to go on.
   expect_true "the default user could not be turned on" can mroom-gate "$GATE_PW" ACL SETUSER default on

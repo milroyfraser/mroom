@@ -92,10 +92,11 @@ redis_world() {
 #!/usr/bin/env bash
 # Logs every argument to $T/redis.argv, and "auth=<yes|no> db=<n> <command>" per call to $T/redis.log:
 # auth=yes when REDISCLI_AUTH held the gate's password. An EVAL's script is logged as <script> and kept
-# in $T/redis.script. Answers from $T/redis/*: version, no-aclfile, default-on, no-modules, databases,
-# save-fails, setuser-fails, keys-<db> (one key per line, for EVAL to count), two-steps (database 0's
-# first step returns cursor 17), noise (a warning on stderr for every call) and old-cli (error replies
-# on stdout, where an older redis-cli prints them).
+# in $T/redis.script. Answers from $T/redis/*: version, no-aclfile, default-on, no-modules (MODULE LIST is
+# empty), module-leak (json.mget is also in @string), databases, save-fails, save-fails-later (every ACL
+# SAVE after the first fails), setuser-fails, keys-<db> (one key per line, for EVAL to count), two-steps
+# (database 0's first step returns cursor 17), noise (a warning on stderr for every call) and old-cli
+# (error replies on stdout, where an older redis-cli prints them).
 printf '%s\n' "$*" >>"$T/redis.argv"
 auth=no
 if [ "${REDISCLI_AUTH:-}" = gate-secret-pw ]; then auth=yes; fi
@@ -120,8 +121,23 @@ case "${cmd[*]}" in
     if [ -f "$T/redis/default-on" ]; then echo 'user default on nopass sanitize-payload ~* &* +@all'
     else echo 'user default off sanitize-payload resetchannels -@all'; fi
     echo 'user mroom-gate on sanitize-payload #6b1c ~* &* +@all' ;;
-  "ACL CAT") printf '%s\n' keyspace read write dangerous scripting; [ -f "$T/redis/no-modules" ] || printf '%s\n' search json timeseries ;;
-  "ACL SAVE") if [ -f "$T/redis/save-fails" ]; then err "ERR There was an error trying to save the ACLs"; fi; echo OK ;;
+  "MODULE LIST")
+    if [ ! -f "$T/redis/no-modules" ]; then
+      printf 'name\nReJSON\nver\n20808\npath\n/usr/lib/redis/modules/rejson.so\nargs\n'
+      printf 'name\nsearch\nver\n80200\npath\n/usr/lib/redis/modules/redisearch.so\nargs\n'
+    fi ;;
+  "COMMAND LIST FILTERBY MODULE ReJSON") printf '%s\n' json.get json.mget json.set ;;
+  "COMMAND LIST FILTERBY MODULE search") printf '%s\n' ft.search ft._list ;;
+  "COMMAND LIST FILTERBY ACLCAT "*)
+    printf '%s\n' get set del
+    if [ -f "$T/redis/module-leak" ] && [ "${cmd[4]}" = string ]; then echo json.mget; fi ;;
+  "ACL SAVE")
+    if [ -f "$T/redis/save-fails" ]; then err "ERR There was an error trying to save the ACLs"; fi
+    if [ -f "$T/redis/save-fails-later" ]; then
+      if [ -f "$T/redis/saved-once" ]; then err "ERR There was an error trying to save the ACLs"; fi
+      : >"$T/redis/saved-once"
+    fi
+    echo OK ;;
   "ACL SETUSER "*) if [ -f "$T/redis/setuser-fails" ]; then err "ERR Error in ACL SETUSER modifier '-pubsub|shardnumsub': Unknown command"; fi; echo OK ;;
   "ACL DELUSER "*) echo 1 ;;
   "CLIENT KILL USER "*) echo 0 ;;
@@ -374,7 +390,8 @@ PY
   expect_rc 2; expect_err_has "the password must be printable ASCII"
 }
 
-DENIED='-@dangerous -scan -randomkey -client|tracking -pubsub|channels -pubsub|shardchannels -pubsub|numsub -pubsub|shardnumsub -function -script|flush -script|kill'
+# The rule's grants and what it takes back: Redis's own types and functions, never @all.
+RULE='+@keyspace +@string +@hash +@list +@set +@sortedset +@stream +@bitmap +@hyperloglog +@geo +@pubsub +@scripting +@transaction +@connection -@dangerous -scan -randomkey -dbsize -client|tracking -pubsub|channels -pubsub|shardchannels -pubsub|numsub -pubsub|shardnumsub -pubsub|numpat -function -script|flush -script|kill -script|debug'
 
 t_redis_user_add_limits_the_user_to_its_prefix() {
   redis_world
@@ -388,21 +405,32 @@ t_redis_user_add_limits_the_user_to_its_prefix() {
   hash="$(printf '%s' "$pw" | sha256sum | cut -d' ' -f1)"
   log="$(redis_log)"
   expect_true "the user's rule is wrong" has "$log" \
-    "auth=yes db=0 ACL SETUSER shop_qa_12 reset on #$hash ~shop:qa12:* &shop:qa12:* +@all $DENIED -@search -@timeseries"
+    "auth=yes db=0 ACL SETUSER shop_qa_12 reset on #$hash ~shop:qa12:* &shop:qa12:* $RULE"
+  expect_true "the user is given every command" lacks "$log" "+@all"
+  expect_true "the modules' commands are not checked against the grants" has "$log" "auth=yes db=0 COMMAND LIST FILTERBY ACLCAT connection"
   expect_true "old connections are not closed" has "$log" "auth=yes db=0 CLIENT KILL USER shop_qa_12"
-  expect_true "the users are not saved" has "$log" "auth=yes db=0 ACL SAVE"
+  run tail -n 1 "$T/redis.log"; expect_out "auth=yes db=0 ACL SAVE"
   expect_true "the password reached a redis-cli command line" lacks "$(cat "$T/redis.argv")" "$pw"
   expect_true "the gate's own password reached a command line" lacks "$(cat "$T/redis.argv")" "gate-secret-pw"
   expect_true "the password reached the gate log" lacks "$(gate_log_text)" "$pw"
   expect_true "the password reached syslog" lacks "$(cat "$T/syslog")" "$pw"
 }
 
-t_redis_without_module_commands_gets_the_rule_without_them() {
+t_without_modules_there_is_nothing_to_check() {
   redis_world; : >"$T/redis/no-modules"
   gate provision "redis-user-add 3"
   expect_rc 0
-  expect_true "the rule names categories this Redis lacks" lacks "$(redis_log)" "-@search"
-  expect_true "the rule is wrong" has "$(redis_log)" "&shop:qa3:* +@all $DENIED"
+  expect_true "categories were listed with no module to check" lacks "$(redis_log)" "FILTERBY ACLCAT"
+  expect_true "the rule is wrong" has "$(redis_log)" "&shop:qa3:* $RULE"
+}
+
+t_a_module_command_in_a_granted_category_is_refused() {
+  redis_world; : >"$T/redis/module-leak"
+  gate provision "redis-user-add 3"
+  expect_rc 1
+  expect_err_has "redis-user-add 3: a module puts commands in a category environments are given, so its key checks would decide what they reach: json.mget"
+  expect_true "a user was set anyway" lacks "$(redis_log)" "ACL SETUSER"
+  expect_true "it printed credentials" lacks "$out" "REDIS_PASSWORD"
 }
 
 t_redis_without_an_aclfile_or_older_than_7_is_refused() {
@@ -421,7 +449,7 @@ t_redis_with_its_default_user_on_is_refused() {
   for c in "redis-user-add 3" "redis-user-remove 3" "redis-clear 3"; do
     gate provision "$c"; expect_rc 1; expect_err_has "Redis's default user is on, so every process on the box reaches every key"
   done
-  expect_true "Redis was changed anyway" eval '! grep -q -E "SETUSER|DELUSER|EVAL" "$T/redis.log"'
+  expect_true "Redis was changed anyway" eval '! grep -q -E "SETUSER|DELUSER|EVAL|SAVE" "$T/redis.log"'
 }
 
 t_redis_warnings_are_never_read_as_values() {
@@ -431,24 +459,34 @@ t_redis_warnings_are_never_read_as_values() {
   rm "$T/redis/no-aclfile"
   gate provision "redis-user-add 3"
   expect_rc 0; expect_out_has "REDIS_USERNAME=shop_qa_3"
-  expect_true "the categories were misread" has "$(redis_log)" "$DENIED -@search -@timeseries"
+  expect_true "the module check or the rule was misread" has "$(redis_log)" "&shop:qa3:* $RULE"
 }
 
 t_an_error_reply_is_reported_from_either_stream() {
   redis_world; : >"$T/redis/setuser-fails"
   gate provision "redis-user-add 3"
   expect_rc 1; expect_err_has "redis-user-add 3: ERR Error in ACL SETUSER modifier '-pubsub|shardnumsub'"
-  : >"$T/redis/old-cli"
+  : >"$T/redis.log"; : >"$T/redis/old-cli"
   gate provision "redis-user-add 3"
   expect_rc 1; expect_err_has "redis-user-add 3: ERR Error in ACL SETUSER modifier '-pubsub|shardnumsub'"
   expect_true "it printed credentials" lacks "$out" "REDIS_PASSWORD"
-  expect_true "it saved a user it could not set" lacks "$(redis_log)" "ACL SAVE"
+  run tail -n 1 "$T/redis.log"; expect_out_has "ACL SETUSER shop_qa_3"
 }
 
-t_a_redis_user_that_cannot_be_saved_fails() {
+t_a_redis_that_cannot_save_is_refused_before_a_change() {
   redis_world; : >"$T/redis/save-fails"
   gate provision "redis-user-add 3"
-  expect_rc 1; expect_err_has "redis-user-add 3: ACL SAVE: ERR There was an error trying to save the ACLs"
+  expect_rc 1; expect_err_has "redis-user-add 3: Redis cannot save its users, so nothing was changed: ERR There was an error"
+  expect_true "a user changed anyway" lacks "$(redis_log)" "ACL SETUSER"
+  gate provision "redis-user-remove 3"
+  expect_rc 1; expect_err_has "redis-user-remove 3: Redis cannot save its users, so nothing was changed"
+  expect_true "a user was removed anyway" lacks "$(redis_log)" "ACL DELUSER"
+}
+
+t_a_change_that_could_not_be_saved_says_so() {
+  redis_world; : >"$T/redis/save-fails-later"
+  gate provision "redis-user-add 3"
+  expect_rc 1; expect_err_has "redis-user-add 3: the user changed but was not saved; run redis-user-add again once Redis can save"
   expect_true "it printed credentials" lacks "$out" "REDIS_PASSWORD"
 }
 
@@ -456,8 +494,8 @@ t_redis_user_remove_deletes_the_user_and_saves() {
   redis_world
   gate provision "redis-user-remove 12"
   expect_rc 0; expect_out "redis user shop_qa_12: removed"
-  run tail -n 2 "$T/redis.log"
-  expect_out $'auth=yes db=0 ACL DELUSER shop_qa_12\nauth=yes db=0 ACL SAVE'
+  run tail -n 3 "$T/redis.log"
+  expect_out $'auth=yes db=0 ACL SAVE\nauth=yes db=0 ACL DELUSER shop_qa_12\nauth=yes db=0 ACL SAVE'
 }
 
 t_redis_clear_deletes_the_prefix_inside_redis_in_every_database() {
@@ -473,8 +511,8 @@ t_redis_clear_deletes_the_prefix_inside_redis_in_every_database() {
   expect_true "the gate read key names back or deleted them itself" eval '! grep -q -E -- "--scan| UNLINK" "$T/redis.log"'
   script="$(cat "$T/redis.script")"
   expect_true "the step does not scan for its pattern" has "$script" "redis.call('SCAN', ARGV[1], 'MATCH', ARGV[2], 'COUNT', 1000)"
-  expect_true "the step does not unlink what it found" has "$script" "redis.call('UNLINK', unpack(keys, i, math.min(i + 499, #keys)))"
-  expect_true "the step replies with more than a cursor and a count" has "$script" "return {r[1], #keys}"
+  expect_true "the step does not count what UNLINK removed" has "$script" "n = n + redis.call('UNLINK', unpack(keys, i, math.min(i + 499, #keys)))"
+  expect_true "the step replies with more than a cursor and a count" has "$script" "return {r[1], n}"
 }
 
 t_redis_clear_follows_the_cursor() {
@@ -539,12 +577,14 @@ test_case one-request-per-environment t_one_request_at_a_time_per_environment
 test_case logged t_requests_and_refusals_are_logged
 test_case scram-rfc-7677 t_the_password_verifier_matches_rfc_7677
 test_case redis-user-add t_redis_user_add_limits_the_user_to_its_prefix
-test_case redis-without-modules t_redis_without_module_commands_gets_the_rule_without_them
+test_case redis-without-modules t_without_modules_there_is_nothing_to_check
+test_case redis-module-leak t_a_module_command_in_a_granted_category_is_refused
 test_case redis-aclfile-and-version t_redis_without_an_aclfile_or_older_than_7_is_refused
 test_case redis-default-user-on t_redis_with_its_default_user_on_is_refused
 test_case redis-warnings-not-values t_redis_warnings_are_never_read_as_values
 test_case redis-error-either-stream t_an_error_reply_is_reported_from_either_stream
-test_case redis-save-fails t_a_redis_user_that_cannot_be_saved_fails
+test_case redis-save-fails t_a_redis_that_cannot_save_is_refused_before_a_change
+test_case redis-save-fails-later t_a_change_that_could_not_be_saved_says_so
 test_case redis-user-remove t_redis_user_remove_deletes_the_user_and_saves
 test_case redis-clear t_redis_clear_deletes_the_prefix_inside_redis_in_every_database
 test_case redis-clear-cursor t_redis_clear_follows_the_cursor
