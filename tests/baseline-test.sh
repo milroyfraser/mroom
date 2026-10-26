@@ -395,7 +395,8 @@ t_garage_is_installed_with_its_config_secrets_and_unit() {
   expect_true "a config lets nginx keep a copy of an answer" \
     eval '[ "$(grep -c -xF "proxy_max_temp_file_size 0;" <<<"$lines")" = 2 ]'
   for line in "client_max_body_size 5g;" "proxy_http_version 1.1;" "proxy_request_buffering off;" \
-    'proxy_set_header Host $http_host;' "client_max_body_size 1k;" 'proxy_redirect ~^/(.*)$ /$bucket/$1;'; do
+    'proxy_set_header Host $http_host;' "client_max_body_size 1k;" 'proxy_redirect ~^/(.*)$ /$bucket/$1;' \
+    "absolute_redirect off;"; do
     expect_true "the nginx configs lack: $line" grep -qxF -- "$line" <<<"$lines"
   done
   # nginx reads a bare { as a block: a regex with a count in it must be quoted.

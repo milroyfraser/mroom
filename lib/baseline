@@ -605,6 +605,7 @@ files.$zone, public files: /<bucket>/<path> reads <path> from a bucket whose web
             rewrite ^/[^/]+(/.*)\$ \$1 break;
             proxy_max_temp_file_size 0;
             proxy_redirect ~^/(.*)\$ /\$bucket/\$1;
+            absolute_redirect off;
             proxy_set_header Host \$bucket.web.mroom.invalid;
             proxy_pass http://unix:$base/run/web.sock;
         }
