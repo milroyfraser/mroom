@@ -277,7 +277,7 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 | `env-sha <N>` | `env=` the SHA-256 of the API site's `.env` (or `missing`), and `commit=` the commit `code-put` recorded (or `none`) |
 | `signin-code <N> <email>` | a sign-in code for a persona address, from the app's `php artisan mroom:signin-code <email>` or its `qa-signin` hook |
 | `user-clean <N>` | stops the site user's processes (PHP-FPM's pool workers once: their master starts fresh ones, which end with the site) and deletes its files in `/tmp`, `/var/tmp`, `/dev/shm`, `/var/crash`, `/run/lock` and `/dev/mqueue`, its IPC objects and its crontab, before qa-down deletes the sites |
-| `mail-user-add <N>` | an SMTP login of its own on the box's Mailpit (D19), given only while mroom's mail relay holds the SMTP port; prints `MAIL_MAILER`, `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME` and a new `MAIL_PASSWORD` |
+| `mail-user-add <N>` | an SMTP login of its own on the box's Mailpit (D19), given only while systemd's socket for mroom's mail relay holds the SMTP port; prints `MAIL_MAILER`, `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME` and a new `MAIL_PASSWORD` |
 | `mail-user-remove <N>` | the environment's SMTP login |
 | `mail-read <N> <email>` | as JSON, the newest five mails the environment's login sent to a persona address (To, Cc or Bcc), and only to personas: sender, recipients, subject and text |
 | `mail-clear <N>` | every mail the environment's login sent |
@@ -347,14 +347,24 @@ address would add are turned off.
 - **No port to take.** Mailpit listens only on Unix sockets in a folder that only the box user can open,
   so no site user can reach its API or stand in for it. Apps send to `127.0.0.1:1025`, where mroom's mail
   relay (`lib/mail-relay`) pipes each connection to Mailpit's SMTP socket. Anyone on the box may take a free
-  TCP port, and with it the logins apps send; the relay does not restart with Mailpit, so the port is never
-  free, and `mail-user-add` gives no login unless the relay holds it.
+  TCP port, and with it the logins apps send, so systemd holds this one: `mroom-mail-relay.socket` listens
+  on it from boot, as root, and hands it to the relay. The port stays held while the relay restarts, after
+  an update, a crash or a reboot, and a connection that comes meanwhile waits for it. While it is held,
+  nothing else can listen where apps' mail arrives. `mail-user-add` gives no login unless what listens on
+  `127.0.0.1` at the port is that socket, active as systemd reports it, or the relay itself; another root
+  program there, such as a mail catcher in a container, is refused.
 - **Restarts.** Mailpit reads its logins only when it starts, so `mail-user-add` and `mail-user-remove` stop
-  it, Forge's daemon starts it again, and the gate waits until it answers on HTTP and SMTP: a moment without
-  SMTP, which a queued mail with more than one try survives. Forge counts a daemon that stops within its
-  Start Seconds as a failed start and gives up after three in a row, so the gate lets each Mailpit run 3
-  seconds before it stops it again; a burst of logins takes 3 seconds each. A restart also moves Mailpit
-  onto the build `mroom baseline mailpit` installed last.
+  it, systemd starts it again (`mroom-mailpit.service`, however often), and the gate waits until it answers
+  on HTTP and SMTP: a moment without SMTP, which a queued mail with more than one try survives. Each Mailpit
+  runs a second before the next stop, so no caller can keep it down; one run by a supervisor instead, such
+  as a Forge daemon, runs 3, since a supervisor gives up after three stops within its Start Seconds. A
+  restart also moves Mailpit onto the build `mroom baseline mailpit` installed last.
+- **The relay** ends a session when Mailpit's side does, or the client's fails, and after at most
+  `MAIL_RELAY_MAX_SECONDS` (1800). It runs at most `MAIL_RELAY_MAX_CONNECTIONS` (256) at once, and at most
+  `MAIL_RELAY_MAX_PER_USER` (32) from one Linux user, so no QA site can take every place.
+- **Confined.** Mailpit reads mail from untrusted apps, so its unit lets it see only its build, its data,
+  its sockets and the two login files, with no network; the relay sees only its script and Mailpit's
+  sockets. Neither can read the box user's other secrets.
 - **The login file** is never left empty, which Mailpit would take as "no login needed": it keeps a login
   no one knows, and a write that fails leaves the file as it was.
 - **Reading and deleting.** Only the gate holds the API login. `mail-read` and `mail-clear` act only on mail
@@ -365,7 +375,13 @@ address would add are turned off.
 **Set up once,** for an app named `shop`, on Postgres 16 or later and Redis 7 or later. Before Postgres 16,
 a role that may create roles may also grant itself the administrator ones, so the gate refuses older
 versions. CI runs these steps against a real Postgres, a real Redis 7 and 8, real site users and sudo, and
-the real Mailpit (`tests/pg/`, `tests/redis/`, `tests/site/` and `tests/mail/`).
+the real Mailpit under systemd (`tests/pg/`, `tests/redis/`, `tests/site/` and `tests/mail/`).
+
+Steps marked *as root* change what the box user cannot, so they must not trust anything the box user, or a
+program running as it, could have changed. Run them from a session those programs cannot change, such as a
+Forge recipe run as root (Server > Recipes), not by typing `sudo` in the box user's shell, whose `PATH`,
+aliases and functions they can change. Their scripts read no file the box user can write: what root
+installs is written out in the step itself.
 
 1. In the box user's `~/.ssh/authorized_keys`, by hand (Forge's SSH key screen stores a bare key, without
    options):
@@ -477,23 +493,25 @@ the real Mailpit (`tests/pg/`, `tests/redis/`, `tests/site/` and `tests/mail/`).
    Until then Redis is exactly as open as it was. The gate refuses Redis requests while the default user
    is on, since with it any process on the box reaches every key.
 
-10. `site-op`, owned by root so the box user cannot change the helper itself, and the one sudoers
-    line that lets the box user run it as any of Forge's isolated users, never as root. Install it again
-    after each mroom upgrade: the gate refuses a copy that is not its release's own.
+10. *As root:* `site-op`, owned by root so the box user cannot change the helper itself, and the one
+    sudoers line that lets the box user run it as any of Forge's isolated users, never as root. Install it
+    again after each mroom upgrade: the gate refuses a copy that is not its release's own. Root never opens
+    a path of the box user's: `runuser` reads the release's copy as the box user (`forge` here), so a link
+    planted there reaches nothing the box user could not read anyway. The sudoers line is written by root,
+    checked, and only then put in place, under a name with a dot in it, which sudo skips until then:
 
     ```bash
-    The sudoers line is written to a private file in your home, never a fixed name in `/tmp`, where any
-    user could put a file of their own first, and each step runs only if the one before it worked:
-
-    ```bash
-    release="$(dirname "$(dirname "$(readlink -f ~/.local/bin/mroom)")")" &&
-      sudo install -d -o root -g root -m 755 /usr/local/libexec/mroom &&
-      sudo install -o root -g root -m 755 "$release/lib/site-op" /usr/local/libexec/mroom/site-op &&
-      line="$(mktemp ~/.mroom-gate-sudoers.XXXXXX)" &&
-      echo 'forge ALL=(%isolated) NOPASSWD: /usr/local/libexec/mroom/site-op' >"$line" &&
-      sudo visudo -cf "$line" &&
-      sudo install -o root -g root -m 440 "$line" /etc/sudoers.d/mroom-gate
-    rm -f "$line"
+    set -eu
+    install -d -o root -g root -m 755 /usr/local/libexec/mroom
+    runuser -u forge -- cat /home/forge/.local/share/mroom/lib/site-op >/usr/local/libexec/mroom/.site-op.new
+    chown root:root /usr/local/libexec/mroom/.site-op.new
+    chmod 755 /usr/local/libexec/mroom/.site-op.new
+    mv /usr/local/libexec/mroom/.site-op.new /usr/local/libexec/mroom/site-op
+    line=/etc/sudoers.d/.mroom-gate.new
+    echo 'forge ALL=(%isolated) NOPASSWD: /usr/local/libexec/mroom/site-op' >"$line"
+    chmod 440 "$line"
+    visudo -cf "$line"
+    mv "$line" /etc/sudoers.d/mroom-gate
     ```
 
     A QA site's user never needs to log in, but its PR's code could add its own SSH key: add
@@ -506,12 +524,18 @@ the real Mailpit (`tests/pg/`, `tests/redis/`, `tests/site/` and `tests/mail/`).
     (`.test`). A site user's name is at most 32 characters, so an app name of 19 characters or fewer always
     fits.
 
-12. The mail catcher, when `qa.parity.mail` is `catcher` (the default): `mroom baseline mailpit`. It
-    downloads Mailpit at the build `lib/core/pins.txt` names, refuses it unless the archive and the binary
-    match their SHA-256 pins, puts mroom's mail relay beside it, makes their logins (mode 600, in
-    `~/.config/mroom/secrets`), and prints the two Forge daemons to create, with Start Seconds 1: the relay
-    on `127.0.0.1:1025` (`MROOM_QA_SMTP_PORT` in `box.env` to change it) and Mailpit on Unix sockets. It can
-    run again: what is in place is kept, and it says when a daemon needs a restart.
+12. The mail catcher, when `qa.parity.mail` is `catcher` (the default): `mroom baseline mailpit`, then,
+    *as root*, the script it prints. Baseline downloads Mailpit at the build `lib/core/pins.txt` names,
+    refuses it unless the archive and the binary match their SHA-256 pins, puts mroom's mail relay beside
+    it and makes their logins (mode 600, in `~/.config/mroom/secrets`). Its script writes three systemd
+    units, each one's text in full, and starts them: the socket on `127.0.0.1:1025` (`MROOM_QA_SMTP_PORT` in
+    `box.env` to change it), the relay and Mailpit, both run as the box user. Before running it, check that
+    every `cat >` writes into `/etc/systemd/system`, every `Exec` line runs a file under the box user's home, each service has `User=` the box user, nothing
+    is an `ExecStartPre`, `ExecStartPost`, `ExecStop` or `ExecReload`, no `Exec` value starts with `+`, `!`
+    or `@`, and the socket listens on `127.0.0.1` only. Baseline can run again: what is in place is kept, it
+    restarts the relay or Mailpit itself when their files changed (systemd holds the port meanwhile), and it
+    prints a script again only for units that differ. Nothing else may listen on the port: on a box that ran
+    an earlier mail catcher there, stop that first.
 
 ## Regression label
 

@@ -1,43 +1,49 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317,SC2016  # t_* run through test_case; a $ in single quotes is for eval, later
-# The gate's mail operations against the real Mailpit, run the way Forge runs it: what a fake cannot show.
-# mroom baseline mailpit downloads the pinned build and checks its SHA-256, and a real supervisord, with the
-# settings Forge gives a daemon, runs the two daemons it prints: mroom's mail relay and Mailpit. Each
-# environment sends with its own login through the relay; mail with no login, a wrong one or a forged tag
-# gets nowhere; mail-read returns only an environment's own mail and mail-clear deletes only it; a removed
-# login stops working; a burst of new logins never makes the daemon give up; and while the gate restarts
-# Mailpit, nothing else can take the SMTP port. CI only: it downloads Mailpit and needs supervisord, so
-# tests/run.sh does not pick it up.
+# The gate's mail operations against the real Mailpit, run the way a box runs it: what a fake cannot show.
+# mroom baseline mailpit downloads the pinned build and checks its SHA-256, and the three systemd units are
+# installed by running, as root, the very script it prints, from a home under /home as on a box (the units
+# hide /home and /tmp from Mailpit, but for its own files). The test then checks:
+# - systemd holds the SMTP port as root and hands it to mroom's mail relay;
+# - each environment sends with its own login through it, and mail with no login, a wrong one or a forged
+#   tag gets nowhere;
+# - mail-read returns only an environment's own mail, and mail-clear deletes only it;
+# - a burst of new logins restarts Mailpit as often as it needs;
+# - while the relay restarts, or is stopped, nothing else can take the port;
+# - a removed login stops working.
+# CI only: it downloads Mailpit and installs systemd units as root, replacing a box's own, so it refuses to
+# run anywhere but GitHub Actions, and tests/run.sh does not pick it up.
 set -euo pipefail
+if [ "${GITHUB_ACTIONS:-}" != true ]; then
+  echo "tests/mail/gate-real-test.sh: CI only; it would replace this machine's mroom systemd units" >&2
+  exit 2
+fi
 SUITE=mail-real
 # shellcheck source=tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
+UNITS=(mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service)
+CI_HOME=""
 cleanup() {
   local f
-  for f in "$TOP"/*/supervisord.conf; do supervisorctl -c "$f" shutdown >/dev/null 2>&1 || true; done
-  for f in "$TOP"/*/squatter.pid; do if [ -s "$f" ]; then kill "$(cat "$f")" 2>/dev/null || true; fi; done
+  for f in "$TOP"/*/squatter.pid "$TOP"/*/v6.pid; do if [ -s "$f" ]; then kill "$(cat "$f")" 2>/dev/null || true; fi; done
+  sudo pkill -f mroom-ci-root-listener 2>/dev/null || true
+  sudo systemctl disable --now "${UNITS[@]}" >/dev/null 2>&1 || true
+  for f in "${UNITS[@]}"; do sudo rm -f "/etc/systemd/system/$f"; done
+  sudo systemctl daemon-reload || true
+  [ -z "$CI_HOME" ] || rm -rf "$CI_HOME"
   rm -rf "$TOP"
 }
 trap cleanup EXIT
 
 gate() { run env SSH_ORIGINAL_COMMAND="$1" "$MROOM" gate provision; }
 field() { sed -n "s/^$1=//p" <<<"$2"; }
-ctl() { supervisorctl -c "$T/supervisord.conf" "$@" 2>&1 || true; }
-is_running() { case "$(ctl status "$1")" in *RUNNING*) return 0 ;; esac; return 1; }
-# running <program>: whether supervisord runs the program, once it has stayed up past Start Seconds; until
-# then supervisord calls it STARTING.
-running() { local _; for _ in $(seq 1 20); do if is_running "$1"; then return 0; fi; sleep 0.25; done; return 1; }
-# quick_stops: how many times Mailpit stopped before Forge's daemon counted its start a success, each of which
-# brings the daemon a step closer to giving up.
-quick_stops() {
-  local spawned succeeded
-  spawned="$(grep -c "spawned: 'mailpit'" "$T/supervisord.log")" || true
-  succeeded="$(grep -c 'success: mailpit entered RUNNING' "$T/supervisord.log")" || true
-  echo $((spawned - succeeded))
-}
+active() { [ "$(systemctl is-active "$1" 2>/dev/null)" = active ]; }
+main_pid() { systemctl show --property=MainPID --value "$1"; }
+now_ms() { date +%s%3N; }
+under() { [ "$1" -lt "$2" ]; }
 
-# send <user|-> <password> <to> <subject> [<X-Tags>]: one mail through the relay; fails when it is refused.
+# send <user|-> <password> <to> <subject> [<X-Tags>]: one mail to 127.0.0.1:1025; fails when it is refused.
 send() {
   python3 -I - "$@" <<'PY'
 import smtplib, sys
@@ -64,56 +70,8 @@ api() {
       "http://localhost$1"
 }
 
-# start_daemons <baseline output>: the two daemons mroom baseline printed, under a supervisord set up the
-# way Forge sets up a daemon (autostart, autorestart, Start Seconds 1, SIGTERM, stopping the whole group).
-start_daemons() {
-  local commands=() dirs=() name i
-  mapfile -t commands < <(sed -n 's/^  Command: *//p' <<<"$1")
-  mapfile -t dirs < <(sed -n 's/^  Directory: *//p' <<<"$1")
-  if [ "${#commands[@]}" != 2 ] || [ "${#dirs[@]}" != 2 ]; then echo "mroom baseline did not print two daemons" >&2; exit 1; fi
-  cat >"$T/supervisord.conf" <<EOF
-[unix_http_server]
-file=$T/supervisor.sock
-[supervisord]
-logfile=$T/supervisord.log
-pidfile=$T/supervisord.pid
-childlogdir=$T
-[rpcinterface:supervisor]
-supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
-[supervisorctl]
-serverurl=unix://$T/supervisor.sock
-EOF
-  for i in 0 1; do
-    name=mail-relay
-    [ "$i" = 0 ] || name=mailpit
-    cat >>"$T/supervisord.conf" <<EOF
-[program:$name]
-command=${commands[$i]}
-directory=${dirs[$i]}
-autostart=true
-autorestart=true
-startsecs=1
-stopwaitsecs=5
-stopsignal=SIGTERM
-stopasgroup=true
-killasgroup=true
-redirect_stderr=true
-stdout_logfile=$T/$name.log
-EOF
-  done
-  supervisord -c "$T/supervisord.conf"
-  for _ in $(seq 1 60); do
-    if is_running mail-relay && is_running mailpit \
-      && curl -q --silent --fail --max-time 2 --output /dev/null \
-        --unix-socket "$HOME/.local/share/mroom-services/mailpit/run/http.sock" http://localhost/livez; then
-      return 0
-    fi
-    sleep 0.25
-  done
-  ctl status >&2; tail -n 20 "$T/mailpit.log" "$T/mail-relay.log" >&2 || true
-  echo "the daemons did not start" >&2
-  exit 1
-}
+# port_owner: the owner (uid) of what listens on 127.0.0.1:1025.
+port_owner() { awk '$4 == "0A" && $2 == "0100007F:0401" { print $8; exit }' /proc/net/tcp; }
 
 # squat <seconds>: tries to take the SMTP port the way anyone on the box could, every 2 ms, and logs each
 # time it did.
@@ -141,17 +99,41 @@ PY
 }
 squat_result() { wait "$(cat "$T/squatter.pid")" || true; rm -f "$T/squatter.pid"; cat "$T/squatter.log"; }
 
+# root_script_of <output>: the script baseline printed for a person to run as root.
+root_script_of() { sed -n '/^----- run as root -----$/,/^----- end -----$/p' <<<"$1" | sed '1d;$d'; }
+
+wait_ready() {
+  for _ in $(seq 1 80); do
+    if active mroom-mailpit.service && [ "$(port_owner)" = 0 ] \
+      && curl -q --silent --fail --max-time 2 --output /dev/null \
+        --unix-socket "$HOME/.local/share/mroom-services/mailpit/run/http.sock" http://localhost/livez; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  systemctl status --no-pager "${UNITS[@]}" >&2 || true
+  echo "the units did not start" >&2
+  exit 1
+}
+
 t_the_mail_operations_against_the_real_mailpit() {
-  if ! command -v supervisord >/dev/null || ! command -v supervisorctl >/dev/null; then
-    echo "this test needs supervisord and supervisorctl (apt install supervisor)" >&2
-    exit 1
-  fi
+  CI_HOME="$(mktemp -d "/home/$(id -un)/mroom-ci.XXXXXX")"
+  export HOME="$CI_HOME"
   mkdir -p "$HOME/.config/mroom"
   printf 'MROOM_APP_NAME=shop\n' >"$HOME/.config/mroom/box.env"
   run "$MROOM" baseline mailpit
   expect_rc 0; expect_out_has "mailpit v1.32.0: installed, SHA-256"
-  start_daemons "$out"
-  local run_dir="$HOME/.local/share/mroom-services/mailpit/run" pw12 pw13 n pids=() relay_pid
+  # Install the units exactly as baseline tells a person to: its script, run as root.
+  local script
+  script="$(root_script_of "$out")"
+  expect_true "baseline printed no script to run as root" [ -n "$script" ]
+  sudo bash -c "$script"
+  wait_ready
+  local run_dir="$HOME/.local/share/mroom-services/mailpit/run" pw12 pw13 pw25 n pids=() relay_pid started
+  run port_owner; expect_out 0
+  run "$MROOM" baseline mailpit
+  expect_out_has "systemd units: installed as this mroom writes them (mroom-mail-relay.socket active, mroom-mail-relay.service active, mroom-mailpit.service active)."
+  expect_out_has "systemd holds 127.0.0.1:1025 (mroom-mail-relay.socket)."
   # The API is on a Unix socket only, in a folder only the box user can open, and needs the gate's login.
   run stat -c %a "$run_dir"; expect_out 700
   run stat -c %a "$run_dir/http.sock"; expect_out 600
@@ -176,7 +158,6 @@ t_the_mail_operations_against_the_real_mailpit() {
   run api "/api/v1/search?query=$(jq -rn '"tag:\"shop_qa_13\"" | @uri')"
   expect_rc 0
   run jq -r '[.messages[].Subject] | sort | join(" ")' <<<"$out"; expect_out env13
-  # Environment 12 sees only its own mail to ada.
   gate "mail-read 12 ada@example.test"; expect_rc 0
   run jq -r '[.[].subject] | join(" ")' <<<"$out"; expect_out env12
   gate "mail-read 12 ada@example.test"
@@ -190,31 +171,88 @@ t_the_mail_operations_against_the_real_mailpit() {
   run jq -r '[.[].subject] | join(" ")' <<<"$out"; expect_out env13
 
   # A burst of new logins, all at once, while someone tries to take the SMTP port: every login goes out,
-  # Forge's daemon never gives up on Mailpit, the relay never restarts, and the port is never free.
-  relay_pid="$(ctl pid mail-relay)"
-  squat 25
+  # without waiting between restarts (systemd starts Mailpit again however often it stops), and the port
+  # is never free.
+  squat 30
+  started=$(now_ms)
   for n in 20 21 22 23 24; do
     (env SSH_ORIGINAL_COMMAND="mail-user-add $n" "$MROOM" gate provision >"$T/add-$n.out" 2>"$T/add-$n.err"
       echo $? >"$T/add-$n.rc") &
     pids+=($!)
   done
   wait "${pids[@]}"
+  expect_true "the burst waited between restarts, as for a supervisor" under $(($(now_ms) - started)) 10000
   for n in 20 21 22 23 24; do
     run cat "$T/add-$n.rc"; expect_out 0
     expect_true "environment $n's new login does not work" \
       can_send "shop_qa_$n" "$(field MAIL_PASSWORD "$(cat "$T/add-$n.out")")" ada@example.test "burst$n"
   done
-  expect_true "Forge's daemon gave up on Mailpit" running mailpit
-  run grep -c 'gave up' "$T/supervisord.log"; expect_out 0
-  run quick_stops; expect_out 0
-  run ctl pid mail-relay; expect_out "$relay_pid"
+  expect_true "systemd stopped running Mailpit" active mroom-mailpit.service
+  # The relay restarts, and is stopped: systemd holds the port throughout, and the next connection starts
+  # the relay again.
+  relay_pid="$(main_pid mroom-mail-relay.service)"
+  for n in 1 2 3; do sudo systemctl restart mroom-mail-relay.service; sleep 0.5; done
+  expect_true "the relay did not restart" [ "$(main_pid mroom-mail-relay.service)" != "$relay_pid" ]
+  sudo systemctl stop mroom-mail-relay.service
+  run port_owner; expect_out 0
+  gate "mail-user-add 25"; expect_rc 0
+  pw25="$(field MAIL_PASSWORD "$out")"
+  expect_true "mail did not start the stopped relay again" can_send shop_qa_25 "$pw25" ada@example.test woken
+  expect_true "the relay is not running again" active mroom-mail-relay.service
   run squat_result; expect_out "taken 0"
-  # The same squatter takes the port as soon as nothing holds it, which is what the relay prevents.
-  ctl stop mail-relay >/dev/null
+
+  # A relay that changed: baseline restarts it, and systemd holds the port meanwhile, squatter or not.
+  relay_pid="$(main_pid mroom-mail-relay.service)"
+  printf '# changed\n' >>"$HOME/.local/share/mroom-services/mail-relay/mail-relay"
+  squat 6
+  run "$MROOM" baseline mailpit
+  expect_out_has "mail relay: restarted to run this one; systemd held the port meanwhile"
+  sleep 2
+  expect_true "baseline did not restart the relay" [ "$(main_pid mroom-mail-relay.service)" != "$relay_pid" ]
+  run squat_result; expect_out "taken 0"
+  run port_owner; expect_out 0
+  expect_true "the restarted relay does not pass mail" can_send shop_qa_25 "$pw25" ada@example.test after-update
+  # Mailpit's copy of the API login gone: baseline writes it again from the same password and restarts
+  # Mailpit to read it; the gate reads mail as before.
+  local mailpit_pid
+  mailpit_pid="$(main_pid mroom-mailpit.service)"
+  rm "$HOME/.config/mroom/secrets/mailpit-ui.passwd"
+  run "$MROOM" baseline mailpit
+  expect_out_has "Mailpit: restarted to run its build and read its API login"
+  expect_out_has "Mailpit answers."
+  wait_ready
+  expect_true "baseline did not restart Mailpit" [ "$(main_pid mroom-mailpit.service)" != "$mailpit_pid" ]
+  gate "mail-read 25 ada@example.test"; expect_rc 0
+  # A v6only listener at :: beside systemd's socket never sees apps' mail, and blocks nothing.
+  python3 -I -c 'import socket, sys, time
+s = socket.socket(socket.AF_INET6); s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+s.bind(("::", 1025)); s.listen(1); time.sleep(60)' >/dev/null 2>&1 &
+  echo $! >"$T/v6.pid"
+  sleep 0.5
+  gate "mail-user-add 26"; expect_rc 0
+  kill "$(cat "$T/v6.pid")" 2>/dev/null || true
+  # A root process on the port that is not systemd's socket for the relay: no login goes out.
+  sudo systemctl stop mroom-mail-relay.socket mroom-mail-relay.service
+  sudo python3 -I -c 'import socket, sys, time
+s = socket.create_server(("127.0.0.1", 1025)); time.sleep(60)' mroom-ci-root-listener >/dev/null 2>&1 &
+  for n in $(seq 1 50); do [ "$(port_owner)" = 0 ] && break; sleep 0.1; done
+  gate "mail-user-add 27"
+  expect_rc 1; expect_err_has "a root process other than mroom-mail-relay.socket listens on port 1025"
+  expect_true "a password went out" eval '! grep -q MAIL_PASSWORD <<<"$out"'
+  run "$MROOM" baseline mailpit
+  expect_out_has "Something else listens on 127.0.0.1:1025 (user 0)"
+  sudo pkill -f mroom-ci-root-listener || true
+  sleep 0.5
+  sudo systemctl start mroom-mail-relay.socket mroom-mail-relay.service
+  wait_ready
+
+  # The same squatter takes the port as soon as nothing holds it, which is what systemd prevents.
+  sudo systemctl stop mroom-mail-relay.socket mroom-mail-relay.service
   squat 1
   run squat_result; expect_out_has "taken"
   expect_true "the squatter could not take a free port" eval '[ "$out" != "taken 0" ]'
-  ctl start mail-relay >/dev/null
+  sudo systemctl start mroom-mail-relay.socket mroom-mail-relay.service
+  wait_ready
 
   # A removed login stops working once Mailpit has read its logins again; the other one goes on.
   gate "mail-user-remove 12"; expect_rc 0
@@ -224,8 +262,7 @@ t_the_mail_operations_against_the_real_mailpit() {
   gate "mail-user-add 13"; expect_rc 0
   expect_true "an old password still worked" eval '! can_send shop_qa_13 "$pw13" ada@example.test old13'
   expect_true "the new password does not work" can_send shop_qa_13 "$(field MAIL_PASSWORD "$out")" ada@example.test new13
-  expect_true "Forge's daemon gave up on Mailpit" running mailpit
-  run quick_stops; expect_out 0
+  expect_true "systemd stopped running Mailpit" active mroom-mailpit.service
 }
 
 test_case real-mailpit t_the_mail_operations_against_the_real_mailpit

@@ -4,8 +4,9 @@
 # SHA-512 crypt lines in Mailpit's SMTP login file, Mailpit is restarted to read them, a login goes out only
 # while mroom's mail relay holds the SMTP port, and only mail whose Username is the environment's login is
 # read or deleted. Offline: curl is a fake that plays Mailpit's API on its Unix socket, "mailpit" is a copy
-# of perl at the installed path that listens on the SMTP socket, kept running by a loop that plays Forge's
-# daemon (a copy of sleep may be a multi-call binary that goes by its name), and the relay is the real one.
+# of perl at the installed path that listens on the SMTP socket, kept running by a loop that plays a daemon
+# that starts it again (a copy of sleep may be a multi-call binary that goes by its name), and the relay is
+# the real one, listening itself. systemd's root-held socket is tested in CI (tests/mail/gate-real-test.sh).
 # tests/mail/gate-real-test.sh runs the real Mailpit in CI.
 set -euo pipefail
 SUITE=mail
@@ -14,7 +15,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 stop_all() {
   local f
   for f in "$TOP"/*/up; do rm -f "$f"; done
-  for f in "$TOP"/*/pid "$TOP"/*/relay.pid "$TOP"/*/squatter.pid; do
+  for f in "$TOP"/*/pid "$TOP"/*/relay.pid "$TOP"/*/squatter.pid "$TOP"/*/v6.pid; do
     if [ -s "$f" ]; then kill "$(cat "$f")" 2>/dev/null || true; fi
   done
   rm -rf "$TOP"
@@ -103,27 +104,33 @@ mailpit_up() {
 }
 mailpit_down() { rm -f "$T/up"; [ -s "$T/pid" ] && kill "$(cat "$T/pid")" 2>/dev/null; sleep 0.2; }
 
-listening() { (exec 3<>"/dev/tcp/127.0.0.1/$SMTP_PORT") 2>/dev/null; }
+listening() { (exec 3<>"/dev/tcp/${1:-127.0.0.1}/${2:-$SMTP_PORT}") 2>/dev/null; }
+# wait_listening [<address> [<port>]]
 wait_listening() {
-  for _ in $(seq 1 50); do if listening; then return 0; fi; sleep 0.1; done
-  echo "nothing came to listen on $SMTP_PORT" >&2
+  for _ in $(seq 1 50); do if listening "$@"; then return 0; fi; sleep 0.1; done
+  echo "nothing came to listen on ${1:-127.0.0.1}:${2:-$SMTP_PORT}" >&2
   return 1
 }
-# relay_up: mroom's mail relay on the SMTP port, run as Forge's daemon would run it.
+# relay_up [<port>]: mroom's mail relay, run as its systemd unit runs it, but listening itself.
 relay_up() {
-  local services="$HOME/.local/share/mroom-services"
-  python3 -I "$services/mail-relay/mail-relay" 127.0.0.1 "$SMTP_PORT" "$services/mailpit/run/smtp.sock" >"$T/relay.log" 2>&1 &
+  local services="$HOME/.local/share/mroom-services" port="${1:-$SMTP_PORT}"
+  python3 -I "$services/mail-relay/mail-relay" 127.0.0.1 "$port" "$services/mailpit/run/smtp.sock" >"$T/relay.log" 2>&1 &
   echo $! >"$T/relay.pid"
-  wait_listening || { cat "$T/relay.log" >&2; return 1; }
+  wait_listening 127.0.0.1 "$port" || { cat "$T/relay.log" >&2; return 1; }
 }
-# squat: a program that is not the relay, listening on the SMTP port.
+# squat [<address>]: a program that is not the relay, listening on the SMTP port at 127.0.0.1 or the address.
 squat() {
   mkdir -p "$T/other"
   cp "$(command -v perl)" "$T/other/squatter"
-  "$T/other/squatter" -MIO::Socket::INET -e 'my $port = IO::Socket::INET->new(LocalAddr => "127.0.0.1",
-    LocalPort => $ARGV[0], Listen => 5, ReuseAddr => 1) or die "listen: $!"; sleep 600' "$SMTP_PORT" >/dev/null 2>&1 &
+  "$T/other/squatter" -MIO::Socket::INET -e 'my $port = IO::Socket::INET->new(LocalAddr => $ARGV[1],
+    LocalPort => $ARGV[0], Listen => 5, ReuseAddr => 1) or die "listen: $!"; sleep 600' "$SMTP_PORT" "${1:-127.0.0.1}" >/dev/null 2>&1 &
   echo $! >"$T/squatter.pid"
-  wait_listening
+  wait_listening "${1:-127.0.0.1}"
+}
+free_port() {
+  local port=$((20000 + RANDOM % 30000))
+  while (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null || [ "$port" = "$SMTP_PORT" ]; do port=$((port + 1)); done
+  echo "$port"
 }
 stop_pid_file() { if [ -s "$1" ]; then kill "$(cat "$1")" 2>/dev/null || true; rm -f "$1"; fi; sleep 0.2; }
 
@@ -136,6 +143,7 @@ hex48() { [[ "$1" =~ ^[0-9a-f]{48}$ ]]; }
 has() { case "$1" in *"$2"*) return 0 ;; esac; return 1; }
 lacks() { ! has "$@"; }
 at_least() { [ "$1" -ge "$2" ]; }
+now_ms() { date +%s%3N; }
 
 # summary <ID> <Username> <To address> [<Cc address>] [<Bcc address>]: one search result.
 summary() {
@@ -156,12 +164,12 @@ t_mail_user_add_gives_the_environment_a_login_and_restarts_mailpit() {
   world; relay_up; mailpit_up
   local before after password hash started
   before="$(cat "$T/pid")"
-  started=$SECONDS
+  started=$(now_ms)
   gate "mail-user-add 12"
   expect_rc 0
   expect_out_has $'MAIL_MAILER=smtp\nMAIL_HOST=127.0.0.1\nMAIL_PORT='"$SMTP_PORT"$'\nMAIL_USERNAME=shop_qa_12\nMAIL_PASSWORD='
   # Forge's daemon counts a Mailpit stopped within a second of starting as a failed start.
-  expect_true "the gate stopped a Mailpit that had just started" at_least $((SECONDS - started)) 2
+  expect_true "the gate stopped a Mailpit that had just started" at_least $(($(now_ms) - started)) 2500
   password="$(sed -n 's/^MAIL_PASSWORD=//p' <<<"$out")"
   expect_true "the password is not 48 hex characters" hex48 "$password"
   hash="$(sed -n 's/^shop_qa_12://p' "$HOME/.config/mroom/secrets/mailpit-smtp.passwd")"
@@ -173,9 +181,9 @@ t_mail_user_add_gives_the_environment_a_login_and_restarts_mailpit() {
   expect_true "the API password reached a command line" lacks "$(cat "$T/curl.argv" 2>/dev/null)" "$API_PASSWORD"
   expect_true "the password reached the gate log" lacks "$(gate_log_text)" "$password"
   run stat -c %a "$HOME/.config/mroom/secrets/mailpit-smtp.passwd"; expect_out 600
-  started=$SECONDS
+  started=$(now_ms)
   gate "mail-user-add 12"; expect_rc 0
-  expect_true "the second restart came within a second of the first" at_least $((SECONDS - started)) 2
+  expect_true "the second restart came within a second of the first" at_least $(($(now_ms) - started)) 2000
   run grep -c '^shop_qa_12:' "$HOME/.config/mroom/secrets/mailpit-smtp.passwd"; expect_out 1
   run bash -c 'compgen -G "$1/.mailpit-smtp.*" || true' _ "$HOME/.config/mroom/secrets"; expect_out ""
   mailpit_down
@@ -202,8 +210,10 @@ t_a_login_goes_out_only_while_the_relay_holds_the_port() {
   local before
   before="$(cat "$T/pid")"
   gate "mail-user-add 12"
-  expect_rc 1; expect_err_has "nothing listens on 127.0.0.1:$SMTP_PORT; check mroom's mail relay daemon"
-  # Something else on the port would be sent every app's login: no login goes out, and nothing changes.
+  expect_rc 1; expect_err_has "nothing listens on 127.0.0.1:$SMTP_PORT; check mroom-mail-relay.socket"
+  # Something else on the port would be sent every app's login: no login goes out, and nothing changes,
+  # also while a relay runs, on another port.
+  relay_up "$(free_port)"
   squat
   gate "mail-user-add 12"
   expect_rc 1; expect_err_has "something other than mroom's mail relay listens on port $SMTP_PORT"
@@ -211,8 +221,24 @@ t_a_login_goes_out_only_while_the_relay_holds_the_port() {
   expect_true "a refused request changed the logins" lacks "$(logins)" "shop_qa_12:"
   expect_true "a refused request restarted Mailpit" [ "$before" = "$(cat "$T/pid")" ]
   stop_pid_file "$T/squatter.pid"
+  # One on every address would get apps' mail as well.
+  squat 0.0.0.0
+  gate "mail-user-add 12"
+  expect_rc 1; expect_err_has "something listens on every address at port $SMTP_PORT"
+  stop_pid_file "$T/squatter.pid"
+  stop_pid_file "$T/relay.pid"
+  # A listener at another address of the loopback, or a v6only one at ::, never sees what apps send to
+  # 127.0.0.1, and blocks nothing.
+  squat 127.0.0.2
   relay_up
+  # (Where the box has no IPv6, the v6only listener cannot start, and the request passes all the same.)
+  python3 -I -c 'import socket, sys, time
+s = socket.socket(socket.AF_INET6); s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+s.bind(("::", int(sys.argv[1]))); s.listen(1); print("up", flush=True); time.sleep(600)' "$SMTP_PORT" >"$T/v6.out" 2>/dev/null &
+  echo $! >"$T/v6.pid"
+  sleep 0.5
   gate "mail-user-add 12"; expect_rc 0; expect_out_has "MAIL_USERNAME=shop_qa_12"
+  stop_pid_file "$T/v6.pid"
   mailpit_down
 }
 
@@ -223,7 +249,7 @@ t_a_mailpit_that_is_down_or_stays_down_fails_the_request() {
   cp "$(command -v perl)" "$T/other/mailpit"
   "$T/other/mailpit" -e 'sleep 600' &
   local impostor=$!
-  gate "mail-user-add 12"; expect_rc 1; expect_err_has "Mailpit is not running; check its daemon in Forge"
+  gate "mail-user-add 12"; expect_rc 1; expect_err_has "Mailpit is not running; check mroom-mailpit.service"
   expect_true "a refused request changed the logins" lacks "$(logins)" "shop_qa_12:"
   expect_true "the gate stopped a program it did not install" kill -0 "$impostor"
   kill "$impostor" 2>/dev/null || true
