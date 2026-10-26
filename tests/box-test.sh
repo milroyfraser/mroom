@@ -202,6 +202,14 @@ t_qa_site_settings() {
     box "MROOM_QA_PERSONA_DOMAIN=$good"
     run "$MROOM" config box MROOM_QA_PERSONA_DOMAIN; expect_rc 0; expect_out "$good"
   done
+  for good in 1024 1025 2525 65535; do
+    box "MROOM_QA_SMTP_PORT=$good"
+    run "$MROOM" config box MROOM_QA_SMTP_PORT; expect_rc 0; expect_out "$good"
+  done
+  for bad in 25 1023 65536 01025 1025x -1; do
+    box "MROOM_QA_SMTP_PORT=$bad"
+    run "$MROOM" config box MROOM_QA_SMTP_PORT; expect_rc 1; expect_err_has "MROOM_QA_SMTP_PORT must be a port number"
+  done
 }
 
 test_case reads-values t_reads_values

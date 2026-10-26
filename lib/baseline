@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+# baseline — sets up the QA services a box runs beside Forge's own (design 3, 8.9). Phase 2a's first part:
+#
+#   mroom baseline mailpit   the QA mail catcher (D19): Mailpit at the build lib/core/pins.txt names, checked
+#                            against its SHA-256, mroom's mail relay, their folders and logins, and the two
+#                            Forge daemons that run them
+#
+# It runs as the box user and changes nothing outside the box user's home. It can run again: a binary that
+# matches its pin and logins that exist are kept. Services live in ~/.local/share/mroom-services, which an
+# uninstall of mroom leaves alone, and their logins in ~/.config/mroom/secrets, files mode 600 and folders
+# 700, where no site user can read them. A Forge token that can create daemons reaches root (D20), so a
+# person creates the daemons from what this prints.
+set -euo pipefail
+umask 077
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+MROOM_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+# shellcheck source=lib/core/util.sh
+. "$MROOM_ROOT/lib/core/util.sh"
+
+PINS="${MROOM_PINS:-$MROOM_ROOT/lib/core/pins.txt}"
+SERVICES="$HOME/.local/share/mroom-services"
+SECRETS="$HOME/.config/mroom/secrets"
+WORK="" SECRET_TMP=""
+trap '[ -z "$WORK" ] || rm -rf "$WORK"; [ -z "$SECRET_TMP" ] || rm -f "$SECRET_TMP"' EXIT
+
+die() { echo "mroom baseline: $*" >&2; exit 1; }
+
+platform() {
+  case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64) echo linux-amd64 ;;
+    Linux-aarch64 | Linux-arm64) echo linux-arm64 ;;
+    *) die "no service builds are pinned for $(uname -s) $(uname -m)" ;;
+  esac
+}
+
+# new_password: 48 hex characters from the kernel's random source.
+new_password() { od -An -N24 -tx1 /dev/urandom | tr -d ' \n'; }
+
+# crypt: the SHA-512 crypt hash of stdin, a format Mailpit reads in its login files. Fails unless openssl
+# gave one: an empty hash would be a login with no password.
+crypt() {
+  local hash
+  hash="$(openssl passwd -6 -stdin)" || return 1
+  [[ "$hash" =~ ^\$6\$[A-Za-z0-9./]+\$[A-Za-z0-9./]+$ ]] || return 1
+  printf '%s\n' "$hash"
+}
+
+# hash_of <password> <hash>: whether the SHA-512 crypt hash is of the password.
+hash_of() {
+  [[ "$2" =~ ^\$6\$([A-Za-z0-9./]+)\$[A-Za-z0-9./]+$ ]] || return 1
+  [ "$(printf '%s' "$1" | openssl passwd -6 -salt "${BASH_REMATCH[1]}" -stdin)" = "$2" ]
+}
+
+# put_secret <file> <content>: the file holding the content, mode 600, replaced in one step.
+put_secret() {
+  SECRET_TMP="$(mktemp "$SECRETS/.baseline.XXXXXX")"
+  printf '%s\n' "$2" >"$SECRET_TMP"
+  mv -f "$SECRET_TMP" "$1"
+  SECRET_TMP=""
+}
+
+# install_pinned <name>: the pinned build of <name> for this platform in $SERVICES/<name>/<version>, and
+# $SERVICES/<name>/current pointing at it. The archive and the binary must both match their SHA-256 pins,
+# or nothing is installed.
+install_pinned() {
+  local name="$1" platform line version archive_sha binary_sha url dir got
+  platform="$(platform)"
+  line="$(awk -v n="$name" -v p="$platform" '$1 == n && $3 == p { print $2, $4, $5, $6; exit }' "$PINS")"
+  read -r version archive_sha binary_sha url <<<"$line"
+  [ -n "${url:-}" ] || die "$(home_short "$PINS") pins no $name build for $platform"
+  [[ "$version" =~ ^v[0-9]+(\.[0-9]+)*$ && "$archive_sha" =~ ^[0-9a-f]{64}$ && "$binary_sha" =~ ^[0-9a-f]{64}$ ]] \
+    || die "the $name pin in $(home_short "$PINS") is malformed"
+  [[ "$url" =~ ^https://[A-Za-z0-9._/-]+$ ]] || die "the $name pin's URL is not a plain https URL"
+  dir="$SERVICES/$name/$version"
+  if [ -f "$dir/$name" ] && [ "$(sha256sum "$dir/$name" | cut -d' ' -f1)" = "$binary_sha" ]; then
+    echo "$name $version: installed, and matches its pin"
+  else
+    WORK="$(mktemp -d)"
+    curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 300 \
+      --max-filesize 200000000 --output "$WORK/archive" "$url" || die "could not download $url"
+    got="$(sha256sum "$WORK/archive" | cut -d' ' -f1)"
+    [ "$got" = "$archive_sha" ] || die "$name $version: the download's SHA-256 is $got, not the pinned $archive_sha; nothing installed"
+    mkdir "$WORK/unpacked"
+    tar -xzf "$WORK/archive" -C "$WORK/unpacked" || die "$name $version: the archive does not unpack"
+    if [ ! -f "$WORK/unpacked/$name" ] || [ -L "$WORK/unpacked/$name" ]; then
+      die "$name $version: the archive holds no $name binary"
+    fi
+    got="$(sha256sum "$WORK/unpacked/$name" | cut -d' ' -f1)"
+    [ "$got" = "$binary_sha" ] || die "$name $version: the binary's SHA-256 is $got, not the pinned $binary_sha; nothing installed"
+    mkdir -p "$dir"
+    install -m 700 "$WORK/unpacked/$name" "$dir/.$name.new"
+    mv -f "$dir/.$name.new" "$dir/$name"
+    echo "$name $version: installed, SHA-256 $binary_sha"
+  fi
+  chmod 700 "$SERVICES" "$SERVICES/$name" "$dir"
+  ln -sfn "$version" "$SERVICES/$name/current"
+}
+
+# install_relay: mroom's mail relay beside the services, so it keeps running however mroom is updated or
+# removed.
+install_relay() {
+  local dir="$SERVICES/mail-relay" had=""
+  mkdir -p "$dir"
+  chmod 700 "$SERVICES" "$dir"
+  if [ -f "$dir/mail-relay" ]; then
+    if cmp -s "$MROOM_ROOT/lib/mail-relay" "$dir/mail-relay"; then
+      echo "mail relay: installed, and matches this mroom"
+      return 0
+    fi
+    had=1
+  fi
+  install -m 700 "$MROOM_ROOT/lib/mail-relay" "$dir/.mail-relay.new"
+  mv -f "$dir/.mail-relay.new" "$dir/mail-relay"
+  if [ -n "$had" ]; then echo "mail relay: updated; restart its daemon in Forge to run this one"; else echo "mail relay: installed"; fi
+}
+
+setup_mailpit() {
+  local base="$SERVICES/mailpit" logins="$SECRETS/mailpit-smtp.passwd" ui="$SECRETS/mailpit-ui.passwd"
+  local env_file="$SECRETS/mailpit.env" port python hash rest content password restart=""
+  need curl tar sha256sum openssl python3
+  load_box || die "box.env could not be read"
+  port="${BOX[MROOM_QA_SMTP_PORT]:-1025}"
+  python="$(command -v python3)"
+  install_pinned mailpit
+  install_relay
+  mkdir -p "$base/data" "$base/run" "$SECRETS"
+  chmod 700 "$base/data" "$base/run" "$SECRETS"
+
+  # The SMTP logins, one per environment, which the gate adds and removes. A login no one knows keeps the
+  # file from ever being empty, which Mailpit would take as "no login needed".
+  # shellcheck disable=SC2016  # the $ signs are the hash's own
+  if ! grep -qE '^mroom-none:\$6\$[A-Za-z0-9./]+\$[A-Za-z0-9./]+$' "$logins" 2>/dev/null; then
+    hash="$(new_password | crypt)" || die "openssl gave no SHA-512 crypt hash; nothing changed"
+    rest="$(grep -v '^mroom-none:' "$logins" 2>/dev/null || true)"
+    content="mroom-none:$hash"
+    if [ -n "$rest" ]; then content+=$'\n'"$rest"; fi
+    put_secret "$logins" "$content"
+    if [ -n "$rest" ]; then echo "SMTP logins: the placeholder login restored"; else echo "SMTP logins: $(home_short "$logins") made"; fi
+  fi
+
+  # The API login, which only the gate holds: environments read their mail through it (mail-read). Mailpit
+  # reads its hash only when it starts, so the password is kept, and its hash rewritten only when it is not
+  # the password's.
+  password=""
+  if [ -f "$env_file" ]; then password="$(sed -n 's/^MAILPIT_API_PASSWORD=//p' "$env_file" | head -n1)"; fi
+  if [ -z "$password" ]; then
+    password="$(new_password)"
+    [ "${#password}" = 48 ] || die "could not read random bytes for a password"
+    hash="$(printf '%s' "$password" | crypt)" || die "openssl gave no SHA-512 crypt hash; nothing changed"
+    put_secret "$ui" "mroom-gate:$hash"
+    put_secret "$env_file" "MAILPIT_API_USER=mroom-gate"$'\n'"MAILPIT_API_PASSWORD=$password"
+    echo "API login: $(home_short "$env_file") made"
+    restart=1
+  elif ! hash_of "$password" "$(sed -n 's/^mroom-gate://p' "$ui" 2>/dev/null | head -n1)"; then
+    hash="$(printf '%s' "$password" | crypt)" || die "openssl gave no SHA-512 crypt hash; nothing changed"
+    put_secret "$ui" "mroom-gate:$hash"
+    echo "API login: its hash for Mailpit rewritten from $(home_short "$env_file")"
+    restart=1
+  fi
+  chmod 600 "$logins" "$ui" "$env_file"
+
+  cat <<EOF
+
+Two Forge daemons run these, and a person creates them (a token that can create daemons reaches root, D20).
+In Forge, Server > Daemons, create each with User $(id -un), Processes 1, Start Seconds 1 and Stop Signal
+SIGTERM:
+
+1. mroom's mail relay. It holds the SMTP port apps send to, so no one else on the box can take it while
+   Mailpit restarts:
+
+  Command:   $python -I $SERVICES/mail-relay/mail-relay 127.0.0.1 $port $base/run/smtp.sock
+  Directory: $SERVICES/mail-relay
+
+2. Mailpit, on Unix sockets only, in a folder only you can open:
+
+  Command:   $base/current/mailpit --listen unix:$base/run/http.sock:0600 --smtp unix:$base/run/smtp.sock:0600 --database $base/data/mailpit.db --smtp-auth-file $SECRETS/mailpit-smtp.passwd --smtp-auth-allow-insecure --tags-username --tags-disable x-tags,plus-addresses --ui-auth-file $SECRETS/mailpit-ui.passwd --max 0 --max-age 7d
+  Directory: $base/data
+
+Each environment sends with its own login, through the relay. The gate restarts Mailpit when it adds or
+removes one, and lets each Mailpit run 3 seconds before the next restart, since Forge counts a daemon that
+stops within its Start Seconds as a failed start. Only the gate reads mail. A newly installed build runs
+from the next restart, of the daemon or by the gate.
+EOF
+  if curl -q --silent --fail --max-time 2 --unix-socket "$base/run/http.sock" --output /dev/null \
+    http://localhost/livez 2>/dev/null; then
+    echo "Mailpit answers."
+    if [ -n "$restart" ]; then echo "Mailpit reads its API login only when it starts: restart its daemon in Forge."; fi
+  else
+    echo "Mailpit does not answer yet."
+  fi
+  if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+    echo "Something listens on 127.0.0.1:$port; the gate checks that it is the relay."
+  else
+    echo "Nothing listens on 127.0.0.1:$port yet."
+  fi
+}
+
+case "${1:-}" in
+  mailpit) [ "$#" = 1 ] || die "usage: mroom baseline mailpit"; setup_mailpit ;;
+  -h | --help | "") awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF" ;;
+  *) die "unknown part '${1:0:40}'; mroom baseline --help lists them" ;;
+esac

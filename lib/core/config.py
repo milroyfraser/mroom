@@ -280,6 +280,7 @@ BOX_KEYS = {
     "MROOM_QA_BACKEND_DIR": "the Laravel app's folder in the repository; . (the default) for its root",
     "MROOM_QA_PHP": "the PHP binary QA sites run, such as php8.4; php by default",
     "MROOM_QA_PERSONA_DOMAIN": "the domain QA personas' addresses end in, such as .test (the default)",
+    "MROOM_QA_SMTP_PORT": "the port on 127.0.0.1 where mroom's mail relay takes QA apps' mail; 1025 by default",
 }
 # Names the gate builds SQL from, so each is a plain Postgres identifier (design 5.1, D18), matched as a
 # whole (fullmatch: "$" alone would let a trailing newline through).
@@ -340,6 +341,9 @@ def box_value_error(key: str, value: str) -> str | None:
             PERSONA_DOMAIN.fullmatch(value) and (value.endswith(RESERVED_SUFFIXES) or value.count(".") >= 3)):
         return ("MROOM_QA_PERSONA_DOMAIN must be a domain suffix starting with a dot: a reserved name such as .test, "
                 "or a subdomain of your own such as .qa.example.com")
+    if key == "MROOM_QA_SMTP_PORT" and not (value.isascii() and value.isdigit() and 1024 <= int(value) <= 65535
+                                             and value == str(int(value))):
+        return "MROOM_QA_SMTP_PORT must be a port number from 1024 to 65535"
     return None
 
 
