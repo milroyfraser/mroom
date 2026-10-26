@@ -418,7 +418,7 @@ and runs it, which installs the `parts` named:
   box, and upgrade the box to that release first. `v` is a tag, never a commit: GitHub serves a fork's commits
   under this repository's address too. Tag and `sum` together pin the exact file.
 - What root trusts is this repository's tags and README, so nothing on the box may write to it: the box's
-  GitHub credentials must reach only the repositories its agents work in, never this one.
+  one GitHub credential, the agents' account (design D22), may write the app's repository, never this one.
 - `parts`: `site-op` always, `mailpit` when `qa.parity.mail` is `catcher`, `garage` when `qa.parity.files`
   is `same`. `smtp_port` is `box.env`'s `MROOM_QA_SMTP_PORT`, 1025 unless set.
 - `root-setup` reads no file the box user can write: it writes each unit from its own text, checks `site-op`
@@ -564,7 +564,8 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
 
     A QA site's user never needs to log in, but its PR's code could add its own SSH key: add
     `DenyGroups isolated` to `/etc/ssh/sshd_config` and reload sshd, which also turns off Forge's SFTP for
-    isolated users.
+    isolated users. Add `AllowAgentForwarding no` with it: a developer who connects with `ssh -A` would
+    otherwise lend their own keys to every session on the box (design D22).
 
 11. In `box.env`: `MROOM_APP_NAME=shop`, `MROOM_QA_TEMPLATE=shop_qa_template` and
     `MROOM_QA_ZONE=qa.example.dev`, and when they differ from the defaults, `MROOM_QA_BACKEND_DIR` (the
