@@ -235,7 +235,9 @@ The client sends only N. The database and role are `<MROOM_APP_NAME>_qa_<N>`, cl
 verifier, through stdin. Each request and refusal is logged, never a secret, to
 `~/.local/state/mroom/gate.log` and to syslog.
 
-**Set up once,** for an app named `shop`. These steps assume Postgres 15 or later.
+**Set up once,** for an app named `shop`, on Postgres 16 or later. Before 16, a role that may create roles
+may also grant itself the administrator ones, so the gate refuses older versions. CI runs these steps
+against a real Postgres (`tests/pg/gate-real-test.sh`).
 
 1. In the box user's `~/.ssh/authorized_keys`, by hand (Forge's SSH key screen stores a bare key, without
    options):
@@ -244,33 +246,55 @@ verifier, through stdin. Each request and refusal is logged, never a secret, to
    restrict,command="/home/forge/.local/bin/mroom gate provision" ssh-ed25519 AAAA… mroom-qa-up
    ```
 
-2. As a Postgres superuser (`sudo -u postgres psql`):
+2. As a Postgres superuser (`sudo -u postgres psql`). `\password` asks for each password, so none ends up
+   in a history file or the server's log:
 
    ```sql
-   CREATE ROLE shop_qa_gate LOGIN CREATEDB CREATEROLE PASSWORD '<a long random password>';
-   CREATE ROLE shop_qa_objects NOLOGIN;           -- owns the template's objects, and nothing else
+   CREATE ROLE shop_qa_gate LOGIN CREATEDB CREATEROLE;
+   \password shop_qa_gate
+   CREATE ROLE shop_qa_objects NOLOGIN;      -- owns the template's objects; never a database or tablespace
    GRANT shop_qa_objects TO shop_qa_gate;
-   CREATE ROLE shop_qa_envs NOLOGIN;              -- every environment's role joins it
+   CREATE ROLE shop_qa_envs NOLOGIN;         -- every environment's role joins it; never grant it anything
    GRANT shop_qa_envs TO shop_qa_gate WITH ADMIN OPTION;
-   ALTER DATABASE shop_qa_template OWNER TO shop_qa_gate;
-   REVOKE CONNECT ON DATABASE shop_qa_template FROM PUBLIC;   -- and on every other database on the box
+   CREATE DATABASE shop_qa_template OWNER shop_qa_gate;
+   GRANT CONNECT ON DATABASE shop_qa_template TO shop_qa_objects;
+   \c shop_qa_template
+   GRANT CREATE ON SCHEMA public TO shop_qa_objects;
    ```
 
-   The template's objects must belong to `shop_qa_objects`. Build it with that role: give it `LOGIN`
-   and a password while you run the app's migrations and seeders against the template, then take
-   `LOGIN` away again.
+3. Build the template as `shop_qa_objects`, so its objects belong to that role. Give it a login for now
+   (`ALTER ROLE shop_qa_objects LOGIN;` and `\password shop_qa_objects`), run the app's migrations and
+   seeders against `shop_qa_template` as that role, then take the login away:
 
-3. In `pg_hba.conf`, above the other `host` lines, then reload Postgres. Each environment's role then
-   reaches only the database named after it:
+   ```sql
+   ALTER ROLE shop_qa_objects NOLOGIN PASSWORD NULL;
+   REVOKE CONNECT ON DATABASE shop_qa_template FROM PUBLIC, shop_qa_objects;
+   ```
+
+   `shop_qa_objects` must never own a database or a tablespace. Each new environment takes over what that
+   role owns, and the gate refuses to run while it owns one.
+
+4. Every new database lets any role connect, so take that back on each of the app's databases, the dev
+   site's for one (not `postgres`, which the gate connects to):
+
+   ```sql
+   REVOKE CONNECT ON DATABASE shop_dev FROM PUBLIC;
+   ```
+
+5. At the very top of `pg_hba.conf`, above every `local` and `host` line, then reload Postgres. The first
+   matching line wins. The gate's own line comes first, since the gate belongs to `shop_qa_envs` and the
+   reject lines would match it too. Each environment's role then reaches only the database named after it:
 
    ```
+   host   all       shop_qa_gate   127.0.0.1/32  scram-sha-256
+   host   all       shop_qa_gate   ::1/128       scram-sha-256
    host   sameuser  +shop_qa_envs  127.0.0.1/32  scram-sha-256
    host   sameuser  +shop_qa_envs  ::1/128       scram-sha-256
    host   all       +shop_qa_envs  all           reject
    local  all       +shop_qa_envs                reject
    ```
 
-4. The gate's connection, in `~/.config/mroom/secrets/pg_service.conf`, mode 600:
+6. The gate's connection, in `~/.config/mroom/secrets/pg_service.conf`, mode 600:
 
    ```
    [mroom-gate]
@@ -281,7 +305,7 @@ verifier, through stdin. Each request and refusal is logged, never a secret, to
    password=<the gate's password>
    ```
 
-5. In `box.env`: `MROOM_APP_NAME=shop` and `MROOM_QA_TEMPLATE=shop_qa_template`.
+7. In `box.env`: `MROOM_APP_NAME=shop` and `MROOM_QA_TEMPLATE=shop_qa_template`.
 
 ## Regression label
 

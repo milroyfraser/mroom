@@ -43,6 +43,16 @@ jobs:
       - run: bash --version | head -1 && python3 --version
       - run: tests/run.sh
 
+  gate-postgres:
+    # The gate against the runner's own Postgres, set up as the README says: pg_hba.conf, ownership and
+    # one environment never reaching another's database, which the offline fake cannot show.
+    name: gate on a real Postgres
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/pg/gate-real-test.sh
+
   install:
     # Phase 0 "done when": install.sh on a fresh Ubuntu installs mroom and `mroom config get app.name`
     # reads an example. A bare ubuntu:24.04 container is the fresh box.

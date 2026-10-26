@@ -14,14 +14,19 @@
 #
 # The client sends only the environment's number. The gate builds every name from box.env, which a person
 # sets: the database and role are <MROOM_APP_NAME>_qa_<N>, cloned from MROOM_QA_TEMPLATE, so no argument
-# can reach another database. It connects as its own Postgres role, through the libpq service mroom-gate
-# in ~/.config/mroom/secrets/pg_service.conf (mode 600). Each request and refusal is logged, never a
-# secret, to ~/.local/state/mroom/gate.log and to syslog. It runs from the installed release, never from
-# an app checkout, so a pull request cannot change it.
+# can reach another database. It connects to Postgres 16 or later as its own role, through the libpq
+# service mroom-gate in ~/.config/mroom/secrets/pg_service.conf (mode 600). Each request and refusal is
+# logged, never a secret, to ~/.local/state/mroom/gate.log and to syslog. It runs from the installed
+# release, never from an app checkout, so a pull request cannot change it.
 #
 # Exit codes: 0 done, 1 failed or refused, 2 not run as a forced command with a role.
 set -euo pipefail
 umask 077
+# sshd passes the client's LANG and LC_* on (AcceptEnv): in some locales a range such as [0-9] matches
+# more than ASCII, so every check below runs in the C locale.
+export LC_ALL=C
+# A test seam only; it must never fix the salt of a real password.
+unset MROOM_SCRAM_SALT
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 MROOM_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
@@ -29,13 +34,22 @@ MROOM_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 . "$MROOM_ROOT/lib/core/util.sh"
 
 MAX_LINE=4096
+LOG_MAX_BYTES=1048576
 role="${1:-}"
 
+# printable <text>: the text with anything but printable ASCII removed, so nothing the server or a client
+# says can forge a line of the log.
+printable() { printf '%s' "$1" | tr -cd '[:print:]'; }
+
 gate_log() {
-  local state
+  local state log
   state="$(mroom_state_dir 2>/dev/null)" || return 0
-  printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${role:-none}" "$*" >>"$state/gate.log" 2>/dev/null || true
-  if command -v logger >/dev/null 2>&1; then logger -t mroom-gate -- "${role:-none} $*" 2>/dev/null || true; fi
+  log="$state/gate.log"
+  if [ -f "$log" ] && [ "$(stat -c %s "$log" 2>/dev/null || echo 0)" -gt "$LOG_MAX_BYTES" ]; then
+    mv -f "$log" "$log.1" 2>/dev/null || true
+  fi
+  printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${role:-none}" "$(printable "$*")" >>"$log" 2>/dev/null || true
+  if command -v logger >/dev/null 2>&1; then logger -t mroom-gate -- "${role:-none} $(printable "$*")" 2>/dev/null || true; fi
 }
 refuse() { gate_log "refused: $*"; echo "mroom gate: refused: $*" >&2; exit 1; }
 fail() { gate_log "failed: $*"; echo "mroom gate: $*" >&2; exit 1; }
@@ -69,21 +83,28 @@ app="${BOX[MROOM_APP_NAME]:-}"
 [ -n "$app" ] || fail "MROOM_APP_NAME is not set in box.env"
 
 PG_SERVICES="$HOME/.config/mroom/secrets/pg_service.conf"
+PG_ERR=""
 
 # pg <database>: runs the SQL on stdin as the gate's role, printing rows unaligned. The SQL never travels
-# on a command line, so neither does anything in it.
+# on a command line. stderr goes to its own file, so a server NOTICE or WARNING can never be read as a
+# value; pg_error gives its first line. VERBOSITY=verbose puts the SQLSTATE code in that line.
 pg() {
-  PGSERVICEFILE="$PG_SERVICES" PGSERVICE=mroom-gate psql -X -q -A -t -v ON_ERROR_STOP=1 -d "$1"
+  PGSERVICEFILE="$PG_SERVICES" PGSERVICE=mroom-gate \
+    psql -X -q -A -t -v ON_ERROR_STOP=1 -v VERBOSITY=verbose -d "$1" 2>"$PG_ERR"
 }
+pg_error() { printable "$(grep -m1 -E '^(ERROR|FATAL|PANIC|psql):' "$PG_ERR" 2>/dev/null || head -n1 "$PG_ERR" 2>/dev/null)"; }
 
 pg_ready() {
   [ -r "$PG_SERVICES" ] || fail "$(home_short "$PG_SERVICES") is missing; it holds the [mroom-gate] service"
   secret_file_ok "$PG_SERVICES" || fail "$(home_short "$PG_SERVICES") must be yours and mode 600"
   need psql python3 flock
+  PG_ERR="$(mktemp "$(mroom_state_dir)/gate-psql.XXXXXX")" || fail "cannot make a file for psql's errors"
+  trap 'rm -f "$PG_ERR"' EXIT
   local ok
-  ok="$(pg postgres <<<"SELECT current_setting('server_version_num')::int >= 150000;" 2>&1)" \
-    || fail "cannot reach Postgres as the gate's role: $(head -n1 <<<"$ok")"
-  [ "$ok" = t ] || fail "Postgres must be 15 or later (D18)"
+  ok="$(pg postgres <<<"SELECT current_setting('server_version_num')::int >= 160000;")" \
+    || fail "cannot reach Postgres as the gate's role: $(pg_error)"
+  # Before 16 a role that may create roles may also grant itself any role, the administrator ones too.
+  [ "$ok" = t ] || fail "Postgres must be 16 or later (D18)"
 }
 
 # env_lock <name>: one request at a time per environment; a second one waits, then gives up.
@@ -99,55 +120,76 @@ cmd_db_create() {
   words_are 2
   env_number "${words[1]}"
   local template="${BOX[MROOM_QA_TEMPLATE]:-}" db="${app}_qa_${words[1]}" objects="${app}_qa_objects"
-  local group="${app}_qa_envs" password verifier statement exists out attempt
+  local group="${app}_qa_envs" password verifier owned role_exists db_exists attempt
   [ -n "$template" ] || fail "MROOM_QA_TEMPLATE is not set in box.env"
   pg_ready
   env_lock "$db"
+
+  # REASSIGN OWNED also moves databases and tablespaces: one owned by the objects role would go to the
+  # environment, so its PR's code could drop it. Refuse before anything is made.
+  owned="$(pg postgres <<SQL
+SELECT count(*) FROM (
+  SELECT 1 FROM pg_database WHERE datdba = '$objects'::regrole
+  UNION ALL SELECT 1 FROM pg_tablespace WHERE spcowner = '$objects'::regrole) owned;
+SQL
+)" || fail "db-create ${words[1]}: $(pg_error)"
+  [ "$owned" = 0 ] || fail "$objects owns a database or tablespace, which REASSIGN OWNED would hand to the environment; give it to the gate's role (D18)"
+
   password="$(new_password)"
   [ "${#password}" = 48 ] || fail "could not read random bytes for the password"
   verifier="$(printf '%s' "$password" | python3 "$MROOM_ROOT/lib/core/scram.py")" || fail "could not make the password verifier"
 
-  # The role first, with a new password each time: the client writes it into the environment's .env.
-  # The gate becomes a member, so it may give the role the database it creates.
-  out="$(pg postgres <<<"SELECT 1 FROM pg_roles WHERE rolname = '$db';" 2>&1)" \
-    || fail "db-create ${words[1]}: $(head -n1 <<<"$out")"
-  if [ "$out" = 1 ]; then
-    statement="ALTER ROLE \"$db\" LOGIN PASSWORD '$verifier';"
-  else
-    statement="CREATE ROLE \"$db\" LOGIN NOINHERIT CONNECTION LIMIT 30 IN ROLE \"$group\" PASSWORD '$verifier';"
-  fi
-  out="$(pg postgres 2>&1 <<SQL
-$statement
+  # The role, with a new password each time (the client writes it into the environment's .env), always
+  # in the group pg_hba.conf matches and with its limits, even when it was made or changed elsewhere. The
+  # gate becomes a member, so it may give the role the database it creates.
+  role_exists="$(pg postgres <<<"SELECT count(*) FROM pg_roles WHERE rolname = '$db';")" \
+    || fail "db-create ${words[1]}: $(pg_error)"
+  if [ "$role_exists" = 1 ]; then
+    pg postgres >/dev/null <<SQL || fail "db-create ${words[1]}: the role: $(pg_error)"
+ALTER ROLE "$db" LOGIN NOINHERIT CONNECTION LIMIT 30 PASSWORD '$verifier';
+GRANT "$group" TO "$db";
 GRANT "$db" TO CURRENT_USER;
 SQL
-)" || fail "db-create ${words[1]}: the role: $(head -n1 <<<"$out")"
-
-  exists="$(pg postgres <<<"SELECT 1 FROM pg_database WHERE datname = '$db';" 2>&1)" \
-    || fail "db-create ${words[1]}: $(head -n1 <<<"$exists")"
-  if [ "$exists" = 1 ]; then
-    echo "database $db: exists"
   else
-    # CREATE DATABASE … TEMPLATE fails while anything else is connected to the template, which includes
-    # another environment cloning it at the same moment: wait and try again.
-    for attempt in 1 2 3 4 5 6; do
-      if out="$(pg postgres 2>&1 <<<"CREATE DATABASE \"$db\" TEMPLATE \"$template\" OWNER \"$db\";")"; then
-        break
-      fi
-      grep -q 'is being accessed by other users' <<<"$out" || fail "db-create ${words[1]}: $(head -n1 <<<"$out")"
-      [ "$attempt" = 6 ] && fail "db-create ${words[1]}: $template stayed busy; try again later"
-      echo "template $template is busy, trying again ($attempt)" >&2
-      sleep "${MROOM_GATE_RETRY_SLEEP:-20}"
-    done
-    echo "database $db: created"
+    pg postgres >/dev/null <<SQL || fail "db-create ${words[1]}: the role: $(pg_error)"
+CREATE ROLE "$db" LOGIN NOINHERIT CONNECTION LIMIT 30 IN ROLE "$group" PASSWORD '$verifier';
+GRANT "$db" TO CURRENT_USER;
+SQL
   fi
 
-  # A clone's objects keep the template owner, a role that owns nothing else, so this moves only them.
-  # A new database gives PUBLIC CONNECT again, so take it back here too (pg_hba.conf is the other half).
-  out="$(pg "$db" 2>&1 <<SQL
-REASSIGN OWNED BY "$objects" TO "$db";
-REVOKE CONNECT, TEMPORARY ON DATABASE "$db" FROM PUBLIC;
-SQL
-)" || fail "db-create ${words[1]}: handing the objects over: $(head -n1 <<<"$out")"
+  db_exists="$(pg postgres <<<"SELECT count(*) FROM pg_database WHERE datname = '$db';")" \
+    || fail "db-create ${words[1]}: $(pg_error)"
+  if [ "$db_exists" = 1 ]; then
+    # The PR's code owns this database and may have changed its settings, so the gate never connects to
+    # it again: database privileges live in the cluster's catalog and are revoked from postgres.
+    pg postgres >/dev/null <<<"REVOKE CONNECT, TEMPORARY ON DATABASE \"$db\" FROM PUBLIC;" \
+      || fail "db-create ${words[1]}: $(pg_error)"
+    echo "database $db: exists"
+  else
+    # CREATE DATABASE … TEMPLATE fails (SQLSTATE 55006) while a session is connected to the template:
+    # wait and try again.
+    for attempt in 1 2 3 4 5 6; do
+      if pg postgres >/dev/null <<<"CREATE DATABASE \"$db\" TEMPLATE \"$template\" OWNER \"$db\";"; then
+        break
+      fi
+      grep -q -E '^ERROR: +55006:' "$PG_ERR" || fail "db-create ${words[1]}: $(pg_error)"
+      [ "$attempt" = 6 ] && fail "db-create ${words[1]}: $template stayed in use; try again later"
+      echo "template $template is in use, trying again ($attempt)" >&2
+      sleep "${MROOM_GATE_RETRY_SLEEP:-20}"
+    done
+    # A new database gives PUBLIC CONNECT again: take it back first. Then hand over the template's
+    # objects, whose owner owns nothing else. The database is new, so no PR code has touched it yet; if
+    # the hand-over fails, the database goes again, so a later request starts clean.
+    pg postgres >/dev/null <<<"REVOKE CONNECT, TEMPORARY ON DATABASE \"$db\" FROM PUBLIC;" \
+      || fail "db-create ${words[1]}: $(pg_error)"
+    if ! pg "$db" >/dev/null <<<"REASSIGN OWNED BY \"$objects\" TO \"$db\";"; then
+      local why
+      why="$(pg_error)"
+      pg postgres >/dev/null <<<"DROP DATABASE IF EXISTS \"$db\" WITH (FORCE);" || true
+      fail "db-create ${words[1]}: handing the template's objects over failed, so the database is gone again: $why"
+    fi
+    echo "database $db: created"
+  fi
 
   gate_log "db-create ${words[1]}: $db ready"
   printf 'DB_DATABASE=%s\nDB_USERNAME=%s\nDB_PASSWORD=%s\n' "$db" "$db" "$password"
@@ -156,14 +198,29 @@ SQL
 cmd_db_drop() {
   words_are 2
   env_number "${words[1]}"
-  local db="${app}_qa_${words[1]}" out
+  local db="${app}_qa_${words[1]}" db_exists
   pg_ready
   env_lock "$db"
-  out="$(pg postgres 2>&1 <<SQL
-DROP DATABASE IF EXISTS "$db" WITH (FORCE);
-DROP ROLE IF EXISTS "$db";
+  db_exists="$(pg postgres <<<"SELECT count(*) FROM pg_database WHERE datname = '$db';")" \
+    || fail "db-drop ${words[1]}: $(pg_error)"
+  if [ "$db_exists" = 1 ]; then
+    # The owner, the PR's own role, may have marked it a template, which DROP DATABASE refuses.
+    pg postgres >/dev/null <<SQL || fail "db-drop ${words[1]}: $(pg_error)"
+ALTER DATABASE "$db" IS_TEMPLATE false;
+DROP DATABASE "$db" WITH (FORCE);
 SQL
-)" || fail "db-drop ${words[1]}: $(head -n1 <<<"$out")"
+  fi
+  # A grant the role was given in another environment's database stops DROP ROLE. Then it can at least
+  # never sign in again.
+  if ! pg postgres >/dev/null <<<"DROP ROLE IF EXISTS \"$db\";"; then
+    local why
+    why="$(pg_error)"
+    pg postgres >/dev/null <<<"ALTER ROLE \"$db\" NOLOGIN PASSWORD NULL;" \
+      || fail "db-drop ${words[1]}: the role could neither be dropped nor locked: $why"
+    gate_log "db-drop ${words[1]}: $db dropped; its role is locked, not dropped: $why"
+    echo "database $db: dropped; role $db locked, since it could not be dropped: $why"
+    return 0
+  fi
   gate_log "db-drop ${words[1]}: $db dropped"
   echo "database $db: dropped"
 }

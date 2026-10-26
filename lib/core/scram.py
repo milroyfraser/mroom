@@ -34,6 +34,11 @@ def main() -> int:
     if not password or "\n" in password or "\r" in password:
         print("scram.py: give exactly one password on stdin, with no newline", file=sys.stderr)
         return 2
+    # Postgres runs a password through SASLprep first, which this does not: for printable ASCII the two
+    # agree, so anything else is refused rather than stored as a verifier no sign-in would match.
+    if not all(" " < c <= "~" for c in password):
+        print("scram.py: the password must be printable ASCII", file=sys.stderr)
+        return 2
     fixed = os.environ.get("MROOM_SCRAM_SALT")
     salt = base64.b64decode(fixed, validate=True) if fixed else os.urandom(16)
     print(verifier(password, salt))

@@ -165,6 +165,12 @@ t_gate_names_are_plain_postgres_names() {
   done
   box 'MROOM_QA_TEMPLATE=qa-template'
   run "$MROOM" config box MROOM_QA_TEMPLATE; expect_rc 1; expect_err_has "MROOM_QA_TEMPLATE must be a plain Postgres name"
+  for bad in pg pg_shop; do
+    box "MROOM_APP_NAME=$bad"
+    run "$MROOM" config box MROOM_APP_NAME; expect_rc 1; expect_err_has "may not be pg or start with pg_"
+  done
+  box 'MROOM_APP_NAME=pgshop'
+  run "$MROOM" config box MROOM_APP_NAME; expect_rc 0; expect_out pgshop
 }
 
 test_case reads-values t_reads_values
