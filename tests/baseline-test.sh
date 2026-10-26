@@ -69,8 +69,12 @@ FAKE
   export T PATH="$T/bin:$PATH" MROOM_PINS="$T/pins.txt" MROOM_SYSTEMD_DIR="$T/systemd" REAL_CURL
 }
 
-# root_script_of <output>: the script baseline printed for a person to run as root.
-root_script_of() { sed -n '/^----- run as root -----$/,/^----- end -----$/p' <<<"$1" | sed '1d;$d'; }
+# root_install <part...>: what mroom's root recipe does, here into the test's own folders (lib/root-setup).
+root_install() {
+  mkdir -p "$T/systemd" "$T/libexec" "$T/sudoers"
+  run env MROOM_ROOT_SETUP_TEST=1 MROOM_LIBEXEC_DIR="$T/libexec" MROOM_SUDOERS_DIR="$T/sudoers" \
+    "$ROOT/lib/root-setup" --user "$(id -un)" --home "$HOME" --smtp-port "${PORT:-1025}" "$@"
+}
 
 # pins <archive sha> <binary sha> [<platform>] [<url>]
 pins() {
@@ -115,75 +119,45 @@ t_mailpit_is_installed_at_its_pin_with_its_relay_and_logins() {
   expect_true "the API password is not 48 hex characters" hex48 "$password"
   expect_true "the API login's hash is not of the gate's password" hash_of "$password" "$(api_hash)"
   expect_true "the download could be sent to a plain-http address" grep -q -- "--proto-redir =https" "$T/curl.log"
-  local base script
-  base="$(services)/mailpit"
   run "$MROOM" baseline mailpit
   expect_out_has "Mailpit does not answer yet."
   expect_out_has "Nothing listens on 127.0.0.1:$PORT yet."
   expect_true "the password reached the output" lacks "$out" "$password"
-  # The units are installed by a person, as root, from a script in which every unit's text stands: root
-  # reads no file the box user can write.
-  script="$(root_script_of "$out")"
-  expect_true "no script to run as root" [ -n "$script" ]
+  # Root installs the units with mroom's root recipe, from a release (lib/root-setup): baseline only says
+  # which are missing or out of date, and prints nothing to run as root.
+  expect_out_has "To be installed or updated: mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service."
+  expect_out_has "Root installs them with mroom's root recipe (README, \"Root steps\"): mailpit in its parts, smtp_port=$PORT."
+  expect_out_has "Set its v and sum from the README of mroom v$(cat "$ROOT/VERSION") on GitHub, never from this box"
+  expect_out_has "This mroom was installed from a checkout, not a release"
+  expect_true "baseline printed a unit to run as root" lacks "$out" "ExecStart="
+  expect_true "baseline printed a script to run as root" lacks "$out" "systemctl "
   expect_no_file "$(services)/units"
-  expect_true "the root script reads or copies a file" lacks "$script" "install -o"
-  expect_true "the root script reads a file of the box user's" lacks "$script" "<$HOME"
-  local unit
-  for unit in mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service; do
-    expect_true "the root script does not write $unit" has "$script" "cat >$T/systemd/$unit <<'MROOM_UNIT'"
-  done
-  expect_true "the root script does not start the units" has "$script" "systemctl enable --now mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service"
-  # The socket holds the port as root; the relay and Mailpit run as the box user, confined, and systemd
-  # starts them again however often they stop.
-  for line in "ListenStream=127.0.0.1:$PORT" \
-    "ExecStart=$(command -v python3) -I $(services)/mail-relay/mail-relay 127.0.0.1 $PORT $base/run/smtp.sock" \
-    "ExecStart=$base/current/mailpit --listen unix:$base/run/http.sock:0600 --smtp unix:$base/run/smtp.sock:0600 --database $base/data/mailpit.db --smtp-auth-file $(secrets)/mailpit-smtp.passwd --smtp-auth-allow-insecure --tags-username --tags-disable x-tags,plus-addresses --ui-auth-file $(secrets)/mailpit-ui.passwd --max 0 --max-age 7d" \
-    "User=$(id -un)" "Group=$(id -gn)" "Restart=always" "StartLimitIntervalSec=0" "NoNewPrivileges=yes" \
-    "WorkingDirectory=$base/data" "ProtectHome=tmpfs" "ProtectSystem=strict" "PrivateNetwork=yes" \
-    "BindReadOnlyPaths=$base $(secrets)/mailpit-smtp.passwd $(secrets)/mailpit-ui.passwd" "BindPaths=$base/data $base/run" \
-    "BindReadOnlyPaths=$(services)/mail-relay $base/run" "RestrictAddressFamilies=AF_UNIX"; do
-    expect_true "the units lack: $line" grep -qxF -- "$line" <<<"$script"
-  done
-  expect_true "a unit runs something as root" \
-    eval '! grep -qE "^Exec[A-Za-z]*=[+!@-]|^ExecStartPre=|^ExecStartPost=|^ExecStop=|^ExecReload=|^User=root" <<<"$script"'
-  # MROOM_SYSTEMD_DIR, a setting for tests, moves where the script writes: baseline says so, loudly.
-  expect_out_has "WARNING: MROOM_SYSTEMD_DIR is set, so this script writes to $T/systemd, not /etc/systemd/system"
+  # MROOM_SYSTEMD_DIR, a setting for tests, moves where baseline looks: it says so, loudly.
+  expect_out_has "WARNING: MROOM_SYSTEMD_DIR is set, so this compares the units in $T/systemd, not /etc/systemd/system"
   # Without box.env's port, the relay takes 1025.
   rm "$HOME/.config/mroom/box.env"
   run "$MROOM" baseline mailpit
-  expect_out_has "ListenStream=127.0.0.1:1025"
+  expect_out_has "mailpit in its parts, smtp_port=1025."
 }
 
 t_installed_units_are_compared_with_what_this_mroom_writes() {
   world
   run "$MROOM" baseline mailpit; expect_rc 0
-  # Running the printed script installs the three units and starts them.
-  mkdir -p "$T/systemd"
-  run bash -c "$(root_script_of "$out")"
-  expect_rc 0
-  run cat "$T/systemctl.log"
-  expect_out_has "systemctl daemon-reload"
-  expect_out_has "systemctl enable --now mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service"
-  run stat -c %a "$T/systemd/mroom-mailpit.service"; expect_out 644
+  # What the root recipe installs is what baseline expects.
+  root_install mailpit; expect_rc 0
   run "$MROOM" baseline mailpit; expect_rc 0
   expect_out_has "systemd units: installed as this mroom writes them (mroom-mail-relay.socket inactive, mroom-mail-relay.service inactive, mroom-mailpit.service inactive)."
-  expect_true "installed units asked to be installed again" lacks "$out" "run as root"
-  # One that changed is written again, and its service restarted.
+  expect_true "installed units asked to be installed again" lacks "$out" "To be installed"
+  # A unit that changed is named.
   printf '# a local change\n' >>"$T/systemd/mroom-mailpit.service"
   run "$MROOM" baseline mailpit; expect_rc 0
   expect_out_has "To be installed or updated: mroom-mailpit.service."
-  local script
-  script="$(root_script_of "$out")"
-  expect_true "the changed unit is not written again" has "$script" "cat >$T/systemd/mroom-mailpit.service"
-  expect_true "an unchanged unit is written again" lacks "$script" "cat >$T/systemd/mroom-mail-relay.socket"
-  expect_true "the changed service is not restarted" has "$script" "systemctl restart mroom-mailpit.service"
-  run bash -c "$script"; expect_rc 0
-  # A new port: the socket is restarted, which frees the port for a moment, so every login is renewed.
+  root_install mailpit; expect_rc 0
+  # A new port: the socket and the relay, which both name it.
   printf 'MROOM_QA_SMTP_PORT=%s\n' "$((PORT + 1))" >"$HOME/.config/mroom/box.env"
   run "$MROOM" baseline mailpit; expect_rc 0
-  script="$(root_script_of "$out")"
-  expect_true "the socket is not restarted on a new port" has "$script" "systemctl restart mroom-mail-relay.socket mroom-mail-relay.service"
-  expect_true "a new port asks for no new logins" has "$script" "give each QA environment new mail logins"
+  expect_out_has "To be installed or updated: mroom-mail-relay.socket mroom-mail-relay.service."
+  expect_out_has "mailpit in its parts, smtp_port=$((PORT + 1))."
   printf 'MROOM_QA_SMTP_PORT=%s\n' "$PORT" >"$HOME/.config/mroom/box.env"
   # Something that is not systemd on the port: say so before the units are installed.
   python3 -I -c 'import socket, sys, time
@@ -354,7 +328,7 @@ t_garage_is_installed_with_its_config_secrets_and_unit() {
   run "$MROOM" baseline garage
   expect_rc 0
   expect_out_has "garage v8.8.8: installed, SHA-256 $GARAGE_SHA"
-  local base secrets script
+  local base secrets
   base="$(services)/garage" secrets="$(secrets)"
   run cat "$base/current/garage"; expect_out "$(cat "$T/served/garage")"
   run mode "$base/v8.8.8/garage"; expect_out 700
@@ -371,17 +345,12 @@ t_garage_is_installed_with_its_config_secrets_and_unit() {
   done
   expect_true "a secret is in the config" eval '! grep -qF "$(cat "$secrets/garage-admin-token")" "$base/garage.toml"'
   run "$MROOM" baseline garage
-  script="$(root_script_of "$out")"
-  expect_true "the root script does not write the unit" has "$script" "cat >$T/systemd/mroom-garage.service <<'MROOM_UNIT'"
-  for line in "ExecStart=$base/current/garage -c $base/garage.toml server" "User=$(id -un)" "Restart=always" \
-    "StartLimitIntervalSec=0" "PrivateNetwork=yes" "ProtectHome=tmpfs" "ProtectSystem=strict" \
-    "BindPaths=$base/meta $base/data $base/run" \
-    "BindReadOnlyPaths=$base $secrets/garage-rpc-secret $secrets/garage-admin-token $secrets/garage-metrics-token"; do
-    expect_true "the unit lacks: $line" grep -qxF -- "$line" <<<"$script"
-  done
-  expect_true "the unit runs something as root" \
-    eval '! grep -qE "^Exec[A-Za-z]*=[+!@-]|^ExecStartPre=|^ExecStartPost=|^ExecStop=|^ExecReload=|^User=root" <<<"$script"'
-  expect_out_has "Garage does not answer yet: install its unit, then run mroom baseline garage again"
+  expect_out_has "To be installed or updated: mroom-garage.service."
+  expect_out_has "Root installs them with mroom's root recipe (README, \"Root steps\"): garage in its parts."
+  root_install garage; expect_rc 0
+  run "$MROOM" baseline garage
+  expect_out_has "systemd units: installed as this mroom writes them (mroom-garage.service inactive)."
+  expect_out_has "Garage does not answer yet: install its unit (the root recipe), then run mroom baseline garage again"
   # The two hosts' nginx configs, on Garage's sockets.
   expect_out_has "s3.qa.example.dev, the S3 API"
   expect_out_has "proxy_pass http://unix:$base/run/s3.sock;"

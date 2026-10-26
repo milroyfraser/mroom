@@ -2,17 +2,17 @@
 # baseline — sets up the QA services a box runs beside Forge's own (design 3, 8.9). Phase 2a's first part:
 #
 #   mroom baseline mailpit   the QA mail catcher (D19): Mailpit at the build lib/core/pins.txt names, checked
-#                            against its SHA-256, mroom's mail relay, their folders and logins, and the
-#                            script that installs, as root, the three systemd units that run them
-#   mroom baseline garage    the QA file store (D14): Garage at its pinned build, its config and secrets, the
-#                            script that installs its systemd unit, its one-node layout, and the nginx
+#                            against its SHA-256, mroom's mail relay, their folders and logins, and whether
+#                            the three systemd units that run them are this release's
+#   mroom baseline garage    the QA file store (D14): Garage at its pinned build, its config and secrets,
+#                            whether its systemd unit is this release's, its one-node layout, and the nginx
 #                            configs of its two hosts
 #
 # It runs as the box user and changes nothing outside the box user's home. It can run again: a binary that
 # matches its pin and logins that exist are kept. Services live in ~/.local/share/mroom-services, which an
 # uninstall of mroom leaves alone, and their logins in ~/.config/mroom/secrets, files mode 600 and folders
-# 700, where no site user can read them. Installing the systemd units takes root (D20), so a person runs the
-# script this prints, in which each unit's text stands: root never reads a file the box user can write.
+# 700, where no site user can read them. Installing the systemd units takes root (D20), which runs nothing
+# this prints: a person installs them with mroom's root recipe in Forge, from a release (D21).
 set -euo pipefail
 shopt -s inherit_errexit
 umask 077
@@ -21,6 +21,9 @@ SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")
 MROOM_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 # shellcheck source=lib/core/util.sh
 . "$MROOM_ROOT/lib/core/util.sh"
+# The units' text, which root-setup installs as root.
+# shellcheck source=lib/root-setup
+. "$MROOM_ROOT/lib/root-setup"
 
 PINS="${MROOM_PINS:-$MROOM_ROOT/lib/core/pins.txt}"
 SERVICES="$HOME/.local/share/mroom-services"
@@ -168,185 +171,25 @@ restart_unit() {
   done
 }
 
-# unit_text <port> <python> <unit>: one of the three systemd units, as this mroom writes it. The socket holds
-# the SMTP port from boot, as root, and hands it to the relay; Mailpit and the relay run as the box user,
-# confined to what they use, and systemd starts them again however often they stop.
-unit_text() {
-  local port="$1" python="$2" base="$SERVICES/mailpit" user group
-  user="$(id -un)" group="$(id -gn)"
-  case "$3" in
-    mroom-mail-relay.socket) cat <<EOF
-# Written by mroom baseline mailpit. QA apps send mail to this port, and systemd holds it from boot, as
-# root, so no one else on the box can take it, not even while the relay restarts (design D19).
-[Unit]
-Description=mroom: the QA SMTP port, held for mroom's mail relay
-
-[Socket]
-ListenStream=127.0.0.1:$port
-Accept=no
-
-[Install]
-WantedBy=sockets.target
-EOF
-      ;;
-    mroom-mail-relay.service) cat <<EOF
-# Written by mroom baseline mailpit. Pipes QA apps' mail from the socket systemd holds to Mailpit. While it
-# is down, connections wait in the socket; RestartSec keeps its restarts well under the socket's trigger
-# limit, which would close the socket.
-[Unit]
-Description=mroom's mail relay: QA apps' mail to Mailpit
-Requires=mroom-mail-relay.socket
-After=mroom-mail-relay.socket
-StartLimitIntervalSec=0
-
-[Service]
-User=$user
-Group=$group
-ExecStart=$python -I $SERVICES/mail-relay/mail-relay 127.0.0.1 $port $base/run/smtp.sock
-Restart=always
-RestartSec=1
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=tmpfs
-BindReadOnlyPaths=$SERVICES/mail-relay $base/run
-PrivateTmp=yes
-PrivateDevices=yes
-RestrictAddressFamilies=AF_UNIX
-SystemCallFilter=@system-service
-SystemCallArchitectures=native
-CapabilityBoundingSet=
-LockPersonality=yes
-RestrictNamespaces=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-      ;;
-    mroom-mailpit.service) cat <<EOF
-# Written by mroom baseline mailpit. Mailpit listens only on Unix sockets in a folder only $user can open,
-# and sees only its own files: its build, its data, its sockets and the two login files. The gate stops it
-# to add or remove a login, which Mailpit reads only when it starts, and systemd starts it again however
-# often that happens.
-[Unit]
-Description=Mailpit, mroom's QA mail catcher
-After=network.target
-StartLimitIntervalSec=0
-
-[Service]
-User=$user
-Group=$group
-WorkingDirectory=$base/data
-ExecStart=$base/current/mailpit --listen unix:$base/run/http.sock:0600 --smtp unix:$base/run/smtp.sock:0600 --database $base/data/mailpit.db --smtp-auth-file $SECRETS/mailpit-smtp.passwd --smtp-auth-allow-insecure --tags-username --tags-disable x-tags,plus-addresses --ui-auth-file $SECRETS/mailpit-ui.passwd --max 0 --max-age 7d
-Restart=always
-RestartSec=100ms
-UMask=0077
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=tmpfs
-BindReadOnlyPaths=$base $SECRETS/mailpit-smtp.passwd $SECRETS/mailpit-ui.passwd
-BindPaths=$base/data $base/run
-PrivateTmp=yes
-PrivateDevices=yes
-PrivateNetwork=yes
-RestrictAddressFamilies=AF_UNIX
-SystemCallFilter=@system-service
-SystemCallArchitectures=native
-CapabilityBoundingSet=
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictNamespaces=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-      ;;
-    mroom-garage.service)
-      base="$SERVICES/garage"
-      cat <<EOF
-# Written by mroom baseline garage. Garage, mroom's QA file store: its S3, web and admin endpoints listen
-# only on Unix sockets in a folder only $user can open, its own RPC stays in a network of its own, and it
-# sees only its build, its config, its data and its three secret files.
-[Unit]
-Description=Garage, mroom's QA file store
-After=network.target
-StartLimitIntervalSec=0
-
-[Service]
-User=$user
-Group=$group
-ExecStart=$base/current/garage -c $base/garage.toml server
-Restart=always
-RestartSec=1
-UMask=0077
-LimitNOFILE=65536
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=tmpfs
-BindReadOnlyPaths=$base $SECRETS/garage-rpc-secret $SECRETS/garage-admin-token $SECRETS/garage-metrics-token
-BindPaths=$base/meta $base/data $base/run
-PrivateTmp=yes
-PrivateDevices=yes
-PrivateNetwork=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-SystemCallFilter=@system-service
-SystemCallArchitectures=native
-CapabilityBoundingSet=
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictNamespaces=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-      ;;
-  esac
-}
-
-# root_script <port> <python> <systemd dir> "<units>" <unit...>: the commands a person runs as root to write
-# the named units and start all of <units>. Every unit's text is in the script itself: root reads no file
-# the box user can write.
-root_script() {
-  local port="$1" python="$2" dir="$3" all="$4" unit written=()
-  shift 4
-  echo "set -eu"
-  for unit in "$@"; do
-    printf "cat >%s <<'MROOM_UNIT'\n%s\nMROOM_UNIT\n" "$dir/$unit" "$(unit_text "$port" "$python" "$unit")"
-    written+=("$dir/$unit")
-  done
-  echo "chmod 644 ${written[*]}"
-  echo "systemctl daemon-reload"
-  echo "systemctl enable --now $all"
-}
-
-# units_section <part> <port> <python> <intro> <unit...>: whether the installed units are as this mroom writes
-# them, and for those that are not, the script a person runs as root (D20). Root reads no file the box user
-# can write: each unit's text is in the script.
+# units_section <part> <port> <intro> <unit...>: whether the installed units are as this release writes them
+# (lib/root-setup holds their text), and when they are not, how a person installs them: mroom's root recipe
+# in Forge, which runs a release's lib/root-setup as root (README, "Root steps"). Nothing this prints is to
+# be run as root: the box user's programs could have changed it.
 units_section() {
-  local part="$1" port="$2" python="$3" intro="$4" systemd="${MROOM_SYSTEMD_DIR:-/etc/systemd/system}"
-  local unit stale=() restarts=() states=() socket_clause=""
-  shift 4
+  local part="$1" port="$2" intro="$3" systemd="${MROOM_SYSTEMD_DIR:-/etc/systemd/system}" unit stale=() states=()
+  local version source
+  shift 3
   for unit in "$@"; do
-    if ! [ -f "$systemd/$unit" ] || [ "$(cat "$systemd/$unit")" != "$(unit_text "$port" "$python" "$unit")" ]; then
+    if ! [ -f "$systemd/$unit" ] \
+      || [ "$(cat "$systemd/$unit")" != "$(unit_text "$unit" "$(id -un)" "$(id -gn)" "$HOME" "${port:-1025}")" ]; then
       stale+=("$unit")
-      [ "${unit##*.}" = socket ] || ! [ -f "$systemd/$unit" ] || restarts+=("$unit")
     fi
   done
   echo
+  if [ "$systemd" != /etc/systemd/system ]; then
+    echo "WARNING: MROOM_SYSTEMD_DIR is set, so this compares the units in $systemd, not /etc/systemd/system: a"
+    echo "setting for tests."
+  fi
   if [ "${#stale[@]}" = 0 ]; then
     for unit in "$@"; do
       states+=("$unit $(systemctl is-active "$unit" 2>/dev/null || true)")
@@ -354,47 +197,32 @@ units_section() {
     echo "systemd units: installed as this mroom writes them ($(printf '%s, ' "${states[@]}" | sed 's/, $//'))."
     return 0
   fi
-  if [[ " $* " == *".socket "* ]]; then socket_clause=", and the socket listens on 127.0.0.1:$port only"; fi
+  version="$(cat "$MROOM_ROOT/VERSION" 2>/dev/null || echo unknown)"
+  source="$(cat "$MROOM_ROOT/SOURCE" 2>/dev/null || true)"
   cat <<EOF
 $intro To be installed or updated: ${stale[*]}.
 
-Run the script below as root, from a session the box user's programs cannot change, such as a Forge recipe
-run as root (Server > Recipes); never by typing sudo in a shell of $(id -un)'s, whose PATH, aliases and
-functions those programs can change. Root reads nothing the box user can write: each unit's text is in the
-script. Check it first: every cat > writes into /etc/systemd/system, every Exec line runs a file under
-$HOME, each service has User=$(id -un), no line starts with ExecStartPre, ExecStartPost, ExecStop or
-ExecReload, no Exec value starts with +, ! or @$socket_clause.
+Root installs them with mroom's root recipe (README, "Root steps"): $part in its parts${port:+, smtp_port=$port}.
+Set its v and sum from the README of mroom v$version on GitHub, never from this box, which the box user's
+programs could change. Then run mroom baseline $part again.
 EOF
-  if [ "$systemd" != /etc/systemd/system ]; then
-    echo
-    echo "WARNING: MROOM_SYSTEMD_DIR is set, so this script writes to $systemd, not /etc/systemd/system. It is a"
-    echo "setting for tests: unless you are testing, unset it and run mroom baseline $part again."
+  if [[ "$source" != release* ]]; then
+    echo "This mroom was installed from a checkout, not a release, and the recipe installs a release's units:"
+    echo "install a release first (install.sh --version)."
   fi
-  cat <<EOF
-
------ run as root -----
-$(root_script "$port" "$python" "$systemd" "$*" "${stale[@]}")
-EOF
-  if [ "${#restarts[@]}" -gt 0 ]; then echo "systemctl restart ${restarts[*]}"; fi
-  if [[ " ${stale[*]} " == *" mroom-mail-relay.socket "* ]] && [ -f "$systemd/mroom-mail-relay.socket" ] \
-    && ! grep -qx "ListenStream=127.0.0.1:$port" "$systemd/mroom-mail-relay.socket"; then
-    echo "systemctl restart mroom-mail-relay.socket mroom-mail-relay.service"
-    echo "echo 'the SMTP port changed, and was free for a moment: give each QA environment new mail logins (mail-user-add)'"
-  fi
-  echo "----- end -----"
 }
 
 setup_mailpit() {
   local base="$SERVICES/mailpit" logins="$SECRETS/mailpit-smtp.passwd" ui="$SECRETS/mailpit-ui.passwd"
-  local env_file="$SECRETS/mailpit.env" port python hash rest content password relay_changed="" mailpit_changed="" tries=1
+  local env_file="$SECRETS/mailpit.env" port hash rest content password relay_changed="" mailpit_changed="" tries=1
   local systemd="${MROOM_SYSTEMD_DIR:-/etc/systemd/system}" status
   need curl tar sha256sum openssl python3 flock
   load_box || die "box.env could not be read"
   port="${BOX[MROOM_QA_SMTP_PORT]:-1025}"
-  python="$(command -v python3)"
+  [ -x "$PYTHON" ] || die "$PYTHON is missing; the mail relay runs on it (apt-get install -y python3)"
   # What the systemd units name, written plainly into them.
-  [[ "$HOME" =~ ^/[A-Za-z0-9._/-]+$ && "$python" =~ ^/[A-Za-z0-9._/-]+$ && "$systemd" =~ ^/[A-Za-z0-9._/-]+$ ]] \
-    || die "systemd units need plain paths; $(printf '%q' "$HOME"), $(printf '%q' "$python") or $(printf '%q' "$systemd") is not"
+  [[ "$HOME" =~ ^/[A-Za-z0-9._/-]+$ && "$systemd" =~ ^/[A-Za-z0-9._/-]+$ ]] \
+    || die "systemd units need plain paths; $(printf '%q' "$HOME") or $(printf '%q' "$systemd") is not"
   [[ "$(id -un)" =~ ^[a-z_][a-z0-9_-]*$ && "$(id -gn)" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "the box user's name is not plain"
   CHANGED=""
   install_pinned mailpit
@@ -453,8 +281,8 @@ setup_mailpit() {
     else echo "Mailpit: runs its build and reads its API login from its next start (mroom-mailpit.service)"; fi
   fi
 
-  units_section mailpit "$port" "$python" "Three systemd units run these: the socket holds the SMTP port apps send to, 127.0.0.1:$port, from boot, as
-root, and the relay and Mailpit run as $(id -un)." mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service
+  units_section mailpit "$port" "Three systemd units run these: the socket holds the SMTP port apps send to, 127.0.0.1:$port, from boot, as
+root, and the relay and Mailpit run as $(id -un)." "${MAILPIT_UNITS[@]}"
   # A Mailpit just restarted gets 10 seconds to answer.
   for _ in $(seq 1 "$tries"); do
     if curl -q --silent --fail --max-time 2 --unix-socket "$base/run/http.sock" --output /dev/null \
@@ -548,8 +376,8 @@ setup_garage() {
     else echo "Garage: runs its build and reads its config from its next start (mroom-garage.service)"; fi
   fi
 
-  units_section garage "" "" "One systemd unit runs Garage, as $user: its S3, web and admin endpoints listen only on Unix
-sockets in $(home_short "$base/run"), and its own RPC stays in a network of its own." mroom-garage.service
+  units_section garage "" "One systemd unit runs Garage, as $user: its S3, web and admin endpoints listen only on Unix
+sockets in $(home_short "$base/run"), and its own RPC stays in a network of its own." "${GARAGE_UNITS[@]}"
 
   # One node holds every bucket: its layout is set once, when Garage first answers.
   for _ in $(seq 1 40); do
@@ -559,7 +387,7 @@ sockets in $(home_short "$base/run"), and its own RPC stays in a network of its 
     sleep 0.25
   done
   if [ -z "$layout" ]; then
-    echo "Garage does not answer yet: install its unit, then run mroom baseline garage again to set up its layout."
+    echo "Garage does not answer yet: install its unit (the root recipe), then run mroom baseline garage again for its layout."
   elif [ "$(jq '.roles | length' <<<"$layout")" -gt 0 ]; then
     echo "Garage answers; its layout holds one node."
   else

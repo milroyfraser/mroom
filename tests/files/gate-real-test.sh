@@ -39,7 +39,6 @@ trap cleanup EXIT
 
 gate() { run env SSH_ORIGINAL_COMMAND="$1" "$MROOM" gate provision; }
 field() { sed -n "s/^$1=//p" <<<"$2"; }
-root_script_of() { sed -n '/^----- run as root -----$/,/^----- end -----$/p' <<<"$1" | sed '1d;$d'; }
 garage_run() { echo "$HOME/.local/share/mroom-services/garage/run"; }
 
 # s3 <key output> <unix|host:port> <Host> <method> <path> [<body>]: one signed S3 request, with the key
@@ -117,10 +116,10 @@ t_the_bucket_operations_against_the_real_garage() {
   printf 'MROOM_APP_NAME=shop\nMROOM_QA_ZONE=qa.example.test\n' >"$HOME/.config/mroom/box.env"
   run "$MROOM" baseline garage
   expect_rc 0; expect_out_has "garage v2.5.0: installed, SHA-256"
-  local script
-  script="$(root_script_of "$out")"
-  expect_true "baseline printed no script to run as root" [ -n "$script" ]
-  sudo bash -c "$script"
+  expect_out_has "To be installed or updated: mroom-garage.service."
+  # Install the unit as the root recipe does: this release's lib/root-setup, run as root.
+  run sudo bash "$ROOT/lib/root-setup" --user "$(id -un)" --home "$HOME" garage
+  expect_rc 0; expect_out_has "systemd units written: mroom-garage.service"
   wait_ready
   run "$MROOM" baseline garage
   expect_rc 0; expect_out_has "Garage answers; its layout now holds this node."

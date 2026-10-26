@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+# root-setup — what mroom needs root for on a box, all from one release (design D21). A person runs it as root
+# through mroom's root recipe in Forge, which downloads it from a release tag and checks its SHA-256 (README,
+# "Root steps"), so nothing the box user, or a program running as it, can change reaches root: it reads no
+# file of theirs, and writes what it installs from its own text, or from its release's lib/site-op, checked
+# against the SHA-256 below.
+#
+#   root-setup --user <name> [--home <dir>] [--smtp-port <port>] [--release <tag>] <part>...
+#
+#   site-op   the gate's helper, owned by root, and the one sudoers line that lets the box user run it as any
+#             of Forge's isolated users, never as root (design 8.2)
+#   mailpit   the systemd units of the QA mail catcher (D19): the socket that holds the SMTP port from boot,
+#             as root, and mroom's mail relay and Mailpit, which run as the box user
+#   garage    the systemd unit of the QA file store, Garage (D14), which runs as the box user
+#
+# --home is the box user's home, where its services live (the one /etc/passwd names when not given),
+# --smtp-port the port QA apps send mail to (mailpit; 1025 when not given), and --release the tag whose
+# lib/site-op to install (site-op; without it, the site-op beside this file, as in a checkout). mroom
+# baseline, run as the box user, reads this file for the units' text, to say whether the installed units are
+# this release's.
+set -euo pipefail
+
+ROOT_SETUP_REPO="milroyfraser/mroom"
+# The SHA-256 of this release's lib/site-op; tests/root-test.sh fails while it is another file's.
+SITE_OP_SHA256="033c9563a72f4b0d9df686865e0ad99526de4ffa60f43adc61315d7276da7cf4"
+# The units name this python, which root's own PATH also finds first on Ubuntu.
+PYTHON=/usr/bin/python3
+MAILPIT_UNITS=(mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service)
+GARAGE_UNITS=(mroom-garage.service)
+
+# unit_text <unit> <user> <group> <home> <port>: one of mroom's systemd units, as this release writes it. The
+# socket holds the SMTP port from boot, as root, and hands it to the relay; the services run as the box user,
+# confined to what they use, and systemd starts them again however often they stop.
+unit_text() {
+  local user="$2" group="$3" home="$4" port="$5" services secrets base
+  services="$home/.local/share/mroom-services" secrets="$home/.config/mroom/secrets" base="$services/mailpit"
+  case "$1" in
+    mroom-mail-relay.socket) cat <<EOF
+# Written by mroom's root-setup (mailpit). QA apps send mail to this port, and systemd holds it from boot, as
+# root, so no one else on the box can take it, not even while the relay restarts (design D19).
+[Unit]
+Description=mroom: the QA SMTP port, held for mroom's mail relay
+
+[Socket]
+ListenStream=127.0.0.1:$port
+Accept=no
+
+[Install]
+WantedBy=sockets.target
+EOF
+      ;;
+    mroom-mail-relay.service) cat <<EOF
+# Written by mroom's root-setup (mailpit). Pipes QA apps' mail from the socket systemd holds to Mailpit. While
+# it is down, connections wait in the socket; RestartSec keeps its restarts well under the socket's trigger
+# limit, which would close the socket.
+[Unit]
+Description=mroom's mail relay: QA apps' mail to Mailpit
+Requires=mroom-mail-relay.socket
+After=mroom-mail-relay.socket
+StartLimitIntervalSec=0
+
+[Service]
+User=$user
+Group=$group
+ExecStart=$PYTHON -I $services/mail-relay/mail-relay 127.0.0.1 $port $base/run/smtp.sock
+Restart=always
+RestartSec=1
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindReadOnlyPaths=$services/mail-relay $base/run
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      ;;
+    mroom-mailpit.service) cat <<EOF
+# Written by mroom's root-setup (mailpit). Mailpit listens only on Unix sockets in a folder only $user can
+# open, and sees only its own files: its build, its data, its sockets and the two login files. The gate stops
+# it to add or remove a login, which Mailpit reads only when it starts, and systemd starts it again however
+# often that happens.
+[Unit]
+Description=Mailpit, mroom's QA mail catcher
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+User=$user
+Group=$group
+WorkingDirectory=$base/data
+ExecStart=$base/current/mailpit --listen unix:$base/run/http.sock:0600 --smtp unix:$base/run/smtp.sock:0600 --database $base/data/mailpit.db --smtp-auth-file $secrets/mailpit-smtp.passwd --smtp-auth-allow-insecure --tags-username --tags-disable x-tags,plus-addresses --ui-auth-file $secrets/mailpit-ui.passwd --max 0 --max-age 7d
+Restart=always
+RestartSec=100ms
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindReadOnlyPaths=$base $secrets/mailpit-smtp.passwd $secrets/mailpit-ui.passwd
+BindPaths=$base/data $base/run
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      ;;
+    mroom-garage.service)
+      base="$services/garage"
+      cat <<EOF
+# Written by mroom's root-setup (garage). Garage, mroom's QA file store: its S3, web and admin endpoints
+# listen only on Unix sockets in a folder only $user can open, its own RPC stays in a network of its own,
+# and it sees only its build, its config, its data and its three secret files.
+[Unit]
+Description=Garage, mroom's QA file store
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+User=$user
+Group=$group
+ExecStart=$base/current/garage -c $base/garage.toml server
+Restart=always
+RestartSec=1
+UMask=0077
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindReadOnlyPaths=$base $secrets/garage-rpc-secret $secrets/garage-admin-token $secrets/garage-metrics-token
+BindPaths=$base/meta $base/data $base/run
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+root_die() { echo "root-setup: $*" >&2; exit 1; }
+
+# root_units <user> <group> <home> <port> <unit...>: writes each unit that is not as this release writes it,
+# starts them all, and restarts those that ran from an older text.
+root_units() {
+  local user="$1" group="$2" home="$3" port="$4" unit text written=() restart=() port_moved=""
+  shift 4
+  for unit in "$@"; do
+    text="$(unit_text "$unit" "$user" "$group" "$home" "$port")"
+    if [ -f "$SYSTEMD_DIR/$unit" ] && [ "$(cat "$SYSTEMD_DIR/$unit")" = "$text" ]; then continue; fi
+    if [ -f "$SYSTEMD_DIR/$unit" ]; then
+      if [ "${unit##*.}" != socket ]; then restart+=("$unit")
+      elif ! grep -qxF "ListenStream=127.0.0.1:$port" "$SYSTEMD_DIR/$unit"; then port_moved=1; fi
+    fi
+    # Written under a name systemd skips, and only then put in place.
+    printf '%s\n' "$text" >"$SYSTEMD_DIR/.$unit.new"
+    chmod 644 "$SYSTEMD_DIR/.$unit.new"
+    mv -f "$SYSTEMD_DIR/.$unit.new" "$SYSTEMD_DIR/$unit"
+    written+=("$unit")
+  done
+  if [ "${#written[@]}" -gt 0 ]; then echo "systemd units written: ${written[*]}"
+  else echo "systemd units: $* already as this release writes them"; fi
+  systemctl daemon-reload
+  systemctl enable --now "$@"
+  if [ "${#restart[@]}" -gt 0 ]; then systemctl restart "${restart[@]}"; fi
+  if [ -n "$port_moved" ]; then
+    systemctl restart mroom-mail-relay.socket mroom-mail-relay.service
+    echo "the SMTP port changed, and was free for a moment: give each QA environment new mail logins (mail-user-add)"
+  fi
+}
+
+# root_site_op <user> <release>: the gate's helper, owned by root, from the release (or from beside this file),
+# checked against SITE_OP_SHA256, and the sudoers line that lets <user> run it as any of Forge's isolated users,
+# never as root. The line is written, checked, and only then put in place, under a name with a dot in it, which
+# sudo skips until then.
+root_site_op() {
+  local user="$1" release="$2" src line owner=()
+  if [ -z "${MROOM_ROOT_SETUP_TEST:-}" ]; then owner=(-o root -g root); fi
+  if [ -n "$release" ]; then
+    curl -q -fsSL --proto '=https' --proto-redir '=https' --max-time 60 -o "$ROOT_TMP/site-op" \
+      "https://raw.githubusercontent.com/$ROOT_SETUP_REPO/$release/lib/site-op" || root_die "could not download site-op of $release"
+  else
+    src="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/site-op"
+    [ -f "$src" ] || root_die "no --release, and no site-op beside this file: run this through mroom's root recipe"
+    cat "$src" >"$ROOT_TMP/site-op"
+  fi
+  echo "$SITE_OP_SHA256  $ROOT_TMP/site-op" | sha256sum --check --status \
+    || root_die "that site-op is not this release's: its SHA-256 differs; nothing changed"
+  install -d "${owner[@]}" -m 755 "$LIBEXEC_DIR"
+  install "${owner[@]}" -m 755 "$ROOT_TMP/site-op" "$LIBEXEC_DIR/.site-op.new"
+  mv -f "$LIBEXEC_DIR/.site-op.new" "$LIBEXEC_DIR/site-op"
+  line="$SUDOERS_DIR/.mroom-gate.new"
+  printf '%s ALL=(%%isolated) NOPASSWD: %s\n' "$user" "$LIBEXEC_DIR/site-op" >"$line"
+  chmod 440 "$line"
+  if command -v visudo >/dev/null 2>&1 && ! visudo -cf "$line" >/dev/null; then
+    rm -f "$line"
+    root_die "visudo refused the sudoers line; site-op is installed, the line is not"
+  fi
+  mv -f "$line" "$SUDOERS_DIR/mroom-gate"
+  echo "site-op: installed from ${release:-the checkout beside this file}, with the sudoers line that lets $user run it as an isolated user"
+}
+
+root_main() {
+  local user="" home="" port=1025 release="" parts=() part entry group
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --user | --home | --smtp-port | --release)
+        [ "$#" -ge 2 ] || root_die "$1 needs a value"
+        case "$1" in --user) user="$2" ;; --home) home="$2" ;; --smtp-port) port="$2" ;; --release) release="$2" ;; esac
+        shift 2
+        ;;
+      site-op | mailpit | garage) parts+=("$1"); shift ;;
+      *) root_die "unknown argument '${1:0:40}'; the parts are site-op, mailpit and garage" ;;
+    esac
+  done
+  [ "${#parts[@]}" -gt 0 ] || root_die "name the parts to install: site-op, mailpit or garage"
+  if [ -n "${MROOM_ROOT_SETUP_TEST:-}" ]; then
+    SYSTEMD_DIR="${MROOM_SYSTEMD_DIR:?for tests, MROOM_SYSTEMD_DIR}" LIBEXEC_DIR="${MROOM_LIBEXEC_DIR:?for tests, MROOM_LIBEXEC_DIR}"
+    SUDOERS_DIR="${MROOM_SUDOERS_DIR:?for tests, MROOM_SUDOERS_DIR}"
+    echo "WARNING: MROOM_ROOT_SETUP_TEST is set, so this writes to $SYSTEMD_DIR, $LIBEXEC_DIR and $SUDOERS_DIR: a setting for tests"
+  else
+    [ "$(id -u)" = 0 ] || root_die "run this as root, through mroom's root recipe (README, Root steps)"
+    SYSTEMD_DIR=/etc/systemd/system LIBEXEC_DIR=/usr/local/libexec/mroom SUDOERS_DIR=/etc/sudoers.d
+  fi
+  # Each value goes into a unit or a sudoers line as it is, so each must be plain.
+  [[ "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || root_die "--user needs the box user's name"
+  entry="$(getent passwd "$user")" || root_die "there is no user $user"
+  [ "$(cut -d: -f3 <<<"$entry")" != 0 ] || root_die "the box user cannot be root"
+  group="$(id -gn "$user")"
+  [[ "$group" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || root_die "the name of $user's group is not plain"
+  if [ -z "$home" ]; then home="$(cut -d: -f6 <<<"$entry")"; fi
+  [[ "$home" =~ ^/[A-Za-z0-9._/-]+$ && "/$home/" != */../* ]] || root_die "$user's home, $(printf '%q' "$home"), is not a plain path"
+  if ! [[ "$port" =~ ^[0-9]{4,5}$ ]] || [ "$port" -lt 1024 ] || [ "$port" -gt 65535 ]; then
+    root_die "--smtp-port takes a port from 1024 to 65535"
+  fi
+  [ -z "$release" ] || [[ "$release" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || root_die "--release takes a tag, such as v0.4.0"
+  ROOT_TMP="$(mktemp -d)"
+  trap 'rm -rf "$ROOT_TMP"' EXIT
+  for part in "${parts[@]}"; do
+    case "$part" in
+      site-op) root_site_op "$user" "$release" ;;
+      mailpit)
+        [ -x "$PYTHON" ] || root_die "$PYTHON is missing; the mail relay needs it (apt-get install -y python3)"
+        root_units "$user" "$group" "$home" "$port" "${MAILPIT_UNITS[@]}"
+        ;;
+      garage) root_units "$user" "$group" "$home" "$port" "${GARAGE_UNITS[@]}" ;;
+    esac
+  done
+}
+
+# Run, it installs; read by mroom baseline, it only defines the units' text.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  umask 022
+  root_main "$@"
+fi

@@ -245,8 +245,9 @@ forge-api --secret GET sites/123/environment
 The real pin is the token. Make it from a Forge account whose only team holds the box (design section 3),
 since `MROOM_FORGE_SERVER` set in the environment can name any server the token sees. Give it only the
 scopes its users need, such as `server:view`, `site:meta` and `site:manage-nginx`. Never give it
-`server:delete`, or any scope design D20 lists as reaching `forge` or root: SSH keys, commands or recipes,
-the sudo or database password, deploy scripts, daemons or scheduled jobs.
+`server:delete`, or any scope design D20 lists as reaching `forge` or root: SSH keys, commands or recipes
+(any `recipe:*` scope, `recipe:view` too, since it runs any saved recipe), the sudo or database password,
+deploy scripts, daemons or scheduled jobs.
 
 To store the token without it showing on screen or in history:
 
@@ -403,10 +404,41 @@ the real Mailpit and Garage under systemd (`tests/pg/`, `tests/redis/`, `tests/s
 `tests/files/`).
 
 Steps marked *as root* change what the box user cannot, so they must not trust anything the box user, or a
-program running as it, could have changed. Run them from a session those programs cannot change, such as a
-Forge recipe run as root (Server > Recipes), not by typing `sudo` in the box user's shell, whose `PATH`,
-aliases and functions they can change. Their scripts read no file the box user can write: what root
-installs is written out in the step itself.
+program running as it, could have changed. Run them from a session those programs cannot change, a Forge
+recipe run as root (Server > Recipes), never by typing `sudo` in the box user's shell, whose `PATH`,
+aliases and functions they can change. They read no file the box user can write.
+
+**The root recipe** (design D21). What mroom installs as root, `site-op` with its sudoers line and the QA
+services' systemd units, comes from a release, never from the box. Save this as a recipe in Forge, run as
+`root` and shared only with the team that holds the box, and run it whenever these steps or
+`mroom baseline` say so. It downloads `lib/root-setup` from the release tag `v`, checks it against `sum`,
+and runs it, which installs the `parts` named:
+
+- Take `v` and `sum` from this README at the release the box runs (`mroom version` says which), on GitHub,
+  never from the box. `v` is a tag, never a commit: GitHub serves a fork's commits under this repository's
+  address too. Tag and `sum` together pin the exact file.
+- `parts`: `site-op` always, `mailpit` when `qa.parity.mail` is `catcher`, `garage` when `qa.parity.files`
+  is `same`. `smtp_port` is `box.env`'s `MROOM_QA_SMTP_PORT`, 1025 unless set.
+- Root reads nothing of the box user's: `root-setup` writes each unit from its own text, checks `site-op`
+  against the SHA-256 it holds, and runs again without harm, rewriting and restarting only what changed.
+- Never give a token on the box a `recipe:*` scope: even `recipe:view` runs any saved recipe.
+
+<!-- root-recipe: tests/root-test.sh checks sum against lib/root-setup, and runs this block -->
+```bash
+set -euo pipefail
+v=v0.4.0
+sum=2cdd3f6c33af64b4761853f1f4d5342a867a2e050ac01b8ddc58a2214ab046c2
+user=forge
+parts=(site-op mailpit garage)
+smtp_port=1025
+[[ "$v" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "v must be a release tag, such as v0.4.0" >&2; exit 1; }
+f="$(mktemp)"
+trap 'rm -f "$f"' EXIT
+curl -q -fsSL --proto '=https' --proto-redir '=https' --max-time 60 -o "$f" \
+  "https://raw.githubusercontent.com/milroyfraser/mroom/$v/lib/root-setup"
+echo "$sum  $f" | sha256sum --check --quiet
+bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
+```
 
 1. In the box user's `~/.ssh/authorized_keys`, by hand (Forge's SSH key screen stores a bare key, without
    options):
@@ -518,26 +550,13 @@ installs is written out in the step itself.
    Until then Redis is exactly as open as it was. The gate refuses Redis requests while the default user
    is on, since with it any process on the box reaches every key.
 
-10. *As root:* `site-op`, owned by root so the box user cannot change the helper itself, and the one
-    sudoers line that lets the box user run it as any of Forge's isolated users, never as root. Install it
-    again after each mroom upgrade: the gate refuses a copy that is not its release's own. Root never opens
-    a path of the box user's: `runuser` reads the release's copy as the box user (`forge` here), so a link
-    planted there reaches nothing the box user could not read anyway. The sudoers line is written by root,
-    checked, and only then put in place, under a name with a dot in it, which sudo skips until then:
-
-    ```bash
-    set -eu
-    install -d -o root -g root -m 755 /usr/local/libexec/mroom
-    runuser -u forge -- cat /home/forge/.local/share/mroom/lib/site-op >/usr/local/libexec/mroom/.site-op.new
-    chown root:root /usr/local/libexec/mroom/.site-op.new
-    chmod 755 /usr/local/libexec/mroom/.site-op.new
-    mv /usr/local/libexec/mroom/.site-op.new /usr/local/libexec/mroom/site-op
-    line=/etc/sudoers.d/.mroom-gate.new
-    echo 'forge ALL=(%isolated) NOPASSWD: /usr/local/libexec/mroom/site-op' >"$line"
-    chmod 440 "$line"
-    visudo -cf "$line"
-    mv "$line" /etc/sudoers.d/mroom-gate
-    ```
+10. *As root:* the root recipe with `site-op` in its parts. It installs `site-op`, owned by root so the box
+    user cannot change the helper itself, at `/usr/local/libexec/mroom/site-op`, from the release and
+    checked against the SHA-256 `lib/root-setup` holds. With it comes the one sudoers line that lets the box
+    user run it as any of Forge's isolated users, never as root, written, checked with `visudo`, and only
+    then put in place as `/etc/sudoers.d/mroom-gate`:
+    `forge ALL=(%isolated) NOPASSWD: /usr/local/libexec/mroom/site-op`. Run the recipe again after each
+    mroom upgrade: the gate refuses a copy that is not its release's own.
 
     A QA site's user never needs to log in, but its PR's code could add its own SSH key: add
     `DenyGroups isolated` to `/etc/ssh/sshd_config` and reload sshd, which also turns off Forge's SFTP for
@@ -550,24 +569,22 @@ installs is written out in the step itself.
     fits.
 
 12. The mail catcher, when `qa.parity.mail` is `catcher` (the default): `mroom baseline mailpit`, then,
-    *as root*, the script it prints. Baseline downloads Mailpit at the build `lib/core/pins.txt` names,
-    refuses it unless the archive and the binary match their SHA-256 pins, puts mroom's mail relay beside
-    it and makes their logins (mode 600, in `~/.config/mroom/secrets`). Its script writes three systemd
-    units, each one's text in full, and starts them: the socket on `127.0.0.1:1025` (`MROOM_QA_SMTP_PORT` in
-    `box.env` to change it), the relay and Mailpit, both run as the box user. Before running it, check that
-    every `cat >` writes into `/etc/systemd/system`, every `Exec` line runs a file under the box user's home, each service has `User=` the box user, nothing
-    is an `ExecStartPre`, `ExecStartPost`, `ExecStop` or `ExecReload`, no `Exec` value starts with `+`, `!`
-    or `@`, and the socket listens on `127.0.0.1` only. Baseline can run again: what is in place is kept, it
+    *as root*, the root recipe with `mailpit` in its parts, then `mroom baseline mailpit` again. Baseline
+    downloads Mailpit at the build `lib/core/pins.txt` names, refuses it unless the archive and the binary
+    match their SHA-256 pins, puts mroom's mail relay beside it and makes their logins (mode 600, in
+    `~/.config/mroom/secrets`). The recipe installs three systemd units and starts them: the socket on
+    `127.0.0.1:1025` (`MROOM_QA_SMTP_PORT` in `box.env`, and the recipe's `smtp_port`, to change it), the
+    relay and Mailpit, both run as the box user. Baseline can run again: what is in place is kept, it
     restarts the relay or Mailpit itself when their files changed (systemd holds the port meanwhile), and it
-    prints a script again only for units that differ. Nothing else may listen on the port: on a box that ran
-    an earlier mail catcher there, stop that first.
+    says when the installed units are not this release's, which the recipe then rewrites. Nothing else may
+    listen on the port: on a box that ran an earlier mail catcher there, stop that first.
 
 13. The file store, when `qa.parity.files` is `same` (the default): `mroom baseline garage`, then, *as
-    root*, the script it prints, which installs Garage's systemd unit, then `mroom baseline garage` again, which
-    gives Garage its one-node layout. Baseline downloads Garage at the build `lib/core/pins.txt` names and
-    refuses any other, and makes its RPC secret and admin and metrics tokens (mode 600, in
-    `~/.config/mroom/secrets`). Check the script as for step 12. With `MROOM_QA_ZONE` set, it prints the nginx
-    configs of Garage's two hosts: create `s3.<zone>` and `files.<zone>` as sites in Forge, each with its
+    root*, the root recipe with `garage` in its parts, which installs Garage's systemd unit, then
+    `mroom baseline garage` again, which gives Garage its one-node layout. Baseline downloads Garage at the
+    build `lib/core/pins.txt` names and refuses any other, and makes its RPC secret and admin and metrics
+    tokens (mode 600, in `~/.config/mroom/secrets`). With `MROOM_QA_ZONE` set, it prints the nginx configs
+    of Garage's two hosts: create `s3.<zone>` and `files.<zone>` as sites in Forge, each with its
     certificate, and put the printed blocks in place of their `location` blocks. Forge's nginx runs as the
     box user, who alone can open Garage's sockets. The S3 host streams each body to Garage, so an unsigned
     upload is refused before nginx stores any of it.

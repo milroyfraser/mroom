@@ -98,6 +98,7 @@ starts the host's deploy and checks that the new release is live; the host (Forg
 | D18 | Each QA environment has its own Postgres role, which owns only that environment's database, and no environment's role can connect to any other database | Isolation and D15 do not cover Postgres either: with one shared login, a PR's code could read, change or drop every QA database, the template and the dev site's database. Postgres lets every role connect to every database by default (`CONNECT` for `PUBLIC`), and every new database gets that grant again, since database-level grants are not copied from the template. So `pg_hba.conf` lets a QA role connect only to the database named after it (`sameuser`, for the group of QA roles), with the gate's own role on a line above, since it belongs to the group too, and `db-create` revokes the grant as well. mroom requires 16 or later: before 16, a role that may create roles may also grant itself any role, the administrator ones included, and from 15 `PUBLIC` can no longer create objects in the `public` schema (doctor checks it, since an upgrade or a restore keeps the old permissions). A cloned database's objects keep the template owner, so the template's objects belong to a role that owns nothing else, and `REASSIGN OWNED` hands them to the environment's role. It also moves databases and tablespaces, so the gate refuses to run while that role owns one |
 | D19 | Mail is caught by Mailpit. Each environment sends with its own SMTP login, `mail-read` matches mail on the login that sent it, and the gate restarts Mailpit when it adds or removes a login | Tested on the box: Mailpit reads its login file only when it starts, so a new login needs a restart: the gate stops Mailpit, which runs as the box user, and systemd starts it again. Stored mail survives, and a queued mail that fails during the restart is retried when its job allows more than one try (`mroom doctor --app` checks). Tags can be forged: a mail with an `X-Tags` header or a plus address gets the tag it names, so those sources are turned off, and `mail-read` matches the `Username` field, which only a login sets: SMTP, or the API login only the gate holds. A port is free while its server restarts, and any user on the box may take a free port, with the logins apps send to it, so Mailpit listens only on Unix sockets in the box user's own folder, and mroom's mail relay pipes apps' TCP mail to it. systemd holds the relay's port from boot, as root (a socket unit), so it stays held while the relay restarts too; the gate gives a login only while that socket is active on the port, or the relay itself holds it (found in three reviews, 26 Oct). Mailpit and the relay are systemd services that start again however often they stop, each Mailpit running a second before the next restart (3 under a supervisor such as Forge's daemons, which gives up after three quick stops), confined to their own files. A person installs the units as root from a script that holds their text, so root reads no file the box user can write |
 | D20 | A Forge token that can add SSH keys, run commands or recipes, read the sudo or database password, edit nginx or deploy scripts, or create daemons or scheduled jobs reaches `forge` or root. Only the `qa` environment holds such a token. The box's token has none of those scopes except nginx, which gives nothing beyond what its users already have as `forge` | Forge's API spec lets a daemon run as `root`; a scheduled job, a recipe and an SSH key take a user of the caller's choice; a deploy script runs as its site's user, which for the dev site is `forge`; and scopes cover the whole account, not one site. qa-up creates workers, so its token reaches root and is guarded by who holds it (sections 8.1, 8.8). Every developer on the box can read the box's token and every agent can use it through `forge-api`, so it keeps reads and site settings, and a person sets up daemons and scheduled jobs with a short-lived token |
+| D21 | What root installs comes from a release, never from the box: mroom's root recipe, saved in Forge and run as root, downloads `lib/root-setup` at a release tag, checks it against the SHA-256 that release's README names, and runs it with the box's values. `mroom baseline` only says whether the installed units are that release's | The box user runs agents that may be compromised (8.1), so whatever the box prints may have been changed, and a checklist of unit lines to refuse always misses one that grants root (`AmbientCapabilities=`, `LoadCredential=`, `StandardOutput=file:`, `RuntimeDirectory=`). A Forge recipe runs as root over Forge's own SSH connection, outside the box user's shell, and the box's token holds no recipe scope (D20; even `recipe:view` runs saved recipes). A tag, never a commit, because GitHub serves a fork's commits under the repository's address; the SHA-256 pins the file. `root-setup` reads no file the box user can write, checks `site-op` against the SHA-256 it holds, and runs in CI as root, where every unit line is checked against an allowlist |
 
 ## 3. Host requirements
 
@@ -124,7 +125,7 @@ starts the host's deploy and checks that the new release is live; the host (Forg
     bucket from the path and names it to Garage as a host under an internal root domain, so one certificate
     serves every bucket. Its S3, web and admin endpoints listen only on Unix sockets in a folder only `forge`
     can open, its RPC stays in a network of its own (`PrivateNetwork`), and it runs confined, as a systemd
-    service whose unit a person installs from the script `mroom baseline garage` prints. Its secrets come from
+    service whose unit root installs with mroom's root recipe (D21). Its secrets come from
     `rpc_secret_file` and `admin_token_file`, and `metrics_token_file` closes `/metrics`.
   - mroom's Reverb host (D16) when `qa.parity.broadcast` is `same`, over WebSockets.
   - Mailpit (D19) when `qa.parity.mail` is `catcher`, run as `mailpit --listen unix:<folder>/http.sock:0600
@@ -133,9 +134,8 @@ starts the host's deploy and checks that the new release is live; the host (Forg
     folder only `forge` can open, behind mroom's mail relay (`lib/mail-relay`), which pipes each connection
     to the SMTP socket. systemd holds `127.0.0.1:1025` for the relay from boot, as root
     (`mroom-mail-relay.socket`); the relay and Mailpit are systemd services run as `forge`, confined to
-    their own files. `mroom baseline mailpit` prints a script with the three units' text, which a person
-    runs as root (D20), from a session the box user's programs cannot change: root reads no file the box
-    user can write. Without TLS, Mailpit refuses to start with a
+    their own files. Root installs the three units with mroom's root recipe (D20, D21): a release's
+    `lib/root-setup`, which reads no file the box user can write. Without TLS, Mailpit refuses to start with a
     login file unless plain-text login is allowed, which is safe on the box. By default it keeps only 500 mails
     for all environments together, so `--max 0` lifts that and `--max-age` trims by age.
 
@@ -362,7 +362,7 @@ Invariants, each with a test:
    - Gate operations that touch a site's files or run its code (unpacking in `code-put` and `dist-put`, hashing
      `.env` in `env-sha`, `signin-code` and `user-clean`) run as that site's user. The gate calls `site-op`, a
      root-owned copy of its release's own, through one sudoers rule that lets `forge` run it as any of Forge's
-     isolated users and never as root (`mroom baseline` installs both; until then a person does). So the gate
+     isolated users and never as root (root installs both with mroom's root recipe, D21). So the gate
      never runs a PR's code or follows its links as `forge`, and `user-clean` needs no root either: a user may
      stop its own processes and delete its own files. `site-op` runs only as a QA site's user, on that
      environment's own sites. The rule still lets `forge`, and so every agent on the box, put code into a QA
@@ -422,6 +422,9 @@ Invariants, each with a test:
      reach its endpoints, Unix sockets in its own folder. Teardown (`bucket-drop`) finds the environment's
      buckets and keys by name, deletes the keys, and empties and deletes each bucket, with a key made for
      that alone.
+   - What root installs (`site-op`, its sudoers line and the services' systemd units) comes from a release:
+     mroom's root recipe runs `lib/root-setup` at a tag, checked against the SHA-256 that release's README
+     names, and nothing `mroom baseline` prints is run as root (D21).
    - Only the gate holds the mail catcher's API login, and only `forge` can reach its API, a Unix socket in its
      own folder. `mail-read` returns mail sent with one environment's login to `qa.persona_domain` addresses
      alone, and teardown deletes that environment's mail (`mail-clear`). The SMTP port apps send their logins
