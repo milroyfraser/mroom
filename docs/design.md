@@ -118,10 +118,14 @@ starts the host's deploy and checks that the new release is live; the host (Forg
 - DNS: a wildcard record `*.<zone>` to the box (or a wildcard certificate in Forge).
 - QA services (section 9), installed by `mroom baseline`, running as `forge` and listening on localhost only. Browsers
   reach the ones they need through nginx on the box, on host names under the zone, with TLS:
-  - Garage (D14) when `qa.parity.files` is `same`. Its S3 API gets a host of its own, because S3 signatures cover
-    the host; apps use path-style addressing, so every bucket stays under that host and its certificate. Public
-    files go through its website endpoint. Its secrets come from `rpc_secret_file` and `admin_token_file`, and
-    `metrics_token_file` closes `/metrics`.
+  - Garage (D14) when `qa.parity.files` is `same`. Its S3 API gets a host of its own, `s3.<zone>`, because S3
+    signatures cover the host; apps use path-style addressing, so every bucket stays under that host and its
+    certificate. Public files go through its website endpoint, on `files.<zone>/<bucket>/<path>`: nginx takes the
+    bucket from the path and names it to Garage as a host under an internal root domain, so one certificate
+    serves every bucket. Its S3, web and admin endpoints listen only on Unix sockets in a folder only `forge`
+    can open, its RPC stays in a network of its own (`PrivateNetwork`), and it runs confined, as a systemd
+    service whose unit a person installs from the script `mroom baseline garage` prints. Its secrets come from
+    `rpc_secret_file` and `admin_token_file`, and `metrics_token_file` closes `/metrics`.
   - mroom's Reverb host (D16) when `qa.parity.broadcast` is `same`, over WebSockets.
   - Mailpit (D19) when `qa.parity.mail` is `catcher`, run as `mailpit --listen unix:<folder>/http.sock:0600
     --smtp unix:<folder>/smtp.sock:0600 --database <file> --smtp-auth-file <file> --smtp-auth-allow-insecure
@@ -413,6 +417,11 @@ Invariants, each with a test:
    - `redis-clear` runs `SCAN` and `UNLINK` inside Redis, one slice of the keyspace per call, so no key name
      leaves it: a name may hold a newline, and read back line by line it would become two, one of them
      outside the prefix.
+   - Each environment's file disk has a bucket of its own on the box's Garage, and a key that reaches that bucket
+     alone, made new on every `bucket-create`; only the gate holds Garage's admin token, and only `forge` can
+     reach its endpoints, Unix sockets in its own folder. Teardown (`bucket-drop`) finds the environment's
+     buckets and keys by name, deletes the keys, and empties and deletes each bucket, with a key made for
+     that alone.
    - Only the gate holds the mail catcher's API login, and only `forge` can reach its API, a Unix socket in its
      own folder. `mail-read` returns mail sent with one environment's login to `qa.persona_domain` addresses
      alone, and teardown deletes that environment's mail (`mail-clear`). The SMTP port apps send their logins

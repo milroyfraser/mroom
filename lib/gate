@@ -32,11 +32,20 @@
 #               mail-user-remove <N>   the environment's SMTP login
 #               mail-read <N> <email>  the newest five mails its login sent to persona addresses alone, as JSON
 #               mail-clear <N>         every mail its login sent
+#               bucket-create <N> <disk> [public]
+#                                      a bucket on the box's Garage (D14) for one of the app's file disks,
+#                                      and a new key that reaches that bucket alone; public turns on its
+#                                      website access. Prints BUCKET, ACCESS_KEY_ID, SECRET_ACCESS_KEY,
+#                                      REGION, ENDPOINT, PATH_STYLE, and URL for a public one
+#               bucket-drop <N>        every bucket the environment has, whatever its disks: their keys
+#                                      deleted, and each bucket emptied and deleted
 #
 # The client sends only the environment's number. The gate builds every name from box.env, which a person
 # sets: the database, role and Redis user are <MROOM_APP_NAME>_qa_<N>, the database is cloned from
 # MROOM_QA_TEMPLATE, and the Redis prefix is <MROOM_APP_NAME>:qa<N>:, so no argument can reach another
-# environment. Its sites, api-<N>.<MROOM_QA_ZONE> and go-<N>.<MROOM_QA_ZONE>, live in the home of a Forge
+# environment. Its buckets are <MROOM_APP_NAME>-qa-<N>-<disk>, each _ of the name a -, for the disk name
+# bucket-create also takes: [a-z][a-z0-9]{0,15}, with no - in it, so no disk's bucket is another
+# environment's or another disk's. Its sites, api-<N>.<MROOM_QA_ZONE> and go-<N>.<MROOM_QA_ZONE>, live in the home of a Forge
 # isolated user of its own, also <MROOM_APP_NAME>_qa_<N>. The gate works in them only through site-op, run
 # as that user with sudo from a root-owned copy of this release's lib/site-op, so it never unpacks a
 # tarball, follows a PR's link or runs its code as the box user. It connects to Postgres 16 or later as its own role, through the libpq service mroom-gate
@@ -101,6 +110,7 @@ case "$role:$op" in
   provision:code-put | provision:dist-put | provision:env-put | provision:env-sha) ;;
   provision:signin-code | provision:user-clean) ;;
   provision:mail-user-add | provision:mail-user-remove | provision:mail-read | provision:mail-clear) ;;
+  provision:bucket-create | provision:bucket-drop) ;;
   *) refuse "$role may not run '${op:0:24}'" ;;
 esac
 
@@ -113,11 +123,18 @@ app="${BOX[MROOM_APP_NAME]:-}"
 [ -n "$app" ] || fail "MROOM_APP_NAME is not set in box.env"
 
 GATE_TMP=""
+# gate_cleanup: what a request leaves behind however it ends: a drop's key of its own, a login file half
+# written, the scratch folder.
+gate_cleanup() {
+  if [ -n "${DROP_KEY:-}" ]; then garage_api POST "/v2/DeleteKey?id=$DROP_KEY" >/dev/null 2>&1 || true; fi
+  if [ -n "${LOGIN_TMP:-}" ]; then rm -f -- "$LOGIN_TMP"; fi
+  rm -rf -- "$GATE_TMP"
+}
 # gate_tmp: a private folder for this request's scratch files, removed however the gate ends.
 gate_tmp() {
   [ -z "$GATE_TMP" ] || return 0
   GATE_TMP="$(mktemp -d "$(mroom_state_dir)/gate-tmp.XXXXXX")" || fail "cannot make a scratch folder"
-  trap 'rm -rf -- "$GATE_TMP"; [ -z "${LOGIN_TMP:-}" ] || rm -f -- "$LOGIN_TMP"' EXIT
+  trap gate_cleanup EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
@@ -843,6 +860,151 @@ cmd_mail_clear() {
   echo "mail of $user: $count deleted"
 }
 
+GARAGE_HOME="$HOME/.local/share/mroom-services/garage"
+# Garage listens only on Unix sockets in a folder only the box user can open (mroom baseline garage).
+GARAGE_ADMIN="$GARAGE_HOME/run/admin.sock"
+GARAGE_S3="$GARAGE_HOME/run/s3.sock"
+GARAGE_TOKEN="$HOME/.config/mroom/secrets/garage-admin-token"
+GARAGE_ERR="" DROP_KEY=""
+
+garage_ready() {
+  [ -r "$GARAGE_TOKEN" ] || fail "$(home_short "$GARAGE_TOKEN") is missing; run mroom baseline garage"
+  secret_file_ok "$GARAGE_TOKEN" || fail "$(home_short "$GARAGE_TOKEN") must be yours and mode 600"
+  need curl jq python3 flock
+  [ -n "${BOX[MROOM_QA_ZONE]:-}" ] || fail "MROOM_QA_ZONE is not set in box.env"
+  gate_tmp
+  GARAGE_ERR="$GATE_TMP/garage.err"
+}
+
+# garage_api <method> <path> [<json>]: one call to Garage's admin API, as its admin token, which reaches curl
+# on stdin, never a command line. Prints the body and returns 0 for a 2xx answer; for any other, writes
+# "HTTP <code>" and Garage's message to $GARAGE_ERR and returns 1.
+garage_api() {
+  local args=(-q --silent --show-error --max-time 60 --unix-socket "$GARAGE_ADMIN" --request "$1" --header @-
+    --output "$GATE_TMP/garage.body" --write-out '%{http_code}') code
+  if [ -n "${3-}" ]; then args+=(--header "Content-Type: application/json" --data-binary "$3"); fi
+  code="$(printf 'Authorization: Bearer %s\n' "$(tr -d '\r\n' <"$GARAGE_TOKEN")" | curl "${args[@]}" "http://localhost$2" 2>"$GARAGE_ERR")" || code=000
+  if [[ "$code" == 2?? ]]; then cat "$GATE_TMP/garage.body"; return 0; fi
+  printf 'HTTP %s %s\n' "$code" "$(jq -r '.message // empty' "$GATE_TMP/garage.body" 2>/dev/null | head -c 200)" >>"$GARAGE_ERR"
+  return 1
+}
+garage_error() { printable "$(grep -m1 -E 'HTTP|curl' "$GARAGE_ERR" 2>/dev/null || echo "no message")"; }
+
+# disk_name <word>: a file disk's name, as mroom.toml names it.
+disk_name() { [[ "$1" =~ ^[a-z][a-z0-9]{0,15}$ ]] || refuse "$op: the disk's name is not [a-z][a-z0-9]{0,15}"; }
+# bucket_of <N> <disk>: the environment's bucket for the disk, which is also its keys' name; with no disk,
+# what every one of the environment's buckets starts with.
+bucket_of() { printf '%s-qa-%s-%s\n' "${app//_/-}" "$1" "$2"; }
+# A jq function: whether a name is <prefix><disk>, which, a disk's name having no -, is that prefix's alone.
+# shellcheck disable=SC2016 # jq's own $p
+GARAGE_OURS='def ours($p): startswith($p) and (.[($p | length):] | test("\\A[a-z][a-z0-9]{0,15}\\z"));'
+
+# bucket_id <name>: the bucket's id, or nothing when there is no such bucket.
+bucket_id() {
+  local info
+  if info="$(garage_api GET "/v2/GetBucketInfo?globalAlias=$1")"; then
+    jq -r '.id' <<<"$info" | grep -E '^[0-9a-f]{64}$' || fail "Garage gave no id for the bucket $1"
+  elif grep -q '^HTTP 404' "$GARAGE_ERR"; then
+    return 0
+  else
+    fail "$op ${words[1]}: $(garage_error)"
+  fi
+}
+
+# drop_keys <name>: deletes every key named <name>, and says how many.
+drop_keys() {
+  local keys id count=0
+  keys="$(garage_api GET /v2/ListKeys)" || fail "$op ${words[1]}: $(garage_error)"
+  for id in $(jq -r --arg n "$1" '.[] | select(.name == $n) | .id | select(test("\\AGK[0-9a-f]{24}\\z"))' <<<"$keys"); do
+    garage_api POST "/v2/DeleteKey?id=$id" >/dev/null || fail "$op ${words[1]}: $(garage_error)"
+    count=$((count + 1))
+  done
+  echo "$count"
+}
+
+# new_key <name> <bucket id> <read> <write>: a new key named <name>, allowed only on that bucket; prints its
+# id and its secret, one per line.
+new_key() {
+  local made id secret
+  made="$(garage_api POST /v2/CreateKey "$(jq -nc --arg n "$1" '{name: $n, neverExpires: true}')")" \
+    || fail "$op ${words[1]}: $(garage_error)"
+  id="$(jq -r '.accessKeyId' <<<"$made")" secret="$(jq -r '.secretAccessKey' <<<"$made")"
+  [[ "$id" =~ ^GK[0-9a-f]{24}$ && "$secret" =~ ^[0-9a-f]{64}$ ]] || fail "Garage made no key for $1"
+  garage_api POST /v2/AllowBucketKey "$(jq -nc --arg b "$2" --arg k "$id" --argjson r "$3" --argjson w "$4" \
+    '{bucketId: $b, accessKeyId: $k, permissions: {read: $r, write: $w, owner: false}}')" >/dev/null \
+    || { garage_api POST "/v2/DeleteKey?id=$id" >/dev/null 2>&1 || true; fail "$op ${words[1]}: $(garage_error)"; }
+  printf '%s\n%s\n' "$id" "$secret"
+}
+
+cmd_bucket_create() {
+  [ "${#words[@]}" = 3 ] || [ "${#words[@]}" = 4 ] || refuse "bucket-create takes 2 or 3 arguments, got $((${#words[@]} - 1))"
+  env_number "${words[1]}"
+  disk_name "${words[2]}"
+  local public=false bucket id old key zone="${BOX[MROOM_QA_ZONE]:-}"
+  if [ "${#words[@]}" = 4 ]; then
+    [ "${words[3]}" = public ] || refuse "bucket-create: its third argument can only be public"
+    public=true
+  fi
+  bucket="$(bucket_of "${words[1]}" "${words[2]}")"
+  garage_ready
+  env_lock garage
+  id="$(bucket_id "$bucket")"
+  if [ -z "$id" ]; then
+    id="$(garage_api POST /v2/CreateBucket "$(jq -nc --arg a "$bucket" '{globalAlias: $a}')" | jq -r '.id')" \
+      || fail "bucket-create ${words[1]}: $(garage_error)"
+    [[ "$id" =~ ^[0-9a-f]{64}$ ]] || fail "Garage gave no id for the new bucket $bucket"
+  fi
+  # A new key every time: the old ones stop working, so a key left in an old .env reaches nothing.
+  old="$(drop_keys "$bucket")"
+  key="$(new_key "$bucket" "$id" true true)"
+  garage_api POST "/v2/UpdateBucket?id=$id" "$(jq -nc --argjson on "$public" \
+    '{websiteAccess: ({enabled: $on} + (if $on then {indexDocument: "index.html"} else {} end))}')" >/dev/null \
+    || fail "bucket-create ${words[1]}: $(garage_error)"
+  gate_log "bucket-create ${words[1]}: $bucket ready (website access $public, $old old keys deleted)"
+  printf 'BUCKET=%s\nACCESS_KEY_ID=%s\nSECRET_ACCESS_KEY=%s\nREGION=garage\nENDPOINT=https://s3.%s\nPATH_STYLE=true\n' \
+    "$bucket" "$(sed -n 1p <<<"$key")" "$(sed -n 2p <<<"$key")" "$zone"
+  if [ "$public" = true ]; then printf 'URL=https://files.%s/%s\n' "$zone" "$bucket"; fi
+}
+
+cmd_bucket_drop() {
+  words_are 2
+  env_number "${words[1]}"
+  local prefix buckets keys id bucket key count old=0 dropped=0
+  prefix="$(bucket_of "${words[1]}" "")"
+  garage_ready
+  env_lock garage
+  # Every bucket and key of the environment, found by name, whatever disks it has had: a disk the app no
+  # longer has leaves nothing behind.
+  buckets="$(garage_api GET /v2/ListBuckets)" || fail "bucket-drop ${words[1]}: $(garage_error)"
+  keys="$(garage_api GET /v2/ListKeys)" || fail "bucket-drop ${words[1]}: $(garage_error)"
+  # Its keys go first, so nothing writes while its buckets empty, and with them any key a killed drop left.
+  for id in $(jq -r --arg p "$prefix" "$GARAGE_OURS"' .[] | select((.name // "") | ours($p) or ours("mroom-drop-" + $p))
+      | .id | select(test("\\AGK[0-9a-f]{24}\\z"))' <<<"$keys"); do
+    garage_api POST "/v2/DeleteKey?id=$id" >/dev/null || fail "bucket-drop ${words[1]}: $(garage_error)"
+    old=$((old + 1))
+  done
+  while read -r id bucket <&3; do
+    # Garage deletes only an empty bucket, and empties none itself: a key of the gate's own, for this
+    # bucket alone, deletes its objects through the S3 API, and goes when the drop ends, whether it worked
+    # or not (gate_cleanup); the next drop deletes one a killed gate left.
+    key="$(new_key "mroom-drop-$bucket" "$id" true true)"
+    DROP_KEY="$(sed -n 1p <<<"$key")"
+    count="$(printf '%s\n' "$key" | python3 -I "$MROOM_ROOT/lib/s3-empty" "$GARAGE_S3" "$bucket" 2>"$GARAGE_ERR")" \
+      || fail "bucket-drop ${words[1]}: $(printable "$(grep -m1 . "$GARAGE_ERR")")"
+    garage_api POST /v2/CleanupIncompleteUploads "$(jq -nc --arg b "$id" '{bucketId: $b, olderThanSecs: 0}')" >/dev/null \
+      || fail "bucket-drop ${words[1]}: $(garage_error)"
+    garage_api POST "/v2/DeleteBucket?id=$id" >/dev/null || fail "bucket-drop ${words[1]}: $(garage_error)"
+    garage_api POST "/v2/DeleteKey?id=$DROP_KEY" >/dev/null || fail "bucket-drop ${words[1]}: $(garage_error)"
+    DROP_KEY=""
+    gate_log "bucket-drop ${words[1]}: $bucket dropped ($count objects)"
+    echo "bucket $bucket: dropped, $count objects deleted"
+    dropped=$((dropped + 1))
+  done 3< <(jq -r --arg p "$prefix" "$GARAGE_OURS"' .[] | select(.id | test("\\A[0-9a-f]{64}\\z"))
+      | (.globalAliases | map(select(ours($p))) | first) as $a | select($a) | "\(.id) \($a)"' <<<"$buckets")
+  gate_log "bucket-drop ${words[1]}: $dropped buckets dropped, $old keys deleted"
+  if [ "$dropped" = 0 ]; then echo "environment ${words[1]} has no buckets, so nothing to drop"; fi
+}
+
 # The operation and its environment only: each operation logs what it did, and an argument it refuses, such
 # as an address that is no persona's, never reaches the log.
 first="${words[1]:-}"
@@ -864,4 +1026,6 @@ case "$op" in
   mail-user-remove) cmd_mail_user_remove ;;
   mail-read) cmd_mail_read ;;
   mail-clear) cmd_mail_clear ;;
+  bucket-create) cmd_bucket_create ;;
+  bucket-drop) cmd_bucket_drop ;;
 esac
