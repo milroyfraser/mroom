@@ -2,7 +2,7 @@
 # shellcheck disable=SC2317,SC2016  # t_* run through test_case; a $ in single quotes is for eval, later
 # Tests for `mroom baseline`: a QA service's build is installed only when its archive and its binary match
 # their SHA-256 pins, mroom's mail relay goes beside it, logins are made once, mode 600, from hashes openssl
-# really gave, and the two Forge daemons to create are printed. Offline: curl is a fake that serves a test
+# really gave, and the three systemd units are written and compared with the installed ones. Offline: curl is a fake that serves a test
 # archive. tests/mail/gate-real-test.sh installs the real pinned Mailpit.
 set -euo pipefail
 SUITE=baseline
@@ -51,7 +51,7 @@ case "$url" in
 esac
 FAKE
   chmod +x "$T/bin/curl"
-  export T PATH="$T/bin:$PATH" MROOM_PINS="$T/pins.txt"
+  export T PATH="$T/bin:$PATH" MROOM_PINS="$T/pins.txt" MROOM_SYSTEMD_DIR="$T/systemd"
 }
 
 # pins <archive sha> <binary sha> [<platform>] [<url>]
@@ -95,21 +95,77 @@ t_mailpit_is_installed_at_its_pin_with_its_relay_and_logins() {
   expect_true "the API password is not 48 hex characters" hex48 "$password"
   expect_true "the API login's hash is not of the gate's password" hash_of "$password" "$(api_hash)"
   expect_true "the download could be sent to a plain-http address" grep -q -- "--proto-redir =https" "$T/curl.log"
+  local base units
+  base="$(services)/mailpit" units="$(services)/units"
   run "$MROOM" baseline mailpit
-  local base
-  base="$(services)/mailpit"
-  expect_out_has "-I $(services)/mail-relay/mail-relay 127.0.0.1 $PORT $base/run/smtp.sock"
-  expect_out_has "$base/current/mailpit --listen unix:$base/run/http.sock:0600 --smtp unix:$base/run/smtp.sock:0600 --database $base/data/mailpit.db"
-  expect_out_has "--smtp-auth-file $(secrets)/mailpit-smtp.passwd --smtp-auth-allow-insecure --tags-username --tags-disable x-tags,plus-addresses"
-  expect_out_has "Directory: $base/data"
-  expect_out_has "Start Seconds 1"
+  expect_out_has "cd $units && sudo install -o root -g root -m 644 mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service $T/systemd/ && sudo systemctl daemon-reload && sudo systemctl enable --now mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service"
   expect_out_has "Mailpit does not answer yet."
   expect_out_has "Nothing listens on 127.0.0.1:$PORT yet."
   expect_true "the password reached the output" lacks "$out" "$password"
+  run mode "$units"; expect_out 700
+  for file in mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service; do
+    run mode "$units/$file"; expect_out 600
+  done
+  # The socket holds the port as root; the relay and Mailpit run as the box user, and systemd starts them
+  # again however often they stop.
+  run grep -x "ListenStream=127.0.0.1:$PORT" "$units/mroom-mail-relay.socket"; expect_rc 0
+  run grep -x "ExecStart=$(command -v python3) -I $(services)/mail-relay/mail-relay 127.0.0.1 $PORT $base/run/smtp.sock" "$units/mroom-mail-relay.service"
+  expect_rc 0
+  run grep -x "ExecStart=$base/current/mailpit --listen unix:$base/run/http.sock:0600 --smtp unix:$base/run/smtp.sock:0600 --database $base/data/mailpit.db --smtp-auth-file $(secrets)/mailpit-smtp.passwd --smtp-auth-allow-insecure --tags-username --tags-disable x-tags,plus-addresses --ui-auth-file $(secrets)/mailpit-ui.passwd --max 0 --max-age 7d" "$units/mroom-mailpit.service"
+  expect_rc 0
+  for file in mroom-mail-relay.service mroom-mailpit.service; do
+    for line in "User=$(id -un)" "Group=$(id -gn)" "Restart=always" "StartLimitIntervalSec=0" "NoNewPrivileges=yes"; do
+      run grep -x "$line" "$units/$file"; expect_rc 0
+    done
+  done
+  run grep -x "WorkingDirectory=$base/data" "$units/mroom-mailpit.service"; expect_rc 0
   # Without box.env's port, the relay takes 1025.
   rm "$HOME/.config/mroom/box.env"
   run "$MROOM" baseline mailpit
-  expect_out_has "mail-relay 127.0.0.1 1025 $base/run/smtp.sock"
+  run grep -x "ListenStream=127.0.0.1:1025" "$units/mroom-mail-relay.socket"; expect_rc 0
+}
+
+t_installed_units_are_compared_with_what_this_mroom_writes() {
+  world
+  run "$MROOM" baseline mailpit; expect_rc 0
+  mkdir -p "$T/systemd"
+  cp "$(services)"/units/mroom-* "$T/systemd/"
+  run "$MROOM" baseline mailpit; expect_rc 0
+  expect_out_has "systemd units: installed, and as this mroom writes them."
+  expect_true "installed units asked to be installed again" lacks "$out" "sudo install"
+  printf '# a local change\n' >>"$T/systemd/mroom-mailpit.service"
+  run "$MROOM" baseline mailpit; expect_rc 0
+  expect_out_has "Changed since they were installed: mroom-mailpit.service."
+  expect_out_has "sudo install -o root -g root -m 644"
+  # Something that is not systemd on the port: say so before the units are installed.
+  python3 -I -c 'import socket, sys, time
+s = socket.create_server(("127.0.0.1", int(sys.argv[1]))); time.sleep(30)' "$PORT" &
+  local listener=$!
+  for _ in $(seq 1 50); do (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 0.1; done
+  run "$MROOM" baseline mailpit; expect_rc 0
+  expect_out_has "Something else listens on 127.0.0.1:$PORT (user $(id -u)): stop it before installing the units."
+  kill "$listener" 2>/dev/null || true
+}
+
+t_a_login_file_it_cannot_read_or_a_busy_gate_stops_it() {
+  world
+  run "$MROOM" baseline mailpit; expect_rc 0
+  local logins before
+  logins="$(secrets)/mailpit-smtp.passwd"
+  before="$(cat "$logins")"
+  chmod 000 "$logins"
+  run "$MROOM" baseline mailpit
+  chmod 600 "$logins"
+  expect_rc 1; expect_err_has "cannot read ~/.config/mroom/secrets/mailpit-smtp.passwd"
+  run cat "$logins"; expect_out "$before"
+  # The gate holds Mailpit's lock while it changes a login: baseline waits for it, then gives up.
+  mkdir -p "$HOME/.local/state/mroom"
+  flock "$HOME/.local/state/mroom/gate-mailpit.lock" sleep 20 &
+  local holder=$!
+  sleep 0.3
+  MROOM_GATE_LOCK_WAIT=1 run "$MROOM" baseline mailpit
+  expect_rc 1; expect_err_has "the gate is still changing Mailpit's logins"
+  kill "$holder" 2>/dev/null || true
 }
 
 t_a_second_run_keeps_the_build_the_relay_and_the_logins() {
@@ -122,13 +178,14 @@ t_a_second_run_keeps_the_build_the_relay_and_the_logins() {
   expect_out_has "mailpit v9.9.9: installed, and matches its pin"
   expect_out_has "mail relay: installed, and matches this mroom"
   expect_out_has "Mailpit answers."
-  expect_true "a kept login asked for a restart" lacks "$out" "restart its daemon"
+  expect_true "a kept login asked for a restart" lacks "$out" "reads its API login"
   run downloads; expect_out 1
   run cat "$(secrets)/mailpit.env" "$(secrets)/mailpit-ui.passwd" "$(secrets)/mailpit-smtp.passwd"; expect_out "$before"
-  # A relay that is not this mroom's is replaced, and its daemon needs a restart to run the new one.
+  # A relay that is not this mroom's is replaced; systemd's relay runs it from its next start.
   printf '# changed\n' >>"$(services)/mail-relay/mail-relay"
   run "$MROOM" baseline mailpit; expect_rc 0
-  expect_out_has "mail relay: updated; restart its daemon in Forge to run this one"
+  expect_out_has "mail relay: updated"
+  expect_out_has "mail relay: runs the new one from its next start (mroom-mail-relay.service)"
   expect_true "the relay was not replaced" cmp -s "$ROOT/lib/mail-relay" "$(services)/mail-relay/mail-relay"
 }
 
@@ -142,7 +199,7 @@ t_the_api_login_is_kept_or_rewritten_from_its_password() {
   rm "$(secrets)/mailpit-ui.passwd"
   run "$MROOM" baseline mailpit; expect_rc 0
   expect_out_has "API login: its hash for Mailpit rewritten from ~/.config/mroom/secrets/mailpit.env"
-  expect_out_has "Mailpit reads its API login only when it starts: restart its daemon in Forge."
+  expect_out_has "Mailpit: reads its API login from its next start (mroom-mailpit.service)"
   run api_password; expect_out "$password"
   expect_true "the rewritten hash is not of the password" hash_of "$password" "$(api_hash)"
   printf 'mroom-gate:$6$a$b\n' >"$(secrets)/mailpit-ui.passwd"
@@ -234,6 +291,8 @@ t_usage_and_unknown_parts() {
 
 test_case mailpit-installed t_mailpit_is_installed_at_its_pin_with_its_relay_and_logins
 test_case second-run t_a_second_run_keeps_the_build_the_relay_and_the_logins
+test_case units t_installed_units_are_compared_with_what_this_mroom_writes
+test_case unreadable t_a_login_file_it_cannot_read_or_a_busy_gate_stops_it
 test_case api-login t_the_api_login_is_kept_or_rewritten_from_its_password
 test_case placeholder t_the_placeholder_login_is_put_back_and_kept_whole
 test_case bad-hash t_a_hash_openssl_did_not_give_is_never_written

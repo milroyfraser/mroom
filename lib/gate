@@ -648,16 +648,22 @@ proc_age() {
   echo $(( ${uptime%.*} * 100 + 10#${uptime#*.} - fields[19] * 100 / $(getconf CLK_TCK) ))
 }
 
-# mailpit_restart: Mailpit reads its logins only when it starts (D19), so the gate stops it and Forge's daemon
-# starts it again; it waits until a new Mailpit answers.
+# under_systemd <pid>: whether the process is systemd's mroom-mailpit.service, which starts Mailpit again
+# however often it stops (StartLimitIntervalSec=0).
+under_systemd() { grep -q '/mroom-mailpit\.service$' "/proc/$1/cgroup" 2>/dev/null; }
+
+# mailpit_restart: Mailpit reads its logins only when it starts (D19), so the gate stops it and systemd starts
+# it again; it waits until a new Mailpit answers.
 mailpit_restart() {
   local old new pid age deadline wait="${MROOM_GATE_RESTART_WAIT:-30}"
   [[ "$wait" =~ ^[0-9]{1,3}$ ]] || wait=30
   old="$(mailpit_pids)"
-  [ -n "$old" ] || fail "Mailpit is not running; check its daemon in Forge (mroom baseline mailpit prints it)"
-  # Forge's daemon counts a Mailpit that stops within its Start Seconds (1) as a failed start, and gives up
-  # after three in a row, so the Mailpit a request just started runs 3 seconds before the next one stops it.
+  [ -n "$old" ] || fail "Mailpit is not running; check mroom-mailpit.service (mroom baseline mailpit writes it)"
+  # Run by a supervisor such as Forge's daemons instead, a Mailpit that stops within Start Seconds (1)
+  # counts as a failed start, and three in a row make it give up, so such a Mailpit runs 3 seconds before
+  # the next request stops it.
   for pid in $old; do
+    if under_systemd "$pid"; then continue; fi
     while age="$(proc_age "$pid")" && [ "$age" -lt 300 ]; do sleep 0.2; done
   done
   for pid in $old; do kill -TERM "$pid" 2>/dev/null || true; done
@@ -668,14 +674,15 @@ mailpit_restart() {
     # A new Mailpit: no process left from before, and one that answers.
     if [ -n "$new" ] && ! grep -qxF -f <(printf '%s\n' "$old") <<<"$new" && mailpit_live; then return 0; fi
   done
-  fail "Mailpit did not come back within $wait seconds of a restart; check its daemon in Forge"
+  fail "Mailpit did not come back within $wait seconds of a restart; check mroom-mailpit.service"
 }
 
-# relay_holds_port: whether mroom's mail relay, and nothing else, listens on the SMTP port, so the logins apps
-# send reach Mailpit. Anyone on the box may take a free port; the relay never lets it go free.
+# relay_holds_port: whether the SMTP port, where apps send their logins, is held by systemd's socket for
+# mroom's mail relay, or by the relay itself, and by nothing else that 127.0.0.1's traffic reaches. Anyone on
+# the box may take a free port; systemd holds this one from boot, as root, also while the relay restarts.
 relay_holds_port() {
-  local port inodes inode proc arg held relay=()
-  port="$(printf ':%04X' "$SMTP_PORT")"
+  local port listeners uid inode proc arg held relay=()
+  port="$(printf '%04X' "$SMTP_PORT")"
   for proc in /proc/[0-9]*; do
     [ -O "$proc" ] || continue
     # A process can end at any moment, and set -e would take that for the gate's own failure.
@@ -683,18 +690,29 @@ relay_holds_port() {
       if [ "$arg" = "$MAIL_RELAY" ]; then relay+=("$proc"); break; fi
     done 2>/dev/null <"$proc/cmdline" || true
   done
-  inodes="$(cat /proc/net/tcp /proc/net/tcp6 2>/dev/null \
-    | awk -v port="$port" '$4 == "0A" && substr($2, length($2) - 4) == port { print $10 }')" || true
-  [ -n "$inodes" ] || fail "nothing listens on 127.0.0.1:$SMTP_PORT; check mroom's mail relay daemon in Forge (mroom baseline mailpit prints it)"
-  for inode in $inodes; do
+  # Listening sockets on the port at 127.0.0.1 or at any address, IPv4 or dual-stack IPv6, as owner and
+  # inode; one at 127.0.0.2 or ::1 never sees what apps send to 127.0.0.1.
+  listeners="$(cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v port="$port" '$4 == "0A" {
+      split($2, addr, ":")
+      if (addr[2] == port && (addr[1] == "0100007F" || addr[1] ~ /^0+$/ ||
+          addr[1] == "0000000000000000FFFF00000100007F")) print $8, $10
+    }')" || true
+  [ -n "$listeners" ] || fail "nothing listens on 127.0.0.1:$SMTP_PORT; check mroom-mail-relay.socket (mroom baseline mailpit writes it)"
+  while read -r uid inode; do
+    if [ "$uid" = 0 ]; then
+      # Made by root: only systemd's socket for the relay may be that, never a mail server of the box's own.
+      [[ "$(systemctl show --property=Listen --value mroom-mail-relay.socket 2>/dev/null)" == *"127.0.0.1:$SMTP_PORT (Stream)"* ]] \
+        || fail "a root process other than mroom-mail-relay.socket listens on port $SMTP_PORT"
+      continue
+    fi
     held=""
     for proc in "${relay[@]}"; do
       for arg in "$proc"/fd/*; do
         if [ "$(readlink "$arg" 2>/dev/null)" = "socket:[$inode]" ]; then held=1; break 2; fi
       done
     done
-    [ -n "$held" ] || fail "something other than mroom's mail relay listens on port $SMTP_PORT, so apps would send it their mail logins: stop it, start the relay's daemon, then give each QA environment new logins"
-  done
+    [ -n "$held" ] || fail "something other than mroom's mail relay listens on port $SMTP_PORT, so apps would send it their mail logins: stop it, check mroom-mail-relay.socket, then give each QA environment new logins"
+  done <<<"$listeners"
 }
 
 # set_login <user> [<hash>]: rewrites the SMTP login file without the user's line, then with the new one if
@@ -756,7 +774,7 @@ cmd_mail_user_add() {
   [ "${#password}" = 48 ] || fail "could not read random bytes for the password"
   hash="$(printf '%s' "$password" | openssl passwd -6 -stdin)" || fail "openssl could not hash the password"
   [[ "$hash" =~ ^\$6\$[A-Za-z0-9./]+\$[A-Za-z0-9./]+$ ]] || fail "openssl gave no SHA-512 crypt hash"
-  [ -n "$(mailpit_pids)" ] || fail "Mailpit is not running; check its daemon in Forge (mroom baseline mailpit prints it)"
+  [ -n "$(mailpit_pids)" ] || fail "Mailpit is not running; check mroom-mailpit.service (mroom baseline mailpit writes it)"
   relay_holds_port
   set_login "$user" "$hash" || rc=$?
   [ "$rc" != 2 ] || login_unwritten
@@ -772,7 +790,7 @@ cmd_mail_user_remove() {
   local user="${app}_qa_${words[1]}" rc=0
   mail_ready
   env_lock mailpit
-  [ -n "$(mailpit_pids)" ] || fail "Mailpit is not running; check its daemon in Forge (mroom baseline mailpit prints it)"
+  [ -n "$(mailpit_pids)" ] || fail "Mailpit is not running; check mroom-mailpit.service (mroom baseline mailpit writes it)"
   set_login "$user" || rc=$?
   [ "$rc" != 2 ] || login_unwritten
   if [ "$rc" = 0 ]; then mailpit_restart; fi

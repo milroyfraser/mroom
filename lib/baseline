@@ -2,14 +2,14 @@
 # baseline — sets up the QA services a box runs beside Forge's own (design 3, 8.9). Phase 2a's first part:
 #
 #   mroom baseline mailpit   the QA mail catcher (D19): Mailpit at the build lib/core/pins.txt names, checked
-#                            against its SHA-256, mroom's mail relay, their folders and logins, and the two
-#                            Forge daemons that run them
+#                            against its SHA-256, mroom's mail relay, their folders and logins, and the three
+#                            systemd units that run them
 #
 # It runs as the box user and changes nothing outside the box user's home. It can run again: a binary that
 # matches its pin and logins that exist are kept. Services live in ~/.local/share/mroom-services, which an
 # uninstall of mroom leaves alone, and their logins in ~/.config/mroom/secrets, files mode 600 and folders
-# 700, where no site user can read them. A Forge token that can create daemons reaches root (D20), so a
-# person creates the daemons from what this prints.
+# 700, where no site user can read them. Installing the systemd units takes root (D20), so a person runs the
+# one command this prints.
 set -euo pipefail
 umask 077
 
@@ -112,27 +112,125 @@ install_relay() {
   fi
   install -m 700 "$MROOM_ROOT/lib/mail-relay" "$dir/.mail-relay.new"
   mv -f "$dir/.mail-relay.new" "$dir/mail-relay"
-  if [ -n "$had" ]; then echo "mail relay: updated; restart its daemon in Forge to run this one"; else echo "mail relay: installed"; fi
+  if [ -n "$had" ]; then echo "mail relay: updated"; else echo "mail relay: installed"; fi
+}
+
+# port_holder <port>: the owner (uid) of what listens on 127.0.0.1:<port> or on every address, if anything.
+port_holder() {
+  local port
+  port="$(printf '%04X' "$1")"
+  cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v port="$port" '$4 == "0A" {
+      split($2, addr, ":")
+      if (addr[2] == port && (addr[1] == "0100007F" || addr[1] ~ /^0+$/)) { print $8; exit }
+    }' || true
+}
+
+# restart_unit <unit>: stops the box user's process that systemd runs as <unit>, which systemd starts again at
+# once (Restart=always). Returns 1 when no such process runs.
+restart_unit() {
+  local proc pids=()
+  for proc in /proc/[0-9]*; do
+    if [ -O "$proc" ] && grep -q "/$1\$" "$proc/cgroup" 2>/dev/null; then pids+=("${proc#/proc/}"); fi
+  done
+  [ "${#pids[@]}" -gt 0 ] || return 1
+  kill -TERM "${pids[@]}" 2>/dev/null || true
+}
+
+# write_units <port> <python>: the three systemd units in $SERVICES/units, which a person installs (D20).
+# The socket holds the SMTP port from boot, as root, and hands it to the relay; Mailpit and the relay run as
+# the box user, and systemd starts them again however often they stop.
+write_units() {
+  local port="$1" python="$2" base="$SERVICES/mailpit" units="$SERVICES/units" user group
+  user="$(id -un)" group="$(id -gn)"
+  mkdir -p "$units"
+  chmod 700 "$units"
+  cat >"$units/mroom-mail-relay.socket" <<EOF
+# Written by mroom baseline mailpit. QA apps send mail to this port, and systemd holds it from boot, as
+# root, so no one else on the box can take it, not even while the relay restarts (design D19).
+[Unit]
+Description=mroom: the QA SMTP port, held for mroom's mail relay
+
+[Socket]
+ListenStream=127.0.0.1:$port
+Accept=no
+
+[Install]
+WantedBy=sockets.target
+EOF
+  cat >"$units/mroom-mail-relay.service" <<EOF
+# Written by mroom baseline mailpit. Pipes QA apps' mail from the socket systemd holds to Mailpit.
+[Unit]
+Description=mroom's mail relay: QA apps' mail to Mailpit
+Requires=mroom-mail-relay.socket
+After=mroom-mail-relay.socket
+StartLimitIntervalSec=0
+
+[Service]
+User=$user
+Group=$group
+ExecStart=$python -I $SERVICES/mail-relay/mail-relay 127.0.0.1 $port $base/run/smtp.sock
+Restart=always
+RestartSec=1
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  cat >"$units/mroom-mailpit.service" <<EOF
+# Written by mroom baseline mailpit. Mailpit listens only on Unix sockets in a folder only $user can open.
+# The gate stops it to add or remove a login, which Mailpit reads only when it starts, and systemd starts
+# it again however often that happens.
+[Unit]
+Description=Mailpit, mroom's QA mail catcher
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+User=$user
+Group=$group
+WorkingDirectory=$base/data
+ExecStart=$base/current/mailpit --listen unix:$base/run/http.sock:0600 --smtp unix:$base/run/smtp.sock:0600 --database $base/data/mailpit.db --smtp-auth-file $SECRETS/mailpit-smtp.passwd --smtp-auth-allow-insecure --tags-username --tags-disable x-tags,plus-addresses --ui-auth-file $SECRETS/mailpit-ui.passwd --max 0 --max-age 7d
+Restart=always
+RestartSec=100ms
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  chmod 600 "$units"/mroom-*
 }
 
 setup_mailpit() {
   local base="$SERVICES/mailpit" logins="$SECRETS/mailpit-smtp.passwd" ui="$SECRETS/mailpit-ui.passwd"
-  local env_file="$SECRETS/mailpit.env" port python hash rest content password restart=""
-  need curl tar sha256sum openssl python3
+  local env_file="$SECRETS/mailpit.env" port python hash rest content password relay_line relay_changed="" api_changed=""
+  local systemd="${MROOM_SYSTEMD_DIR:-/etc/systemd/system}" unit changed=() missing=() holder
+  need curl tar sha256sum openssl python3 flock
   load_box || die "box.env could not be read"
   port="${BOX[MROOM_QA_SMTP_PORT]:-1025}"
   python="$(command -v python3)"
+  # What the systemd units name, written plainly into them.
+  [[ "$HOME" =~ ^/[A-Za-z0-9._/-]+$ && "$python" =~ ^/[A-Za-z0-9._/-]+$ ]] \
+    || die "systemd units need plain paths; $(printf '%q' "$HOME") or $(printf '%q' "$python") is not"
+  [[ "$(id -un)" =~ ^[a-z_][a-z0-9_-]*$ && "$(id -gn)" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "the box user's name is not plain"
   install_pinned mailpit
-  install_relay
+  relay_line="$(install_relay)"
+  echo "$relay_line"
+  [ "$relay_line" = "mail relay: installed, and matches this mroom" ] || relay_changed=1
   mkdir -p "$base/data" "$base/run" "$SECRETS"
   chmod 700 "$base/data" "$base/run" "$SECRETS"
+  # The logins file is the gate's too: no login is changed while a request changes one.
+  exec 9>"$(mroom_state_dir)/gate-mailpit.lock"
+  flock -w "${MROOM_GATE_LOCK_WAIT:-900}" 9 || die "the gate is still changing Mailpit's logins; run this again in a moment"
 
   # The SMTP logins, one per environment, which the gate adds and removes. A login no one knows keeps the
   # file from ever being empty, which Mailpit would take as "no login needed".
+  if [ -e "$logins" ] && ! [ -r "$logins" ]; then die "cannot read $(home_short "$logins"); give it back to $(id -un), mode 600; nothing changed"; fi
   # shellcheck disable=SC2016  # the $ signs are the hash's own
   if ! grep -qE '^mroom-none:\$6\$[A-Za-z0-9./]+\$[A-Za-z0-9./]+$' "$logins" 2>/dev/null; then
     hash="$(new_password | crypt)" || die "openssl gave no SHA-512 crypt hash; nothing changed"
-    rest="$(grep -v '^mroom-none:' "$logins" 2>/dev/null || true)"
+    rest=""
+    if [ -e "$logins" ]; then rest="$(grep -v '^mroom-none:' "$logins" || true)"; fi
     content="mroom-none:$hash"
     if [ -n "$rest" ]; then content+=$'\n'"$rest"; fi
     put_secret "$logins" "$content"
@@ -151,49 +249,61 @@ setup_mailpit() {
     put_secret "$ui" "mroom-gate:$hash"
     put_secret "$env_file" "MAILPIT_API_USER=mroom-gate"$'\n'"MAILPIT_API_PASSWORD=$password"
     echo "API login: $(home_short "$env_file") made"
-    restart=1
+    api_changed=1
   elif ! hash_of "$password" "$(sed -n 's/^mroom-gate://p' "$ui" 2>/dev/null | head -n1)"; then
     hash="$(printf '%s' "$password" | crypt)" || die "openssl gave no SHA-512 crypt hash; nothing changed"
     put_secret "$ui" "mroom-gate:$hash"
     echo "API login: its hash for Mailpit rewritten from $(home_short "$env_file")"
-    restart=1
+    api_changed=1
   fi
   chmod 600 "$logins" "$ui" "$env_file"
 
-  cat <<EOF
+  # A changed relay or API login needs its process started again; systemd does that, and holds the port
+  # meanwhile.
+  if [ -n "$relay_changed" ]; then
+    if restart_unit mroom-mail-relay.service; then echo "mail relay: restarted to run this one; systemd held the port meanwhile"
+    else echo "mail relay: runs the new one from its next start (mroom-mail-relay.service)"; fi
+  fi
+  if [ -n "$api_changed" ]; then
+    if restart_unit mroom-mailpit.service; then echo "Mailpit: restarted to read its API login"
+    else echo "Mailpit: reads its API login from its next start (mroom-mailpit.service)"; fi
+  fi
 
-Two Forge daemons run these, and a person creates them (a token that can create daemons reaches root, D20).
-In Forge, Server > Daemons, create each with User $(id -un), Processes 1, Start Seconds 1 and Stop Signal
-SIGTERM:
+  write_units "$port" "$python"
+  for unit in mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service; do
+    if ! [ -f "$systemd/$unit" ]; then missing+=("$unit")
+    elif ! cmp -s "$SERVICES/units/$unit" "$systemd/$unit"; then changed+=("$unit"); fi
+  done
+  echo
+  if [ "${#missing[@]}" = 0 ] && [ "${#changed[@]}" = 0 ]; then
+    echo "systemd units: installed, and as this mroom writes them."
+  else
+    cat <<EOF
+Three systemd units run these, and a person installs them (root, D20): the socket holds the SMTP port
+apps send to, 127.0.0.1:$port, from boot, so no one else on the box can take it, and the relay and Mailpit
+run as $(id -un). Install them with:
 
-1. mroom's mail relay. It holds the SMTP port apps send to, so no one else on the box can take it while
-   Mailpit restarts:
-
-  Command:   $python -I $SERVICES/mail-relay/mail-relay 127.0.0.1 $port $base/run/smtp.sock
-  Directory: $SERVICES/mail-relay
-
-2. Mailpit, on Unix sockets only, in a folder only you can open:
-
-  Command:   $base/current/mailpit --listen unix:$base/run/http.sock:0600 --smtp unix:$base/run/smtp.sock:0600 --database $base/data/mailpit.db --smtp-auth-file $SECRETS/mailpit-smtp.passwd --smtp-auth-allow-insecure --tags-username --tags-disable x-tags,plus-addresses --ui-auth-file $SECRETS/mailpit-ui.passwd --max 0 --max-age 7d
-  Directory: $base/data
-
-Each environment sends with its own login, through the relay. The gate restarts Mailpit when it adds or
-removes one, and lets each Mailpit run 3 seconds before the next restart, since Forge counts a daemon that
-stops within its Start Seconds as a failed start. Only the gate reads mail. A newly installed build runs
-from the next restart, of the daemon or by the gate.
+  cd $SERVICES/units && sudo install -o root -g root -m 644 mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service $systemd/ && sudo systemctl daemon-reload && sudo systemctl enable --now mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service
 EOF
+    if [ "${#changed[@]}" -gt 0 ]; then
+      echo
+      echo "Changed since they were installed: ${changed[*]}. After installing, restart the services that changed"
+      echo "(sudo systemctl restart <unit>). A restart of the socket frees the port for a moment, so after one,"
+      echo "give each QA environment new mail logins."
+    fi
+  fi
   if curl -q --silent --fail --max-time 2 --unix-socket "$base/run/http.sock" --output /dev/null \
     http://localhost/livez 2>/dev/null; then
     echo "Mailpit answers."
-    if [ -n "$restart" ]; then echo "Mailpit reads its API login only when it starts: restart its daemon in Forge."; fi
   else
     echo "Mailpit does not answer yet."
   fi
-  if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
-    echo "Something listens on 127.0.0.1:$port; the gate checks that it is the relay."
-  else
-    echo "Nothing listens on 127.0.0.1:$port yet."
-  fi
+  holder="$(port_holder "$port")"
+  case "$holder" in
+    "") echo "Nothing listens on 127.0.0.1:$port yet." ;;
+    0) echo "systemd holds 127.0.0.1:$port." ;;
+    *) echo "Something else listens on 127.0.0.1:$port (user $holder): stop it before installing the units." ;;
+  esac
 }
 
 case "${1:-}" in

@@ -277,7 +277,7 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 | `env-sha <N>` | `env=` the SHA-256 of the API site's `.env` (or `missing`), and `commit=` the commit `code-put` recorded (or `none`) |
 | `signin-code <N> <email>` | a sign-in code for a persona address, from the app's `php artisan mroom:signin-code <email>` or its `qa-signin` hook |
 | `user-clean <N>` | stops the site user's processes (PHP-FPM's pool workers once: their master starts fresh ones, which end with the site) and deletes its files in `/tmp`, `/var/tmp`, `/dev/shm`, `/var/crash`, `/run/lock` and `/dev/mqueue`, its IPC objects and its crontab, before qa-down deletes the sites |
-| `mail-user-add <N>` | an SMTP login of its own on the box's Mailpit (D19), given only while mroom's mail relay holds the SMTP port; prints `MAIL_MAILER`, `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME` and a new `MAIL_PASSWORD` |
+| `mail-user-add <N>` | an SMTP login of its own on the box's Mailpit (D19), given only while systemd's socket for mroom's mail relay holds the SMTP port; prints `MAIL_MAILER`, `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME` and a new `MAIL_PASSWORD` |
 | `mail-user-remove <N>` | the environment's SMTP login |
 | `mail-read <N> <email>` | as JSON, the newest five mails the environment's login sent to a persona address (To, Cc or Bcc), and only to personas: sender, recipients, subject and text |
 | `mail-clear <N>` | every mail the environment's login sent |
@@ -347,14 +347,19 @@ address would add are turned off.
 - **No port to take.** Mailpit listens only on Unix sockets in a folder that only the box user can open,
   so no site user can reach its API or stand in for it. Apps send to `127.0.0.1:1025`, where mroom's mail
   relay (`lib/mail-relay`) pipes each connection to Mailpit's SMTP socket. Anyone on the box may take a free
-  TCP port, and with it the logins apps send; the relay does not restart with Mailpit, so the port is never
-  free, and `mail-user-add` gives no login unless the relay holds it.
+  TCP port, and with it the logins apps send, so systemd holds this one: `mroom-mail-relay.socket` listens
+  on it from boot, as root, and hands it to the relay. The port stays held while the relay restarts, after
+  an update, a crash or a reboot, and a connection that comes meanwhile waits for it. `mail-user-add` gives
+  no login unless the port is held by that socket or the relay, and the listener counts only at
+  `127.0.0.1` or every address, where apps' mail arrives.
 - **Restarts.** Mailpit reads its logins only when it starts, so `mail-user-add` and `mail-user-remove` stop
-  it, Forge's daemon starts it again, and the gate waits until it answers on HTTP and SMTP: a moment without
-  SMTP, which a queued mail with more than one try survives. Forge counts a daemon that stops within its
-  Start Seconds as a failed start and gives up after three in a row, so the gate lets each Mailpit run 3
-  seconds before it stops it again; a burst of logins takes 3 seconds each. A restart also moves Mailpit
-  onto the build `mroom baseline mailpit` installed last.
+  it, systemd starts it again (`mroom-mailpit.service`, however often), and the gate waits until it answers
+  on HTTP and SMTP: a moment without SMTP, which a queued mail with more than one try survives. A Mailpit
+  run by a supervisor instead, such as a Forge daemon, would be given up after three stops within its Start
+  Seconds, so for one of those the gate waits until it has run 3 seconds. A restart also moves Mailpit onto
+  the build `mroom baseline mailpit` installed last.
+- **The relay** ends a session when Mailpit's side does, after at most `MAIL_RELAY_MAX_SECONDS` (1800), and
+  runs at most `MAIL_RELAY_MAX_CONNECTIONS` (256) at once, so held connections cannot use up its files.
 - **The login file** is never left empty, which Mailpit would take as "no login needed": it keeps a login
   no one knows, and a write that fails leaves the file as it was.
 - **Reading and deleting.** Only the gate holds the API login. `mail-read` and `mail-clear` act only on mail
@@ -509,9 +514,12 @@ the real Mailpit (`tests/pg/`, `tests/redis/`, `tests/site/` and `tests/mail/`).
 12. The mail catcher, when `qa.parity.mail` is `catcher` (the default): `mroom baseline mailpit`. It
     downloads Mailpit at the build `lib/core/pins.txt` names, refuses it unless the archive and the binary
     match their SHA-256 pins, puts mroom's mail relay beside it, makes their logins (mode 600, in
-    `~/.config/mroom/secrets`), and prints the two Forge daemons to create, with Start Seconds 1: the relay
-    on `127.0.0.1:1025` (`MROOM_QA_SMTP_PORT` in `box.env` to change it) and Mailpit on Unix sockets. It can
-    run again: what is in place is kept, and it says when a daemon needs a restart.
+    `~/.config/mroom/secrets`), and writes three systemd units to `~/.local/share/mroom-services/units`: the
+    socket on `127.0.0.1:1025` (`MROOM_QA_SMTP_PORT` in `box.env` to change it), the relay and Mailpit, both
+    run as you. Install them with the one `sudo` command it prints. It can run again: what is in place is
+    kept, it restarts the relay or Mailpit when their files changed (systemd holds the port meanwhile), and it
+    says when the installed units differ from what it writes. Nothing else may listen on the port: on a box
+    that ran an earlier mail catcher there, stop that first.
 
 ## Regression label
 
