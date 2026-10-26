@@ -172,9 +172,10 @@ t_the_bucket_operations_against_the_real_garage() {
     # Forge's own blocks of a PHP site, left in place: the printed ones must still take every path.
     forge='location ~ \.php$ { return 418; } location ~ /\.(?!well-known).* { deny all; }'
     echo "server { listen 127.0.0.1:8081; server_name s3.qa.example.test; $forge"
-    sed -n '/^s3.qa.example.test, the S3 API/,/^files.qa.example.test, public files/p' <<<"$baseline_out" | sed '1d;$d'
+    # The printed config lines alone, which are indented; the text around them is not.
+    sed -n '/^s3.qa.example.test, the S3 API/,/^files.qa.example.test, public files/p' <<<"$baseline_out" | grep '^    '
     echo "} server { listen 127.0.0.1:8081; server_name files.qa.example.test; $forge"
-    sed -n '/^files.qa.example.test, public files/,$p' <<<"$baseline_out" | sed '1d'
+    sed -n '/^files.qa.example.test, public files/,$p' <<<"$baseline_out" | grep '^    '
     echo "} }"
   } >"$T/nginx/nginx.conf"
   nginx -p "$T/nginx" -c "$T/nginx/nginx.conf" 2>"$T/nginx/start.err" || { cat "$T/nginx/nginx.conf" "$T/nginx/start.err" >&2; exit 1; }
