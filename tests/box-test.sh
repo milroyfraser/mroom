@@ -194,11 +194,11 @@ t_qa_site_settings() {
     box "MROOM_QA_PHP=$bad"
     run "$MROOM" config box MROOM_QA_PHP; expect_rc 1; expect_err_has "MROOM_QA_PHP must be a PHP binary's name"
   done
-  for bad in test example.test .Test . .test. .com .nl ..test .a..b; do
+  for bad in test example.test .Test . .test. .com .nl ..test .a..b .co.uk .com.au .github.io .mycompany.com; do
     box "MROOM_QA_PERSONA_DOMAIN=$bad"
     run "$MROOM" config box MROOM_QA_PERSONA_DOMAIN; expect_rc 1; expect_err_has "MROOM_QA_PERSONA_DOMAIN must be a domain suffix"
   done
-  for good in .example .example.com .qa.example.com; do
+  for good in .example .example.com .qa.example.com .qa.mycompany.com .personas.test; do
     box "MROOM_QA_PERSONA_DOMAIN=$good"
     run "$MROOM" config box MROOM_QA_PERSONA_DOMAIN; expect_rc 0; expect_out "$good"
   done

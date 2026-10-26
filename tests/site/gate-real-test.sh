@@ -17,8 +17,9 @@ BOX_USER=mroombox
 ZONE=qa.example.test
 COMMIT=abc1234def5678abc1234def5678abc1234def56
 FPM=""
+WRITING="/tmp/mroom-writing-$$"
 cleanup() {
-  rm -f "$TOP/respawn"
+  rm -f "$TOP/respawn" "$WRITING"
   if [ -n "$FPM" ] && [ -f "$TOP/fpm.pid" ]; then sudo kill "$(cat "$TOP/fpm.pid")" 2>/dev/null || true; fi
   sudo pkill -KILL -u shop_qa_12 >/dev/null 2>&1 || true
   sudo pkill -KILL -u shop_qa_13 >/dev/null 2>&1 || true
@@ -149,6 +150,19 @@ t_the_site_operations_with_real_users_and_sudo() {
   run sudo stat -c '%U %a %F' "$(site 12)/backend/.env"; expect_out "shop_qa_12 600 regular file"
   run sudo cat "/home/$BOX_USER/.config/mroom/box.env"; expect_out "$box_env"
 
+  # The site's own code writing all the while (Laravel's logger runs mkdir -p storage/logs): every put still
+  # succeeds and keeps the upload live, since each entry is exchanged in one step.
+  : >"$WRITING"
+  sudo -u shop_qa_12 bash -c "while [ -e '$WRITING' ]; do mkdir -p '$(site 12)/backend/storage/logs' 2>/dev/null; done" &
+  local i failed=0
+  for i in $(seq 1 10); do
+    gate "code-put 12 $COMMIT" <"$T/code.tgz"
+    if [ "$rc" != 0 ]; then failed=$((failed + 1)); echo "    put $i: $err" >&2; fi
+    if [ "$(sudo cat "$(site 12)/backend/storage/app/photo.jpg" 2>/dev/null)" != uploaded ]; then failed=$((failed + 1)); fi
+  done
+  rm -f "$WRITING"
+  expect_true "$failed puts failed or lost the upload while the site wrote" [ "$failed" = 0 ]
+
   gate "code-put 12 $COMMIT" <"$T/hostile.tgz"
   expect_rc 1; expect_err_has "refused"
   expect_true "a refused tarball changed the site" sudo test -f "$(site 12)/README.md"
@@ -174,9 +188,14 @@ t_the_site_operations_with_real_users_and_sudo() {
     sleep 0.25
   done
   gate "user-clean 12"; expect_rc 0
-  expect_out_has "2 PHP-FPM pool workers left, which stop when the site goes"
+  expect_out_has "2 PHP-FPM pool workers stopped once"
+  expect_out_has "fresh ones left, which stop when the site goes"
   expect_true "environment 12's stray process still runs" eval '! pgrep -u shop_qa_12 -x sleep >/dev/null'
-  expect_true "the pool lost its workers" [ "$(pool_workers)" = 2 ]
+  for _ in $(seq 1 20); do
+    if [ "$(pool_workers)" = 2 ]; then break; fi
+    sleep 0.25
+  done
+  expect_true "the pool's master did not replace its workers" [ "$(pool_workers)" = 2 ]
   expect_true "environment 12's files stayed" eval '! sudo test -e /tmp/qa12-file && ! sudo test -e /tmp/qa12-dir && ! sudo test -e /dev/shm/qa12-shm'
   expect_true "environment 13's process was stopped" pgrep -u shop_qa_13 -x sleep
   expect_true "environment 13's files went" sudo test -f /tmp/qa13-file

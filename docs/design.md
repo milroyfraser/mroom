@@ -410,8 +410,9 @@ Invariants, each with a test:
    - Before qa-down deletes a site, `user-clean` stops the site user's processes and removes its files outside
      its home (in `/tmp`, `/var/tmp`, `/dev/shm`, `/var/crash`, `/run/lock` and `/dev/mqueue`), its System V IPC
      objects and its crontab, as that user, since the next user can be given the same UID. qa-down deletes the
-     site's daemons first, since supervisor restarts what is killed; PHP-FPM's master does the same for its
-     pool's workers, which are left to stop when Forge deletes the site.
+     site's daemons first, since supervisor restarts what is killed. PHP-FPM's master does the same for its pool's
+     workers, so they are stopped once, which ends any request in flight, and their fresh replacements stop when
+     Forge deletes the site, right after; a request in that gap could still leave a file.
    - `mroom doctor` checks the box: the default Redis user is refused; no QA role can reach another database, and
      `PUBLIC` can neither connect to the QA databases, the template or the dev site's database nor create in their
      `public` schema; each GitHub environment keeps its branch rule; each QA site's nginx config, set from an nginx

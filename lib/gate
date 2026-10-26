@@ -477,7 +477,7 @@ recorded_commit() {
 cmd_code_put() {
   words_are 3
   env_number "${words[1]}"
-  [[ "${words[2]}" =~ ^[0-9a-f]{40}$ ]] || refuse "code-put: '${words[2]:0:24}' is not a full commit SHA"
+  [[ "${words[2]}" =~ ^[0-9a-f]{40}$ ]] || refuse "code-put: its second argument is not a full commit SHA"
   site_ready
   site_user_exists || fail "there is no user $SITE_USER; qa-up creates the site first"
   env_lock "site-$SITE_USER"

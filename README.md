@@ -276,7 +276,7 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 | `env-put <N>` | the API site's `.env`, on stdin, written as the site user (mode 600), replacing rather than following any link the PR's code left there; prints `env=` its SHA-256 |
 | `env-sha <N>` | `env=` the SHA-256 of the API site's `.env` (or `missing`), and `commit=` the commit `code-put` recorded (or `none`) |
 | `signin-code <N> <email>` | a sign-in code for a persona address, from the app's `php artisan mroom:signin-code <email>` or its `qa-signin` hook |
-| `user-clean <N>` | stops the site user's processes, leaving PHP-FPM's pool workers, which end with the site, and deletes its files in `/tmp`, `/var/tmp`, `/dev/shm`, `/var/crash`, `/run/lock` and `/dev/mqueue`, its IPC objects and its crontab, before qa-down deletes the sites |
+| `user-clean <N>` | stops the site user's processes (PHP-FPM's pool workers once: their master starts fresh ones, which end with the site) and deletes its files in `/tmp`, `/var/tmp`, `/dev/shm`, `/var/crash`, `/run/lock` and `/dev/mqueue`, its IPC objects and its crontab, before qa-down deletes the sites |
 
 The client sends only N. The database, role and Redis user are `<MROOM_APP_NAME>_qa_<N>`, and the
 database is cloned from `MROOM_QA_TEMPLATE`, both set by a person in `box.env`. A password reaches
@@ -311,9 +311,14 @@ that environment's own `api-<N>` and `go-<N>` sites:
   tree except the backend's `.env` and `storage/`. Any `.env` in the tarball is skipped, a link at `.env`,
   `storage` or `bootstrap/cache` refuses the tarball, and the gate writes `version.json`
   (`{"release": null, "commit": "<sha>"}`) into the backend, since a tarball has no git history.
-- **The swap** builds the new tree beside the live one. If a move fails, every move is undone and the site
-  is as it was. What a killed put leaves is recovered by the next one, or set aside as `.mroom-kept-*` for
-  a person when the site has made its own `.env` or `storage/` since; it is never deleted.
+- **The swap** builds the new tree beside the live one, then exchanges the two entry by entry, each in one
+  atomic step (`renameat2`), so the site never lacks an entry, even while its own code writes. A failed step
+  undoes the steps done. A killed put's kept items go back live with the next put; if the site made its own
+  meanwhile, that copy is set aside as `.mroom-kept-*` for a person, as is a scratch tree whose put is not
+  known. Kept items are never deleted, and each put reports how many set-aside copies wait. A log the app
+  writes during the swap itself may be lost. Changing `MROOM_QA_BACKEND_DIR` while an environment exists
+  leaves its `.env` and `storage/` at the old place, where the next put replaces them: recreate the
+  environment instead.
 - **`.env`** is written by `env-put`, as the site user, so neither Forge nor the gate writes through a link
   the PR's code left there. `env-sha` checks that write; the PR's code can change the file afterwards.
 - **The commit** that `env-sha` reports is the one the gate recorded, as the box user, outside the site.
@@ -322,8 +327,10 @@ that environment's own `api-<N>` and `go-<N>` sites:
   app prints is the PR's own code's answer.
 - **`user-clean`** runs as the site user too: a user may stop its own processes and delete its own files,
   so no rule lets the box user run anything as root. PHP-FPM's master replaces a killed pool worker at
-  once, so pool workers are left to stop with the site; anything else that keeps coming back, such as a
-  daemon not yet deleted, fails the clean, though its files still go.
+  once, so pool workers are stopped once, which ends any request in flight, and their fresh replacements
+  stop when Forge deletes the site. A request that arrives in between could still leave a file, so qa-down
+  deletes the site right after. Anything else that keeps coming back, such as a daemon not yet deleted,
+  fails the clean, though the files go first.
 
 The sudoers line lets the box user, and so every agent on the box, run `site-op` as any QA site user:
 put any code into a QA site and run its sign-in command. QA sites hold only QA data, and the box user can
@@ -444,17 +451,23 @@ versions. CI runs these steps against a real Postgres, a real Redis 7 and 8, and
    Until then Redis is exactly as open as it was. The gate refuses Redis requests while the default user
    is on, since with it any process on the box reaches every key.
 
-10. `site-op`, owned by root so the box user cannot change what runs as a site user, and the one sudoers
+10. `site-op`, owned by root so the box user cannot change the helper itself, and the one sudoers
     line that lets the box user run it as any of Forge's isolated users, never as root. Install it again
     after each mroom upgrade: the gate refuses a copy that is not its release's own.
 
     ```bash
-    release="$(dirname "$(dirname "$(readlink -f ~/.local/bin/mroom)")")"   # the installed release
-    sudo install -d -o root -g root -m 755 /usr/local/libexec/mroom
-    sudo install -o root -g root -m 755 "$release/lib/site-op" /usr/local/libexec/mroom/site-op
-    echo 'forge ALL=(%isolated) NOPASSWD: /usr/local/libexec/mroom/site-op' >/tmp/mroom-gate.sudoers
-    sudo visudo -cf /tmp/mroom-gate.sudoers && sudo install -o root -g root -m 440 /tmp/mroom-gate.sudoers /etc/sudoers.d/mroom-gate
-    rm /tmp/mroom-gate.sudoers
+    The sudoers line is written to a private file in your home, never a fixed name in `/tmp`, where any
+    user could put a file of their own first, and each step runs only if the one before it worked:
+
+    ```bash
+    release="$(dirname "$(dirname "$(readlink -f ~/.local/bin/mroom)")")" &&
+      sudo install -d -o root -g root -m 755 /usr/local/libexec/mroom &&
+      sudo install -o root -g root -m 755 "$release/lib/site-op" /usr/local/libexec/mroom/site-op &&
+      line="$(mktemp ~/.mroom-gate-sudoers.XXXXXX)" &&
+      echo 'forge ALL=(%isolated) NOPASSWD: /usr/local/libexec/mroom/site-op' >"$line" &&
+      sudo visudo -cf "$line" &&
+      sudo install -o root -g root -m 440 "$line" /etc/sudoers.d/mroom-gate
+    rm -f "$line"
     ```
 
     A QA site's user never needs to log in, but its PR's code could add its own SSH key: add

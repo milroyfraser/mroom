@@ -122,6 +122,14 @@ unchanged() {
     && [ "$(cat "$(site)/backend/storage/app/photo.jpg")" = uploaded ]
 }
 gate_log_text() { cat "$HOME/.local/state/mroom/gate.log" 2>/dev/null || true; }
+# snapshot: the live tree's every path, type and mode, and the kept items' content.
+snapshot() {
+  (cd "$(site)" && find . -path './.mroom-*' -prune -o -printf '%p %y %m\n' | sort
+    cat backend/.env backend/storage/app/photo.jpg 2>/dev/null) || true
+}
+tree_is() { [ "$(snapshot)" = "$1" ]; }
+# park <backend>: a scratch tree a put killed mid-swap left, its marker naming that backend folder.
+park() { mkdir -p "$(site)/.mroom-new-dead/backend"; printf 'code %s\n' "$1" >"$(site)/.mroom-new-dead/.mroom-put"; }
 put() { gate provision "code-put 12 $COMMIT" <"${1:-$T/code.tgz}"; }
 recorded() { cat "$HOME/.local/state/mroom/qa/shop_qa_12.commit" 2>/dev/null || echo none; }
 
@@ -150,24 +158,47 @@ t_a_second_put_replaces_the_first() {
   run cat "$(site)/backend/.env"; expect_out "APP_KEY=base64:live"
 }
 
-t_a_failed_swap_puts_everything_back() {
+t_a_failed_step_puts_everything_back() {
   world; repo_tarball
-  local n
-  # Each of a put's seven renames: the two kept items, the two live entries aside, the three new ones in.
-  for n in 1 2 3 4 5 6 7; do
-    MROOM_SITE_OP_FAIL_RENAME="$n" put
-    expect_rc 1; expect_err_has "No space left on device (a test's)"
-    expect_true "a swap failing at rename $n changed the site" unchanged
-    expect_true "a swap failing at rename $n left a scratch folder" no_leftovers
+  local before n=1
+  before="$(snapshot)"
+  # Each step of a put in turn: the kept items into the new tree, then each entry exchanged, placed or
+  # retired. Every failure leaves the tree exactly as it was; the first step that is not there succeeds.
+  while MROOM_SITE_OP_FAIL_STEP="$n" put; [ "$rc" != 0 ] && [ "$n" -le 20 ]; do
+    expect_err_has "No space left on device (a test's)"
+    expect_true "a put failing at step $n changed the site" tree_is "$before"
+    expect_true "a put failing at step $n left a scratch folder" no_leftovers
+    expect_true "a put failing at step $n kept a recorded commit" eval '[ "$(recorded)" = none ]'
+    n=$((n + 1))
   done
-  expect_true "a failed put kept a recorded commit" eval '[ "$(recorded)" = none ]'
-  MROOM_SITE_OP_FAIL_RENAME=8 put; expect_rc 0
+  expect_true "a put took only $((n - 1)) steps" [ "$n" -gt 5 ]
+  expect_rc 0
+  expect_file "$(site)/README.md"
+  expect_no_file "$(site)/old-file"
+}
+
+t_a_put_survives_the_sites_own_writes() {
+  world; repo_tarball
+  # Laravel's logger runs mkdir -p storage/logs at any moment, here as fast as it can, through every put.
+  : >"$T/writing"
+  (while [ -e "$T/writing" ]; do mkdir -p "$T/homes/shop_qa_12/$SITE/backend/storage/logs" 2>/dev/null; done) &
+  local writer=$! i failed=0
+  for i in $(seq 1 25); do
+    put
+    if [ "$rc" != 0 ]; then failed=$((failed + 1)); echo "    put $i: $err" >&2; fi
+    if [ "$(cat "$(site)/backend/storage/app/photo.jpg" 2>/dev/null)" != uploaded ]; then failed=$((failed + 1)); fi
+  done
+  rm -f "$T/writing"
+  wait "$writer" 2>/dev/null || true
+  expect_true "$failed puts failed or lost the upload while the site wrote" [ "$failed" = 0 ]
+  run cat "$(site)/backend/.env"; expect_out "APP_KEY=base64:live"
 }
 
 t_an_interrupted_put_is_recovered() {
   world; repo_tarball
   # A put that died mid-swap: its new tree holds the live .env, and the live tree has none.
-  mkdir -p "$(site)/.mroom-new-dead/backend" "$(site)/.mroom-old-dead/x"
+  park backend
+  mkdir -p "$(site)/.mroom-old-dead/x"
   mv "$(site)/backend/.env" "$(site)/.mroom-new-dead/backend/.env"
   put; expect_rc 0
   run cat "$(site)/backend/.env"; expect_out "APP_KEY=base64:live"
@@ -177,14 +208,37 @@ t_an_interrupted_put_is_recovered() {
 t_a_kept_item_the_site_made_again_is_set_aside_not_deleted() {
   world; repo_tarball
   # A put died with storage parked in its new tree; since then the app wrote a log into a fresh storage.
-  mkdir -p "$(site)/.mroom-new-dead/backend"
+  park backend
   mv "$(site)/backend/storage" "$(site)/.mroom-new-dead/backend/storage"
   mkdir -p "$(site)/backend/storage/logs"
   printf 'log\n' >"$(site)/backend/storage/logs/laravel.log"
   put; expect_rc 0
-  expect_out_has "backend/storage from an interrupted put stay in .mroom-kept-"
-  expect_true "the parked upload was deleted" compgen -G "$(site)/.mroom-kept-*/backend/storage/app/photo.jpg"
-  run cat "$(site)/backend/storage/logs/laravel.log"; expect_out log
+  expect_out_has "backend/storage from an interrupted put are live again; the copies the site made meanwhile stay in .mroom-kept-"
+  expect_out_has "1 set-aside copies (.mroom-kept-*) wait for a person"
+  run cat "$(site)/backend/storage/app/photo.jpg"; expect_out uploaded
+  expect_true "the site's own log was deleted" compgen -G "$(site)/.mroom-kept-*/backend/storage/logs/laravel.log"
+}
+
+t_a_scratch_tree_of_unknown_origin_or_another_backend_is_kept() {
+  world; repo_tarball
+  mkdir -p "$(site)/.mroom-new-old/backend/storage/app"
+  printf 'precious\n' >"$(site)/.mroom-new-old/backend/storage/app/doc.pdf"
+  put; expect_rc 0
+  expect_out_has "a scratch tree of an unknown put stays in .mroom-kept-"
+  expect_true "the unknown scratch tree was deleted" compgen -G "$(site)/.mroom-kept-*/backend/storage/app/doc.pdf"
+  park app
+  printf 'other\n' >"$(site)/.mroom-new-dead/backend/marker"
+  put; expect_rc 0
+  expect_out_has "a put for the backend folder app was interrupted; its scratch tree stays in .mroom-kept-"
+  expect_out_has "2 set-aside copies (.mroom-kept-*) wait for a person"
+}
+
+t_a_backend_without_its_search_bit_keeps_env_and_storage() {
+  world; repo_tarball
+  chmod 600 "$(site)/backend"
+  put; expect_rc 0
+  run cat "$(site)/backend/.env"; expect_out "APP_KEY=base64:live"
+  run cat "$(site)/backend/storage/app/photo.jpg"; expect_out uploaded
 }
 
 t_env_sha_reports_the_env_hash_and_the_recorded_commit() {
@@ -266,6 +320,17 @@ t_size_limits_refuse_before_unpacking() {
   expect_true "a refused tarball changed the site" unchanged
   gate provision "code-put 12 $COMMIT" </dev/null; expect_rc 1; expect_err_has "no tarball came on stdin"
   expect_true "an empty upload stayed" no_leftovers
+}
+
+t_a_sparse_entry_is_refused() {
+  world
+  local top="$T/src/example-shop-${COMMIT:0:7}"
+  mkdir -p "$top/backend"
+  printf '#!/usr/bin/env php\n' >"$top/backend/artisan"
+  truncate -s 1M "$top/backend/hole"
+  tar --sparse --format=gnu -czf "$T/sparse.tgz" -C "$T/src" "example-shop-${COMMIT:0:7}"
+  put "$T/sparse.tgz"; expect_rc 1; expect_err_has "the tarball has a sparse entry"
+  expect_true "a refused tarball changed the site" unchanged
 }
 
 t_unpacked_files_lose_setuid_and_dirs_stay_removable() {
@@ -380,14 +445,18 @@ t_one_site_request_at_a_time_per_environment() {
 
 test_case code-put t_code_put_replaces_the_tree_and_keeps_env_and_storage
 test_case second-put t_a_second_put_replaces_the_first
-test_case failed-swap t_a_failed_swap_puts_everything_back
+test_case failed-step t_a_failed_step_puts_everything_back
+test_case concurrent-writes t_a_put_survives_the_sites_own_writes
 test_case interrupted-put t_an_interrupted_put_is_recovered
 test_case kept-item-set-aside t_a_kept_item_the_site_made_again_is_set_aside_not_deleted
+test_case unknown-scratch-tree t_a_scratch_tree_of_unknown_origin_or_another_backend_is_kept
+test_case no-search-bit t_a_backend_without_its_search_bit_keeps_env_and_storage
 test_case env-sha t_env_sha_reports_the_env_hash_and_the_recorded_commit
 test_case env-put t_env_put_writes_the_env_as_the_site_user_without_following_a_link
 test_case hostile-tarballs t_a_tarball_of_another_commit_or_shape_changes_nothing
 test_case cut-or-padded t_a_cut_off_or_padded_upload_is_refused
 test_case size-limits t_size_limits_refuse_before_unpacking
+test_case sparse t_a_sparse_entry_is_refused
 test_case modes t_unpacked_files_lose_setuid_and_dirs_stay_removable
 test_case own-sites-only t_site_op_works_only_on_its_own_environments_sites
 test_case dist-put t_dist_put_replaces_the_web_folder

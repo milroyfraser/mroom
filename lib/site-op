@@ -20,13 +20,14 @@ sites, so it reaches nothing that user's code cannot: the gate never unpacks a t
 or runs its code as the box user. A tarball is unpacked with tarfile's data filter (no absolute path, no
 `..`, no link leading out of the tree, no device file, no setuid bit). A code tree replaces the site's whole
 tree except the backend's .env and storage/: any .env in the tarball is skipped, and a link at .env, storage
-or bootstrap/cache refuses the whole tarball. The new tree is built beside the live one and swapped in; a
-failed swap puts everything back, and what an interrupted one leaves is recovered or set aside for a person,
-never deleted. Messages go to stderr; the gate shows the first line.
+or bootstrap/cache refuses the whole tarball. The new tree is built beside the live one and exchanged with it
+entry by entry, each in one atomic step; a failed step is undone, and what an interrupted put leaves is
+recovered or set aside for a person, never deleted. Messages go to stderr; the gate shows the first line.
 """
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import grp
 import hashlib
@@ -47,7 +48,7 @@ import uuid
 
 # Through sudo, the passwd file gives the user and its home, and no setting comes from the environment. Run
 # directly (the tests), $HOME is the home, MROOM_SITE_OP_USER names the QA user it plays (never for clean),
-# and MROOM_SITE_OP_* may lower the limits or make a rename fail.
+# and MROOM_SITE_OP_* may lower the limits or make a step of a put fail.
 UNDER_SUDO = "SUDO_UID" in os.environ
 
 
@@ -79,9 +80,12 @@ EMAIL = re.compile(r"[a-z0-9._+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+")
 CODE = re.compile(r"[A-Za-z0-9-]{4,64}")
 QA_USER = re.compile(r"[a-z][a-z0-9_]*_qa_([1-9][0-9]{0,8})")
 SAFE_PATH = "/usr/local/bin:/usr/bin:/bin"
+MARKER = ".mroom-put"                             # in a put's scratch tree: "code <backend_dir>" or "dist"
 # Where any user may write, so where a site user's files can outlive it (design 8.9).
 SHARED_FOLDERS = ("/tmp", "/var/tmp", "/dev/shm", "/var/crash", "/run/lock", "/dev/mqueue")
 STOP_SIGNALS = {signal.SIGHUP, signal.SIGINT, signal.SIGTERM}
+# Held while a put moves the live tree, so none stops it halfway (sudo relays these to the command).
+HOLD_SIGNALS = STOP_SIGNALS | {signal.SIGQUIT, signal.SIGUSR1, signal.SIGUSR2}
 
 
 class Refused(Exception):
@@ -154,6 +158,18 @@ def through_link(root: str, path: str) -> bool:
     return any(os.path.islink(os.path.join(root, p)) for p in prefixes(path) if p != ".")
 
 
+def present(path: str) -> bool:
+    """Whether something is at path. Only "not there" counts as absent: a folder this user cannot search
+    raises, rather than hiding a kept item that would then go with the old tree."""
+    try:
+        os.lstat(path)
+        return True
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as e:
+        raise Refused(f"cannot look at {path}: {e.strerror}") from None
+
+
 def open_up(path: str) -> None:
     """Gives this user rwx on its own folders below path, so a tarball's read-only folder can still go."""
     for top, dirs, _files in os.walk(path):
@@ -191,32 +207,140 @@ def kept(backend: str) -> list[str]:
     return [tree_path(backend, ".env"), tree_path(backend, "storage")]
 
 
+# renameat2(2), which Python does not wrap: RENAME_NOREPLACE moves only if nothing is at the target, and
+# RENAME_EXCHANGE swaps two paths in one step, so neither is ever missing. Without them (an old C library, or
+# a filesystem that cannot), plain renames do the same, but not atomically.
+AT_FDCWD, RENAME_NOREPLACE, RENAME_EXCHANGE = -100, 1, 2
+try:
+    _renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    _renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    _renameat2.restype = ctypes.c_int
+except (AttributeError, OSError):
+    _renameat2 = None
+
+
+def renameat2(src: str, dst: str, flags: int) -> bool:
+    """Returns False when renameat2 or its flags are not available here."""
+    if _renameat2 is None:
+        return False
+    if _renameat2(AT_FDCWD, os.fsencode(src), AT_FDCWD, os.fsencode(dst), flags) == 0:
+        return True
+    err = ctypes.get_errno()
+    if err in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
+        return False
+    raise OSError(err, os.strerror(err), src)
+
+
+def exchange(src: str, dst: str) -> None:
+    if not renameat2(src, dst, RENAME_EXCHANGE):
+        between = os.path.join(os.path.dirname(dst), ".mroom-x-" + uuid.uuid4().hex[:8])
+        os.rename(dst, between)
+        os.rename(src, dst)
+        os.rename(between, src)
+
+
+def place(src: str, dst: str) -> str:
+    """Moves src to dst. If something is at dst, as when the site's own code made it meanwhile, the two are
+    exchanged instead and that thing ends up at src. Returns "placed" or "exchanged"."""
+    try:
+        if renameat2(src, dst, RENAME_NOREPLACE):
+            return "placed"
+    except FileExistsError:
+        exchange(src, dst)
+        return "exchanged"
+    if os.path.lexists(dst):
+        exchange(src, dst)
+        return "exchanged"
+    os.rename(src, dst)
+    return "placed"
+
+
+STEPS = [0]
+
+
+def step() -> None:
+    """Counts a move of a put; a test can make the Nth one fail (MROOM_SITE_OP_FAIL_STEP)."""
+    STEPS[0] += 1
+    if seam("FAIL_STEP") == str(STEPS[0]):
+        raise OSError(errno.ENOSPC, "No space left on device (a test's)")
+
+
+def read_marker(path: str) -> tuple[str, str | None] | None:
+    try:
+        with open(os.path.join(path, MARKER)) as f:
+            kind, _, backend = f.read(256).strip().partition(" ")
+    except OSError:
+        return None
+    if kind == "dist" and not backend:
+        return "dist", None
+    if kind == "code" and REPO_DIR.fullmatch(backend):
+        return "code", backend
+    return None
+
+
+def holds_kept(path: str) -> bool:
+    """Whether a folder holds a .env or a storage folder anywhere."""
+    for _top, dirs, files in os.walk(path):
+        if ".env" in files or "storage" in dirs:
+            return True
+    return False
+
+
+def recover_new(root: str, path: str, current: str | None) -> str:
+    """Puts an interrupted put's kept items back live. When the site made its own meanwhile (a log written
+    since), the two are exchanged: the parked copy, the real one, goes live, and the site's copy is set aside
+    with the scratch tree for a person. A scratch tree whose put is not known, or was for another backend
+    folder than this put's, is set aside whole. Returns a note when the scratch tree stays, set aside."""
+    marker = read_marker(path)
+    if marker is None:
+        if holds_kept(path):
+            return f"a scratch tree of an unknown put stays in {set_aside(path, '.mroom-kept-')} for a person"
+        return ""
+    kind, backend = marker
+    if kind != "code":
+        return ""
+    if current is not None and backend != current:
+        return (f"a put for the backend folder {backend} was interrupted; its scratch tree stays in "
+                f"{set_aside(path, '.mroom-kept-')} for a person")
+    swapped = []
+    for keep in kept(backend):
+        src, dst = os.path.join(path, keep), os.path.join(root, keep)
+        if not present(src) or through_link(path, keep) or through_link(root, os.path.dirname(keep) or "."):
+            continue
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if place(src, dst) == "exchanged":
+            swapped.append(keep)
+    left = [keep for keep in kept(backend) if present(os.path.join(path, keep))]
+    if not left:
+        return ""
+    aside = set_aside(path, ".mroom-kept-")
+    if left == swapped:
+        return (f"{' and '.join(left)} from an interrupted put are live again; the copies the site made "
+                f"meanwhile stay in {aside} for a person")
+    return f"{' and '.join(left)} from an interrupted put stay in {aside} for a person"
+
+
 def recover(root: str, backend: str | None) -> list[str]:
-    """Clears what an interrupted put left. A kept item its new tree still holds goes back when the live tree
-    lacks it; when the site has its own again (a log written since), the scratch tree is set aside for a
-    person, never deleted. Returns notes for the gate."""
+    """Clears what an interrupted put left, putting its kept items back, never deleting them. Returns notes
+    for the gate."""
     notes = []
     for name in sorted(os.listdir(root)):
         if not name.startswith(".mroom-") or name.startswith(".mroom-kept-"):
             continue
         path = os.path.join(root, name)
-        if name.startswith(".mroom-new-") and backend is not None and os.path.isdir(path) and not os.path.islink(path):
-            for keep in kept(backend):
-                src, dst = os.path.join(path, keep), os.path.join(root, keep)
-                if (os.path.lexists(src) and not through_link(path, keep) and not os.path.lexists(dst)
-                        and not through_link(root, os.path.dirname(keep) or ".")):
-                    os.makedirs(os.path.dirname(dst), exist_ok=True)
-                    os.rename(src, dst)
-            left = [keep for keep in kept(backend) if os.path.lexists(os.path.join(path, keep))]
-            if left:
-                notes.append(f"{' and '.join(left)} from an interrupted put stay in {set_aside(path, '.mroom-kept-')}, "
-                             "since the site has its own again: a person merges them")
+        if name.startswith(".mroom-new-") and os.path.isdir(path) and not os.path.islink(path):
+            note = recover_new(root, path, backend)
+            if note:
+                notes.append(note)
                 continue
         try:
             remove(path)
         except OSError:
             if not name.startswith(".mroom-trash-"):
                 notes.append(f"{name} could not be removed, so it stays as {set_aside(path, '.mroom-trash-')}")
+    waiting = sum(1 for name in os.listdir(root) if name.startswith(".mroom-kept-"))
+    if waiting:
+        notes.append(f"{waiting} set-aside copies (.mroom-kept-*) wait for a person")
     return notes
 
 
@@ -240,8 +364,8 @@ def read_upload(root: str) -> str:
 
 
 class BoundedTarInfo(tarfile.TarInfo):
-    """Refuses a long name or a pax record larger than MAX_HEADER, which tarfile would read into memory
-    whole before any member is seen."""
+    """Refuses a long name or a pax record larger than MAX_HEADER, which tarfile would read into memory whole
+    before any member is seen, and any sparse entry, whose maps it reads the same way."""
 
     def _bounded(self) -> None:
         if self.size > MAX_HEADER:
@@ -254,6 +378,11 @@ class BoundedTarInfo(tarfile.TarInfo):
     def _proc_gnulong(self, tf):
         self._bounded()
         return super()._proc_gnulong(tf)
+
+    def _sparse(self, *_args) -> None:
+        raise Refused("the tarball has a sparse entry, which a repository never needs")
+
+    _proc_sparse = _proc_gnusparse_00 = _proc_gnusparse_01 = _proc_gnusparse_10 = _sparse
 
 
 def plan(tf: tarfile.TarFile, kind: str, commit: str | None, backend: str | None) -> tuple[dict, int]:
@@ -327,17 +456,6 @@ def drain(tf: tarfile.TarFile) -> None:
             raise Refused("the tarball has data after its end")
 
 
-RENAMES = [0]
-
-
-def rename(src: str, dst: str) -> None:
-    """os.rename, which a test can make fail at its Nth call (MROOM_SITE_OP_FAIL_RENAME)."""
-    RENAMES[0] += 1
-    if seam("FAIL_RENAME") == str(RENAMES[0]):
-        raise OSError(errno.ENOSPC, "No space left on device (a test's)")
-    os.rename(src, dst)
-
-
 def movable(path: str, name: str) -> None:
     """The entry must be this user's own, to move it, and a folder writable, since moving a folder to a new
     parent rewrites its '..'."""
@@ -349,28 +467,46 @@ def movable(path: str, name: str) -> None:
         os.chmod(path, stat.S_IMODE(st.st_mode) | stat.S_IWUSR)
 
 
-def swap(root: str, staging: str) -> str:
-    """Moves the live tree aside and the new one in, inside the site's own folder, which keeps its own
-    owner and permissions. If a move fails, every move is undone before the error goes on. Returns the
-    folder holding the old tree."""
-    old = tempfile.mkdtemp(dir=root, prefix=".mroom-old-")
-    aside, placed = [], []
+def reachable(root: str, keep: str) -> None:
+    """Gives this user rwx on its own folders on the way to a kept item, so one left without its search bit
+    cannot hide the item."""
+    parent = os.path.dirname(keep)
+    for prefix in prefixes(parent) if parent else []:
+        path = os.path.join(root, prefix)
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            return
+        if stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid():
+            os.chmod(path, stat.S_IMODE(st.st_mode) | 0o700)
+
+
+def swap(root: str, staging: str) -> None:
+    """Exchanges the live tree with the new one, entry by entry, inside the site's own folder, which keeps its
+    owner and permissions. An entry both trees hold is exchanged in one atomic step, so the site never lacks
+    it, even while its own code writes; one only the new tree holds is placed; one only the live tree holds
+    moves into the scratch folder, which ends up holding the old tree. A failed step undoes the steps done."""
+    live = {name for name in os.listdir(root) if not name.startswith(".mroom-")}
+    new = {name for name in os.listdir(staging) if not name.startswith(".mroom-")}
+    done = []
     try:
-        for name in sorted(os.listdir(root)):
-            if not name.startswith(".mroom-"):
-                rename(os.path.join(root, name), os.path.join(old, name))
-                aside.append(name)
-        for name in sorted(os.listdir(staging)):
-            rename(os.path.join(staging, name), os.path.join(root, name))
-            placed.append(name)
-    except BaseException:
-        for name in reversed(placed):
+        for name in sorted(new):
+            step()
+            done.append((place(os.path.join(staging, name), os.path.join(root, name)), name))
+        for name in sorted(live - new):
+            step()
             os.rename(os.path.join(root, name), os.path.join(staging, name))
-        for name in reversed(aside):
-            os.rename(os.path.join(old, name), os.path.join(root, name))
-        os.rmdir(old)
+            done.append(("retired", name))
+    except BaseException:
+        for kind, name in reversed(done):
+            src, dst = os.path.join(staging, name), os.path.join(root, name)
+            if kind == "exchanged":
+                exchange(src, dst)
+            elif kind == "placed":
+                os.rename(dst, src)
+            else:
+                place(src, dst)
         raise
-    return old
 
 
 def unpack(kind: str, domain: str, backend: str | None, commit: str | None) -> None:
@@ -386,6 +522,8 @@ def unpack(kind: str, domain: str, backend: str | None, commit: str | None) -> N
     staging = tempfile.mkdtemp(dir=root, prefix=".mroom-new-")
     moved, dropped = [], []
     try:
+        with open(os.path.join(staging, MARKER), "x") as out:
+            out.write(f"code {backend}\n" if kind == "code" else "dist\n")
         with tarfile.open(upload, "r:gz", tarinfo=BoundedTarInfo) as tf:
             renamed, skipped = plan(tf, kind, commit, backend)
             drain(tf)
@@ -399,6 +537,7 @@ def unpack(kind: str, domain: str, backend: str | None, commit: str | None) -> N
             except tarfile.FilterError as e:
                 raise Refused(f"refused: {e}") from None
         open_up(staging)
+        carry = []
         if kind == "code":
             version = os.path.join(staging, tree_path(backend, "version.json"))
             remove(version)
@@ -406,44 +545,44 @@ def unpack(kind: str, domain: str, backend: str | None, commit: str | None) -> N
                 out.write(json.dumps({"release": None, "commit": commit}) + "\n")
             for keep in kept(backend):
                 remove(os.path.join(staging, keep))
+                reachable(root, keep)
+                live = os.path.join(root, keep)
+                if not present(live):
+                    continue
+                if through_link(root, keep):
+                    dropped.append(keep)
+                    continue
+                movable(live, keep)
+                carry.append(keep)
         for name in os.listdir(root):
             if not name.startswith(".mroom-"):
                 movable(os.path.join(root, name), name)
-        # From here the live .env and storage move into the new tree: a stop signal waits until the swap is
-        # done or undone, and a failure puts them back.
-        signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+        # From here the live .env and storage move into the new tree, which is then exchanged with the live
+        # one. A signal waits until that is done or undone, and a failure puts the kept items back.
+        signal.pthread_sigmask(signal.SIG_BLOCK, HOLD_SIGNALS)
         try:
-            if kind == "code":
-                for keep in kept(backend):
-                    live = os.path.join(root, keep)
-                    if not os.path.lexists(live):
-                        continue
-                    if through_link(root, keep):
-                        dropped.append(keep)
-                        continue
-                    movable(live, keep)
-                    os.makedirs(os.path.dirname(os.path.join(staging, keep)), exist_ok=True)
-                    rename(live, os.path.join(staging, keep))
-                    moved.append(keep)
-            old = swap(root, staging)
+            for keep in carry:
+                os.makedirs(os.path.dirname(os.path.join(staging, keep)), exist_ok=True)
+                step()
+                os.rename(os.path.join(root, keep), os.path.join(staging, keep))
+                moved.append(keep)
+            swap(root, staging)
             moved = []
         except BaseException:
             for keep in reversed(list(moved)):
-                if not os.path.lexists(os.path.join(root, keep)):
-                    os.makedirs(os.path.dirname(os.path.join(root, keep)), exist_ok=True)
-                    os.rename(os.path.join(staging, keep), os.path.join(root, keep))
-                    moved.remove(keep)
+                os.makedirs(os.path.dirname(os.path.join(root, keep)), exist_ok=True)
+                place(os.path.join(staging, keep), os.path.join(root, keep))
+                moved.remove(keep)
             raise
         finally:
-            signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS)
-        try:
-            remove(old)
-        except OSError:
-            notes.append(f"the old tree stays as {set_aside(old, '.mroom-trash-')} until it can be removed")
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, HOLD_SIGNALS)
     finally:
         remove(upload)
         if not moved:  # a kept item that could not go back stays for the next put's recover()
-            remove(staging)
+            try:
+                remove(staging)
+            except OSError:
+                notes.append(f"the old tree stays as {set_aside(staging, '.mroom-trash-')} until it can be removed")
     entries = sum(1 for m, _ in renamed.values() if not m.isdir())
     print(f"{domain}: {entries} entries unpacked, {skipped} .env skipped"
           + (f", a link at {' and '.join(dropped)} not kept" if dropped else "")
@@ -632,8 +771,9 @@ def sweep_ipc(uid: int) -> int:
 def clean() -> None:
     """Before qa-down deletes a site: stops its user's processes and deletes what the user keeps outside its
     home, since the next site user can be given the same UID (design 8.9). A user may stop its own processes
-    and delete its own files, so this needs no root. PHP-FPM pool workers are left: their root master replaces
-    a killed one at once, and stops them all when Forge deletes the site. The files go in any case."""
+    and delete its own files, so this needs no root. PHP-FPM's master replaces a killed pool worker at once,
+    so pool workers are killed once, to end any request in flight, and their fresh replacements are left to
+    stop when Forge deletes the site; a request that arrives in between could still leave a file."""
     user = pwd.getpwuid(os.getuid())
     if not QA_USER.fullmatch(user.pw_name) or user.pw_uid < 1000 or not isolated(user):
         raise Refused(f"{user.pw_name} is not a QA site's isolated user")
@@ -650,16 +790,25 @@ def clean() -> None:
                 pass
         time.sleep(0.25)
     others = [pid for pid in own_processes() if not pool_worker(pid)]
-    workers = sum(1 for pid in own_processes() if pool_worker(pid))
+    workers = [pid for pid in own_processes() if pool_worker(pid)]
+    for pid in workers:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if workers:
+        time.sleep(0.5)
     removed = sweep_files(user.pw_uid) + sweep_ipc(user.pw_uid)
     try:
         crontab = subprocess.run(["crontab", "-r"], env={"PATH": SAFE_PATH}, stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
     except OSError:
         crontab = False
+    fresh = sum(1 for pid in own_processes() if pool_worker(pid))
     report = (f"{user.pw_name}: {len(stopped)} processes stopped, {removed} files and IPC objects removed outside "
               "its home" + (", its crontab removed" if crontab else "")
-              + (f", {workers} PHP-FPM pool workers left, which stop when the site goes" if workers else ""))
+              + (f", {len(workers)} PHP-FPM pool workers stopped once" if workers else "")
+              + (f" ({fresh} fresh ones left, which stop when the site goes)" if fresh else ""))
     if others:
         raise Refused(f"{report}; {len(others)} other processes kept coming back (delete the site's daemons first)")
     print(report)
