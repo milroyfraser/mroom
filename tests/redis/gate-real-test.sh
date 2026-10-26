@@ -19,11 +19,12 @@ trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$TOP"' EXIT
 as() { local user="$1" pw="$2"; shift 2; REDISCLI_AUTH="$pw" redis-cli --no-auth-warning -e --user "$user" "$@"; }
 can() { as "$@" >/dev/null 2>&1; }
 cannot() { ! can "$@"; }
-# denied <user> <password> <redis-cli args...>: the command is refused for want of permission.
+# denied <user> <password> <redis-cli args...>: the command is refused for want of permission (NOPERM, or
+# from inside a script, an ACL failure).
 denied() {
   local o
   if o="$(as "$@" 2>&1)"; then return 1; fi
-  case "$o" in *NOPERM*) return 0 ;; esac
+  case "$o" in *NOPERM* | *"ACL failure in script: No permissions"*) return 0 ;; esac
   echo "    refused, but not for permission: $o" >&2
   return 1
 }
@@ -37,7 +38,9 @@ may() {
   return 1
 }
 gate() { run env SSH_ORIGINAL_COMMAND="$1" "$MROOM" gate provision; }
-password_of() { sed -n 's/^REDIS_PASSWORD=//p' <<<"$1"; }
+# take_password: the REDIS_PASSWORD the gate just printed, which then leaves $out, so a failure's report in
+# CI's public log never shows it.
+take_password() { password="$(sed -n 's/^REDIS_PASSWORD=//p' <<<"$out")"; out="(credentials)"; }
 acl_file() { docker exec "$NAME" cat /acl/users.acl; }
 
 wait_for_redis() {
@@ -109,7 +112,7 @@ t_the_gate_on_a_real_redis() {
   printf 'MROOM_APP_NAME=shop\n' >"$HOME/.config/mroom/box.env"
   printf 'REDIS_GATE_USER=mroom-gate\nREDIS_GATE_PASSWORD=%s\n' "$GATE_PW" >"$HOME/.config/mroom/secrets/redis-gate.env"
   chmod 600 "$HOME/.config/mroom/secrets/redis-gate.env"
-  local modules pw12 pw13 old sub c args sweep acl clients
+  local modules password pw12 pw13 old sub c args sweep acl clients
   modules="$(as mroom-gate "$GATE_PW" MODULE LIST | tr -d '\r' | awk 'prev == "name" { print } { prev = $0 }' | tr '\n' ' ')"
   echo "  $IMAGE: $(as mroom-gate "$GATE_PW" INFO server | tr -d '\r' | grep '^redis_version:'), modules: ${modules:-none}"
   if [[ "$IMAGE" == redis:8* ]]; then
@@ -118,7 +121,7 @@ t_the_gate_on_a_real_redis() {
   expect_true "the default user signed in" eval '! redis-cli -e PING >/dev/null 2>&1'
 
   gate "redis-user-add 12"; expect_rc 0
-  pw12="$(password_of "$out")"
+  take_password; pw12="$password"
   expect_true "env 12 cannot write its own key" can shop_qa_12 "$pw12" SET shop:qa12:a 1
   expect_true "env 12 cannot use its prefix in another database" can shop_qa_12 "$pw12" -n 1 SET shop:qa12:b 1
   expect_true "env 12 cannot publish on its own channel" can shop_qa_12 "$pw12" PUBLISH shop:qa12:events x
@@ -201,7 +204,7 @@ NEEDED
   done
   old="$pw12"
   gate "redis-user-add 12"; expect_rc 0
-  pw12="$(password_of "$out")"
+  take_password; pw12="$password"
   expect_true "the old password still signs in" cannot shop_qa_12 "$old" PING
   expect_true "the new password does not sign in" can shop_qa_12 "$pw12" PING
   for _ in $(seq 1 20); do
@@ -218,7 +221,7 @@ NEEDED
   expect_true "env 12's user did not survive a restart" can shop_qa_12 "$pw12" PING
 
   gate "redis-user-add 13"; expect_rc 0
-  pw13="$(password_of "$out")"
+  take_password; pw13="$password"
   expect_true "env 13 cannot write its key" can shop_qa_13 "$pw13" SET shop:qa13:keep 1
   expect_true "env 12 cannot write" can shop_qa_12 "$pw12" SET shop:qa12:a 1
   expect_true "env 12 cannot write in database 1" can shop_qa_12 "$pw12" -n 1 SET shop:qa12:b 1
