@@ -370,9 +370,16 @@ root, and the relay and Mailpit run as $(id -un). To be installed or updated: ${
 Run the script below as root, from a session the box user's programs cannot change, such as a Forge recipe
 run as root (Server > Recipes); never by typing sudo in a shell of $(id -un)'s, whose PATH, aliases and
 functions those programs can change. Root reads nothing the box user can write: each unit's text is in the
-script. Check it first: every Exec line runs a file under $HOME, each service has User=$(id -un), no line
-starts with ExecStartPre, ExecStartPost, ExecStop or ExecReload, no Exec value starts with +, ! or @, and
-the socket listens on 127.0.0.1:$port only.
+script. Check it first: every cat > writes into /etc/systemd/system, every Exec line runs a file under
+$HOME, each service has User=$(id -un), no line starts with ExecStartPre, ExecStartPost, ExecStop or
+ExecReload, no Exec value starts with +, ! or @, and the socket listens on 127.0.0.1:$port only.
+EOF
+    if [ "$systemd" != /etc/systemd/system ]; then
+      echo
+      echo "WARNING: MROOM_SYSTEMD_DIR is set, so this script writes to $systemd, not /etc/systemd/system. It is a"
+      echo "setting for tests: unless you are testing, unset it and run mroom baseline mailpit again."
+    fi
+    cat <<EOF
 
 ----- run as root -----
 $(root_script "$port" "$python" "$systemd" "${stale[@]}")

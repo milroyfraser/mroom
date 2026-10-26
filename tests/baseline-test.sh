@@ -130,7 +130,10 @@ t_mailpit_is_installed_at_its_pin_with_its_relay_and_logins() {
     "BindReadOnlyPaths=$(services)/mail-relay $base/run" "RestrictAddressFamilies=AF_UNIX"; do
     expect_true "the units lack: $line" grep -qxF -- "$line" <<<"$script"
   done
-  expect_true "a unit runs something as root" eval '! grep -qE "^Exec[A-Za-z]*=[+!@-]|^ExecStartPre=|^ExecStartPost=|^User=root" <<<"$script"'
+  expect_true "a unit runs something as root" \
+    eval '! grep -qE "^Exec[A-Za-z]*=[+!@-]|^ExecStartPre=|^ExecStartPost=|^ExecStop=|^ExecReload=|^User=root" <<<"$script"'
+  # MROOM_SYSTEMD_DIR, a setting for tests, moves where the script writes: baseline says so, loudly.
+  expect_out_has "WARNING: MROOM_SYSTEMD_DIR is set, so this script writes to $T/systemd, not /etc/systemd/system"
   # Without box.env's port, the relay takes 1025.
   rm "$HOME/.config/mroom/box.env"
   run "$MROOM" baseline mailpit

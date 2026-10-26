@@ -530,7 +530,7 @@ installs is written out in the step itself.
     it and makes their logins (mode 600, in `~/.config/mroom/secrets`). Its script writes three systemd
     units, each one's text in full, and starts them: the socket on `127.0.0.1:1025` (`MROOM_QA_SMTP_PORT` in
     `box.env` to change it), the relay and Mailpit, both run as the box user. Before running it, check that
-    every `Exec` line runs a file under the box user's home, each service has `User=` the box user, nothing
+    every `cat >` writes into `/etc/systemd/system`, every `Exec` line runs a file under the box user's home, each service has `User=` the box user, nothing
     is an `ExecStartPre`, `ExecStartPost`, `ExecStop` or `ExecReload`, no `Exec` value starts with `+`, `!`
     or `@`, and the socket listens on `127.0.0.1` only. Baseline can run again: what is in place is kept, it
     restarts the relay or Mailpit itself when their files changed (systemd holds the port meanwhile), and it
