@@ -37,9 +37,10 @@ class Mailpit:
             threading.Thread(target=self.talk, args=(conn,), daemon=True).start()
 
     def talk(self, conn):
-        # Like the real Mailpit, it lets the other side hang up mid-session, as the relay does when its client
-        # goes away or it stops. Raising would print a traceback from this daemon thread, and one still
-        # printing as the interpreter exits makes Python abort (exit 134).
+        # Like the real Mailpit, it lets the other side hang up mid-session. The relay hangs up when its client
+        # resets or it is stopped, and this test stops it while the last of the twenty sessions are ending.
+        # Raising would print a traceback from this daemon thread, and one still printing as the interpreter
+        # exits makes Python abort (exit 134).
         with conn, contextlib.suppress(OSError):
             conn.sendall(b"220 hello\r\n")
             while data := conn.recv(65536):
@@ -118,6 +119,11 @@ finally:
     relay.wait(10)
 PY
   expect_rc 0
+  # An uncaught exception in a thread, or any traceback, from the fake or the relay (which shares this stderr),
+  # is a fault even in a run that gets through: a thread still printing one as Python exits aborts the run, and
+  # often only its first line, "Exception in thread", gets out before the exit.
+  expect_err_lacks "Exception in thread"
+  expect_err_lacks "Traceback"
   local check
   for check in greeting echo "large and half-close" "closed while Mailpit is down" "relay still up" \
     "back with Mailpit" "twenty at once"; do
@@ -270,6 +276,8 @@ relay.terminate()
 relay.wait(10)
 PY
   expect_rc 0
+  expect_err_lacks "Exception in thread"
+  expect_err_lacks "Traceback"
   local check
   for check in "systemd's socket" "served by the next relay" "a socket on another port" "a taken port" \
     "a third at once is closed" "ended with Mailpit's side" "closed after its time" "a reset frees its place" \
