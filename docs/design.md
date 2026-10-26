@@ -55,7 +55,8 @@ Commits do not show a person's work, because agents make almost all of them.
 ### 1.3 What mroom gives a team
 
 - **A shared agent box**: one worktree, test database and Redis prefix per session, with every session signing in
-  to Redis as the box's own user (D15); one Claude, GitHub and git identity per developer; a dev site served from
+  to Redis as the box's own user (D15); one Claude login and commit author per developer, on one GitHub account
+  for the box's agents (D22); a dev site served from
   a pushed branch under a lock; resume after a restart; nightly Claude Code updates and worktree clean-up; box
   health (`mroom status`, `mroom doctor`) and a watchdog that reports the box's own failures to chat.
 - **An agent workflow**: `/refine` → `/deliver` → `/implement` → stop at a PR in review; `/release` on a person's
@@ -99,6 +100,7 @@ starts the host's deploy and checks that the new release is live; the host (Forg
 | D19 | Mail is caught by Mailpit. Each environment sends with its own SMTP login, `mail-read` matches mail on the login that sent it, and the gate restarts Mailpit when it adds or removes a login | Tested on the box: Mailpit reads its login file only when it starts, so a new login needs a restart: the gate stops Mailpit, which runs as the box user, and systemd starts it again. Stored mail survives, and a queued mail that fails during the restart is retried when its job allows more than one try (`mroom doctor --app` checks). Tags can be forged: a mail with an `X-Tags` header or a plus address gets the tag it names, so those sources are turned off, and `mail-read` matches the `Username` field, which only a login sets: SMTP, or the API login only the gate holds. A port is free while its server restarts, and any user on the box may take a free port, with the logins apps send to it, so Mailpit listens only on Unix sockets in the box user's own folder, and mroom's mail relay pipes apps' TCP mail to it. systemd holds the relay's port from boot, as root (a socket unit), so it stays held while the relay restarts too; the gate gives a login only while that socket is active on the port, or the relay itself holds it (found in three reviews, 26 Oct). Mailpit and the relay are systemd services that start again however often they stop, each Mailpit running a second before the next restart (3 under a supervisor such as Forge's daemons, which gives up after three quick stops), confined to their own files. A person installs the units as root from a script that holds their text, so root reads no file the box user can write |
 | D20 | A Forge token that can add SSH keys, run commands or recipes, read the sudo or database password, edit nginx or deploy scripts, or create daemons or scheduled jobs reaches `forge` or root. Only the `qa` environment holds such a token. The box's token has none of those scopes except nginx, which gives nothing beyond what its users already have as `forge` | Forge's API spec lets a daemon run as `root`; a scheduled job, a recipe and an SSH key take a user of the caller's choice; a deploy script runs as its site's user, which for the dev site is `forge`; and scopes cover the whole account, not one site. qa-up creates workers, so its token reaches root and is guarded by who holds it (sections 8.1, 8.8). Every developer on the box can read the box's token and every agent can use it through `forge-api`, so it keeps reads and site settings, and a person sets up daemons and scheduled jobs with a short-lived token |
 | D21 | What root installs comes from a release, never from the box: mroom's root recipe, saved in Forge and run as root, downloads `lib/root-setup` at a release tag, checks it against the SHA-256 that release's README names, and runs it with the box's values. `mroom baseline` only says whether the installed units are that release's | The box user runs agents that may be compromised (8.1), so whatever the box prints may have been changed, and a checklist of unit lines to refuse always misses one that grants root (`AmbientCapabilities=`, `LoadCredential=`, `StandardOutput=file:`, `RuntimeDirectory=`). A Forge recipe runs as root over Forge's own SSH connection, outside the box user's shell, and the box's token holds no recipe scope (D20; even `recipe:view` runs saved recipes). A tag, never a commit, because GitHub serves a fork's commits under the repository's address; the SHA-256 pins the file. `root-setup` reads no file the box user can write and checks `site-op` against the SHA-256 it holds; CI runs it as root in the mail, files and site jobs, and `tests/root-test.sh` checks every unit line against an allowlist. What it trusts is this repository's tags and README, so nothing on the box may write to the repository. One limit stays: systemd, as root, resolves the units' bind paths in the box user's home whenever a service starts (open question 8) |
+| D22 | Every session on the box works on GitHub as one account of the agents' own: Write on the app's repository, never admin, and never a developer's account. A developer's own GitHub login never comes onto the box; each developer keeps their own Claude login and commit author, and chat pings for an agent's pull request go to the author of its first commit | Every session runs as the box's one OS user, so any agent can use every login stored there. A developer's login can approve pull requests, so a required approval could be given from the box, and an admin's could lift the branch rules. The agents' account cannot approve the pull requests it opens, so every approval comes from a person, off the box; whether a second developer reviews is a separate rule. The account's SSH key and `gh` login are the box's only GitHub credentials, and neither reaches mroom's repository (D21) |
 
 ## 3. Host requirements
 
@@ -422,6 +424,8 @@ Invariants, each with a test:
      reach its endpoints, Unix sockets in its own folder. Teardown (`bucket-drop`) finds the environment's
      buckets and keys by name, deletes the keys, and empties and deletes each bucket, with a key made for
      that alone.
+   - The box holds one GitHub identity, the agents' own: it may write the app's repository and nothing else, never
+     administers it, and cannot approve its own pull requests, so a person approves every one, off the box (D22).
    - What root installs (`site-op`, its sudoers line and the services' systemd units) comes from a release:
      mroom's root recipe runs `lib/root-setup` at a tag, checked against the SHA-256 that release's README
      names, and nothing `mroom baseline` prints is run as root (D21).
@@ -620,6 +624,21 @@ turned into config:
 Left in the pilot app: its frontend hosting, its translation workflow, its data masking and export (mroom loads the
 result; section 9), its fixtures and feature files, and its own teams, channels and people.
 
+What the box scripts learned after this table was drawn, which their port keeps:
+
+- **GitHub (D22).** `mroom user setup` checks that the box's GitHub login is the agents' account, and refuses
+  otherwise; a profile gets no GitHub login of its own. An older profile loses its own: setup removes the folder
+  and the login in it once the profile's daemon has restarted without it, and `mroom status` flags a daemon still
+  running on one.
+- **Pings.** Chat pings for an agent's pull request go to the author of its first commit, since a profile commits
+  under its developer's name: by GitHub account when the chat user map has it, else by commit email. Later commits,
+  a reviewer's committed suggestion or a bot's fix, never count, and a first commit by the agent or a bot pings the
+  developer the map gives the agents' account.
+- **Forge logs.** The box's Forge token holds no scope for reading a background process's log, and Forge answers
+  403. Setup says the log is unreadable and goes on, instead of stopping under `set -e` before it finishes.
+- **The dev site's lock.** A pull that refuses before it changes anything, such as one that finds uncommitted
+  changes in the served checkout, gives back a lock it took, and never one its owner already held.
+
 ## 13. Before publishing
 
 - Trademark search for "mroom" (Mudroom exists) and the npm, PyPI, crates.io and Homebrew name check again.
@@ -645,7 +664,7 @@ result; section 9), its fixtures and feature files, and its own teams, channels 
    the gate is built.
 4. A control-plane package (section 10): build it later only for orchestration, not for speed.
 5. The bot's GitHub identity: PR notes and checks run as `github-actions`; the persona's Linear and Slack apps are
-   per team. Document the one-time setup.
+   per team. Document the one-time setup. (The box's agents push and open pull requests as their own account, D22.)
 6. QA services (section 8.9): pick the box's S3-compatible store and confirm a key per bucket; confirm the box's
    Reverb can add and remove apps, and how short its restart is if it must restart; decide how the mail catcher
    tells environments apart (a header, or the sender). **Answered:** Garage, with a key per bucket proven (D14);
