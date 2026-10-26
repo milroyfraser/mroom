@@ -3,8 +3,8 @@
 # Tests for the gate's mail operations (mail-user-add, mail-user-remove, mail-read, mail-clear): logins are
 # SHA-512 crypt lines in Mailpit's SMTP login file, Mailpit is restarted to read them, and only mail whose
 # Username is the environment's login is read or deleted. Offline: curl is a fake that plays Mailpit's API,
-# and "mailpit" is a copy of perl at the installed path, sleeping, kept running by a loop that plays Forge's
-# daemon (a copy of sleep may be a multi-call binary that goes by its name).
+# and "mailpit" is a copy of perl at the installed path that listens on a free port for SMTP, kept running by
+# a loop that plays Forge's daemon (a copy of sleep may be a multi-call binary that goes by its name).
 # tests/mail/gate-real-test.sh runs the real Mailpit in CI.
 set -euo pipefail
 SUITE=mail
@@ -25,7 +25,9 @@ world() {
   local secrets="$HOME/.config/mroom/secrets" bin="$HOME/.local/share/mroom-services/mailpit/v1.32.0"
   mkdir -p "$secrets" "$bin" "$T/bin" "$T/api"
   printf 'MROOM_APP_NAME=shop\n' >"$HOME/.config/mroom/box.env"
-  printf 'MAILPIT_API_USER=mroom-gate\nMAILPIT_API_PASSWORD=%s\n' "$API_PASSWORD" >"$secrets/mailpit.env"
+  SMTP_PORT=$((20000 + RANDOM % 30000))
+  while (exec 3<>"/dev/tcp/127.0.0.1/$SMTP_PORT") 2>/dev/null; do SMTP_PORT=$((SMTP_PORT + 1)); done
+  printf 'MAILPIT_API_USER=mroom-gate\nMAILPIT_API_PASSWORD=%s\nMAILPIT_SMTP_PORT=%s\n' "$API_PASSWORD" "$SMTP_PORT" >"$secrets/mailpit.env"
   printf 'mroom-none:$6$x$y\n' >"$secrets/mailpit-smtp.passwd"
   chmod 600 "$secrets/mailpit.env" "$secrets/mailpit-smtp.passwd"
   cp "$(command -v perl)" "$bin/mailpit"
@@ -64,15 +66,22 @@ esac
 FAKE
   printf '#!/bin/sh\necho "$*" >>"$T/syslog"\n' >"$T/bin/logger"
   chmod +x "$T/bin/curl" "$T/bin/logger"
-  export T PATH="$T/bin:$PATH" API_PASSWORD MROOM_GATE_RESTART_WAIT=40
+  export T PATH="$T/bin:$PATH" API_PASSWORD SMTP_PORT MROOM_GATE_RESTART_WAIT=40
 }
+
+# The stand-in Mailpit: listens for SMTP on $SMTP_PORT unless $T/no-smtp exists, and sleeps.
+STAND_IN='unless (-e "$ENV{T}/no-smtp") {
+  $smtp = IO::Socket::INET->new(LocalAddr => "127.0.0.1", LocalPort => $ENV{SMTP_PORT}, Listen => 5, ReuseAddr => 1)
+    or die "listen: $!";
+}
+sleep 600;'
 
 # mailpit_up: a loop that plays Forge's daemon, starting "mailpit" again whenever it stops.
 mailpit_up() {
   local bin="$HOME/.local/share/mroom-services/mailpit/current/mailpit"
   : >"$T/up"
   # wait fails when the gate stops "mailpit", which set -e would take for the loop's own failure.
-  (while [ -e "$T/up" ]; do "$bin" -e 'sleep 600' & echo $! >"$T/pid"; wait $! || true; done) >/dev/null 2>&1 &
+  (while [ -e "$T/up" ]; do "$bin" -MIO::Socket::INET -e "$STAND_IN" & echo $! >"$T/pid"; wait $! || true; sleep 0.05; done) >/dev/null 2>&1 &
   for _ in $(seq 1 40); do [ -s "$T/pid" ] && return 0; sleep 0.05; done
 }
 mailpit_down() { rm -f "$T/up"; [ -s "$T/pid" ] && kill "$(cat "$T/pid")" 2>/dev/null; sleep 0.2; }
@@ -86,8 +95,11 @@ hex48() { [[ "$1" =~ ^[0-9a-f]{48}$ ]]; }
 has() { case "$1" in *"$2"*) return 0 ;; esac; return 1; }
 lacks() { ! has "$@"; }
 
-# summary <ID> <Username> <To address>: one search result.
-summary() { jq -nc --arg id "$1" --arg u "$2" --arg to "$3" '{ID: $id, Username: $u, To: [{Address: $to}], Tags: [$u]}'; }
+# summary <ID> <Username> <To address> [<Cc address>]: one search result.
+summary() {
+  jq -nc --arg id "$1" --arg u "$2" --arg to "$3" --arg cc "${4-}" \
+    '{ID: $id, Username: $u, To: [{Address: $to}], Cc: (if $cc == "" then null else [{Address: $cc}] end), Tags: [$u]}'
+}
 # search <start> <summary>...: a search page.
 search() { local start="$1"; shift; printf '%s\n' "$@" | jq -s '{messages: .}' >"$T/api/search-$start.json"; }
 # message <ID> <to> <text>: a whole mail.
@@ -103,7 +115,7 @@ t_mail_user_add_gives_the_environment_a_login_and_restarts_mailpit() {
   before="$(cat "$T/pid")"
   gate "mail-user-add 12"
   expect_rc 0
-  expect_out_has $'MAIL_MAILER=smtp\nMAIL_HOST=127.0.0.1\nMAIL_PORT=1025\nMAIL_USERNAME=shop_qa_12\nMAIL_PASSWORD='
+  expect_out_has $'MAIL_MAILER=smtp\nMAIL_HOST=127.0.0.1\nMAIL_PORT='"$SMTP_PORT"$'\nMAIL_USERNAME=shop_qa_12\nMAIL_PASSWORD='
   password="$(sed -n 's/^MAIL_PASSWORD=//p' <<<"$out")"
   expect_true "the password is not 48 hex characters" hex48 "$password"
   hash="$(sed -n 's/^shop_qa_12://p' "$HOME/.config/mroom/secrets/mailpit-smtp.passwd")"
@@ -138,8 +150,15 @@ t_mail_user_remove_takes_the_login_away() {
 
 t_a_mailpit_that_is_down_or_stays_down_fails_the_request() {
   world
+  # A program called mailpit that was not installed by mroom baseline is not Mailpit.
+  mkdir -p "$T/other"
+  cp "$(command -v perl)" "$T/other/mailpit"
+  "$T/other/mailpit" -e 'sleep 600' &
+  local impostor=$!
   gate "mail-user-add 12"; expect_rc 1; expect_err_has "Mailpit is not running; create its daemon"
   expect_true "a refused request changed the logins" lacks "$(logins)" "shop_qa_12:"
+  expect_true "the gate stopped a program it did not install" kill -0 "$impostor"
+  kill "$impostor" 2>/dev/null || true
   # Running once, but nothing starts it again.
   "$HOME/.local/share/mroom-services/mailpit/current/mailpit" -e 'sleep 600' &
   local lone=$!
@@ -147,18 +166,38 @@ t_a_mailpit_that_is_down_or_stays_down_fails_the_request() {
   expect_rc 1; expect_err_has "Mailpit did not come back within 30 seconds"
   expect_true "the credentials were printed" lacks "$out" "MAIL_PASSWORD"
   kill "$lone" 2>/dev/null || true
+  # Back on HTTP, but not taking SMTP connections: not back.
+  : >"$T/no-smtp"
+  mailpit_up
+  MROOM_GATE_RESTART_WAIT=4 gate "mail-user-add 12"
+  expect_rc 1; expect_err_has "Mailpit did not come back within 30 seconds"
+  mailpit_down
+}
+
+t_a_restart_starts_the_current_build() {
+  world
+  local services="$HOME/.local/share/mroom-services/mailpit"
+  mailpit_up
+  mkdir -p "$services/v1.33.0"
+  cp "$(command -v perl)" "$services/v1.33.0/mailpit"
+  ln -sfn v1.33.0 "$services/current"
+  run readlink "/proc/$(cat "$T/pid")/exe"; expect_out "$(readlink -f "$services/v1.32.0/mailpit")"
+  gate "mail-user-add 12"; expect_rc 0
+  run readlink "/proc/$(cat "$T/pid")/exe"; expect_out "$(readlink -f "$services/v1.33.0/mailpit")"
+  mailpit_down
 }
 
 t_mail_read_returns_only_the_environments_mail_to_the_address() {
   world
   search 0 "$(summary a1 shop_qa_12 ada@example.test)" "$(summary a2 shop_qa_13 ada@example.test)" \
     "$(summary a3 shop_qa_12 bob@example.test)" "$(summary ../x shop_qa_12 ada@example.test)" \
-    "$(summary a4 shop_qa_12 ADA@EXAMPLE.TEST)"
+    "$(summary a4 shop_qa_12 ADA@EXAMPLE.TEST)" "$(summary a5 shop_qa_12 carol@example.test ada@example.test)"
   message a1 ada@example.test "Your link: https://example.test/reset/1"
+  message a5 carol@example.test "Copied in"
   message a4 ada@example.test "$(head -c 40000 /dev/zero | tr '\0' x)"
   gate "mail-read 12 ada@example.test"
   expect_rc 0
-  run jq -r '[.[].id] | join(" ")' <<<"$out"; expect_out "a1 a4"
+  run jq -r '[.[].id] | join(" ")' <<<"$out"; expect_out "a1 a4 a5"
   gate "mail-read 12 ada@example.test"
   run jq -r '.[0] | [.from, (.to | join(",")), .subject, .text] | join("|")' <<<"$out"
   expect_out "app@example.test|ada@example.test|Reset|Your link: https://example.test/reset/1"
@@ -166,7 +205,7 @@ t_mail_read_returns_only_the_environments_mail_to_the_address() {
   run jq -r '.[1].text | length' <<<"$out"; expect_out 32768
   gate "mail-read 12 ada@example.test"
   expect_true "the HTML came along" eval '! jq -e ".[0].HTML or .[0].html" <<<"$out" >/dev/null'
-  run grep -c 'message/' "$T/curl.argv"; expect_out 8
+  run grep -c 'message/' "$T/curl.argv"; expect_out 12
   gate "mail-read 12 nobody@example.test"; expect_rc 0; expect_out '[]'
   gate "mail-read 12 someone@customer.example"; expect_rc 1; expect_err_has "not a persona address ending in .test"
   expect_true "a refused address reached the log" lacks "$(gate_log_text)" "customer.example"
@@ -208,6 +247,7 @@ t_the_api_login_and_settings_must_be_in_place() {
 test_case mail-user-add t_mail_user_add_gives_the_environment_a_login_and_restarts_mailpit
 test_case mail-user-remove t_mail_user_remove_takes_the_login_away
 test_case mailpit-down t_a_mailpit_that_is_down_or_stays_down_fails_the_request
+test_case current-build t_a_restart_starts_the_current_build
 test_case mail-read t_mail_read_returns_only_the_environments_mail_to_the_address
 test_case mail-clear t_mail_clear_deletes_only_the_environments_mail
 test_case api-login t_the_api_login_and_settings_must_be_in_place

@@ -279,7 +279,7 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 | `user-clean <N>` | stops the site user's processes (PHP-FPM's pool workers once: their master starts fresh ones, which end with the site) and deletes its files in `/tmp`, `/var/tmp`, `/dev/shm`, `/var/crash`, `/run/lock` and `/dev/mqueue`, its IPC objects and its crontab, before qa-down deletes the sites |
 | `mail-user-add <N>` | an SMTP login of its own on the box's Mailpit (D19); prints `MAIL_MAILER`, `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME` and a new `MAIL_PASSWORD` |
 | `mail-user-remove <N>` | the environment's SMTP login |
-| `mail-read <N> <email>` | as JSON, the newest five mails the environment's login sent to a persona address: sender, recipients, subject and text |
+| `mail-read <N> <email>` | as JSON, the newest five mails the environment's login sent to a persona address (To, Cc or Bcc): sender, recipients, subject and text |
 | `mail-clear <N>` | every mail the environment's login sent |
 
 The client sends only N. The database, role and Redis user are `<MROOM_APP_NAME>_qa_<N>`, and the
@@ -343,8 +343,11 @@ already read every isolated site's files on Forge.
 Mail goes to the box's Mailpit, which keeps it (D19). Each environment sends with its own SMTP login, and
 a login sets the mail's `Username` field and its only tag, since the tags an `X-Tags` header or a plus
 address would add are turned off. Mailpit reads its logins only when it starts, so `mail-user-add` and
-`mail-user-remove` stop it and Forge's daemon starts it again, about a second without SMTP, which a queued
-mail with more than one try survives. Only the gate holds the API login: `mail-read` and `mail-clear` act
+`mail-user-remove` stop it, Forge's daemon starts it again, and the gate waits until it answers on HTTP and
+SMTP: about a second without SMTP, which a queued mail with more than one try survives. A restart also
+moves Mailpit onto the build `mroom baseline mailpit` installed last.
+Mailpit deletes every mail when asked to delete an empty list, so `mail-clear` sends only plain, non-empty
+lists of IDs. Only the gate holds the API login: `mail-read` and `mail-clear` act
 only on mail whose `Username` is the environment's login, and `mail-read` only for persona addresses.
 
 **Set up once,** for an app named `shop`, on Postgres 16 or later and Redis 7 or later. Before Postgres 16,

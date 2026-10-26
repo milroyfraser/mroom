@@ -578,7 +578,7 @@ cmd_user_clean() {
 
 MAILPIT_SECRETS="$HOME/.config/mroom/secrets/mailpit.env"
 MAILPIT_LOGINS="$HOME/.config/mroom/secrets/mailpit-smtp.passwd"
-MAILPIT_BIN="$HOME/.local/share/mroom-services/mailpit/current/mailpit"
+MAILPIT_HOME="$HOME/.local/share/mroom-services/mailpit"
 MAILPIT_URL="" MAILPIT_AUTH="" SMTP_HOST="" SMTP_PORT="" MAIL_ERR=""
 
 # mail_secret <KEY>: one value from mailpit.env, which mroom baseline mailpit writes; the one reader of it.
@@ -590,7 +590,7 @@ mail_ready() {
     [ -r "$file" ] || fail "$(home_short "$file") is missing; run mroom baseline mailpit"
     secret_file_ok "$file" || fail "$(home_short "$file") must be yours and mode 600"
   done
-  need curl jq openssl flock base64
+  need curl jq openssl flock base64 timeout
   user="$(mail_secret MAILPIT_API_USER)" pass="$(mail_secret MAILPIT_API_PASSWORD)"
   if [ -z "$user" ] || [ -z "$pass" ]; then fail "$(home_short "$MAILPIT_SECRETS") must set MAILPIT_API_USER and MAILPIT_API_PASSWORD"; fi
   [[ "$user" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "MAILPIT_API_USER is not a plain user name"
@@ -613,15 +613,26 @@ mailpit_api() {
 }
 mail_error() { printable "$(grep -m1 . "$MAIL_ERR" 2>/dev/null || echo "no message")"; }
 
-# mailpit_pids: the Mailpit processes this user runs from the installed binary.
+# mailpit_pids: the Mailpit processes this user runs from any installed build, so one that runs an older build
+# than current is found too, and its restart starts the current one.
 mailpit_pids() {
-  local bin proc
-  bin="$(readlink -f "$MAILPIT_BIN" 2>/dev/null)" || return 0
+  local home proc exe
+  home="$(readlink -f "$MAILPIT_HOME" 2>/dev/null)" || return 0
   for proc in /proc/[0-9]*; do
-    if [ -O "$proc" ] && [ "$(readlink "$proc/exe" 2>/dev/null)" = "$bin" ]; then echo "${proc#/proc/}"; fi
+    [ -O "$proc" ] || continue
+    exe="$(readlink "$proc/exe" 2>/dev/null)" || continue
+    exe="${exe% (deleted)}"
+    if [[ "$exe" == "$home"/*/mailpit && "${exe#"$home"/}" != */*/* ]]; then echo "${proc#/proc/}"; fi
   done
 }
-mailpit_live() { [ "$(curl -q --silent --max-time 2 --output /dev/null --write-out '%{http_code}' "$MAILPIT_URL/livez" 2>/dev/null)" = 200 ]; }
+# smtp_open: whether Mailpit takes SMTP connections; the inner bash expands its own arguments.
+# shellcheck disable=SC2016
+smtp_open() { timeout 3 bash -c ': <>"/dev/tcp/$0/$1"' "$SMTP_HOST" "$SMTP_PORT" 2>/dev/null; }
+# mailpit_live: whether Mailpit answers on HTTP and takes SMTP connections. It starts its web server first,
+# so the first can be true a moment before the second.
+mailpit_live() {
+  [ "$(curl -q --silent --max-time 2 --output /dev/null --write-out '%{http_code}' "$MAILPIT_URL/livez" 2>/dev/null)" = 200 ] && smtp_open
+}
 
 # mailpit_restart: Mailpit reads its logins only when it starts (D19), so the gate stops it and Forge's daemon
 # starts it again; it waits until a new Mailpit answers.
@@ -650,8 +661,8 @@ set_login() {
   mv -f "$tmp" "$MAILPIT_LOGINS"
 }
 
-# mail_ids <user> [<address>]: the IDs of the mail the user's login sent, to the address if one is given,
-# newest first. The tag only narrows the search: a mail counts only when its Username field, which only a
+# mail_ids <user> [<address>]: the IDs of the mail the user's login sent, to the address (To, Cc or Bcc) if
+# one is given, newest first. The tag only narrows the search: a mail counts only when its Username field, which only a
 # login sets, is the user (D19).
 mail_ids() {
   local query start=0 page
@@ -659,7 +670,7 @@ mail_ids() {
   while :; do
     page="$(mailpit_api GET "/api/v1/search?query=$query&start=$start&limit=500")" || return 1
     jq -r --arg u "$1" --arg a "${2-}" '.messages[] | select(.Username == $u)
-      | select($a == "" or ([.To[]? | (.Address // "") | ascii_downcase] | index($a)))
+      | select($a == "" or ([.To[]?, .Cc[]?, .Bcc[]? | (.Address // "") | ascii_downcase] | index($a)))
       | .ID | select(test("^[A-Za-z0-9_-]{1,64}$"))' <<<"$page"
     [ "$(jq '.messages | length' <<<"$page")" = 500 ] || return 0
     start=$((start + 500))
@@ -726,6 +737,9 @@ cmd_mail_clear() {
   count="${#ids[@]}"
   while [ "${#ids[@]}" -gt 0 ]; do
     batch="$(jq -nc '{IDs: $ARGS.positional}' --args "${ids[@]:0:500}")"
+    # Mailpit deletes every mail, of every environment, when the list of IDs is empty or does not parse.
+    [[ "$batch" =~ ^\{\"IDs\":\[\"[A-Za-z0-9_-]+\"(,\"[A-Za-z0-9_-]+\")*\]\}$ ]] \
+      || fail "mail-clear ${words[1]}: refusing to send Mailpit a list of IDs that is not plain"
     mailpit_api DELETE /api/v1/messages "$batch" >/dev/null || fail "mail-clear ${words[1]}: $(mail_error)"
     ids=("${ids[@]:500}")
   done

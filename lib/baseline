@@ -107,7 +107,8 @@ In Forge, Server > Daemons, create:
   User:      $(id -un)
 
 It listens on this box only. Each environment sends with its own login, the gate restarts Mailpit when it
-adds or removes one (Forge's daemon starts it again), and only the gate reads mail through the API.
+adds or removes one (Forge's daemon starts it again), and only the gate reads mail through the API. A
+newly installed build runs from the next restart, of the daemon or by the gate.
 EOF
   if curl -q --silent --max-time 2 --output /dev/null http://127.0.0.1:8025/livez 2>/dev/null; then
     echo "Mailpit answers on 127.0.0.1:8025."
