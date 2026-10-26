@@ -12,7 +12,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 t_the_relay_pipes_each_connection_to_mailpit() {
   run python3 -I - "$ROOT/lib/mail-relay" "$T/smtp.sock" <<'PY'
-import os, socket, subprocess, sys, threading, time
+import contextlib, os, socket, subprocess, sys, threading, time
 
 relay_path, sock_path = sys.argv[1], sys.argv[2]
 
@@ -37,7 +37,10 @@ class Mailpit:
             threading.Thread(target=self.talk, args=(conn,), daemon=True).start()
 
     def talk(self, conn):
-        with conn:
+        # Like the real Mailpit, it lets the other side hang up mid-session, as the relay does when its client
+        # goes away or it stops. Raising would print a traceback from this daemon thread, and one still
+        # printing as the interpreter exits makes Python abort (exit 134).
+        with conn, contextlib.suppress(OSError):
             conn.sendall(b"220 hello\r\n")
             while data := conn.recv(65536):
                 conn.sendall(data.upper())
@@ -124,7 +127,7 @@ PY
 
 t_the_relay_takes_systemds_socket_and_bounds_each_connection() {
   run python3 -I - "$ROOT/lib/mail-relay" "$T/smtp.sock" <<'PY'
-import os, socket, struct, subprocess, sys, threading, time
+import contextlib, os, socket, struct, subprocess, sys, threading, time
 
 relay_path, sock_path = sys.argv[1], sys.argv[2]
 mode = {"close": False}
@@ -150,7 +153,8 @@ class Mailpit:
             threading.Thread(target=self.talk, args=(conn,), daemon=True).start()
 
     def talk(self, conn):
-        with conn:
+        # Lets the other side hang up mid-session, as the pipes case's Mailpit does.
+        with conn, contextlib.suppress(OSError):
             conn.sendall(b"220 hello\r\n")
             if mode["close"]:
                 return
