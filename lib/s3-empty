@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""s3-empty: deletes every object in a bucket of the box's Garage, through its S3 API on a Unix socket.
+
+    s3-empty <socket> <bucket>          the access key id, then its secret, one per line on stdin
+
+Prints how many objects it deleted. The gate runs it to empty a QA environment's bucket before deleting it,
+since Garage deletes only an empty bucket (bucket-drop), with a key of the gate's own, made for that drop
+alone and allowed only that bucket. Requests are signed with AWS Signature Version 4; the key and its
+secret come on stdin, never a command line.
+"""
+
+import datetime
+import hashlib
+import hmac
+import http.client
+import re
+import socket
+import sys
+import urllib.parse
+import xml.etree.ElementTree as ElementTree
+
+REGION = "garage"
+SERVICE = "s3"
+HOST = "garage.invalid"
+NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+MAX_ROUNDS = 100000
+
+
+class UnixConnection(http.client.HTTPConnection):
+    def __init__(self, path: str) -> None:
+        super().__init__(HOST, timeout=60)
+        self.socket_path = path
+
+    def connect(self) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self.socket_path)
+
+
+def quote(text: str, safe: str = "-_.~") -> str:
+    return urllib.parse.quote(text, safe=safe)
+
+
+class S3:
+    def __init__(self, socket_path: str, key_id: str, secret: str) -> None:
+        self.socket_path, self.key_id, self.secret = socket_path, key_id, secret
+
+    def request(self, method: str, path: str, query: dict) -> tuple:
+        """One signed request; path is already encoded, as it is sent."""
+        now = datetime.datetime.now(datetime.timezone.utc)
+        stamp, day = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
+        empty = hashlib.sha256(b"").hexdigest()
+        headers = {"host": HOST, "x-amz-content-sha256": empty, "x-amz-date": stamp}
+        canonical_query = "&".join(f"{quote(k)}={quote(v)}" for k, v in sorted(query.items()))
+        signed = ";".join(sorted(headers))
+        canonical = "\n".join([method, path, canonical_query,
+                               "".join(f"{k}:{headers[k]}\n" for k in sorted(headers)), signed, empty])
+        scope = f"{day}/{REGION}/{SERVICE}/aws4_request"
+        to_sign = "\n".join(["AWS4-HMAC-SHA256", stamp, scope, hashlib.sha256(canonical.encode()).hexdigest()])
+        key = ("AWS4" + self.secret).encode()
+        for part in (day, REGION, SERVICE, "aws4_request"):
+            key = hmac.new(key, part.encode(), hashlib.sha256).digest()
+        signature = hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest()
+        headers["authorization"] = (f"AWS4-HMAC-SHA256 Credential={self.key_id}/{scope}, "
+                                    f"SignedHeaders={signed}, Signature={signature}")
+        connection = UnixConnection(self.socket_path)
+        try:
+            connection.request(method, path + (f"?{canonical_query}" if canonical_query else ""), headers=headers)
+            response = connection.getresponse()
+            return response.status, response.read()
+        finally:
+            connection.close()
+
+
+def fail(what: str, status: int, body: bytes) -> None:
+    code = re.search(rb"<Code>([^<]{1,64})</Code>", body)
+    raise SystemExit(f"s3-empty: {what}: HTTP {status}" + (f" {code.group(1).decode(errors='replace')}" if code else ""))
+
+
+def empty(s3: S3, bucket: str) -> int:
+    """Lists the bucket from its start and deletes what it lists, until nothing is left."""
+    deleted, seen = 0, set()
+    for _ in range(MAX_ROUNDS):
+        status, body = s3.request("GET", f"/{bucket}", {"list-type": "2", "encoding-type": "url", "max-keys": "1000"})
+        if status != 200:
+            fail(f"listing {bucket}", status, body)
+        keys = [urllib.parse.unquote_plus(element.text or "")
+                for element in ElementTree.fromstring(body).iter(f"{NS}Key")]
+        if not keys:
+            return deleted
+        for key in keys:
+            if key in seen:
+                raise SystemExit(f"s3-empty: {bucket} still lists an object it was told to delete")
+            seen.add(key)
+            status, body = s3.request("DELETE", f"/{bucket}/{quote(key, safe='-_.~/')}", {})
+            if status not in (200, 204):
+                fail(f"deleting an object of {bucket}", status, body)
+            deleted += 1
+    raise SystemExit(f"s3-empty: {bucket} did not empty")
+
+
+def main(argv: list) -> int:
+    if len(argv) != 2 or not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,61}[a-z0-9]", argv[1]):
+        print("usage: s3-empty <socket> <bucket>, with the key id and its secret on stdin", file=sys.stderr)
+        return 2
+    lines = sys.stdin.read().split("\n")
+    key_id, secret = (lines + ["", ""])[:2]
+    if not re.fullmatch(r"GK[0-9a-f]{24}", key_id) or not re.fullmatch(r"[0-9a-f]{64}", secret):
+        print("s3-empty: stdin holds no Garage key id and secret", file=sys.stderr)
+        return 2
+    print(empty(S3(argv[0], key_id, secret), argv[1]))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,7 +1,11 @@
 # The QA services' builds mroom was tested with (design section 3): `mroom baseline` installs nothing else.
 # Mailpit publishes no checksums of its own: the archive's SHA-256 is the digest GitHub keeps for the release
-# asset, and the binary's is the one inside that archive.
+# asset, and the binary's is the one inside that archive. Garage publishes none at all, and ships a bare
+# binary: both columns hold the SHA-256 of the build mroom was tested with (26 Oct 2026), which CI checks
+# again from GitHub's network on every run.
 #
 # name     version  platform     archive-sha256                                                    binary-sha256                                                     url
 mailpit    v1.32.0  linux-amd64  4b5993c978e8604c70d43927e2ad103b311bba3b1822fa0cf1d4ee4ec890a93c  262cfa28fae4554be198d1fea5ef83c0f8299317876d658623711c629a8edec8  https://github.com/axllent/mailpit/releases/download/v1.32.0/mailpit-linux-amd64.tar.gz
 mailpit    v1.32.0  linux-arm64  e1e45d1dc72bd497fb262a1e4100178eee057c42c5fc36d143eb8621769e1137  0e39f7ce4de3c2a4e939dc5fcfad355221c0bc412c62f13888e20fde1de7b3a7  https://github.com/axllent/mailpit/releases/download/v1.32.0/mailpit-linux-arm64.tar.gz
+garage     v2.5.0   linux-amd64  2ff667286217cd73ebcb1c03af993822365000441dfe31a80cb64c5189a9dea8  2ff667286217cd73ebcb1c03af993822365000441dfe31a80cb64c5189a9dea8  https://garagehq.deuxfleurs.fr/_releases/v2.5.0/x86_64-unknown-linux-musl/garage
+garage     v2.5.0   linux-arm64  69b6040cef428b993500c17dd0d0c1240acf2f3f667b9b05ceba4b9660db4e8c  69b6040cef428b993500c17dd0d0c1240acf2f3f667b9b05ceba4b9660db4e8c  https://garagehq.deuxfleurs.fr/_releases/v2.5.0/aarch64-unknown-linux-musl/garage

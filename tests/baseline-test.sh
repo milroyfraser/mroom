@@ -8,6 +8,12 @@ set -euo pipefail
 SUITE=baseline
 # shellcheck source=tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+stop_all() {
+  local f
+  for f in "$TOP"/*/garage.pid; do if [ -s "$f" ]; then kill "$(cat "$f")" 2>/dev/null || true; fi; done
+  rm -rf "$TOP"
+}
+trap stop_all EXIT
 skip_unless has_box_tools "this host lacks bash 5, flock or GNU date, which box commands need"
 
 platform() {
@@ -17,6 +23,7 @@ platform() {
   esac
 }
 sha() { sha256sum "$1" | cut -d' ' -f1; }
+REAL_CURL="$(command -v curl)"
 
 # world: a test build of "mailpit" and its archive, pins for them, a fake curl serving the archive, and a
 # box.env naming a free SMTP port.
@@ -26,16 +33,20 @@ world() {
   chmod 755 "$T/build/mailpit"
   printf 'readme\n' >"$T/build/README.md"
   tar -czf "$T/served/mailpit.tgz" -C "$T/build" mailpit README.md
+  # Garage ships as a bare binary.
+  printf '#!/bin/sh\necho garage\n' >"$T/served/garage"
+  GARAGE_SHA="$(sha "$T/served/garage")"
   pins "$(sha "$T/served/mailpit.tgz")" "$(sha "$T/build/mailpit")"
   PORT=$((20000 + RANDOM % 30000))
   while (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; do PORT=$((PORT + 1)); done
   printf 'MROOM_QA_SMTP_PORT=%s\n' "$PORT" >"$HOME/.config/mroom/box.env"
   cat >"$T/bin/curl" <<'FAKE'
 #!/usr/bin/env bash
-# Logs each call; serves https://example.test/mailpit.tgz into --output, and Mailpit's /livez on its Unix
-# socket only when $T/live exists.
+# Logs each call; serves https://example.test/mailpit.tgz and https://example.test/garage into --output, and
+# Mailpit's /livez on its Unix socket only when $T/live exists. Calls to Garage's admin socket go to the real
+# curl, and so to tests/fakes/garage.py when a test runs it.
 printf '%s\n' "$*" >>"$T/curl.log"
-out="" socket="" url="${!#}"
+args=("$@") out="" socket="" url="${!#}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output) out="$2"; shift 2 ;;
@@ -43,8 +54,10 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
+if [ "$socket" = "$HOME/.local/share/mroom-services/garage/run/admin.sock" ]; then exec "$REAL_CURL" "${args[@]}"; fi
 case "$url" in
   https://example.test/mailpit.tgz) cp "$T/served/mailpit.tgz" "$out" ;;
+  https://example.test/garage) cp "$T/served/garage" "$out" ;;
   http://localhost/livez)
     [ "$socket" = "$HOME/.local/share/mroom-services/mailpit/run/http.sock" ] && [ -e "$T/live" ] || exit 7 ;;
   *) echo "fake curl: no such URL $url" >&2; exit 22 ;;
@@ -53,7 +66,7 @@ FAKE
   # systemctl: logs every call, and calls every unit inactive.
   printf '#!/bin/sh\necho "systemctl $*" >>"$T/systemctl.log"\n[ "$1" != is-active ] || { echo inactive; exit 3; }\n' >"$T/bin/systemctl"
   chmod +x "$T/bin/curl" "$T/bin/systemctl"
-  export T PATH="$T/bin:$PATH" MROOM_PINS="$T/pins.txt" MROOM_SYSTEMD_DIR="$T/systemd"
+  export T PATH="$T/bin:$PATH" MROOM_PINS="$T/pins.txt" MROOM_SYSTEMD_DIR="$T/systemd" REAL_CURL
 }
 
 # root_script_of <output>: the script baseline printed for a person to run as root.
@@ -61,7 +74,8 @@ root_script_of() { sed -n '/^----- run as root -----$/,/^----- end -----$/p' <<<
 
 # pins <archive sha> <binary sha> [<platform>] [<url>]
 pins() {
-  printf '# test pins\nmailpit v9.9.9 %s %s %s %s\n' "${3:-$(platform)}" "$1" "$2" "${4:-https://example.test/mailpit.tgz}" >"$T/pins.txt"
+  printf '# test pins\nmailpit v9.9.9 %s %s %s %s\ngarage v8.8.8 %s %s %s https://example.test/garage\n' \
+    "${3:-$(platform)}" "$1" "$2" "${4:-https://example.test/mailpit.tgz}" "$(platform)" "$GARAGE_SHA" "$GARAGE_SHA" >"$T/pins.txt"
 }
 
 # hash_of <password> <hash>: whether the SHA-512 crypt hash is of the password.
@@ -303,23 +317,105 @@ t_a_missing_or_malformed_pin_is_refused() {
 }
 
 t_the_committed_pins_are_well_formed() {
-  local platform count=0 line
+  local platform count=0 line name archive binary url service
   while read -r line; do
     case "$line" in "" | \#*) continue ;; esac
     count=$((count + 1))
     expect_true "a pin is malformed: $line" \
-      eval '[[ "$line" =~ ^[a-z]+\ +v[0-9.]+\ +linux-(amd64|arm64)\ +[0-9a-f]{64}\ +[0-9a-f]{64}\ +https://github\.com/[A-Za-z0-9._/-]+$ ]]'
+      eval '[[ "$line" =~ ^[a-z]+\ +v[0-9.]+\ +linux-(amd64|arm64)\ +[0-9a-f]{64}\ +[0-9a-f]{64}\ +https://(github\.com|garagehq\.deuxfleurs\.fr)/[A-Za-z0-9._/-]+$ ]]'
+    # A bare binary (its URL ends in its name) is its own archive: its two hashes are one.
+    read -r name _ _ archive binary url <<<"$line"
+    if [ "${url##*/}" = "$name" ]; then
+      expect_true "the bare $name binary has two hashes: $line" [ "$archive" = "$binary" ]
+    fi
   done <"$ROOT/lib/core/pins.txt"
-  expect_true "the pins file pins nothing" [ "$count" -ge 2 ]
-  for platform in linux-amd64 linux-arm64; do
-    expect_true "no mailpit pin for $platform" grep -qE "^mailpit +v[0-9.]+ +$platform " "$ROOT/lib/core/pins.txt"
+  expect_true "the pins file pins nothing" [ "$count" -ge 4 ]
+  for service in mailpit garage; do
+    for platform in linux-amd64 linux-arm64; do
+      expect_true "no $service pin for $platform" grep -qE "^$service +v[0-9.]+ +$platform " "$ROOT/lib/core/pins.txt"
+    done
   done
+}
+
+# garage_up: tests/fakes/garage.py on Garage's sockets, playing its admin API.
+garage_up() {
+  local run="$HOME/.local/share/mroom-services/garage/run"
+  python3 -I "$ROOT/tests/fakes/garage.py" "$run/admin.sock" "$run/s3.sock" "$HOME/.config/mroom/secrets/garage-admin-token" \
+    "$T/garage.log" >"$T/garage.out" 2>&1 &
+  echo $! >"$T/garage.pid"
+  for _ in $(seq 1 50); do grep -q up "$T/garage.out" 2>/dev/null && return 0; sleep 0.1; done
+  cat "$T/garage.out" >&2
+  return 1
+}
+
+t_garage_is_installed_with_its_config_secrets_and_unit() {
+  world
+  printf 'MROOM_QA_ZONE=qa.example.dev\n' >>"$HOME/.config/mroom/box.env"
+  run "$MROOM" baseline garage
+  expect_rc 0
+  expect_out_has "garage v8.8.8: installed, SHA-256 $GARAGE_SHA"
+  local base secrets script
+  base="$(services)/garage" secrets="$(secrets)"
+  run cat "$base/current/garage"; expect_out "$(cat "$T/served/garage")"
+  run mode "$base/v8.8.8/garage"; expect_out 700
+  for file in "$base" "$base/meta" "$base/data" "$base/run"; do run mode "$file"; expect_out 700; done
+  for file in garage-rpc-secret garage-admin-token garage-metrics-token; do run mode "$secrets/$file"; expect_out 600; done
+  run cat "$secrets/garage-rpc-secret"; expect_true "the RPC secret is not 32 bytes of hex" eval '[[ "$out" =~ ^[0-9a-f]{64}$ ]]'
+  run mode "$base/garage.toml"; expect_out 600
+  # Its config names its secrets' files, never a secret, and Unix sockets for every endpoint but RPC.
+  for line in "metadata_dir = \"$base/meta\"" "data_dir = \"$base/data\"" "replication_factor = 1" \
+    'rpc_bind_addr = "127.0.0.1:3901"' "rpc_secret_file = \"$secrets/garage-rpc-secret\"" \
+    "api_bind_addr = \"$base/run/s3.sock\"" "bind_addr = \"$base/run/web.sock\"" 'root_domain = ".web.mroom.invalid"' \
+    "api_bind_addr = \"$base/run/admin.sock\"" "admin_token_file = \"$secrets/garage-admin-token\""; do
+    expect_true "the config lacks: $line" grep -qxF -- "$line" "$base/garage.toml"
+  done
+  expect_true "a secret is in the config" eval '! grep -qF "$(cat "$secrets/garage-admin-token")" "$base/garage.toml"'
+  run "$MROOM" baseline garage
+  script="$(root_script_of "$out")"
+  expect_true "the root script does not write the unit" has "$script" "cat >$T/systemd/mroom-garage.service <<'MROOM_UNIT'"
+  for line in "ExecStart=$base/current/garage -c $base/garage.toml server" "User=$(id -un)" "Restart=always" \
+    "StartLimitIntervalSec=0" "PrivateNetwork=yes" "ProtectHome=tmpfs" "ProtectSystem=strict" \
+    "BindPaths=$base/meta $base/data $base/run" \
+    "BindReadOnlyPaths=$base $secrets/garage-rpc-secret $secrets/garage-admin-token $secrets/garage-metrics-token"; do
+    expect_true "the unit lacks: $line" grep -qxF -- "$line" <<<"$script"
+  done
+  expect_true "the unit runs something as root" \
+    eval '! grep -qE "^Exec[A-Za-z]*=[+!@-]|^ExecStartPre=|^ExecStartPost=|^ExecStop=|^ExecReload=|^User=root" <<<"$script"'
+  expect_out_has "Garage does not answer yet: install its unit, then run mroom baseline garage again"
+  # The two hosts' nginx configs, on Garage's sockets.
+  expect_out_has "s3.qa.example.dev, the S3 API"
+  expect_out_has "proxy_pass http://unix:$base/run/s3.sock;"
+  expect_out_has "files.qa.example.dev, public files"
+  expect_out_has 'proxy_set_header Host $bucket.web.mroom.invalid;'
+  # nginx reads a bare { as a block: a regex with a count in it must be quoted.
+  expect_out_has 'location ~ "^/([a-z0-9][a-z0-9-]{1,61}[a-z0-9])(/.*)$" {'
+  expect_out_has "proxy_pass http://unix:$base/run/web.sock;"
+}
+
+t_garage_keeps_its_secrets_and_sets_its_layout_once() {
+  world
+  run "$MROOM" baseline garage; expect_rc 0
+  expect_out_has "Set MROOM_QA_ZONE in box.env, and run this again for the nginx configs"
+  local before
+  before="$(cat "$(secrets)"/garage-*)"
+  garage_up
+  run "$MROOM" baseline garage; expect_rc 0
+  expect_out_has "garage v8.8.8: installed, and matches its pin"
+  expect_out_has "Garage answers; its layout now holds this node."
+  expect_true "a kept config was written again" lacks "$out" "Garage config:"
+  run cat "$(secrets)"/garage-*; expect_out "$before"
+  run bash -c 'printf "Authorization: Bearer %s\n" "$(cat "$1")" | "$2" -q -s --unix-socket "$3" --header @- http://localhost/test/state' _ \
+    "$(secrets)/garage-admin-token" "$REAL_CURL" "$(services)/garage/run/admin.sock"
+  run jq -c '.layout | {version, zones: [.roles[].zone]}' <<<"$out"; expect_out '{"version":1,"zones":["box"]}'
+  run "$MROOM" baseline garage; expect_rc 0
+  expect_out_has "Garage answers; its layout holds one node."
+  kill "$(cat "$T/garage.pid")" 2>/dev/null || true
 }
 
 t_usage_and_unknown_parts() {
   world
   run "$MROOM" baseline; expect_rc 0; expect_out_has "mroom baseline mailpit"
-  run "$MROOM" baseline garage; expect_rc 1; expect_err_has "unknown part 'garage'"
+  run "$MROOM" baseline reverb; expect_rc 1; expect_err_has "unknown part 'reverb'"
   run "$MROOM" baseline mailpit extra; expect_rc 1; expect_err_has "usage: mroom baseline mailpit"
 }
 
@@ -333,5 +429,7 @@ test_case bad-hash t_a_hash_openssl_did_not_give_is_never_written
 test_case pin-mismatch t_a_build_that_does_not_match_its_pin_is_not_installed
 test_case bad-pins t_a_missing_or_malformed_pin_is_refused
 test_case committed-pins t_the_committed_pins_are_well_formed
+test_case garage t_garage_is_installed_with_its_config_secrets_and_unit
+test_case garage-layout t_garage_keeps_its_secrets_and_sets_its_layout_once
 test_case usage t_usage_and_unknown_parts
 finish

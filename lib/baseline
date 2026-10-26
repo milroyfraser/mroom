@@ -4,6 +4,9 @@
 #   mroom baseline mailpit   the QA mail catcher (D19): Mailpit at the build lib/core/pins.txt names, checked
 #                            against its SHA-256, mroom's mail relay, their folders and logins, and the
 #                            script that installs, as root, the three systemd units that run them
+#   mroom baseline garage    the QA file store (D14): Garage at its pinned build, its config and secrets, the
+#                            script that installs its systemd unit, its one-node layout, and the nginx
+#                            configs of its two hosts
 #
 # It runs as the box user and changes nothing outside the box user's home. It can run again: a binary that
 # matches its pin and logins that exist are kept. Services live in ~/.local/share/mroom-services, which an
@@ -79,12 +82,17 @@ install_pinned() {
   else
     CHANGED=1
     WORK="$(mktemp -d)"
-    curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 300 \
+    curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 600 \
       --max-filesize 200000000 --output "$WORK/archive" "$url" || die "could not download $url"
     got="$(sha256sum "$WORK/archive" | cut -d' ' -f1)"
     [ "$got" = "$archive_sha" ] || die "$name $version: the download's SHA-256 is $got, not the pinned $archive_sha; nothing installed"
     mkdir "$WORK/unpacked"
-    tar -xzf "$WORK/archive" -C "$WORK/unpacked" || die "$name $version: the archive does not unpack"
+    if [ "${url##*/}" = "$name" ]; then
+      # A bare binary, whose two pins are one: the download is the binary.
+      cp "$WORK/archive" "$WORK/unpacked/$name"
+    else
+      tar -xzf "$WORK/archive" -C "$WORK/unpacked" || die "$name $version: the archive does not unpack"
+    fi
     if [ ! -f "$WORK/unpacked/$name" ] || [ -L "$WORK/unpacked/$name" ]; then
       die "$name $version: the archive holds no $name binary"
     fi
@@ -262,27 +270,124 @@ ProtectControlGroups=yes
 WantedBy=multi-user.target
 EOF
       ;;
+    mroom-garage.service)
+      base="$SERVICES/garage"
+      cat <<EOF
+# Written by mroom baseline garage. Garage, mroom's QA file store: its S3, web and admin endpoints listen
+# only on Unix sockets in a folder only $user can open, its own RPC stays in a network of its own, and it
+# sees only its build, its config, its data and its three secret files.
+[Unit]
+Description=Garage, mroom's QA file store
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+User=$user
+Group=$group
+ExecStart=$base/current/garage -c $base/garage.toml server
+Restart=always
+RestartSec=1
+UMask=0077
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindReadOnlyPaths=$base $SECRETS/garage-rpc-secret $SECRETS/garage-admin-token $SECRETS/garage-metrics-token
+BindPaths=$base/meta $base/data $base/run
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      ;;
   esac
 }
 
-# root_script <port> <python> <systemd dir> <unit...>: the commands a person runs as root to install the named
-# units and start them. Every unit's text is in the script itself: root reads no file the box user can write.
+# root_script <port> <python> <systemd dir> "<units>" <unit...>: the commands a person runs as root to write
+# the named units and start all of <units>. Every unit's text is in the script itself: root reads no file
+# the box user can write.
 root_script() {
-  local port="$1" python="$2" dir="$3" unit
-  shift 3
+  local port="$1" python="$2" dir="$3" all="$4" unit written=()
+  shift 4
   echo "set -eu"
   for unit in "$@"; do
     printf "cat >%s <<'MROOM_UNIT'\n%s\nMROOM_UNIT\n" "$dir/$unit" "$(unit_text "$port" "$python" "$unit")"
+    written+=("$dir/$unit")
   done
-  echo "chmod 644 $dir/mroom-mail-relay.socket $dir/mroom-mail-relay.service $dir/mroom-mailpit.service"
+  echo "chmod 644 ${written[*]}"
   echo "systemctl daemon-reload"
-  echo "systemctl enable --now mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service"
+  echo "systemctl enable --now $all"
+}
+
+# units_section <part> <port> <python> <intro> <unit...>: whether the installed units are as this mroom writes
+# them, and for those that are not, the script a person runs as root (D20). Root reads no file the box user
+# can write: each unit's text is in the script.
+units_section() {
+  local part="$1" port="$2" python="$3" intro="$4" systemd="${MROOM_SYSTEMD_DIR:-/etc/systemd/system}"
+  local unit stale=() restarts=() states=() socket_clause=""
+  shift 4
+  for unit in "$@"; do
+    if ! [ -f "$systemd/$unit" ] || [ "$(cat "$systemd/$unit")" != "$(unit_text "$port" "$python" "$unit")" ]; then
+      stale+=("$unit")
+      [ "${unit##*.}" = socket ] || ! [ -f "$systemd/$unit" ] || restarts+=("$unit")
+    fi
+  done
+  echo
+  if [ "${#stale[@]}" = 0 ]; then
+    for unit in "$@"; do
+      states+=("$unit $(systemctl is-active "$unit" 2>/dev/null || true)")
+    done
+    echo "systemd units: installed as this mroom writes them ($(printf '%s, ' "${states[@]}" | sed 's/, $//'))."
+    return 0
+  fi
+  if [[ " $* " == *".socket "* ]]; then socket_clause=", and the socket listens on 127.0.0.1:$port only"; fi
+  cat <<EOF
+$intro To be installed or updated: ${stale[*]}.
+
+Run the script below as root, from a session the box user's programs cannot change, such as a Forge recipe
+run as root (Server > Recipes); never by typing sudo in a shell of $(id -un)'s, whose PATH, aliases and
+functions those programs can change. Root reads nothing the box user can write: each unit's text is in the
+script. Check it first: every cat > writes into /etc/systemd/system, every Exec line runs a file under
+$HOME, each service has User=$(id -un), no line starts with ExecStartPre, ExecStartPost, ExecStop or
+ExecReload, no Exec value starts with +, ! or @$socket_clause.
+EOF
+  if [ "$systemd" != /etc/systemd/system ]; then
+    echo
+    echo "WARNING: MROOM_SYSTEMD_DIR is set, so this script writes to $systemd, not /etc/systemd/system. It is a"
+    echo "setting for tests: unless you are testing, unset it and run mroom baseline $part again."
+  fi
+  cat <<EOF
+
+----- run as root -----
+$(root_script "$port" "$python" "$systemd" "$*" "${stale[@]}")
+EOF
+  if [ "${#restarts[@]}" -gt 0 ]; then echo "systemctl restart ${restarts[*]}"; fi
+  if [[ " ${stale[*]} " == *" mroom-mail-relay.socket "* ]] && [ -f "$systemd/mroom-mail-relay.socket" ] \
+    && ! grep -qx "ListenStream=127.0.0.1:$port" "$systemd/mroom-mail-relay.socket"; then
+    echo "systemctl restart mroom-mail-relay.socket mroom-mail-relay.service"
+    echo "echo 'the SMTP port changed, and was free for a moment: give each QA environment new mail logins (mail-user-add)'"
+  fi
+  echo "----- end -----"
 }
 
 setup_mailpit() {
   local base="$SERVICES/mailpit" logins="$SECRETS/mailpit-smtp.passwd" ui="$SECRETS/mailpit-ui.passwd"
   local env_file="$SECRETS/mailpit.env" port python hash rest content password relay_changed="" mailpit_changed="" tries=1
-  local systemd="${MROOM_SYSTEMD_DIR:-/etc/systemd/system}" unit stale=() restarts=() states=() status
+  local systemd="${MROOM_SYSTEMD_DIR:-/etc/systemd/system}" status
   need curl tar sha256sum openssl python3 flock
   load_box || die "box.env could not be read"
   port="${BOX[MROOM_QA_SMTP_PORT]:-1025}"
@@ -348,50 +453,8 @@ setup_mailpit() {
     else echo "Mailpit: runs its build and reads its API login from its next start (mroom-mailpit.service)"; fi
   fi
 
-  # The units, compared with the installed ones. Root reads no file the box user can write: a person runs
-  # the printed script, in which every unit's text stands, as root.
-  for unit in mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service; do
-    if ! [ -f "$systemd/$unit" ] || [ "$(cat "$systemd/$unit")" != "$(unit_text "$port" "$python" "$unit")" ]; then
-      stale+=("$unit")
-      [ "$unit" = mroom-mail-relay.socket ] || ! [ -f "$systemd/$unit" ] || restarts+=("$unit")
-    fi
-  done
-  echo
-  if [ "${#stale[@]}" = 0 ]; then
-    for unit in mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service; do
-      states+=("$unit $(systemctl is-active "$unit" 2>/dev/null || true)")
-    done
-    echo "systemd units: installed as this mroom writes them ($(printf '%s, ' "${states[@]}" | sed 's/, $//'))."
-  else
-    cat <<EOF
-Three systemd units run these: the socket holds the SMTP port apps send to, 127.0.0.1:$port, from boot, as
-root, and the relay and Mailpit run as $(id -un). To be installed or updated: ${stale[*]}.
-
-Run the script below as root, from a session the box user's programs cannot change, such as a Forge recipe
-run as root (Server > Recipes); never by typing sudo in a shell of $(id -un)'s, whose PATH, aliases and
-functions those programs can change. Root reads nothing the box user can write: each unit's text is in the
-script. Check it first: every cat > writes into /etc/systemd/system, every Exec line runs a file under
-$HOME, each service has User=$(id -un), no line starts with ExecStartPre, ExecStartPost, ExecStop or
-ExecReload, no Exec value starts with +, ! or @, and the socket listens on 127.0.0.1:$port only.
-EOF
-    if [ "$systemd" != /etc/systemd/system ]; then
-      echo
-      echo "WARNING: MROOM_SYSTEMD_DIR is set, so this script writes to $systemd, not /etc/systemd/system. It is a"
-      echo "setting for tests: unless you are testing, unset it and run mroom baseline mailpit again."
-    fi
-    cat <<EOF
-
------ run as root -----
-$(root_script "$port" "$python" "$systemd" "${stale[@]}")
-EOF
-    if [ "${#restarts[@]}" -gt 0 ]; then echo "systemctl restart ${restarts[*]}"; fi
-    if [[ " ${stale[*]} " == *" mroom-mail-relay.socket "* ]] && [ -f "$systemd/mroom-mail-relay.socket" ] \
-      && ! grep -qx "ListenStream=127.0.0.1:$port" "$systemd/mroom-mail-relay.socket"; then
-      echo "systemctl restart mroom-mail-relay.socket mroom-mail-relay.service"
-      echo "echo 'the SMTP port changed, and was free for a moment: give each QA environment new mail logins (mail-user-add)'"
-    fi
-    echo "----- end -----"
-  fi
+  units_section mailpit "$port" "$python" "Three systemd units run these: the socket holds the SMTP port apps send to, 127.0.0.1:$port, from boot, as
+root, and the relay and Mailpit run as $(id -un)." mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service
   # A Mailpit just restarted gets 10 seconds to answer.
   for _ in $(seq 1 "$tries"); do
     if curl -q --silent --fail --max-time 2 --unix-socket "$base/run/http.sock" --output /dev/null \
@@ -410,8 +473,140 @@ EOF
   esac
 }
 
+# garage_admin <method> <path> [<json>]: one call to Garage's admin API on its Unix socket, with the admin
+# token, which reaches curl on stdin, never a command line.
+garage_admin() {
+  local args=(-q --silent --show-error --fail --max-time 30 --unix-socket "$SERVICES/garage/run/admin.sock" --request "$1" --header @-)
+  if [ -n "${3-}" ]; then args+=(--header "Content-Type: application/json" --data-binary "$3"); fi
+  printf 'Authorization: Bearer %s\n' "$(cat "$SECRETS/garage-admin-token")" | curl "${args[@]}" "http://localhost$2"
+}
+
+# garage_toml: Garage's config. Paths and settings only: its secrets stay in their files, mode 600, which
+# Garage refuses to read when anyone else may. No root_domain for the S3 API, so apps use path-style
+# addressing under one host and its certificate (section 3); the web endpoint names a bucket by its host,
+# which nginx gives it from the path (`files.<zone>/<bucket>/…`).
+garage_toml() {
+  local base="$SERVICES/garage"
+  cat <<EOF
+# Written by mroom baseline garage; it is written again on every run.
+metadata_dir = "$base/meta"
+data_dir = "$base/data"
+db_engine = "sqlite"
+replication_factor = 1
+rpc_bind_addr = "127.0.0.1:3901"
+rpc_public_addr = "127.0.0.1:3901"
+rpc_secret_file = "$SECRETS/garage-rpc-secret"
+
+[s3_api]
+s3_region = "garage"
+api_bind_addr = "$base/run/s3.sock"
+
+[s3_web]
+bind_addr = "$base/run/web.sock"
+root_domain = ".web.mroom.invalid"
+
+[admin]
+api_bind_addr = "$base/run/admin.sock"
+admin_token_file = "$SECRETS/garage-admin-token"
+metrics_token_file = "$SECRETS/garage-metrics-token"
+EOF
+}
+
+setup_garage() {
+  local base="$SERVICES/garage" zone token layout node version user
+  need curl tar sha256sum openssl jq
+  load_box || die "box.env could not be read"
+  zone="${BOX[MROOM_QA_ZONE]:-}" user="$(id -un)"
+  [[ "$HOME" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "systemd units need plain paths; $(printf '%q' "$HOME") is not"
+  [[ "$user" =~ ^[a-z_][a-z0-9_-]*$ && "$(id -gn)" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "the box user's name is not plain"
+  CHANGED=""
+  install_pinned garage
+  mkdir -p "$base/meta" "$base/data" "$base/run" "$SECRETS"
+  chmod 700 "$base" "$base/meta" "$base/data" "$base/run" "$SECRETS"
+  # Its secrets, each made once.
+  if ! [ -s "$SECRETS/garage-rpc-secret" ]; then
+    put_secret "$SECRETS/garage-rpc-secret" "$(openssl rand -hex 32)"
+    echo "Garage RPC secret: made"
+  fi
+  for token in admin metrics; do
+    if ! [ -s "$SECRETS/garage-$token-token" ]; then
+      put_secret "$SECRETS/garage-$token-token" "$(new_password)"
+      echo "Garage $token token: made"
+      CHANGED=1
+    fi
+  done
+  chmod 600 "$SECRETS/garage-rpc-secret" "$SECRETS/garage-admin-token" "$SECRETS/garage-metrics-token"
+  if ! [ -f "$base/garage.toml" ] || [ "$(cat "$base/garage.toml")" != "$(garage_toml)" ]; then
+    put_secret "$base/garage.toml" "$(garage_toml)"
+    echo "Garage config: $(home_short "$base/garage.toml") written"
+    CHANGED=1
+  fi
+  if [ -n "$CHANGED" ]; then
+    if restart_unit mroom-garage.service "$base/"; then echo "Garage: restarted to run its build and read its config"
+    else echo "Garage: runs its build and reads its config from its next start (mroom-garage.service)"; fi
+  fi
+
+  units_section garage "" "" "One systemd unit runs Garage, as $user: its S3, web and admin endpoints listen only on Unix
+sockets in $(home_short "$base/run"), and its own RPC stays in a network of its own." mroom-garage.service
+
+  # One node holds every bucket: its layout is set once, when Garage first answers.
+  for _ in $(seq 1 40); do
+    if layout="$(garage_admin GET /v2/GetClusterLayout 2>/dev/null)"; then break; fi
+    layout=""
+    [ -n "$CHANGED" ] || break
+    sleep 0.25
+  done
+  if [ -z "$layout" ]; then
+    echo "Garage does not answer yet: install its unit, then run mroom baseline garage again to set up its layout."
+  elif [ "$(jq '.roles | length' <<<"$layout")" -gt 0 ]; then
+    echo "Garage answers; its layout holds one node."
+  else
+    node="$(garage_admin GET /v2/GetClusterStatus | jq -r '.nodes[0].id // empty')"
+    [[ "$node" =~ ^[0-9a-f]{16,128}$ ]] || die "Garage named no node to give the layout"
+    garage_admin POST /v2/UpdateClusterLayout \
+      "$(jq -nc --arg id "$node" '{roles: [{id: $id, zone: "box", capacity: 1099511627776, tags: ["mroom"]}]}')" >/dev/null
+    version="$(garage_admin GET /v2/GetClusterLayout | jq '.version')"
+    garage_admin POST /v2/ApplyClusterLayout "$(jq -nc --argjson v "$((version + 1))" '{version: $v}')" >/dev/null
+    echo "Garage answers; its layout now holds this node."
+  fi
+
+  # Browsers reach Garage through nginx, on two hosts of the QA zone, with TLS.
+  if [ -z "$zone" ]; then
+    echo "Set MROOM_QA_ZONE in box.env, and run this again for the nginx configs of Garage's two hosts."
+    return 0
+  fi
+  cat <<EOF
+
+Browsers and apps reach Garage through nginx, on two hosts of the QA zone. Create each as a site in Forge,
+with its certificate, and put this in place of the site's "location /" block (Forge's nginx runs as $user,
+who alone can open the sockets):
+
+s3.$zone, the S3 API: path-style, so every bucket is under this host and its certificate.
+
+    client_max_body_size 0;
+    proxy_request_buffering off;
+    location / {
+        proxy_set_header Host \$host;
+        proxy_pass http://unix:$base/run/s3.sock;
+    }
+
+files.$zone, public files: /<bucket>/<path> reads <path> from a bucket whose website access is on.
+
+    location ~ "^/([a-z0-9][a-z0-9-]{1,61}[a-z0-9])(/.*)\$" {
+        set \$bucket \$1;
+        rewrite ^/[^/]+(/.*)\$ \$1 break;
+        proxy_set_header Host \$bucket.web.mroom.invalid;
+        proxy_pass http://unix:$base/run/web.sock;
+    }
+    location / {
+        return 404;
+    }
+EOF
+}
+
 case "${1:-}" in
   mailpit) [ "$#" = 1 ] || die "usage: mroom baseline mailpit"; setup_mailpit ;;
+  garage) [ "$#" = 1 ] || die "usage: mroom baseline garage"; setup_garage ;;
   -h | --help | "") awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF" ;;
   *) die "unknown part '${1:0:40}'; mroom baseline --help lists them" ;;
 esac

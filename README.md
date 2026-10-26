@@ -281,6 +281,8 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 | `mail-user-remove <N>` | the environment's SMTP login |
 | `mail-read <N> <email>` | as JSON, the newest five mails the environment's login sent to a persona address (To, Cc or Bcc), and only to personas: sender, recipients, subject and text |
 | `mail-clear <N>` | every mail the environment's login sent |
+| `bucket-create <N> <disk> [public]` | a bucket on the box's Garage (D14) for one of the app's file disks, and a new key that reaches that bucket alone; `public` turns on its website access. Prints `BUCKET`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `REGION`, `ENDPOINT`, `PATH_STYLE`, and `URL` for a public disk |
+| `bucket-drop <N> <disk>` | the disk's bucket: its keys deleted, the bucket emptied and deleted |
 
 The client sends only N. The database, role and Redis user are `<MROOM_APP_NAME>_qa_<N>`, and the
 database is cloned from `MROOM_QA_TEMPLATE`, both set by a person in `box.env`. A password reaches
@@ -372,10 +374,28 @@ address would add are turned off.
   Mailpit deletes every mail when asked to delete an empty list, so `mail-clear` sends only plain,
   non-empty lists of IDs.
 
+Files go to the box's Garage (D14), a bucket for each environment and file disk, `<app>-qa-<N>-<disk>`:
+
+- **A key per bucket.** `bucket-create` gives the bucket a new key, allowed to read and write it alone, and
+  deletes the old ones, so a key left in an old `.env` reaches nothing. The gate prints neutral settings;
+  qa-up writes them to the names the app's disks read.
+- **Two hosts.** Apps and browsers reach Garage through nginx: `s3.<zone>` for the S3 API, path-style, so
+  every bucket is under one host and its certificate, and `files.<zone>/<bucket>/<path>` for a public
+  disk's files, which Garage serves from a bucket only when its website access is on. Garage has no
+  per-file permissions, so a disk with both kinds of file is two disks here.
+- **No port to take.** Garage's S3, web and admin endpoints listen only on Unix sockets in a folder only the
+  box user can open, and its own RPC stays in a network of its own (`PrivateNetwork`), where no site user can
+  reach it. Only the gate holds the admin token. Garage, confined like Mailpit, sees only its build, config,
+  data and secrets.
+- **Dropping.** Garage deletes only an empty bucket and empties none itself, so `bucket-drop` deletes the
+  environment's keys first, then every object through the S3 API with a key of its own, made for that drop
+  alone and deleted however the drop ends, and only then the bucket.
+
 **Set up once,** for an app named `shop`, on Postgres 16 or later and Redis 7 or later. Before Postgres 16,
 a role that may create roles may also grant itself the administrator ones, so the gate refuses older
 versions. CI runs these steps against a real Postgres, a real Redis 7 and 8, real site users and sudo, and
-the real Mailpit under systemd (`tests/pg/`, `tests/redis/`, `tests/site/` and `tests/mail/`).
+the real Mailpit and Garage under systemd (`tests/pg/`, `tests/redis/`, `tests/site/`, `tests/mail/` and
+`tests/files/`).
 
 Steps marked *as root* change what the box user cannot, so they must not trust anything the box user, or a
 program running as it, could have changed. Run them from a session those programs cannot change, such as a
@@ -536,6 +556,15 @@ installs is written out in the step itself.
     restarts the relay or Mailpit itself when their files changed (systemd holds the port meanwhile), and it
     prints a script again only for units that differ. Nothing else may listen on the port: on a box that ran
     an earlier mail catcher there, stop that first.
+
+13. The file store, when `qa.parity.files` is `same` (the default): `mroom baseline garage`, then, *as
+    root*, the script it prints, which installs Garage's systemd unit, then `mroom baseline garage` again, which
+    gives Garage its one-node layout. Baseline downloads Garage at the build `lib/core/pins.txt` names and
+    refuses any other, and makes its RPC secret and admin and metrics tokens (mode 600, in
+    `~/.config/mroom/secrets`). Check the script as for step 12. With `MROOM_QA_ZONE` set, it prints the nginx
+    configs of Garage's two hosts: create `s3.<zone>` and `files.<zone>` as sites in Forge, each with its
+    certificate, and put the printed blocks in place of their `location /` block. Forge's nginx runs as the
+    box user, who alone can open Garage's sockets.
 
 ## Regression label
 
