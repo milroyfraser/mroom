@@ -8,16 +8,22 @@
 # checked word by word and never passed to a shell. No CI key gets a shell. A role runs only its own
 # operations:
 #
-#   provision   db-create <N>   a database and a role of its own for QA environment N (D18); prints
-#                               DB_DATABASE, DB_USERNAME and a new DB_PASSWORD for the environment's .env
-#               db-drop <N>     the environment's database and its role
+#   provision   db-create <N>          a database and a role of its own for QA environment N (D18); prints
+#                                      DB_DATABASE, DB_USERNAME and a new DB_PASSWORD for its .env
+#               db-drop <N>            the environment's database and its role
+#               redis-user-add <N>     a Redis user of its own, limited to its prefix (D15); prints
+#                                      REDIS_USERNAME, a new REDIS_PASSWORD, REDIS_PREFIX, HORIZON_PREFIX
+#               redis-user-remove <N>  the environment's Redis user, and its connections
+#               redis-clear <N>        every key under the environment's prefix, in every database
 #
 # The client sends only the environment's number. The gate builds every name from box.env, which a person
-# sets: the database and role are <MROOM_APP_NAME>_qa_<N>, cloned from MROOM_QA_TEMPLATE, so no argument
-# can reach another database. It connects to Postgres 16 or later as its own role, through the libpq
-# service mroom-gate in ~/.config/mroom/secrets/pg_service.conf (mode 600). Each request and refusal is
-# logged, never a secret, to ~/.local/state/mroom/gate.log and to syslog. It runs from the installed
-# release, never from an app checkout, so a pull request cannot change it.
+# sets: the database, role and Redis user are <MROOM_APP_NAME>_qa_<N>, the database is cloned from
+# MROOM_QA_TEMPLATE, and the Redis prefix is <MROOM_APP_NAME>:qa<N>:, so no argument can reach another
+# environment. It connects to Postgres 16 or later as its own role, through the libpq service mroom-gate
+# in ~/.config/mroom/secrets/pg_service.conf, and to Redis 7 or later as its own user, from
+# ~/.config/mroom/secrets/redis-gate.env (both mode 600). Each request and refusal is logged, never a
+# secret, to ~/.local/state/mroom/gate.log and to syslog. It runs from the installed release, never from an
+# app checkout, so a pull request cannot change it.
 #
 # Exit codes: 0 done, 1 failed or refused, 2 not run as a forced command with a role.
 set -euo pipefail
@@ -71,6 +77,7 @@ op="${words[0]}"
 
 case "$role:$op" in
   provision:db-create | provision:db-drop) ;;
+  provision:redis-user-add | provision:redis-user-remove | provision:redis-clear) ;;
   *) refuse "$role may not run '${op:0:24}'" ;;
 esac
 
@@ -81,6 +88,17 @@ words_are() { [ "${#words[@]}" = "$1" ] || refuse "$op takes $(($1 - 1)) argumen
 load_box || fail "box.env could not be read"
 app="${BOX[MROOM_APP_NAME]:-}"
 [ -n "$app" ] || fail "MROOM_APP_NAME is not set in box.env"
+
+GATE_TMP=""
+# gate_tmp: a private folder for this request's scratch files, removed however the gate ends.
+gate_tmp() {
+  [ -z "$GATE_TMP" ] || return 0
+  GATE_TMP="$(mktemp -d "$(mroom_state_dir)/gate-tmp.XXXXXX")" || fail "cannot make a scratch folder"
+  trap 'rm -rf -- "$GATE_TMP"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
 
 PG_SERVICES="$HOME/.config/mroom/secrets/pg_service.conf"
 PG_ERR=""
@@ -98,8 +116,8 @@ pg_ready() {
   [ -r "$PG_SERVICES" ] || fail "$(home_short "$PG_SERVICES") is missing; it holds the [mroom-gate] service"
   secret_file_ok "$PG_SERVICES" || fail "$(home_short "$PG_SERVICES") must be yours and mode 600"
   need psql python3 flock
-  PG_ERR="$(mktemp "$(mroom_state_dir)/gate-psql.XXXXXX")" || fail "cannot make a file for psql's errors"
-  trap 'rm -f "$PG_ERR"' EXIT
+  gate_tmp
+  PG_ERR="$GATE_TMP/psql.err"
   local ok
   ok="$(pg postgres <<<"SELECT current_setting('server_version_num')::int >= 160000;")" \
     || fail "cannot reach Postgres as the gate's role: $(pg_error)"
@@ -225,8 +243,183 @@ SQL
   echo "database $db: dropped"
 }
 
+REDIS_SECRETS="$HOME/.config/mroom/secrets/redis-gate.env"
+REDIS_USER="" REDIS_PASS="" REDIS_HOST="" REDIS_PORT="" REDIS_ERR=""
+
+# redis_secret <KEY>: one value from redis-gate.env; the one reader of that file.
+redis_secret() { sed -n "s/^$1=//p" "$REDIS_SECRETS" | head -n1 | tr -d '\r'; }
+
+# rcli <args...>: redis-cli as the gate's own user. The password travels in REDISCLI_AUTH, never on a
+# command line, and -e makes an error reply fail the call. stderr goes to its own file, as psql's does, so
+# only the reply is ever read as a value.
+rcli() {
+  REDISCLI_AUTH="$REDIS_PASS" redis-cli --no-auth-warning -e -h "$REDIS_HOST" -p "$REDIS_PORT" \
+    --user "$REDIS_USER" "$@" 2>"$REDIS_ERR"
+}
+# redis_error [<reply>]: what went wrong, on one line: redis-cli's stderr, or the error reply an older
+# redis-cli prints where the reply would be.
+redis_error() {
+  local e
+  e="$(grep -m1 . "$REDIS_ERR" 2>/dev/null)" || e="$(grep -m1 . <<<"${1-}")" || e="an unexpected reply"
+  printable "$e"
+}
+# config_get <name>: one Redis setting. CONFIG GET replies with the name, then the value.
+config_get() {
+  local reply
+  reply="$(rcli CONFIG GET "$1")" || return 1
+  reply="$(tr -d '\r' <<<"$reply")"
+  [ "$(sed -n 1p <<<"$reply")" = "$1" ] || return 1
+  sed -n 2p <<<"$reply"
+}
+
+redis_ready() {
+  [ -r "$REDIS_SECRETS" ] || fail "$(home_short "$REDIS_SECRETS") is missing; it holds REDIS_GATE_USER and REDIS_GATE_PASSWORD"
+  secret_file_ok "$REDIS_SECRETS" || fail "$(home_short "$REDIS_SECRETS") must be yours and mode 600"
+  need redis-cli flock sha256sum
+  gate_tmp
+  REDIS_ERR="$GATE_TMP/redis.err"
+  REDIS_USER="$(redis_secret REDIS_GATE_USER)"
+  REDIS_PASS="$(redis_secret REDIS_GATE_PASSWORD)"
+  REDIS_HOST="$(redis_secret REDIS_GATE_HOST)"
+  REDIS_PORT="$(redis_secret REDIS_GATE_PORT)"
+  REDIS_HOST="${REDIS_HOST:-127.0.0.1}" REDIS_PORT="${REDIS_PORT:-6379}"
+  if [ -z "$REDIS_USER" ] || [ -z "$REDIS_PASS" ]; then
+    fail "$(home_short "$REDIS_SECRETS") must set REDIS_GATE_USER and REDIS_GATE_PASSWORD"
+  fi
+  [[ "$REDIS_USER" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "REDIS_GATE_USER is not a plain user name"
+  # redis-user-add would reset such a user to one environment's prefix, locking the gate out.
+  if [[ "$REDIS_USER" =~ ^${app}_qa_[0-9]+$ ]]; then fail "REDIS_GATE_USER is named like an environment's user"; fi
+  [[ "$REDIS_HOST" =~ ^[A-Za-z0-9.:-]+$ ]] || fail "REDIS_GATE_HOST is not a plain host"
+  [[ "$REDIS_PORT" =~ ^[0-9]{1,5}$ ]] || fail "REDIS_GATE_PORT is not a port"
+  local info major aclfile users
+  info="$(rcli INFO server)" || fail "cannot reach Redis as the gate's user: $(redis_error "$info")"
+  major="$(tr -d '\r' <<<"$info" | sed -n 's/^redis_version:\([0-9][0-9]*\).*/\1/p')"
+  if ! [[ "$major" =~ ^[0-9]+$ ]] || ((major < 7)); then fail "Redis must be 7 or later (D15)"; fi
+  aclfile="$(config_get aclfile)" || fail "cannot read Redis's aclfile setting: $(redis_error)"
+  [ -n "$aclfile" ] || fail "Redis has no aclfile, so the users it is given would vanish on a restart (D15)"
+  # While the default user is on, any process on the box signs in as it and reaches every key, so an
+  # environment's own user would keep nothing apart.
+  users="$(rcli ACL LIST)" || fail "cannot list Redis's users: $(redis_error "$users")"
+  if tr -d '\r' <<<"$users" | grep -q -E '^user default on( |$)'; then
+    fail "Redis's default user is on, so every process on the box reaches every key; turn it off first (D15)"
+  fi
+}
+
+# What an environment's user is given: Redis's own data types and the functions an app needs, never @all.
+# A module's commands carry only its own categories (and @read, @write and the like), so none is in these,
+# and a module command cannot be trusted to name its keys: JSON.MGET declares only its first key and reads
+# the rest, FT.SEARCH and TS.MRANGE take none. A server command added later stays out unless it joins one.
+GRANTED=(keyspace string hash list set sortedset stream bitmap hyperloglog geo pubsub scripting transaction connection)
+# Taken back from those: the commands that flush, watch, list, count or debug the whole server, or reset its
+# scripts (design 8.9). @dangerous holds KEYS, FLUSHALL, SORT, CLIENT LIST, MONITOR and the like.
+WITHHELD=(-@dangerous -scan -randomkey -dbsize '-client|tracking' '-pubsub|channels' '-pubsub|shardchannels'
+  '-pubsub|numsub' '-pubsub|shardnumsub' '-pubsub|numpat' -function '-script|flush' '-script|kill' '-script|debug')
+
+# granted_module_commands: the commands of loaded modules that GRANTED would give an environment, one per
+# line. There must be none.
+granted_module_commands() {
+  local modules m c reply mods="" granted=""
+  modules="$(rcli MODULE LIST)" || return 1
+  while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    reply="$(rcli COMMAND LIST FILTERBY MODULE "$m")" || return 1
+    mods+="$(tr -d '\r' <<<"$reply")"$'\n'
+  done < <(tr -d '\r' <<<"$modules" | awk 'prev == "name" { print } { prev = $0 }')
+  [ -n "${mods//[[:space:]]/}" ] || return 0
+  for c in "${GRANTED[@]}"; do
+    reply="$(rcli COMMAND LIST FILTERBY ACLCAT "$c")" || return 1
+    granted+="$(tr -d '\r' <<<"$reply")"$'\n'
+  done
+  grep -x -F -f <(grep . <<<"$mods") <<<"$granted" | sort -u || true
+}
+
+cmd_redis_user_add() {
+  words_are 2
+  env_number "${words[1]}"
+  local user="${app}_qa_${words[1]}" prefix="${app}:qa${words[1]}:" password hash leaks out
+  redis_ready
+  env_lock "redis-$user"
+  leaks="$(granted_module_commands)" \
+    || fail "redis-user-add ${words[1]}: cannot list Redis's modules and their commands: $(redis_error)"
+  if [ -n "$leaks" ]; then
+    fail "redis-user-add ${words[1]}: a module puts commands in a category environments are given, so its key checks would decide what they reach: $(tr '\n' ' ' <<<"$leaks" | cut -c1-160)"
+  fi
+  # Save first, so a Redis that cannot save its users is refused before a password changes.
+  out="$(rcli ACL SAVE)" \
+    || fail "redis-user-add ${words[1]}: Redis cannot save its users, so nothing was changed: $(redis_error "$out")"
+  password="$(new_password)"
+  [ "${#password}" = 48 ] || fail "could not read random bytes for the password"
+  # Redis stores and compares only this hash, so only the hash leaves the gate.
+  hash="$(printf '%s' "$password" | sha256sum | cut -d' ' -f1)"
+  # reset first: ACL SETUSER only adds to a user, so running it again would keep the old password.
+  out="$(rcli ACL SETUSER "$user" reset on "#$hash" "~$prefix*" "&$prefix*" "${GRANTED[@]/#/+@}" "${WITHHELD[@]}")" \
+    || fail "redis-user-add ${words[1]}: $(redis_error "$out")"
+  # A connection signed in with the old password stays signed in: close them, so the app reconnects.
+  rcli CLIENT KILL USER "$user" >/dev/null || true
+  out="$(rcli ACL SAVE)" \
+    || fail "redis-user-add ${words[1]}: the user changed but was not saved; run redis-user-add again once Redis can save: $(redis_error "$out")"
+  gate_log "redis-user-add ${words[1]}: $user ready"
+  printf 'REDIS_USERNAME=%s\nREDIS_PASSWORD=%s\nREDIS_PREFIX=%s\nHORIZON_PREFIX=%shorizon:\n' \
+    "$user" "$password" "$prefix" "$prefix"
+}
+
+cmd_redis_user_remove() {
+  words_are 2
+  env_number "${words[1]}"
+  local user="${app}_qa_${words[1]}" out
+  redis_ready
+  env_lock "redis-$user"
+  out="$(rcli ACL SAVE)" \
+    || fail "redis-user-remove ${words[1]}: Redis cannot save its users, so nothing was changed: $(redis_error "$out")"
+  # ACL DELUSER also closes the connections signed in as the user.
+  out="$(rcli ACL DELUSER "$user")" || fail "redis-user-remove ${words[1]}: $(redis_error "$out")"
+  out="$(rcli ACL SAVE)" \
+    || fail "redis-user-remove ${words[1]}: the user is gone but was not saved; run redis-user-remove again once Redis can save: $(redis_error "$out")"
+  gate_log "redis-user-remove ${words[1]}: $user removed"
+  echo "redis user $user: removed"
+}
+
+# One step of redis-clear, run inside Redis: SCAN from the cursor in ARGV[1] for keys matching ARGV[2], then
+# UNLINK what it found, 500 at a time. Key names never leave Redis: a name may hold a newline, and read back
+# line by line it would become two names, one of them outside the prefix. Replies with the next cursor and
+# how many keys UNLINK removed (SCAN may return a key twice).
+CLEAR_STEP="local r = redis.call('SCAN', ARGV[1], 'MATCH', ARGV[2], 'COUNT', 1000)
+local keys, n = r[2], 0
+for i = 1, #keys, 500 do n = n + redis.call('UNLINK', unpack(keys, i, math.min(i + 499, #keys))) end
+return {r[1], n}"
+
+cmd_redis_clear() {
+  words_are 2
+  env_number "${words[1]}"
+  local prefix="${app}:qa${words[1]}:" dbs db cursor reply n total=0
+  redis_ready
+  env_lock "redis-${app}_qa_${words[1]}"
+  dbs="$(config_get databases)" || fail "redis-clear ${words[1]}: cannot read Redis's databases setting: $(redis_error)"
+  [[ "$dbs" =~ ^[1-9][0-9]{0,5}$ ]] || fail "redis-clear ${words[1]}: Redis reports '${dbs:0:24}' databases"
+  # Every database: Laravel keeps its cache in a different one from its queues and sessions. Each step
+  # scans a slice of the keyspace, so Redis never stalls the way KEYS would stall it.
+  for ((db = 0; db < dbs; db++)); do
+    cursor=0
+    while :; do
+      reply="$(rcli -n "$db" EVAL "$CLEAR_STEP" 0 "$cursor" "$prefix*")" \
+        || fail "redis-clear ${words[1]}: database $db: $(redis_error "$reply")"
+      reply="$(tr -d '\r' <<<"$reply")"
+      cursor="$(sed -n 1p <<<"$reply")"
+      n="$(sed -n 2p <<<"$reply")"
+      [[ "$cursor" =~ ^[0-9]+$ && "$n" =~ ^[0-9]+$ ]] || fail "redis-clear ${words[1]}: database $db: an unexpected reply"
+      total=$((total + 10#$n))
+      if [ "$cursor" = 0 ]; then break; fi
+    done
+  done
+  gate_log "redis-clear ${words[1]}: $total keys under $prefix"
+  echo "redis $prefix: $total keys deleted"
+}
+
 gate_log "request: ${line:0:200}"
 case "$op" in
   db-create) cmd_db_create ;;
   db-drop) cmd_db_drop ;;
+  redis-user-add) cmd_redis_user_add ;;
+  redis-user-remove) cmd_redis_user_remove ;;
+  redis-clear) cmd_redis_clear ;;
 esac

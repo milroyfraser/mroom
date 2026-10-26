@@ -3,8 +3,9 @@
 # (expected SQL, or a command the gate must refuse).
 # Tests for `mroom gate` (lib/gate) and lib/core/scram.py: the forced command refuses anything but plain
 # words a role may run, builds every name from box.env, and db-create / db-drop send Postgres the right
-# SQL, never the password, and fail closed. Offline: psql is a fake that logs the SQL it gets on stdin.
-# tests/pg/gate-real-test.sh runs the same gate against a real Postgres in CI.
+# SQL and the redis-* operations send Redis the right commands, never a password, and fail closed.
+# Offline: psql and redis-cli are fakes that log what they get. tests/pg/gate-real-test.sh and
+# tests/redis/gate-real-test.sh run the same gate against a real Postgres and a real Redis in CI.
 set -euo pipefail
 SUITE=gate
 # shellcheck source=tests/lib.sh
@@ -80,6 +81,79 @@ password_of() { sed -n 's/^DB_PASSWORD=//p' <<<"$1"; }
 # line_of <text>: the number of the first psql.log line holding the text, or 0.
 line_of() { grep -n -F -m1 -- "$1" "$T/psql.log" 2>/dev/null | cut -d: -f1 || echo 0; }
 gate_log_text() { cat "$HOME/.local/state/mroom/gate.log" 2>/dev/null || true; }
+
+# redis_world: the world above, plus the gate's Redis login (mode 600) and a fake redis-cli.
+redis_world() {
+  world
+  mkdir -p "$T/redis"
+  printf 'REDIS_GATE_USER=mroom-gate\nREDIS_GATE_PASSWORD=gate-secret-pw\n' >"$HOME/.config/mroom/secrets/redis-gate.env"
+  chmod 600 "$HOME/.config/mroom/secrets/redis-gate.env"
+  cat >"$T/bin/redis-cli" <<'FAKE'
+#!/usr/bin/env bash
+# Logs every argument to $T/redis.argv, and "auth=<yes|no> db=<n> <command>" per call to $T/redis.log:
+# auth=yes when REDISCLI_AUTH held the gate's password. An EVAL's script is logged as <script> and kept
+# in $T/redis.script. Answers from $T/redis/*: version, no-aclfile, default-on, no-modules (MODULE LIST is
+# empty), module-leak (json.mget is also in @string), databases, save-fails, save-fails-later (every ACL
+# SAVE after the first fails), setuser-fails, keys-<db> (one key per line, for EVAL to count), two-steps
+# (database 0's first step returns cursor 17), noise (a warning on stderr for every call) and old-cli
+# (error replies on stdout, where an older redis-cli prints them).
+printf '%s\n' "$*" >>"$T/redis.argv"
+auth=no
+if [ "${REDISCLI_AUTH:-}" = gate-secret-pw ]; then auth=yes; fi
+db=0 cmd=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --no-auth-warning | -e) shift ;;
+    -h | -p | --user) shift 2 ;;
+    -n) db="$2"; shift 2 ;;
+    *) cmd+=("$1"); shift ;;
+  esac
+done
+err() { if [ -f "$T/redis/old-cli" ]; then echo "$1"; else echo "$1" >&2; fi; exit 1; }
+if [ -f "$T/redis/noise" ]; then echo "Warning: a line on stderr, never a value" >&2; fi
+if [ "${cmd[0]}" = EVAL ]; then printf '%s' "${cmd[1]}" >"$T/redis.script"; cmd[1]="<script>"; fi
+echo "auth=$auth db=$db ${cmd[*]}" >>"$T/redis.log"
+case "${cmd[*]}" in
+  "INFO server") printf '# Server\r\nredis_version:%s\r\n' "$(cat "$T/redis/version" 2>/dev/null || echo 8.10.2)" ;;
+  "CONFIG GET aclfile") printf 'aclfile\n'; [ -f "$T/redis/no-aclfile" ] || echo /etc/redis/users.acl ;;
+  "CONFIG GET databases") printf 'databases\n%s\n' "$(cat "$T/redis/databases" 2>/dev/null || echo 2)" ;;
+  "ACL LIST")
+    if [ -f "$T/redis/default-on" ]; then echo 'user default on nopass sanitize-payload ~* &* +@all'
+    else echo 'user default off sanitize-payload resetchannels -@all'; fi
+    echo 'user mroom-gate on sanitize-payload #6b1c ~* &* +@all' ;;
+  "MODULE LIST")
+    if [ ! -f "$T/redis/no-modules" ]; then
+      printf 'name\nReJSON\nver\n20808\npath\n/usr/lib/redis/modules/rejson.so\nargs\n'
+      printf 'name\nsearch\nver\n80200\npath\n/usr/lib/redis/modules/redisearch.so\nargs\n'
+    fi ;;
+  "COMMAND LIST FILTERBY MODULE ReJSON") printf '%s\n' json.get json.mget json.set ;;
+  "COMMAND LIST FILTERBY MODULE search") printf '%s\n' ft.search ft._list ;;
+  "COMMAND LIST FILTERBY ACLCAT "*)
+    printf '%s\n' get set del
+    if [ -f "$T/redis/module-leak" ] && [ "${cmd[4]}" = string ]; then echo json.mget; fi ;;
+  "ACL SAVE")
+    if [ -f "$T/redis/save-fails" ]; then err "ERR There was an error trying to save the ACLs"; fi
+    if [ -f "$T/redis/save-fails-later" ]; then
+      if [ -f "$T/redis/saved-once" ]; then err "ERR There was an error trying to save the ACLs"; fi
+      : >"$T/redis/saved-once"
+    fi
+    echo OK ;;
+  "ACL SETUSER "*) if [ -f "$T/redis/setuser-fails" ]; then err "ERR Error in ACL SETUSER modifier '-pubsub|shardnumsub': Unknown command"; fi; echo OK ;;
+  "ACL DELUSER "*) echo 1 ;;
+  "CLIENT KILL USER "*) echo 0 ;;
+  "EVAL <script> 0 "*)
+    n=0
+    if [ -f "$T/redis/keys-$db" ]; then n="$(awk -v p="${cmd[4]%\*}" 'index($0, p) == 1' "$T/redis/keys-$db" | wc -l | tr -d ' ')"; fi
+    if [ -f "$T/redis/two-steps" ] && [ "$db" = 0 ] && [ "${cmd[3]}" = 0 ]; then printf '17\n1\n'
+    elif [ -f "$T/redis/two-steps" ] && [ "$db" = 0 ]; then printf '0\n%s\n' "$((n - 1))"
+    else printf '0\n%s\n' "$n"; fi ;;
+  *) err "ERR unknown command" ;;
+esac
+FAKE
+  chmod +x "$T/bin/redis-cli"
+}
+
+redis_log() { cat "$T/redis.log" 2>/dev/null || true; }
 
 t_it_runs_only_as_a_forced_command_with_a_role() {
   world
@@ -316,6 +390,160 @@ PY
   expect_rc 2; expect_err_has "the password must be printable ASCII"
 }
 
+# The rule's grants and what it takes back: Redis's own types and functions, never @all.
+RULE='+@keyspace +@string +@hash +@list +@set +@sortedset +@stream +@bitmap +@hyperloglog +@geo +@pubsub +@scripting +@transaction +@connection -@dangerous -scan -randomkey -dbsize -client|tracking -pubsub|channels -pubsub|shardchannels -pubsub|numsub -pubsub|shardnumsub -pubsub|numpat -function -script|flush -script|kill -script|debug'
+
+t_redis_user_add_limits_the_user_to_its_prefix() {
+  redis_world
+  gate provision "redis-user-add 12"
+  expect_rc 0
+  expect_out_has $'REDIS_USERNAME=shop_qa_12\nREDIS_PASSWORD='
+  expect_out_has $'REDIS_PREFIX=shop:qa12:\nHORIZON_PREFIX=shop:qa12:horizon:'
+  local pw hash log
+  pw="$(sed -n 's/^REDIS_PASSWORD=//p' <<<"$out")"
+  expect_true "the password is not 48 hex characters: $pw" eval '[[ "$pw" =~ ^[0-9a-f]{48}$ ]]'
+  hash="$(printf '%s' "$pw" | sha256sum | cut -d' ' -f1)"
+  log="$(redis_log)"
+  expect_true "the user's rule is wrong" has "$log" \
+    "auth=yes db=0 ACL SETUSER shop_qa_12 reset on #$hash ~shop:qa12:* &shop:qa12:* $RULE"
+  expect_true "the user is given every command" lacks "$log" "+@all"
+  expect_true "the modules' commands are not checked against the grants" has "$log" "auth=yes db=0 COMMAND LIST FILTERBY ACLCAT connection"
+  expect_true "old connections are not closed" has "$log" "auth=yes db=0 CLIENT KILL USER shop_qa_12"
+  run tail -n 1 "$T/redis.log"; expect_out "auth=yes db=0 ACL SAVE"
+  expect_true "the password reached a redis-cli command line" lacks "$(cat "$T/redis.argv")" "$pw"
+  expect_true "the gate's own password reached a command line" lacks "$(cat "$T/redis.argv")" "gate-secret-pw"
+  expect_true "the password reached the gate log" lacks "$(gate_log_text)" "$pw"
+  expect_true "the password reached syslog" lacks "$(cat "$T/syslog")" "$pw"
+}
+
+t_without_modules_there_is_nothing_to_check() {
+  redis_world; : >"$T/redis/no-modules"
+  gate provision "redis-user-add 3"
+  expect_rc 0
+  expect_true "categories were listed with no module to check" lacks "$(redis_log)" "FILTERBY ACLCAT"
+  expect_true "the rule is wrong" has "$(redis_log)" "&shop:qa3:* $RULE"
+}
+
+t_a_module_command_in_a_granted_category_is_refused() {
+  redis_world; : >"$T/redis/module-leak"
+  gate provision "redis-user-add 3"
+  expect_rc 1
+  expect_err_has "redis-user-add 3: a module puts commands in a category environments are given, so its key checks would decide what they reach: json.mget"
+  expect_true "a user was set anyway" lacks "$(redis_log)" "ACL SETUSER"
+  expect_true "it printed credentials" lacks "$out" "REDIS_PASSWORD"
+}
+
+t_redis_without_an_aclfile_or_older_than_7_is_refused() {
+  redis_world; : >"$T/redis/no-aclfile"
+  gate provision "redis-user-add 3"
+  expect_rc 1; expect_err_has "Redis has no aclfile, so the users it is given would vanish on a restart (D15)"
+  expect_true "a user was set anyway" lacks "$(redis_log)" "ACL SETUSER"
+  rm "$T/redis/no-aclfile"; echo 6.2.14 >"$T/redis/version"
+  gate provision "redis-user-add 3"
+  expect_rc 1; expect_err_has "Redis must be 7 or later (D15)"
+}
+
+t_redis_with_its_default_user_on_is_refused() {
+  redis_world; : >"$T/redis/default-on"
+  local c
+  for c in "redis-user-add 3" "redis-user-remove 3" "redis-clear 3"; do
+    gate provision "$c"; expect_rc 1; expect_err_has "Redis's default user is on, so every process on the box reaches every key"
+  done
+  expect_true "Redis was changed anyway" eval '! grep -q -E "SETUSER|DELUSER|EVAL|SAVE" "$T/redis.log"'
+}
+
+t_redis_warnings_are_never_read_as_values() {
+  redis_world; : >"$T/redis/noise"; : >"$T/redis/no-aclfile"
+  gate provision "redis-user-add 3"
+  expect_rc 1; expect_err_has "Redis has no aclfile"
+  rm "$T/redis/no-aclfile"
+  gate provision "redis-user-add 3"
+  expect_rc 0; expect_out_has "REDIS_USERNAME=shop_qa_3"
+  expect_true "the module check or the rule was misread" has "$(redis_log)" "&shop:qa3:* $RULE"
+}
+
+t_an_error_reply_is_reported_from_either_stream() {
+  redis_world; : >"$T/redis/setuser-fails"
+  gate provision "redis-user-add 3"
+  expect_rc 1; expect_err_has "redis-user-add 3: ERR Error in ACL SETUSER modifier '-pubsub|shardnumsub'"
+  : >"$T/redis.log"; : >"$T/redis/old-cli"
+  gate provision "redis-user-add 3"
+  expect_rc 1; expect_err_has "redis-user-add 3: ERR Error in ACL SETUSER modifier '-pubsub|shardnumsub'"
+  expect_true "it printed credentials" lacks "$out" "REDIS_PASSWORD"
+  run tail -n 1 "$T/redis.log"; expect_out_has "ACL SETUSER shop_qa_3"
+}
+
+t_a_redis_that_cannot_save_is_refused_before_a_change() {
+  redis_world; : >"$T/redis/save-fails"
+  gate provision "redis-user-add 3"
+  expect_rc 1; expect_err_has "redis-user-add 3: Redis cannot save its users, so nothing was changed: ERR There was an error"
+  expect_true "a user changed anyway" lacks "$(redis_log)" "ACL SETUSER"
+  gate provision "redis-user-remove 3"
+  expect_rc 1; expect_err_has "redis-user-remove 3: Redis cannot save its users, so nothing was changed"
+  expect_true "a user was removed anyway" lacks "$(redis_log)" "ACL DELUSER"
+}
+
+t_a_change_that_could_not_be_saved_says_so() {
+  redis_world; : >"$T/redis/save-fails-later"
+  gate provision "redis-user-add 3"
+  expect_rc 1; expect_err_has "redis-user-add 3: the user changed but was not saved; run redis-user-add again once Redis can save"
+  expect_true "it printed credentials" lacks "$out" "REDIS_PASSWORD"
+}
+
+t_redis_user_remove_deletes_the_user_and_saves() {
+  redis_world
+  gate provision "redis-user-remove 12"
+  expect_rc 0; expect_out "redis user shop_qa_12: removed"
+  run tail -n 3 "$T/redis.log"
+  expect_out $'auth=yes db=0 ACL SAVE\nauth=yes db=0 ACL DELUSER shop_qa_12\nauth=yes db=0 ACL SAVE'
+}
+
+t_redis_clear_deletes_the_prefix_inside_redis_in_every_database() {
+  redis_world
+  printf 'shop:qa12:queues:default\nshop:qa12:cache:a b\nshop:qa13:queues:default\n' >"$T/redis/keys-0"
+  printf 'shop:qa12:cache:x\n' >"$T/redis/keys-1"
+  gate provision "redis-clear 12"
+  expect_rc 0; expect_out "redis shop:qa12:: 3 keys deleted"
+  local log script
+  log="$(redis_log)"
+  expect_true "database 0 is not cleared from the start" has "$log" "auth=yes db=0 EVAL <script> 0 0 shop:qa12:*"
+  expect_true "database 1 is not cleared" has "$log" "auth=yes db=1 EVAL <script> 0 0 shop:qa12:*"
+  expect_true "the gate read key names back or deleted them itself" eval '! grep -q -E -- "--scan| UNLINK" "$T/redis.log"'
+  script="$(cat "$T/redis.script")"
+  expect_true "the step does not scan for its pattern" has "$script" "redis.call('SCAN', ARGV[1], 'MATCH', ARGV[2], 'COUNT', 1000)"
+  expect_true "the step does not count what UNLINK removed" has "$script" "n = n + redis.call('UNLINK', unpack(keys, i, math.min(i + 499, #keys)))"
+  expect_true "the step replies with more than a cursor and a count" has "$script" "return {r[1], n}"
+}
+
+t_redis_clear_follows_the_cursor() {
+  redis_world; : >"$T/redis/two-steps"
+  printf 'shop:qa4:a\nshop:qa4:b\nshop:qa4:c\n' >"$T/redis/keys-0"
+  gate provision "redis-clear 4"
+  expect_rc 0; expect_out "redis shop:qa4:: 3 keys deleted"
+  expect_true "the second step is not taken" has "$(redis_log)" "auth=yes db=0 EVAL <script> 0 17 shop:qa4:*"
+}
+
+t_redis_clear_refuses_a_strange_database_count() {
+  redis_world; echo "16 more" >"$T/redis/databases"
+  gate provision "redis-clear 4"
+  expect_rc 1; expect_err_has "redis-clear 4: Redis reports '16 more' databases"
+  expect_true "it cleared anyway" lacks "$(redis_log)" "EVAL"
+}
+
+t_the_gates_redis_login_must_be_in_place() {
+  redis_world
+  chmod 644 "$HOME/.config/mroom/secrets/redis-gate.env"
+  gate provision "redis-clear 1"; expect_rc 1; expect_err_has "redis-gate.env must be yours and mode 600"
+  printf 'REDIS_GATE_USER=mroom-gate\n' >"$HOME/.config/mroom/secrets/redis-gate.env"
+  chmod 600 "$HOME/.config/mroom/secrets/redis-gate.env"
+  gate provision "redis-clear 1"; expect_rc 1; expect_err_has "must set REDIS_GATE_USER and REDIS_GATE_PASSWORD"
+  printf 'REDIS_GATE_USER=shop_qa_7\nREDIS_GATE_PASSWORD=gate-secret-pw\n' >"$HOME/.config/mroom/secrets/redis-gate.env"
+  gate provision "redis-user-add 7"; expect_rc 1; expect_err_has "REDIS_GATE_USER is named like an environment's user"
+  rm "$HOME/.config/mroom/secrets/redis-gate.env"
+  gate provision "redis-clear 1"; expect_rc 1; expect_err_has "redis-gate.env is missing"
+  expect_true "redis-cli ran" eval '[ ! -s "$T/redis.log" ]'
+}
+
 # The README's pg_hba.conf lines are the ones CI's real Postgres runs with (tests/pg/pg_hba.conf).
 t_the_readme_shows_the_pg_hba_lines_ci_tests() {
   local line
@@ -348,4 +576,18 @@ test_case box-env-and-service-file t_box_env_and_the_service_file_must_be_in_pla
 test_case one-request-per-environment t_one_request_at_a_time_per_environment
 test_case logged t_requests_and_refusals_are_logged
 test_case scram-rfc-7677 t_the_password_verifier_matches_rfc_7677
+test_case redis-user-add t_redis_user_add_limits_the_user_to_its_prefix
+test_case redis-without-modules t_without_modules_there_is_nothing_to_check
+test_case redis-module-leak t_a_module_command_in_a_granted_category_is_refused
+test_case redis-aclfile-and-version t_redis_without_an_aclfile_or_older_than_7_is_refused
+test_case redis-default-user-on t_redis_with_its_default_user_on_is_refused
+test_case redis-warnings-not-values t_redis_warnings_are_never_read_as_values
+test_case redis-error-either-stream t_an_error_reply_is_reported_from_either_stream
+test_case redis-save-fails t_a_redis_that_cannot_save_is_refused_before_a_change
+test_case redis-save-fails-later t_a_change_that_could_not_be_saved_says_so
+test_case redis-user-remove t_redis_user_remove_deletes_the_user_and_saves
+test_case redis-clear t_redis_clear_deletes_the_prefix_inside_redis_in_every_database
+test_case redis-clear-cursor t_redis_clear_follows_the_cursor
+test_case redis-clear-database-count t_redis_clear_refuses_a_strange_database_count
+test_case redis-login-in-place t_the_gates_redis_login_must_be_in_place
 finish

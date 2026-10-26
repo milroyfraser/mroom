@@ -229,15 +229,35 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 |---|---|
 | `db-create <N>` | a Postgres role and a database of their own for QA environment N, cloned from the template (D18); prints `DB_DATABASE`, `DB_USERNAME` and a new `DB_PASSWORD` for the environment's `.env` |
 | `db-drop <N>` | the environment's database and role |
+| `redis-user-add <N>` | a Redis user of its own, limited to its prefix `<app>:qa<N>:` (D15); prints `REDIS_USERNAME`, a new `REDIS_PASSWORD`, `REDIS_PREFIX` and `HORIZON_PREFIX` |
+| `redis-user-remove <N>` | the environment's Redis user, which also closes its connections |
+| `redis-clear <N>` | every key under the environment's prefix, in every Redis database |
 
-The client sends only N. The database and role are `<MROOM_APP_NAME>_qa_<N>`, cloned from
-`MROOM_QA_TEMPLATE`, both set by a person in `box.env`. The password reaches Postgres only as a SCRAM
-verifier, through stdin. Each request and refusal is logged, never a secret, to
-`~/.local/state/mroom/gate.log` and to syslog.
+The client sends only N. The database, role and Redis user are `<MROOM_APP_NAME>_qa_<N>`, and the
+database is cloned from `MROOM_QA_TEMPLATE`, both set by a person in `box.env`. A password reaches
+Postgres only as a SCRAM verifier, through stdin, and Redis only as its SHA-256. Each request and refusal
+is logged, never a secret, to `~/.local/state/mroom/gate.log` and to syslog.
 
-**Set up once,** for an app named `shop`, on Postgres 16 or later. Before 16, a role that may create roles
-may also grant itself the administrator ones, so the gate refuses older versions. CI runs these steps
-against a real Postgres (`tests/pg/gate-real-test.sh`).
+A Redis user gets Redis's own data types and the functions an app needs (`@keyspace`, `@string`, `@hash`,
+`@list`, `@set`, `@sortedset`, `@stream`, `@bitmap`, `@hyperloglog`, `@geo`, `@pubsub`, `@scripting`,
+`@transaction` and `@connection`), never `@all`, for keys and channels under its prefix only. It loses the
+commands among them that flush, watch, list, count or debug the whole server or reset its scripts (design
+8.9). It gets no module command: Redis checks a command's keys from what the command declares, and a
+module's commands may not declare them all (`JSON.MGET` declares only its first), so the gate refuses to
+run if a loaded module puts a command in one of those categories. Each change closes the user's old
+connections and is saved to Redis's `aclfile`, so it survives a restart. `redis-clear` deletes inside
+Redis, a slice of the keyspace at a time, so no key name is read back, where a newline in one could make
+it two.
+
+So an environment's app can't use what acts on a whole database, such as `Cache::flush()` (FLUSHDB) or
+anything that scans, such as `cache:prune-stale-tags` (SCAN); `redis-clear` empties an environment instead.
+A pattern subscription must be exactly `<prefix>*`. And one Redis keeps environments' data apart, not their
+load: a long script or a large write from one PR slows every environment and the dev site.
+
+**Set up once,** for an app named `shop`, on Postgres 16 or later and Redis 7 or later. Before Postgres 16,
+a role that may create roles may also grant itself the administrator ones, so the gate refuses older
+versions. CI runs these steps against a real Postgres and a real Redis 7 and 8 (`tests/pg/` and
+`tests/redis/`).
 
 1. In the box user's `~/.ssh/authorized_keys`, by hand (Forge's SSH key screen stores a bare key, without
    options):
@@ -305,7 +325,51 @@ against a real Postgres (`tests/pg/gate-real-test.sh`).
    password=<the gate's password>
    ```
 
-7. In `box.env`: `MROOM_APP_NAME=shop` and `MROOM_QA_TEMPLATE=shop_qa_template`.
+7. The gate's Redis login. This makes a long random password, writes it to
+   `~/.config/mroom/secrets/redis-gate.env` (mode 600) and prints the SHA-256 that step 8 needs, without
+   the password reaching a command line or your shell's history:
+
+   ```sh
+   (
+     umask 077
+     p="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
+     printf 'REDIS_GATE_USER=mroom-gate\nREDIS_GATE_PASSWORD=%s\n' "$p" >~/.config/mroom/secrets/redis-gate.env
+     printf '%s' "$p" | sha256sum | cut -d' ' -f1
+   )
+   ```
+
+   `REDIS_GATE_HOST` and `REDIS_GATE_PORT` default to `127.0.0.1` and `6379`.
+
+8. Redis's users in an `aclfile`. Redis rewrites it on `ACL SAVE`, so put it in a folder Redis's own user
+   may write to, such as `/etc/redis`. The file holds two lines. The first is the gate's own user, with
+   the hash from step 7. The second is the `user default …` line that `redis-cli ACL LIST` prints now,
+   copied unchanged (add `--askpass` if Redis has a password). With that line the default user keeps
+   exactly the access it has today, so the restart opens nothing and every client keeps working. Without
+   it, Redis starts with the default user open to anyone, whatever password it had:
+
+   ```
+   user mroom-gate on #<the hash> ~* &* +@all
+   user default <the rest of the line ACL LIST printed>
+   ```
+
+   In `redis.conf`, add `aclfile /etc/redis/users.acl` and remove any `requirepass` line, whose hash the
+   default user's line now carries. Then restart Redis.
+
+9. Give every other client of Redis, such as the dev site, its workers and each worktree, a user of its
+   own (D15). Then turn the default user off and close the connections still signed in as it.
+   `--askpass` asks for the gate's password:
+
+   ```
+   $ redis-cli --user mroom-gate --askpass
+   127.0.0.1:6379> ACL SETUSER default off
+   127.0.0.1:6379> ACL SAVE
+   127.0.0.1:6379> CLIENT KILL USER default
+   ```
+
+   Until then Redis is exactly as open as it was. The gate refuses Redis requests while the default user
+   is on, since with it any process on the box reaches every key.
+
+10. In `box.env`: `MROOM_APP_NAME=shop` and `MROOM_QA_TEMPLATE=shop_qa_template`.
 
 ## Regression label
 
