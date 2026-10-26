@@ -221,8 +221,8 @@ an expired login.
 
 ## Forge API
 
-`forge-api` calls the Laravel Forge v2 API of this box, for agents and people. Every call is pinned to the
-box's server (`MROOM_FORGE_ORG` and `MROOM_FORGE_SERVER` in `box.env`), and a path is relative to it:
+`forge-api` calls the Laravel Forge v2 API of this box, for agents and people. Every call goes to the box's
+server (`MROOM_FORGE_ORG` and `MROOM_FORGE_SERVER` in `box.env`), and a path is relative to it:
 
 ```bash
 forge-api GET sites
@@ -230,21 +230,29 @@ forge-api PUT sites/123/nginx --write --data '{"config":"..."}'
 forge-api --secret GET sites/123/environment
 ```
 
-- Reads run freely. POST, PUT, PATCH and DELETE need `--write`, which an agent adds only after you agree.
-- A path that returns secrets, such as a site's env, needs `--secret`, so an allow rule for plain reads
-  never matches it.
-- `--data -` reads the body from stdin. The token and any body reach curl through private files, never its
-  command line.
-- Forge's 502s and 503s are retried, a 429 waits as long as Forge says, and a read that timed out is
-  retried (a write never is, since it may have run).
+- A path is plain words joined by `/`, starting with a resource name such as `sites`, with an optional
+  query. One with an empty, `.` or `..` part, or any percent-encoding, is refused before Forge is called.
+- POST, PUT, PATCH and DELETE need `--write`. A path that returns secrets needs `--secret`: a site's env,
+  a package registry's credentials, a deploy hook, webhook or heartbeat URL, a command's output.
+- The two flags mark a call, so that a permission rule allowing plain reads never matches it and the call
+  asks first.
+- The token reaches curl on stdin, never a command line or a file, and is not printed even under `bash -x`.
+  `--data -` reads the body from stdin; use it for a body with secrets in it, since an inline `--data`
+  shows in the process list.
+- A 503 is retried, and so is a 502 for GET, PUT and DELETE. A 429 waits for Forge's `Retry-After` (up to
+  120 seconds, else 20). A read that timed out is retried; a write never is, since it may have run.
 
-The token lives in `~/.config/mroom/secrets/forge-token`, mode 600. Give it only the scopes the box's users
-need: a token that can create daemons or scheduled jobs reaches root (design D20). To store it without it
-showing on screen or in history:
+The real pin is the token. Make it from a Forge account whose only team holds the box (design section 3),
+since `MROOM_FORGE_SERVER` set in the environment can name any server the token sees. Give it only the
+scopes its users need, such as `server:view`, `site:meta` and `site:manage-nginx`. Never give it
+`server:delete`, or any scope design D20 lists as reaching `forge` or root: SSH keys, commands or recipes,
+the sudo or database password, deploy scripts, daemons or scheduled jobs.
+
+To store the token without it showing on screen or in history:
 
 ```bash
-umask 077; mkdir -p ~/.config/mroom/secrets
-read -rs t; printf '%s' "$t" >~/.config/mroom/secrets/forge-token; unset t
+( umask 077; mkdir -p ~/.config/mroom/secrets
+  read -rs t; printf '%s' "$t" >~/.config/mroom/secrets/forge-token; chmod 600 ~/.config/mroom/secrets/forge-token )
 ```
 
 On a runner, the QA actions use the same client (`lib/core/forge.sh`) with `MROOM_FORGE_ORG`,

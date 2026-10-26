@@ -7,12 +7,15 @@
 #   jq -n '{...}' | forge-api POST sites/123/domains --write --data -
 #   forge-api --secret GET sites/123/environment
 #
-# Every call is pinned to this box's server (MROOM_FORGE_ORG and MROOM_FORGE_SERVER in box.env), and a
-# path is relative to it; one that could climb out is refused. Reads run freely. POST, PUT, PATCH and
-# DELETE need --write, which an agent adds only after the user agrees. A path that returns secrets (a
-# site's env) needs --secret, so an allow rule for plain reads never matches it. The token comes from
-# ~/.config/mroom/secrets/forge-token (mode 600) and is never printed; --data - reads the body from stdin,
-# so a body with secrets in it stays off the command line too.
+# Every call goes to this box's server (MROOM_FORGE_ORG and MROOM_FORGE_SERVER), and a path is relative to
+# it: plain words joined by /, starting with a resource name such as sites, with no empty, "." or ".."
+# part and no percent-encoding, plus an optional query of plain values. Anything else is refused before
+# Forge is called. POST, PUT, PATCH and DELETE need --write. A path that returns secrets (a site's env, a
+# package registry's credentials, a deploy hook, webhook or heartbeat URL, a command's output) needs
+# --secret. The two flags mark a call so that a permission rule allowing plain reads never matches it and
+# the call asks first. The token comes from ~/.config/mroom/secrets/forge-token (mode 600) and is never
+# printed. --data - reads the body from stdin: use it for a body with secrets in it, since an inline --data
+# shows in the process list.
 #
 # Exit codes: 0 done, 1 Forge or the client failed, 2 refused before calling Forge.
 set -euo pipefail
@@ -57,21 +60,35 @@ case "$method" in
   *) refuse "unsupported method $method" ;;
 esac
 
-# The path is relative to the pinned server: refuse anything that could leave it or smuggle a host in.
+# The path stays under the pinned server. Laravel decodes percent-encoding before it routes, so
+# %65nvironment would be "environment": no % in the path part at all. curl drops "." parts, so "." or ""
+# would reach the server itself (DELETE . would ask Forge to delete it): a resource name comes first.
 path="${path#/}"
-case "$path" in
-  "" | *..* | *://* | *@* | orgs* | servers* | *%2[eEfF]* | *%5[cC]*)
-    refuse "the path must stay under this box's server, for example sites/123" ;;
+part="${path%%\?*}" query=""
+case "$path" in *\?*) query="${path#*\?}" ;; esac
+[[ "$part" =~ ^[a-z][a-z0-9-]*(/[A-Za-z0-9_.~,-]+)*$ ]] || refuse "the path must stay under this box's server, for example sites/123"
+case "/$part/" in
+  */./* | */../* | /orgs/* | /servers/*) refuse "the path must stay under this box's server, for example sites/123" ;;
 esac
 # Inside a bracket expression a backslash is literal, so "]" goes first and "-" last instead of escaping.
-plain_path='^[]A-Za-z0-9._~/?=&%,[-]+$'
-[[ "$path" =~ $plain_path ]] || refuse "the path has characters a Forge path never needs: $path"
-case "${path%%\?*}" in
-  env | */env | env/* | */env/* | *environment*)
+plain_query='^[]A-Za-z0-9._~,=&%[-]*$'
+[[ "$query" =~ $plain_query ]] || refuse "the query has characters a Forge query never needs: $query"
+
+lower="$(printf '%s' "$part" | tr '[:upper:]' '[:lower:]')"
+case "$lower" in
+  env | */env | env/* | */env/* | *environment* | *credentials* | *deploy-hook* | *webhooks* | *heartbeats* \
+    | */output | */output/*)
     [ "$secret" = 1 ] || refuse "$path returns secrets; run it as: forge-api --secret $method $path" ;;
 esac
-if [ "$has_data" = 1 ] && ! jq -e . >/dev/null 2>&1 <<<"$data"; then refuse "--data is not valid JSON"; fi
 
 need curl jq
-body="$(forge "$method" "/$path" "$data")" || exit 1
-printf '%s\n' "$body"
+if [ "$has_data" = 1 ] && ! jq -e . >/dev/null 2>&1 <<<"$data"; then refuse "--data is not valid JSON"; fi
+
+# forge runs in this shell, not in $(...), so these traps see its folder and remove it however the call
+# ends: an interrupted call must not leave a body or an answer on disk.
+trap forge_cleanup EXIT
+trap 'forge_cleanup; exit 129' HUP
+trap 'forge_cleanup; exit 130' INT
+trap 'forge_cleanup; exit 143' TERM
+forge "$method" "/$path" "$data" || exit 1
+echo

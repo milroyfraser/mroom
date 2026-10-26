@@ -3,7 +3,7 @@
 #
 #   ./install.sh                     install from the checkout this script is in
 #   ./install.sh --version v0.1.0    install that tagged release (its GitHub release tarball)
-#   ./install.sh --uninstall         remove every installed version and the mroom link
+#   ./install.sh --uninstall         remove every installed version and the mroom and forge-api links
 #
 # Options:
 #   --prefix <dir>   install under <dir> instead of ~/.local: <dir>/share/mroom/<version>, <dir>/bin/mroom
@@ -211,11 +211,25 @@ say "installed mroom $have from $source_note"
 say "  $dest"
 say "  $link -> $dest/bin/mroom"
 for name in "${extra_links[@]}"; do
-  [ -x "$dest/bin/$name" ] || continue
   extra="$bindir/$name"
-  if { [ -e "$extra" ] || [ -L "$extra" ]; } && ! is_ours "$extra" && [ "$force" != 1 ]; then
-    say "  left $extra alone: it is not mroom's (mroom's is $dest/bin/$name; --force replaces it)"
+  if [ ! -x "$dest/bin/$name" ]; then
+    # This version has no such command (an older release): a link of ours would point at another version.
+    if is_ours "$extra"; then
+      rm -f "$extra"
+      say "  removed $extra: mroom $have has no $name"
+    fi
     continue
+  fi
+  if { [ -e "$extra" ] || [ -L "$extra" ]; } && ! is_ours "$extra"; then
+    if [ "$force" != 1 ]; then
+      say "  left $extra alone: it is not mroom's (mroom's is $dest/bin/$name; --force replaces it)"
+      continue
+    fi
+    # --force: keep what was there, beside the new link, rather than delete it.
+    aside="$extra.before-mroom"
+    if [ -e "$aside" ] || [ -L "$aside" ]; then aside="$extra.before-mroom.$$"; fi
+    mv "$extra" "$aside" || die "could not move $extra aside"
+    say "  moved $extra to $aside"
   fi
   ln -sfn "$dest/bin/$name" "$extra"
   say "  $extra -> $dest/bin/$name"
