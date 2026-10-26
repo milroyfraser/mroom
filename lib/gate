@@ -26,10 +26,11 @@
 #               user-clean <N>         stops the site user's processes (PHP-FPM's pool workers end with the
 #                                      site) and deletes its files in /tmp, /var/tmp, /dev/shm, /var/crash,
 #                                      /run/lock and /dev/mqueue, its IPC objects and its crontab
-#               mail-user-add <N>      an SMTP login of its own on the box's Mailpit (D19); prints MAIL_MAILER,
-#                                      MAIL_HOST, MAIL_PORT, MAIL_USERNAME and a new MAIL_PASSWORD
+#               mail-user-add <N>      an SMTP login of its own on the box's Mailpit (D19), while mroom's mail
+#                                      relay holds the SMTP port; prints MAIL_MAILER, MAIL_HOST, MAIL_PORT,
+#                                      MAIL_USERNAME and a new MAIL_PASSWORD
 #               mail-user-remove <N>   the environment's SMTP login
-#               mail-read <N> <email>  the newest mail its login sent to a persona address, as JSON
+#               mail-read <N> <email>  the newest five mails its login sent to persona addresses alone, as JSON
 #               mail-clear <N>         every mail its login sent
 #
 # The client sends only the environment's number. The gate builds every name from box.env, which a person
@@ -116,7 +117,7 @@ GATE_TMP=""
 gate_tmp() {
   [ -z "$GATE_TMP" ] || return 0
   GATE_TMP="$(mktemp -d "$(mroom_state_dir)/gate-tmp.XXXXXX")" || fail "cannot make a scratch folder"
-  trap 'rm -rf -- "$GATE_TMP"' EXIT
+  trap 'rm -rf -- "$GATE_TMP"; [ -z "${LOGIN_TMP:-}" ] || rm -f -- "$LOGIN_TMP"' EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
@@ -579,7 +580,12 @@ cmd_user_clean() {
 MAILPIT_SECRETS="$HOME/.config/mroom/secrets/mailpit.env"
 MAILPIT_LOGINS="$HOME/.config/mroom/secrets/mailpit-smtp.passwd"
 MAILPIT_HOME="$HOME/.local/share/mroom-services/mailpit"
-MAILPIT_URL="" MAILPIT_AUTH="" SMTP_HOST="" SMTP_PORT="" MAIL_ERR=""
+# Mailpit listens only on Unix sockets in a folder only the box user can open; apps reach its SMTP side
+# through mroom's mail relay, which holds the TCP port (lib/mail-relay).
+MAILPIT_HTTP="$MAILPIT_HOME/run/http.sock"
+MAILPIT_SMTP="$MAILPIT_HOME/run/smtp.sock"
+MAIL_RELAY="$HOME/.local/share/mroom-services/mail-relay/mail-relay"
+MAILPIT_AUTH="" SMTP_PORT="" MAIL_ERR="" LOGIN_TMP=""
 
 # mail_secret <KEY>: one value from mailpit.env, which mroom baseline mailpit writes; the one reader of it.
 mail_secret() { sed -n "s/^$1=//p" "$MAILPIT_SECRETS" | head -n1 | tr -d '\r'; }
@@ -590,26 +596,22 @@ mail_ready() {
     [ -r "$file" ] || fail "$(home_short "$file") is missing; run mroom baseline mailpit"
     secret_file_ok "$file" || fail "$(home_short "$file") must be yours and mode 600"
   done
-  need curl jq openssl flock base64 timeout
+  need curl jq openssl flock base64 python3
   user="$(mail_secret MAILPIT_API_USER)" pass="$(mail_secret MAILPIT_API_PASSWORD)"
   if [ -z "$user" ] || [ -z "$pass" ]; then fail "$(home_short "$MAILPIT_SECRETS") must set MAILPIT_API_USER and MAILPIT_API_PASSWORD"; fi
   [[ "$user" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "MAILPIT_API_USER is not a plain user name"
-  MAILPIT_URL="$(mail_secret MAILPIT_API_URL)" SMTP_HOST="$(mail_secret MAILPIT_SMTP_HOST)" SMTP_PORT="$(mail_secret MAILPIT_SMTP_PORT)"
-  MAILPIT_URL="${MAILPIT_URL:-http://127.0.0.1:8025}" SMTP_HOST="${SMTP_HOST:-127.0.0.1}" SMTP_PORT="${SMTP_PORT:-1025}"
-  # The API and its login stay on this box.
-  [[ "$MAILPIT_URL" =~ ^http://127\.0\.0\.1:[0-9]{1,5}$ ]] || fail "MAILPIT_API_URL must be http://127.0.0.1:<port>"
-  [[ "$SMTP_HOST" =~ ^[A-Za-z0-9.:-]+$ && "$SMTP_PORT" =~ ^[0-9]{1,5}$ ]] || fail "MAILPIT_SMTP_HOST or MAILPIT_SMTP_PORT is not plain"
   MAILPIT_AUTH="$(printf '%s:%s' "$user" "$pass" | base64 -w0)"
+  SMTP_PORT="${BOX[MROOM_QA_SMTP_PORT]:-1025}"
   gate_tmp
   MAIL_ERR="$GATE_TMP/mail.err"
 }
 
-# mailpit_api <method> <path> [<json>]: one call to Mailpit's API as the gate's login, printing the body.
-# The login reaches curl on stdin, never a command line.
+# mailpit_api <method> <path> [<json>]: one call to Mailpit's API, on its Unix socket, as the gate's login,
+# printing the body. The login reaches curl on stdin, never a command line.
 mailpit_api() {
-  local args=(-q --silent --show-error --fail --max-time 30 --request "$1" --header @-)
+  local args=(-q --silent --show-error --fail --max-time 30 --unix-socket "$MAILPIT_HTTP" --request "$1" --header @-)
   if [ -n "${3-}" ]; then args+=(--header "Content-Type: application/json" --data-binary "$3"); fi
-  printf 'Authorization: Basic %s\n' "$MAILPIT_AUTH" | curl "${args[@]}" "$MAILPIT_URL$2" 2>"$MAIL_ERR"
+  printf 'Authorization: Basic %s\n' "$MAILPIT_AUTH" | curl "${args[@]}" "http://localhost$2" 2>"$MAIL_ERR"
 }
 mail_error() { printable "$(grep -m1 . "$MAIL_ERR" 2>/dev/null || echo "no message")"; }
 
@@ -625,53 +627,120 @@ mailpit_pids() {
     if [[ "$exe" == "$home"/*/mailpit && "${exe#"$home"/}" != */*/* ]]; then echo "${proc#/proc/}"; fi
   done
 }
-# smtp_open: whether Mailpit takes SMTP connections; the inner bash expands its own arguments.
-# shellcheck disable=SC2016
-smtp_open() { timeout 3 bash -c ': <>"/dev/tcp/$0/$1"' "$SMTP_HOST" "$SMTP_PORT" 2>/dev/null; }
+
+# socket_open <path>: whether something takes connections on the Unix socket.
+socket_open() {
+  python3 -I -c 'import socket, sys; s = socket.socket(socket.AF_UNIX); s.settimeout(3); s.connect(sys.argv[1])' "$1" 2>/dev/null
+}
 # mailpit_live: whether Mailpit answers on HTTP and takes SMTP connections. It starts its web server first,
 # so the first can be true a moment before the second.
 mailpit_live() {
-  [ "$(curl -q --silent --max-time 2 --output /dev/null --write-out '%{http_code}' "$MAILPIT_URL/livez" 2>/dev/null)" = 200 ] && smtp_open
+  [ "$(curl -q --silent --max-time 2 --unix-socket "$MAILPIT_HTTP" --output /dev/null --write-out '%{http_code}' \
+    http://localhost/livez 2>/dev/null)" = 200 ] && socket_open "$MAILPIT_SMTP"
+}
+
+# proc_age <pid>: how long the process has run, in hundredths of a second.
+proc_age() {
+  local stat fields uptime
+  stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+  read -r -a fields <<<"${stat##*) }"
+  uptime="$(cut -d' ' -f1 /proc/uptime)"
+  echo $(( ${uptime%.*} * 100 + 10#${uptime#*.} - fields[19] * 100 / $(getconf CLK_TCK) ))
 }
 
 # mailpit_restart: Mailpit reads its logins only when it starts (D19), so the gate stops it and Forge's daemon
 # starts it again; it waits until a new Mailpit answers.
 mailpit_restart() {
-  local old new pid _
+  local old new pid age deadline wait="${MROOM_GATE_RESTART_WAIT:-30}"
+  [[ "$wait" =~ ^[0-9]{1,3}$ ]] || wait=30
   old="$(mailpit_pids)"
-  [ -n "$old" ] || fail "Mailpit is not running; create its daemon (mroom baseline mailpit)"
+  [ -n "$old" ] || fail "Mailpit is not running; check its daemon in Forge (mroom baseline mailpit prints it)"
+  # Forge's daemon counts a Mailpit that stops within its Start Seconds (1) as a failed start, and gives up
+  # after three in a row, so the Mailpit a request just started runs 3 seconds before the next one stops it.
+  for pid in $old; do
+    while age="$(proc_age "$pid")" && [ "$age" -lt 300 ]; do sleep 0.2; done
+  done
   for pid in $old; do kill -TERM "$pid" 2>/dev/null || true; done
-  for _ in $(seq 1 "${MROOM_GATE_RESTART_WAIT:-120}"); do
+  deadline=$((SECONDS + wait))
+  while [ "$SECONDS" -lt "$deadline" ]; do
     sleep 0.25
     new="$(mailpit_pids)"
     # A new Mailpit: no process left from before, and one that answers.
     if [ -n "$new" ] && ! grep -qxF -f <(printf '%s\n' "$old") <<<"$new" && mailpit_live; then return 0; fi
   done
-  fail "Mailpit did not come back within 30 seconds of a restart; check its daemon"
+  fail "Mailpit did not come back within $wait seconds of a restart; check its daemon in Forge"
+}
+
+# relay_holds_port: whether mroom's mail relay, and nothing else, listens on the SMTP port, so the logins apps
+# send reach Mailpit. Anyone on the box may take a free port; the relay never lets it go free.
+relay_holds_port() {
+  local port inodes inode proc arg held relay=()
+  port="$(printf ':%04X' "$SMTP_PORT")"
+  for proc in /proc/[0-9]*; do
+    [ -O "$proc" ] || continue
+    # A process can end at any moment, and set -e would take that for the gate's own failure.
+    while IFS= read -r -d '' arg; do
+      if [ "$arg" = "$MAIL_RELAY" ]; then relay+=("$proc"); break; fi
+    done 2>/dev/null <"$proc/cmdline" || true
+  done
+  inodes="$(cat /proc/net/tcp /proc/net/tcp6 2>/dev/null \
+    | awk -v port="$port" '$4 == "0A" && substr($2, length($2) - 4) == port { print $10 }')" || true
+  [ -n "$inodes" ] || fail "nothing listens on 127.0.0.1:$SMTP_PORT; check mroom's mail relay daemon in Forge (mroom baseline mailpit prints it)"
+  for inode in $inodes; do
+    held=""
+    for proc in "${relay[@]}"; do
+      for arg in "$proc"/fd/*; do
+        if [ "$(readlink "$arg" 2>/dev/null)" = "socket:[$inode]" ]; then held=1; break 2; fi
+      done
+    done
+    [ -n "$held" ] || fail "something other than mroom's mail relay listens on port $SMTP_PORT, so apps would send it their mail logins: stop it, start the relay's daemon, then give each QA environment new logins"
+  done
 }
 
 # set_login <user> [<hash>]: rewrites the SMTP login file without the user's line, then with the new one if
-# a hash is given. Returns 1 when nothing changed.
+# a hash is given. Returns 0 when it changed the file, 1 when nothing changed, and 2 when it could not write
+# it, which leaves the file as it was. Every step is checked here: bash runs a function that is called from
+# `if` or `||` without set -e.
 set_login() {
-  local tmp
-  tmp="$(mktemp "$(dirname "$MAILPIT_LOGINS")/.mailpit-smtp.XXXXXX")"
-  awk -F: -v user="$1" '$1 != user' "$MAILPIT_LOGINS" >"$tmp"
-  if [ -n "${2-}" ]; then printf '%s:%s\n' "$1" "$2" >>"$tmp"; fi
-  if cmp -s "$tmp" "$MAILPIT_LOGINS"; then rm -f "$tmp"; return 1; fi
-  mv -f "$tmp" "$MAILPIT_LOGINS"
+  local want
+  want="$(awk -F: -v user="$1" '$1 != user' "$MAILPIT_LOGINS")" || return 2
+  if [ -n "${2-}" ]; then want+=$'\n'"$1:$2"; fi
+  want="${want#$'\n'}"
+  # The login no one knows keeps the file from being empty, which Mailpit takes as "no login needed".
+  [[ "$want" == "mroom-none:"* || "$want" == *$'\n'"mroom-none:"* ]] || return 2
+  [ "$want" != "$(cat "$MAILPIT_LOGINS")" ] || return 1
+  LOGIN_TMP="$(mktemp "$(dirname "$MAILPIT_LOGINS")/.mailpit-smtp.XXXXXX")" || return 2
+  if ! printf '%s\n' "$want" >"$LOGIN_TMP" || [ "$(cat "$LOGIN_TMP")" != "$want" ] \
+    || ! mv -f "$LOGIN_TMP" "$MAILPIT_LOGINS"; then
+    return 2
+  fi
+  LOGIN_TMP=""
+}
+login_unwritten() {
+  if grep -q '^mroom-none:' "$MAILPIT_LOGINS"; then
+    fail "could not write $(home_short "$MAILPIT_LOGINS"), which is unchanged; is the disk full?"
+  fi
+  fail "$(home_short "$MAILPIT_LOGINS") has lost its mroom-none line; run mroom baseline mailpit"
 }
 
-# mail_ids <user> [<address>]: the IDs of the mail the user's login sent, to the address (To, Cc or Bcc) if
-# one is given, newest first. The tag only narrows the search: a mail counts only when its Username field, which only a
-# login sets, is the user (D19).
+# mail_ids <user> [<address> [<max>]]: the IDs of the mail the user's login sent, newest first; with an
+# address, only mail to it (To, Cc or Bcc) whose every recipient is a persona, and at most <max> of them. The
+# tag only narrows the search: a mail counts only when its Username field, which only a login sets, is the
+# user (D19).
 mail_ids() {
-  local query start=0 page
+  local query start=0 page ids found=0 domain="${BOX[MROOM_QA_PERSONA_DOMAIN]:-.test}"
   query="$(jq -rn --arg q "tag:\"$1\"" '$q | @uri')"
   while :; do
     page="$(mailpit_api GET "/api/v1/search?query=$query&start=$start&limit=500")" || return 1
-    jq -r --arg u "$1" --arg a "${2-}" '.messages[] | select(.Username == $u)
-      | select($a == "" or ([.To[]?, .Cc[]?, .Bcc[]? | (.Address // "") | ascii_downcase] | index($a)))
-      | .ID | select(test("^[A-Za-z0-9_-]{1,64}$"))' <<<"$page"
+    ids="$(jq -r --arg u "$1" --arg a "${2-}" --arg d "$domain" '.messages[] | select(.Username == $u)
+      | select($a == "" or ([.To[]?, .Cc[]?, .Bcc[]? | (.Address // "") | ascii_downcase]
+          | index($a) and all(test("\\A[a-z0-9._+-]+@[a-z0-9-]+(\\.[a-z0-9-]+)+\\z") and endswith($d))))
+      | .ID | select(test("\\A[A-Za-z0-9_-]{1,64}\\z"))' <<<"$page")" || return 1
+    if [ -n "$ids" ]; then
+      printf '%s\n' "$ids"
+      found=$((found + $(wc -l <<<"$ids")))
+      if [ -n "${3-}" ] && [ "$found" -ge "$3" ]; then return 0; fi
+    fi
     [ "$(jq '.messages | length' <<<"$page")" = 500 ] || return 0
     start=$((start + 500))
   done
@@ -680,29 +749,33 @@ mail_ids() {
 cmd_mail_user_add() {
   words_are 2
   env_number "${words[1]}"
-  local user="${app}_qa_${words[1]}" password hash
+  local user="${app}_qa_${words[1]}" password hash rc=0
   mail_ready
   env_lock mailpit  # one login file and one Mailpit for every environment
   password="$(new_password)"
   [ "${#password}" = 48 ] || fail "could not read random bytes for the password"
   hash="$(printf '%s' "$password" | openssl passwd -6 -stdin)" || fail "openssl could not hash the password"
   [[ "$hash" =~ ^\$6\$[A-Za-z0-9./]+\$[A-Za-z0-9./]+$ ]] || fail "openssl gave no SHA-512 crypt hash"
-  [ -n "$(mailpit_pids)" ] || fail "Mailpit is not running; create its daemon (mroom baseline mailpit)"
-  set_login "$user" "$hash" || true
+  [ -n "$(mailpit_pids)" ] || fail "Mailpit is not running; check its daemon in Forge (mroom baseline mailpit prints it)"
+  relay_holds_port
+  set_login "$user" "$hash" || rc=$?
+  [ "$rc" != 2 ] || login_unwritten
   mailpit_restart
   gate_log "mail-user-add ${words[1]}: $user ready"
-  printf 'MAIL_MAILER=smtp\nMAIL_HOST=%s\nMAIL_PORT=%s\nMAIL_USERNAME=%s\nMAIL_PASSWORD=%s\n' \
-    "$SMTP_HOST" "$SMTP_PORT" "$user" "$password"
+  printf 'MAIL_MAILER=smtp\nMAIL_HOST=127.0.0.1\nMAIL_PORT=%s\nMAIL_USERNAME=%s\nMAIL_PASSWORD=%s\n' \
+    "$SMTP_PORT" "$user" "$password"
 }
 
 cmd_mail_user_remove() {
   words_are 2
   env_number "${words[1]}"
-  local user="${app}_qa_${words[1]}"
+  local user="${app}_qa_${words[1]}" rc=0
   mail_ready
   env_lock mailpit
-  [ -n "$(mailpit_pids)" ] || fail "Mailpit is not running; create its daemon (mroom baseline mailpit)"
-  if set_login "$user"; then mailpit_restart; fi
+  [ -n "$(mailpit_pids)" ] || fail "Mailpit is not running; check its daemon in Forge (mroom baseline mailpit prints it)"
+  set_login "$user" || rc=$?
+  [ "$rc" != 2 ] || login_unwritten
+  if [ "$rc" = 0 ]; then mailpit_restart; fi
   gate_log "mail-user-remove ${words[1]}: $user removed"
   echo "mail user $user: removed"
 }
@@ -714,7 +787,7 @@ cmd_mail_read() {
   persona mail-read "$address"
   mail_ready
   env_lock mailpit  # not while a restart is under way
-  ids="$(mail_ids "$user" "$address")" || fail "mail-read ${words[1]}: $(mail_error)"
+  ids="$(mail_ids "$user" "$address" 5)" || fail "mail-read ${words[1]}: $(mail_error)"
   for id in $ids; do
     mail="$(mailpit_api GET "/api/v1/message/$id")" || fail "mail-read ${words[1]}: $(mail_error)"
     found+=("$mail")

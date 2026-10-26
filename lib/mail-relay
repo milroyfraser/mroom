@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""mail-relay: holds the box's SMTP port for Mailpit, so no one else can take it (design D19).
+
+    mail-relay <host> <port> <socket>
+
+Listens on <host>:<port>, where apps send mail, and pipes each connection to Mailpit's SMTP Unix socket.
+Mailpit listens only on Unix sockets in a folder that only the box user can open. The gate restarts Mailpit
+whenever it adds or removes a login, and a TCP port is free while its server restarts, for any user on the
+box to take, and with it the logins apps send. The relay does not restart with Mailpit, so the port stays
+taken. A connection that comes while Mailpit is down is closed, and the app's queued mail tries again.
+
+mroom baseline mailpit copies this file beside the services and prints the Forge daemon that runs it.
+"""
+
+import asyncio
+import sys
+
+CHUNK = 65536
+
+
+async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Copies one direction until its end, then ends that direction on the other side too."""
+    try:
+        while data := await reader.read(CHUNK):
+            writer.write(data)
+            await writer.drain()
+        if writer.can_write_eof():
+            writer.write_eof()
+    except OSError:
+        pass
+
+
+async def relay(socket_path: str, client_reader: asyncio.StreamReader,
+                client_writer: asyncio.StreamWriter) -> None:
+    try:
+        mailpit_reader, mailpit_writer = await asyncio.open_unix_connection(socket_path)
+    except OSError:
+        client_writer.close()
+        return
+    try:
+        await asyncio.gather(pipe(client_reader, mailpit_writer), pipe(mailpit_reader, client_writer))
+    finally:
+        mailpit_writer.close()
+        client_writer.close()
+
+
+async def serve(host: str, port: int, socket_path: str) -> None:
+    server = await asyncio.start_server(lambda r, w: relay(socket_path, r, w), host, port)
+    async with server:
+        await server.serve_forever()
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 3 or not argv[1].isdigit():
+        print("usage: mail-relay <host> <port> <socket>", file=sys.stderr)
+        return 2
+    asyncio.run(serve(argv[0], int(argv[1]), argv[2]))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

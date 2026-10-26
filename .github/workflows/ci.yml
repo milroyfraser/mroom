@@ -112,12 +112,15 @@ jobs:
 
   gate-mail:
     # The gate's mail operations against the real Mailpit, which mroom baseline mailpit downloads at its
-    # pinned build and checks: logins, restarts, reading and clearing one environment's mail.
+    # pinned build and checks, run with mroom's mail relay under a real supervisord set up the way Forge sets
+    # up a daemon: logins, a burst of restarts, the SMTP port never free, reading and clearing one
+    # environment's mail.
     name: gate on a real Mailpit
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq supervisor
       - run: tests/mail/gate-real-test.sh
 
   install:
