@@ -218,9 +218,11 @@ t_the_site_operations_with_real_users_and_sudo() {
   expect_out $'root:root 755\nroot:root 440'
   run sudo cat /etc/sudoers.d/mroom-gate; expect_out "$BOX_USER ALL=(%isolated) NOPASSWD: /usr/local/libexec/mroom/site-op"
   expect_true "the installed site-op is not this release's" sudo cmp -s "$ROOT/lib/site-op" /usr/local/libexec/mroom/site-op
-  # Beside a root-setup in a folder the box user's side could change, as in /tmp, site-op is refused.
+  # Beside a root-setup in a folder others can change, like /tmp, site-op is refused. Mode 1777, as /tmp has:
+  # the sudo-rs job runs as root, so the folder is root's own there.
   mkdir -p "$T/not-roots"
   cp "$ROOT/lib/root-setup" "$ROOT/lib/site-op" "$T/not-roots/"
+  chmod 1777 "$T/not-roots"
   run sudo bash "$T/not-roots/root-setup" --user "$BOX_USER" site-op
   expect_rc 1; expect_err_has "is not in a folder only root can change"
   # The sudoers line runs site-op as an isolated user and nothing else, never as root.
