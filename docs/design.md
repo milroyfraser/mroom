@@ -378,10 +378,16 @@ Invariants, each with a test:
    - The Redis user reaches keys and channels under the environment's prefix only, and none of the commands that
      flush, watch or list the whole server or reset its scripts: for example `reset on #<sha256> ~shop:qa12:*
      &shop:qa12:* +@all -@dangerous -scan -randomkey -client|tracking -pubsub|channels -pubsub|shardchannels
-     -pubsub|numsub -function -script|flush -script|kill`. It starts with `reset`, because `ACL SETUSER` only adds
-     to a user, so running it again would keep an old password. Users live in an `aclfile` that the gate rewrites
-     with `ACL SAVE`, which also keeps `user default off`. Turning the default user off leaves its open connections
-     signed in, so the rollout closes them (`CLIENT KILL USER default`).
+     -pubsub|numsub -pubsub|shardnumsub -function -script|flush -script|kill`. Redis 8 bundles a query engine and
+     time series whose commands take no key arguments (an index or a label query reaches any prefix), so on a
+     Redis that has them the rule also denies `@search` and `@timeseries`. It starts with `reset`, because
+     `ACL SETUSER` only adds to a user, so running it again would keep an old password. Users live in an `aclfile`
+     that the gate rewrites with `ACL SAVE`, which also keeps `user default off`. The gate refuses to run while
+     the default user is on. Turning it off leaves its open connections signed in, so the rollout closes them
+     (`CLIENT KILL USER default`).
+   - `redis-clear` runs `SCAN` and `UNLINK` inside Redis, one slice of the keyspace per call, so no key name
+     leaves it: a name may hold a newline, and read back line by line it would become two, one of them
+     outside the prefix.
    - Only the gate holds the mail catcher's API login. `mail-read` returns mail for `qa.persona_domain` addresses
      sent with one environment's login, and teardown deletes that environment's mail (`mail-clear`).
    - Before qa-down deletes a site, `user-clean` stops the site user's processes and removes its files outside
