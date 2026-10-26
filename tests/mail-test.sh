@@ -15,7 +15,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 stop_all() {
   local f
   for f in "$TOP"/*/up; do rm -f "$f"; done
-  for f in "$TOP"/*/pid "$TOP"/*/relay.pid "$TOP"/*/squatter.pid; do
+  for f in "$TOP"/*/pid "$TOP"/*/relay.pid "$TOP"/*/squatter.pid "$TOP"/*/v6.pid; do
     if [ -s "$f" ]; then kill "$(cat "$f")" 2>/dev/null || true; fi
   done
   rm -rf "$TOP"
@@ -221,11 +221,24 @@ t_a_login_goes_out_only_while_the_relay_holds_the_port() {
   expect_true "a refused request changed the logins" lacks "$(logins)" "shop_qa_12:"
   expect_true "a refused request restarted Mailpit" [ "$before" = "$(cat "$T/pid")" ]
   stop_pid_file "$T/squatter.pid"
+  # One on every address would get apps' mail as well.
+  squat 0.0.0.0
+  gate "mail-user-add 12"
+  expect_rc 1; expect_err_has "something listens on every address at port $SMTP_PORT"
+  stop_pid_file "$T/squatter.pid"
   stop_pid_file "$T/relay.pid"
-  # A listener at another address of the loopback never sees what apps send to 127.0.0.1.
+  # A listener at another address of the loopback, or a v6only one at ::, never sees what apps send to
+  # 127.0.0.1, and blocks nothing.
   squat 127.0.0.2
   relay_up
+  # (Where the box has no IPv6, the v6only listener cannot start, and the request passes all the same.)
+  python3 -I -c 'import socket, sys, time
+s = socket.socket(socket.AF_INET6); s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+s.bind(("::", int(sys.argv[1]))); s.listen(1); print("up", flush=True); time.sleep(600)' "$SMTP_PORT" >"$T/v6.out" 2>/dev/null &
+  echo $! >"$T/v6.pid"
+  sleep 0.5
   gate "mail-user-add 12"; expect_rc 0; expect_out_has "MAIL_USERNAME=shop_qa_12"
+  stop_pid_file "$T/v6.pid"
   mailpit_down
 }
 

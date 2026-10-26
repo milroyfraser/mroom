@@ -124,7 +124,7 @@ PY
 
 t_the_relay_takes_systemds_socket_and_bounds_each_connection() {
   run python3 -I - "$ROOT/lib/mail-relay" "$T/smtp.sock" <<'PY'
-import errno, os, socket, subprocess, sys, threading, time
+import os, socket, struct, subprocess, sys, threading, time
 
 relay_path, sock_path = sys.argv[1], sys.argv[2]
 mode = {"close": False}
@@ -178,18 +178,6 @@ def greeting(port, timeout=5):
         return c.recv(100)
 
 
-def taken(port):
-    s = socket.socket()
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        s.bind(("127.0.0.1", port))
-        return False
-    except OSError as e:
-        return e.errno == errno.EADDRINUSE
-    finally:
-        s.close()
-
-
 def wait_closed(conn, seconds):
     conn.settimeout(seconds)
     try:
@@ -204,11 +192,10 @@ listener = socket.create_server(("127.0.0.1", port))
 relay = handed_over(listener, port)
 time.sleep(0.5)
 print("systemd's socket:", "ok" if greeting(port) == b"220 hello\r\n" else "wrong")
-# The relay restarts while systemd holds the port: no one else can take it, and a connection that comes
-# meanwhile waits and is served by the next relay.
+# The relay restarts while its socket stays open where systemd holds it (here, this test): a connection
+# that comes meanwhile waits, and the next relay serves it.
 relay.terminate()
 relay.wait(10)
-print("held while the relay is down:", "ok" if taken(port) else "free")
 waiting = socket.create_connection(("127.0.0.1", port), timeout=5)
 relay = handed_over(listener, port)
 print("served by the next relay:", "ok" if waiting.recv(100) == b"220 hello\r\n" else "wrong")
@@ -254,12 +241,35 @@ long.recv(100)
 print("closed after its time:", "ok" if wait_closed(long, 6) else "still open")
 relay.terminate()
 relay.wait(10)
+
+# A client that resets after the greeting frees its place at once, not when Mailpit would notice, minutes
+# later; and one user (here, this test's) gets at most its share.
+relay = handed_over(listener, port, {"MAIL_RELAY_MAX_CONNECTIONS": "1"})
+time.sleep(0.5)
+reset = socket.create_connection(("127.0.0.1", port), timeout=5)
+reset.recv(100)
+reset.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+reset.close()
+time.sleep(0.5)
+print("a reset frees its place:", "ok" if greeting(port) == b"220 hello\r\n" else "still held")
+relay.terminate()
+relay.wait(10)
+relay = handed_over(listener, port, {"MAIL_RELAY_MAX_PER_USER": "1"})
+time.sleep(0.5)
+first = socket.create_connection(("127.0.0.1", port), timeout=5)
+first.recv(100)
+second = socket.create_connection(("127.0.0.1", port), timeout=5)
+print("one user's share:", "ok" if wait_closed(second, 3) else "served")
+second.close()
+first.close()
+relay.terminate()
+relay.wait(10)
 PY
   expect_rc 0
   local check
-  for check in "systemd's socket" "held while the relay is down" "served by the next relay" \
-    "a socket on another port" "a taken port" "a third at once is closed" "ended with Mailpit's side" \
-    "closed after its time"; do
+  for check in "systemd's socket" "served by the next relay" "a socket on another port" "a taken port" \
+    "a third at once is closed" "ended with Mailpit's side" "closed after its time" "a reset frees its place" \
+    "one user's share"; do
     expect_out_has "$check: ok"
   done
 }

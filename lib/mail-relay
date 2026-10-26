@@ -10,9 +10,10 @@ apps send, so systemd holds this one: mroom-mail-relay.socket listens on it from
 it to the relay, which runs as the box user. The port stays held while the relay restarts. Started without
 a socket from systemd, as in tests, the relay listens itself, and stops if the port is taken.
 
-A connection ends when Mailpit's side does, after QUIT or when Mailpit drops an idle client, and lasts at
-most MAIL_RELAY_MAX_SECONDS (1800). At most MAIL_RELAY_MAX_CONNECTIONS (256) run at once; the next is closed
-at once.
+A connection ends when Mailpit's side does, after QUIT or when Mailpit drops an idle client, or when the
+client's side fails, and lasts at most MAIL_RELAY_MAX_SECONDS (1800). At most MAIL_RELAY_MAX_CONNECTIONS
+(256) run at once, and at most MAIL_RELAY_MAX_PER_USER (32) from one Linux user, the owner of the client's
+socket, so one QA site cannot take every place; the next is closed at once.
 
 mroom baseline mailpit copies this file beside the services and writes the systemd units that run it.
 """
@@ -32,19 +33,22 @@ def setting(name: str, default: int) -> int:
 
 
 MAX_CONNECTIONS = setting("MAIL_RELAY_MAX_CONNECTIONS", 256)
+MAX_PER_USER = setting("MAIL_RELAY_MAX_PER_USER", 32)
 MAX_SECONDS = setting("MAIL_RELAY_MAX_SECONDS", 1800)
 
 
-async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    """Copies one direction until its end, then ends that direction on the other side too."""
+async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
+    """Copies one direction until its end, then ends that direction on the other side too. False when the
+    direction failed instead of ending."""
     try:
         while data := await reader.read(CHUNK):
             writer.write(data)
             await writer.drain()
         if writer.can_write_eof():
             writer.write_eof()
+        return True
     except OSError:
-        pass
+        return False
 
 
 async def session(socket_path: str, client_reader: asyncio.StreamReader,
@@ -52,30 +56,63 @@ async def session(socket_path: str, client_reader: asyncio.StreamReader,
     mailpit_reader, mailpit_writer = await asyncio.wait_for(
         asyncio.open_unix_connection(socket_path), CONNECT_SECONDS)
     to_mailpit = asyncio.ensure_future(pipe(client_reader, mailpit_writer))
+    to_client = asyncio.ensure_future(pipe(mailpit_reader, client_writer))
     try:
-        # The session is over when Mailpit's side ends, whatever the client still holds open.
-        await pipe(mailpit_reader, client_writer)
+        # The session is over when Mailpit's side ends, whatever the client still holds open, or when the
+        # client's side fails (a reset), which Mailpit would otherwise wait minutes to notice.
+        done, _ = await asyncio.wait({to_mailpit, to_client}, return_when=asyncio.FIRST_COMPLETED)
+        if to_client not in done and to_mailpit.result():
+            await to_client
     finally:
         to_mailpit.cancel()
+        to_client.cancel()
         mailpit_writer.close()
+
+
+def tcp_hex(address: tuple) -> str:
+    """An IPv4 address and port as /proc/net/tcp writes them."""
+    packed = int.from_bytes(socket.inet_aton(address[0]), sys.byteorder)
+    return f"{packed:08X}:{address[1]:04X}"
+
+
+def peer_user(writer: asyncio.StreamWriter):
+    """The owner of the client's socket, from /proc/net/tcp: the user its app runs as. None when unknown."""
+    peer, local = writer.get_extra_info("peername"), writer.get_extra_info("sockname")
+    try:
+        want = (tcp_hex(peer), tcp_hex(local))
+        with open("/proc/net/tcp", encoding="ascii") as table:
+            next(table)
+            for line in table:
+                fields = line.split()
+                if (fields[1], fields[2]) == want:
+                    return int(fields[7])
+    except (OSError, ValueError, TypeError, IndexError, StopIteration):
+        pass
+    return None
 
 
 class Relay:
     def __init__(self, socket_path: str) -> None:
         self.socket_path = socket_path
         self.open = 0
+        self.by_user: dict = {}
 
     async def handle(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> None:
-        if self.open >= MAX_CONNECTIONS:
+        user = peer_user(client_writer)
+        if self.open >= MAX_CONNECTIONS or self.by_user.get(user, 0) >= MAX_PER_USER:
             client_writer.close()
             return
         self.open += 1
+        self.by_user[user] = self.by_user.get(user, 0) + 1
         try:
             await asyncio.wait_for(session(self.socket_path, client_reader, client_writer), MAX_SECONDS)
         except (OSError, asyncio.TimeoutError):
             pass
         finally:
             self.open -= 1
+            self.by_user[user] -= 1
+            if not self.by_user[user]:
+                del self.by_user[user]
             client_writer.close()
 
 

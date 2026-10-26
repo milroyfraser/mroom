@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317,SC2016  # t_* run through test_case; a $ in single quotes is for eval, later
 # The gate's mail operations against the real Mailpit, run the way a box runs it: what a fake cannot show.
-# mroom baseline mailpit downloads the pinned build and checks its SHA-256, and the three systemd units it
-# writes are installed with the very command it prints. The test then checks:
+# mroom baseline mailpit downloads the pinned build and checks its SHA-256, and the three systemd units are
+# installed by running, as root, the very script it prints, from a home under /home as on a box (the units
+# hide /home and /tmp from Mailpit, but for its own files). The test then checks:
 # - systemd holds the SMTP port as root and hands it to mroom's mail relay;
 # - each environment sends with its own login through it, and mail with no login, a wrong one or a forged
 #   tag gets nowhere;
@@ -10,19 +11,27 @@
 # - a burst of new logins restarts Mailpit as often as it needs;
 # - while the relay restarts, or is stopped, nothing else can take the port;
 # - a removed login stops working.
-# CI only: it downloads Mailpit and installs systemd units with sudo, so tests/run.sh does not pick it up.
+# CI only: it downloads Mailpit and installs systemd units as root, replacing a box's own, so it refuses to
+# run anywhere but GitHub Actions, and tests/run.sh does not pick it up.
 set -euo pipefail
+if [ "${GITHUB_ACTIONS:-}" != true ]; then
+  echo "tests/mail/gate-real-test.sh: CI only; it would replace this machine's mroom systemd units" >&2
+  exit 2
+fi
 SUITE=mail-real
 # shellcheck source=tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
 UNITS=(mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service)
+CI_HOME=""
 cleanup() {
   local f
-  for f in "$TOP"/*/squatter.pid; do if [ -s "$f" ]; then kill "$(cat "$f")" 2>/dev/null || true; fi; done
+  for f in "$TOP"/*/squatter.pid "$TOP"/*/v6.pid; do if [ -s "$f" ]; then kill "$(cat "$f")" 2>/dev/null || true; fi; done
+  sudo pkill -f mroom-ci-root-listener 2>/dev/null || true
   sudo systemctl disable --now "${UNITS[@]}" >/dev/null 2>&1 || true
   for f in "${UNITS[@]}"; do sudo rm -f "/etc/systemd/system/$f"; done
   sudo systemctl daemon-reload || true
+  [ -z "$CI_HOME" ] || rm -rf "$CI_HOME"
   rm -rf "$TOP"
 }
 trap cleanup EXIT
@@ -90,6 +99,9 @@ PY
 }
 squat_result() { wait "$(cat "$T/squatter.pid")" || true; rm -f "$T/squatter.pid"; cat "$T/squatter.log"; }
 
+# root_script_of <output>: the script baseline printed for a person to run as root.
+root_script_of() { sed -n '/^----- run as root -----$/,/^----- end -----$/p' <<<"$1" | sed '1d;$d'; }
+
 wait_ready() {
   for _ in $(seq 1 80); do
     if active mroom-mailpit.service && [ "$(port_owner)" = 0 ] \
@@ -105,21 +117,23 @@ wait_ready() {
 }
 
 t_the_mail_operations_against_the_real_mailpit() {
+  CI_HOME="$(mktemp -d "/home/$(id -un)/mroom-ci.XXXXXX")"
+  export HOME="$CI_HOME"
   mkdir -p "$HOME/.config/mroom"
   printf 'MROOM_APP_NAME=shop\n' >"$HOME/.config/mroom/box.env"
-  run env MROOM_SYSTEMD_DIR=/etc/systemd/system "$MROOM" baseline mailpit
+  run "$MROOM" baseline mailpit
   expect_rc 0; expect_out_has "mailpit v1.32.0: installed, SHA-256"
-  # Install the units exactly as baseline tells a person to.
-  local install
-  install="$(sed -n 's/^  \(cd .* && sudo install .*\)$/\1/p' <<<"$out")"
-  expect_true "baseline printed no install command" [ -n "$install" ]
-  bash -c "$install"
+  # Install the units exactly as baseline tells a person to: its script, run as root.
+  local script
+  script="$(root_script_of "$out")"
+  expect_true "baseline printed no script to run as root" [ -n "$script" ]
+  sudo bash -c "$script"
   wait_ready
   local run_dir="$HOME/.local/share/mroom-services/mailpit/run" pw12 pw13 pw25 n pids=() relay_pid started
   run port_owner; expect_out 0
-  run env MROOM_SYSTEMD_DIR=/etc/systemd/system "$MROOM" baseline mailpit
-  expect_out_has "systemd units: installed, and as this mroom writes them."
-  expect_out_has "systemd holds 127.0.0.1:1025."
+  run "$MROOM" baseline mailpit
+  expect_out_has "systemd units: installed as this mroom writes them (mroom-mail-relay.socket active, mroom-mail-relay.service active, mroom-mailpit.service active)."
+  expect_out_has "systemd holds 127.0.0.1:1025 (mroom-mail-relay.socket)."
   # The API is on a Unix socket only, in a folder only the box user can open, and needs the gate's login.
   run stat -c %a "$run_dir"; expect_out 700
   run stat -c %a "$run_dir/http.sock"; expect_out 600
@@ -187,15 +201,49 @@ t_the_mail_operations_against_the_real_mailpit() {
   expect_true "the relay is not running again" active mroom-mail-relay.service
   run squat_result; expect_out "taken 0"
 
-  # A relay that changed: baseline restarts it, and systemd holds the port meanwhile.
+  # A relay that changed: baseline restarts it, and systemd holds the port meanwhile, squatter or not.
   relay_pid="$(main_pid mroom-mail-relay.service)"
   printf '# changed\n' >>"$HOME/.local/share/mroom-services/mail-relay/mail-relay"
-  run env MROOM_SYSTEMD_DIR=/etc/systemd/system "$MROOM" baseline mailpit
+  squat 6
+  run "$MROOM" baseline mailpit
   expect_out_has "mail relay: restarted to run this one; systemd held the port meanwhile"
   sleep 2
   expect_true "baseline did not restart the relay" [ "$(main_pid mroom-mail-relay.service)" != "$relay_pid" ]
+  run squat_result; expect_out "taken 0"
   run port_owner; expect_out 0
   expect_true "the restarted relay does not pass mail" can_send shop_qa_25 "$pw25" ada@example.test after-update
+  # Mailpit's copy of the API login gone: baseline writes it again from the same password and restarts
+  # Mailpit to read it; the gate reads mail as before.
+  local mailpit_pid
+  mailpit_pid="$(main_pid mroom-mailpit.service)"
+  rm "$HOME/.config/mroom/secrets/mailpit-ui.passwd"
+  run "$MROOM" baseline mailpit
+  expect_out_has "Mailpit: restarted to run its build and read its API login"
+  wait_ready
+  expect_true "baseline did not restart Mailpit" [ "$(main_pid mroom-mailpit.service)" != "$mailpit_pid" ]
+  gate "mail-read 25 ada@example.test"; expect_rc 0
+  # A v6only listener at :: beside systemd's socket never sees apps' mail, and blocks nothing.
+  python3 -I -c 'import socket, sys, time
+s = socket.socket(socket.AF_INET6); s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+s.bind(("::", 1025)); s.listen(1); time.sleep(60)' >/dev/null 2>&1 &
+  echo $! >"$T/v6.pid"
+  sleep 0.5
+  gate "mail-user-add 26"; expect_rc 0
+  kill "$(cat "$T/v6.pid")" 2>/dev/null || true
+  # A root process on the port that is not systemd's socket for the relay: no login goes out.
+  sudo systemctl stop mroom-mail-relay.socket mroom-mail-relay.service
+  sudo python3 -I -c 'import socket, sys, time
+s = socket.create_server(("127.0.0.1", 1025)); time.sleep(60)' mroom-ci-root-listener >/dev/null 2>&1 &
+  for n in $(seq 1 50); do [ "$(port_owner)" = 0 ] && break; sleep 0.1; done
+  gate "mail-user-add 27"
+  expect_rc 1; expect_err_has "a root process other than mroom-mail-relay.socket listens on port 1025"
+  expect_true "a password went out" eval '! grep -q MAIL_PASSWORD <<<"$out"'
+  run "$MROOM" baseline mailpit
+  expect_out_has "Something else listens on 127.0.0.1:1025 (user 0)"
+  sudo pkill -f mroom-ci-root-listener || true
+  sleep 0.5
+  sudo systemctl start mroom-mail-relay.socket mroom-mail-relay.service
+  wait_ready
 
   # The same squatter takes the port as soon as nothing holds it, which is what systemd prevents.
   sudo systemctl stop mroom-mail-relay.socket mroom-mail-relay.service
