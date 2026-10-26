@@ -24,7 +24,18 @@ trap cleanup EXIT
 gate() { run env SSH_ORIGINAL_COMMAND="$1" "$MROOM" gate provision; }
 field() { sed -n "s/^$1=//p" <<<"$2"; }
 ctl() { supervisorctl -c "$T/supervisord.conf" "$@" 2>&1 || true; }
-running() { case "$(ctl status "$1")" in *RUNNING*) return 0 ;; esac; return 1; }
+is_running() { case "$(ctl status "$1")" in *RUNNING*) return 0 ;; esac; return 1; }
+# running <program>: whether supervisord runs the program, once it has stayed up past Start Seconds; until
+# then supervisord calls it STARTING.
+running() { local _; for _ in $(seq 1 20); do if is_running "$1"; then return 0; fi; sleep 0.25; done; return 1; }
+# quick_stops: how many times Mailpit stopped before Forge's daemon counted its start a success, each of which
+# brings the daemon a step closer to giving up.
+quick_stops() {
+  local spawned succeeded
+  spawned="$(grep -c "spawned: 'mailpit'" "$T/supervisord.log")" || true
+  succeeded="$(grep -c 'success: mailpit entered RUNNING' "$T/supervisord.log")" || true
+  echo $((spawned - succeeded))
+}
 
 # send <user|-> <password> <to> <subject> [<X-Tags>]: one mail through the relay; fails when it is refused.
 send() {
@@ -92,7 +103,7 @@ EOF
   done
   supervisord -c "$T/supervisord.conf"
   for _ in $(seq 1 60); do
-    if running mail-relay && running mailpit \
+    if is_running mail-relay && is_running mailpit \
       && curl -q --silent --fail --max-time 2 --output /dev/null \
         --unix-socket "$HOME/.local/share/mroom-services/mailpit/run/http.sock" http://localhost/livez; then
       return 0
@@ -195,6 +206,7 @@ t_the_mail_operations_against_the_real_mailpit() {
   done
   expect_true "Forge's daemon gave up on Mailpit" running mailpit
   run grep -c 'gave up' "$T/supervisord.log"; expect_out 0
+  run quick_stops; expect_out 0
   run ctl pid mail-relay; expect_out "$relay_pid"
   run squat_result; expect_out "taken 0"
   # The same squatter takes the port as soon as nothing holds it, which is what the relay prevents.
@@ -213,6 +225,7 @@ t_the_mail_operations_against_the_real_mailpit() {
   expect_true "an old password still worked" eval '! can_send shop_qa_13 "$pw13" ada@example.test old13'
   expect_true "the new password does not work" can_send shop_qa_13 "$(field MAIL_PASSWORD "$out")" ada@example.test new13
   expect_true "Forge's daemon gave up on Mailpit" running mailpit
+  run quick_stops; expect_out 0
 }
 
 test_case real-mailpit t_the_mail_operations_against_the_real_mailpit
