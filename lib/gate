@@ -1,0 +1,425 @@
+#!/usr/bin/env bash
+# gate — the one way CI reaches the box (design 8.2). sshd runs `mroom gate <role>` instead of whatever
+# the client asked for, through a line in the box user's ~/.ssh/authorized_keys:
+#
+#   restrict,command="/home/forge/.local/bin/mroom gate provision" ssh-ed25519 AAAA… mroom-qa-up
+#
+# The request comes from SSH_ORIGINAL_COMMAND: one line of plain words, split without any expansion,
+# checked word by word and never passed to a shell. No CI key gets a shell. A role runs only its own
+# operations:
+#
+#   provision   db-create <N>          a database and a role of its own for QA environment N (D18); prints
+#                                      DB_DATABASE, DB_USERNAME and a new DB_PASSWORD for its .env
+#               db-drop <N>            the environment's database and its role
+#               redis-user-add <N>     a Redis user of its own, limited to its prefix (D15); prints
+#                                      REDIS_USERNAME, a new REDIS_PASSWORD, REDIS_PREFIX, HORIZON_PREFIX
+#               redis-user-remove <N>  the environment's Redis user, and its connections
+#               redis-clear <N>        every key under the environment's prefix, in every database
+#
+# The client sends only the environment's number. The gate builds every name from box.env, which a person
+# sets: the database, role and Redis user are <MROOM_APP_NAME>_qa_<N>, the database is cloned from
+# MROOM_QA_TEMPLATE, and the Redis prefix is <MROOM_APP_NAME>:qa<N>:, so no argument can reach another
+# environment. It connects to Postgres 16 or later as its own role, through the libpq service mroom-gate
+# in ~/.config/mroom/secrets/pg_service.conf, and to Redis 7 or later as its own user, from
+# ~/.config/mroom/secrets/redis-gate.env (both mode 600). Each request and refusal is logged, never a
+# secret, to ~/.local/state/mroom/gate.log and to syslog. It runs from the installed release, never from an
+# app checkout, so a pull request cannot change it.
+#
+# Exit codes: 0 done, 1 failed or refused, 2 not run as a forced command with a role.
+set -euo pipefail
+umask 077
+# sshd passes the client's LANG and LC_* on (AcceptEnv): in some locales a range such as [0-9] matches
+# more than ASCII, so every check below runs in the C locale.
+export LC_ALL=C
+# A test seam only; it must never fix the salt of a real password.
+unset MROOM_SCRAM_SALT
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+MROOM_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+# shellcheck source=lib/core/util.sh
+. "$MROOM_ROOT/lib/core/util.sh"
+
+MAX_LINE=4096
+LOG_MAX_BYTES=1048576
+role="${1:-}"
+
+# printable <text>: the text with anything but printable ASCII removed, so nothing the server or a client
+# says can forge a line of the log.
+printable() { printf '%s' "$1" | tr -cd '[:print:]'; }
+
+gate_log() {
+  local state log
+  state="$(mroom_state_dir 2>/dev/null)" || return 0
+  log="$state/gate.log"
+  if [ -f "$log" ] && [ "$(stat -c %s "$log" 2>/dev/null || echo 0)" -gt "$LOG_MAX_BYTES" ]; then
+    mv -f "$log" "$log.1" 2>/dev/null || true
+  fi
+  printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${role:-none}" "$(printable "$*")" >>"$log" 2>/dev/null || true
+  if command -v logger >/dev/null 2>&1; then logger -t mroom-gate -- "${role:-none} $(printable "$*")" 2>/dev/null || true; fi
+}
+refuse() { gate_log "refused: $*"; echo "mroom gate: refused: $*" >&2; exit 1; }
+fail() { gate_log "failed: $*"; echo "mroom gate: $*" >&2; exit 1; }
+
+case "$role" in
+  provision) ;;
+  -h | --help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; exit 0 ;;
+  *) echo "mroom gate: run it as an SSH forced command: mroom gate provision" >&2; exit 2 ;;
+esac
+
+line="${SSH_ORIGINAL_COMMAND-}"
+[ -n "$line" ] || refuse "empty command"
+((${#line} <= MAX_LINE)) || refuse "command longer than $MAX_LINE characters"
+# One line of plain words: no ; | & $ ( ) ` ' " \ < > * ? spaces in a row, tabs or newlines.
+[[ "$line" =~ ^[A-Za-z0-9_.@+=/:-]+(\ [A-Za-z0-9_.@+=/:-]+)*$ ]] || refuse "characters outside the allowed set"
+# Safe to split: those characters hold nothing to glob, quote or expand, and read -a expands nothing.
+read -r -a words <<<"$line"
+op="${words[0]}"
+
+case "$role:$op" in
+  provision:db-create | provision:db-drop) ;;
+  provision:redis-user-add | provision:redis-user-remove | provision:redis-clear) ;;
+  *) refuse "$role may not run '${op:0:24}'" ;;
+esac
+
+# env_number <word>: the environment's number, 1 to 999999999 with no leading zero.
+env_number() { [[ "$1" =~ ^[1-9][0-9]{0,8}$ ]] || refuse "$op: '${1:0:24}' is not an environment number"; }
+words_are() { [ "${#words[@]}" = "$1" ] || refuse "$op takes $(($1 - 1)) argument(s), got $((${#words[@]} - 1))"; }
+
+load_box || fail "box.env could not be read"
+app="${BOX[MROOM_APP_NAME]:-}"
+[ -n "$app" ] || fail "MROOM_APP_NAME is not set in box.env"
+
+GATE_TMP=""
+# gate_tmp: a private folder for this request's scratch files, removed however the gate ends.
+gate_tmp() {
+  [ -z "$GATE_TMP" ] || return 0
+  GATE_TMP="$(mktemp -d "$(mroom_state_dir)/gate-tmp.XXXXXX")" || fail "cannot make a scratch folder"
+  trap 'rm -rf -- "$GATE_TMP"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+
+PG_SERVICES="$HOME/.config/mroom/secrets/pg_service.conf"
+PG_ERR=""
+
+# pg <database>: runs the SQL on stdin as the gate's role, printing rows unaligned. The SQL never travels
+# on a command line. stderr goes to its own file, so a server NOTICE or WARNING can never be read as a
+# value; pg_error gives its first line. VERBOSITY=verbose puts the SQLSTATE code in that line.
+pg() {
+  PGSERVICEFILE="$PG_SERVICES" PGSERVICE=mroom-gate \
+    psql -X -q -A -t -v ON_ERROR_STOP=1 -v VERBOSITY=verbose -d "$1" 2>"$PG_ERR"
+}
+pg_error() { printable "$(grep -m1 -E '^(ERROR|FATAL|PANIC|psql):' "$PG_ERR" 2>/dev/null || head -n1 "$PG_ERR" 2>/dev/null)"; }
+
+pg_ready() {
+  [ -r "$PG_SERVICES" ] || fail "$(home_short "$PG_SERVICES") is missing; it holds the [mroom-gate] service"
+  secret_file_ok "$PG_SERVICES" || fail "$(home_short "$PG_SERVICES") must be yours and mode 600"
+  need psql python3 flock
+  gate_tmp
+  PG_ERR="$GATE_TMP/psql.err"
+  local ok
+  ok="$(pg postgres <<<"SELECT current_setting('server_version_num')::int >= 160000;")" \
+    || fail "cannot reach Postgres as the gate's role: $(pg_error)"
+  # Before 16 a role that may create roles may also grant itself any role, the administrator ones too.
+  [ "$ok" = t ] || fail "Postgres must be 16 or later (D18)"
+}
+
+# env_lock <name>: one request at a time per environment; a second one waits, then gives up.
+env_lock() {
+  exec 9>"$(mroom_state_dir)/gate-$1.lock"
+  flock -w "${MROOM_GATE_LOCK_WAIT:-900}" 9 || fail "another request for $1 is still running"
+}
+
+# new_password: 48 hex characters from the kernel's random source.
+new_password() { od -An -N24 -tx1 /dev/urandom | tr -d ' \n'; }
+
+cmd_db_create() {
+  words_are 2
+  env_number "${words[1]}"
+  local template="${BOX[MROOM_QA_TEMPLATE]:-}" db="${app}_qa_${words[1]}" objects="${app}_qa_objects"
+  local group="${app}_qa_envs" password verifier owned role_exists db_exists attempt
+  [ -n "$template" ] || fail "MROOM_QA_TEMPLATE is not set in box.env"
+  pg_ready
+  env_lock "$db"
+
+  # REASSIGN OWNED also moves databases and tablespaces: one owned by the objects role would go to the
+  # environment, so its PR's code could drop it. Refuse before anything is made.
+  owned="$(pg postgres <<SQL
+SELECT count(*) FROM (
+  SELECT 1 FROM pg_database WHERE datdba = '$objects'::regrole
+  UNION ALL SELECT 1 FROM pg_tablespace WHERE spcowner = '$objects'::regrole) owned;
+SQL
+)" || fail "db-create ${words[1]}: $(pg_error)"
+  [ "$owned" = 0 ] || fail "$objects owns a database or tablespace, which REASSIGN OWNED would hand to the environment; give it to the gate's role (D18)"
+
+  password="$(new_password)"
+  [ "${#password}" = 48 ] || fail "could not read random bytes for the password"
+  verifier="$(printf '%s' "$password" | python3 "$MROOM_ROOT/lib/core/scram.py")" || fail "could not make the password verifier"
+
+  # The role, with a new password each time (the client writes it into the environment's .env), always
+  # in the group pg_hba.conf matches and with its limits, even when it was made or changed elsewhere. The
+  # gate becomes a member, so it may give the role the database it creates.
+  role_exists="$(pg postgres <<<"SELECT count(*) FROM pg_roles WHERE rolname = '$db';")" \
+    || fail "db-create ${words[1]}: $(pg_error)"
+  if [ "$role_exists" = 1 ]; then
+    pg postgres >/dev/null <<SQL || fail "db-create ${words[1]}: the role: $(pg_error)"
+ALTER ROLE "$db" LOGIN NOINHERIT CONNECTION LIMIT 30 PASSWORD '$verifier';
+GRANT "$group" TO "$db";
+GRANT "$db" TO CURRENT_USER;
+SQL
+  else
+    pg postgres >/dev/null <<SQL || fail "db-create ${words[1]}: the role: $(pg_error)"
+CREATE ROLE "$db" LOGIN NOINHERIT CONNECTION LIMIT 30 IN ROLE "$group" PASSWORD '$verifier';
+GRANT "$db" TO CURRENT_USER;
+SQL
+  fi
+
+  db_exists="$(pg postgres <<<"SELECT count(*) FROM pg_database WHERE datname = '$db';")" \
+    || fail "db-create ${words[1]}: $(pg_error)"
+  if [ "$db_exists" = 1 ]; then
+    # The PR's code owns this database and may have changed its settings, so the gate never connects to
+    # it again: database privileges live in the cluster's catalog and are revoked from postgres.
+    pg postgres >/dev/null <<<"REVOKE CONNECT, TEMPORARY ON DATABASE \"$db\" FROM PUBLIC;" \
+      || fail "db-create ${words[1]}: $(pg_error)"
+    echo "database $db: exists"
+  else
+    # CREATE DATABASE … TEMPLATE fails (SQLSTATE 55006) while a session is connected to the template:
+    # wait and try again.
+    for attempt in 1 2 3 4 5 6; do
+      if pg postgres >/dev/null <<<"CREATE DATABASE \"$db\" TEMPLATE \"$template\" OWNER \"$db\";"; then
+        break
+      fi
+      grep -q -E '^ERROR: +55006:' "$PG_ERR" || fail "db-create ${words[1]}: $(pg_error)"
+      [ "$attempt" = 6 ] && fail "db-create ${words[1]}: $template stayed in use; try again later"
+      echo "template $template is in use, trying again ($attempt)" >&2
+      sleep "${MROOM_GATE_RETRY_SLEEP:-20}"
+    done
+    # A new database gives PUBLIC CONNECT again: take it back first. Then hand over the template's
+    # objects, whose owner owns nothing else. The database is new, so no PR code has touched it yet; if
+    # the hand-over fails, the database goes again, so a later request starts clean.
+    pg postgres >/dev/null <<<"REVOKE CONNECT, TEMPORARY ON DATABASE \"$db\" FROM PUBLIC;" \
+      || fail "db-create ${words[1]}: $(pg_error)"
+    if ! pg "$db" >/dev/null <<<"REASSIGN OWNED BY \"$objects\" TO \"$db\";"; then
+      local why
+      why="$(pg_error)"
+      pg postgres >/dev/null <<<"DROP DATABASE IF EXISTS \"$db\" WITH (FORCE);" || true
+      fail "db-create ${words[1]}: handing the template's objects over failed, so the database is gone again: $why"
+    fi
+    echo "database $db: created"
+  fi
+
+  gate_log "db-create ${words[1]}: $db ready"
+  printf 'DB_DATABASE=%s\nDB_USERNAME=%s\nDB_PASSWORD=%s\n' "$db" "$db" "$password"
+}
+
+cmd_db_drop() {
+  words_are 2
+  env_number "${words[1]}"
+  local db="${app}_qa_${words[1]}" db_exists
+  pg_ready
+  env_lock "$db"
+  db_exists="$(pg postgres <<<"SELECT count(*) FROM pg_database WHERE datname = '$db';")" \
+    || fail "db-drop ${words[1]}: $(pg_error)"
+  if [ "$db_exists" = 1 ]; then
+    # The owner, the PR's own role, may have marked it a template, which DROP DATABASE refuses.
+    pg postgres >/dev/null <<SQL || fail "db-drop ${words[1]}: $(pg_error)"
+ALTER DATABASE "$db" IS_TEMPLATE false;
+DROP DATABASE "$db" WITH (FORCE);
+SQL
+  fi
+  # A grant the role was given in another environment's database stops DROP ROLE. Then it can at least
+  # never sign in again.
+  if ! pg postgres >/dev/null <<<"DROP ROLE IF EXISTS \"$db\";"; then
+    local why
+    why="$(pg_error)"
+    pg postgres >/dev/null <<<"ALTER ROLE \"$db\" NOLOGIN PASSWORD NULL;" \
+      || fail "db-drop ${words[1]}: the role could neither be dropped nor locked: $why"
+    gate_log "db-drop ${words[1]}: $db dropped; its role is locked, not dropped: $why"
+    echo "database $db: dropped; role $db locked, since it could not be dropped: $why"
+    return 0
+  fi
+  gate_log "db-drop ${words[1]}: $db dropped"
+  echo "database $db: dropped"
+}
+
+REDIS_SECRETS="$HOME/.config/mroom/secrets/redis-gate.env"
+REDIS_USER="" REDIS_PASS="" REDIS_HOST="" REDIS_PORT="" REDIS_ERR=""
+
+# redis_secret <KEY>: one value from redis-gate.env; the one reader of that file.
+redis_secret() { sed -n "s/^$1=//p" "$REDIS_SECRETS" | head -n1 | tr -d '\r'; }
+
+# rcli <args...>: redis-cli as the gate's own user. The password travels in REDISCLI_AUTH, never on a
+# command line, and -e makes an error reply fail the call. stderr goes to its own file, as psql's does, so
+# only the reply is ever read as a value.
+rcli() {
+  REDISCLI_AUTH="$REDIS_PASS" redis-cli --no-auth-warning -e -h "$REDIS_HOST" -p "$REDIS_PORT" \
+    --user "$REDIS_USER" "$@" 2>"$REDIS_ERR"
+}
+# redis_error [<reply>]: what went wrong, on one line: redis-cli's stderr, or the error reply an older
+# redis-cli prints where the reply would be.
+redis_error() {
+  local e
+  e="$(grep -m1 . "$REDIS_ERR" 2>/dev/null)" || e="$(grep -m1 . <<<"${1-}")" || e="an unexpected reply"
+  printable "$e"
+}
+# config_get <name>: one Redis setting. CONFIG GET replies with the name, then the value.
+config_get() {
+  local reply
+  reply="$(rcli CONFIG GET "$1")" || return 1
+  reply="$(tr -d '\r' <<<"$reply")"
+  [ "$(sed -n 1p <<<"$reply")" = "$1" ] || return 1
+  sed -n 2p <<<"$reply"
+}
+
+redis_ready() {
+  [ -r "$REDIS_SECRETS" ] || fail "$(home_short "$REDIS_SECRETS") is missing; it holds REDIS_GATE_USER and REDIS_GATE_PASSWORD"
+  secret_file_ok "$REDIS_SECRETS" || fail "$(home_short "$REDIS_SECRETS") must be yours and mode 600"
+  need redis-cli flock sha256sum
+  gate_tmp
+  REDIS_ERR="$GATE_TMP/redis.err"
+  REDIS_USER="$(redis_secret REDIS_GATE_USER)"
+  REDIS_PASS="$(redis_secret REDIS_GATE_PASSWORD)"
+  REDIS_HOST="$(redis_secret REDIS_GATE_HOST)"
+  REDIS_PORT="$(redis_secret REDIS_GATE_PORT)"
+  REDIS_HOST="${REDIS_HOST:-127.0.0.1}" REDIS_PORT="${REDIS_PORT:-6379}"
+  if [ -z "$REDIS_USER" ] || [ -z "$REDIS_PASS" ]; then
+    fail "$(home_short "$REDIS_SECRETS") must set REDIS_GATE_USER and REDIS_GATE_PASSWORD"
+  fi
+  [[ "$REDIS_USER" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "REDIS_GATE_USER is not a plain user name"
+  # redis-user-add would reset such a user to one environment's prefix, locking the gate out.
+  if [[ "$REDIS_USER" =~ ^${app}_qa_[0-9]+$ ]]; then fail "REDIS_GATE_USER is named like an environment's user"; fi
+  [[ "$REDIS_HOST" =~ ^[A-Za-z0-9.:-]+$ ]] || fail "REDIS_GATE_HOST is not a plain host"
+  [[ "$REDIS_PORT" =~ ^[0-9]{1,5}$ ]] || fail "REDIS_GATE_PORT is not a port"
+  local info major aclfile users
+  info="$(rcli INFO server)" || fail "cannot reach Redis as the gate's user: $(redis_error "$info")"
+  major="$(tr -d '\r' <<<"$info" | sed -n 's/^redis_version:\([0-9][0-9]*\).*/\1/p')"
+  if ! [[ "$major" =~ ^[0-9]+$ ]] || ((major < 7)); then fail "Redis must be 7 or later (D15)"; fi
+  aclfile="$(config_get aclfile)" || fail "cannot read Redis's aclfile setting: $(redis_error)"
+  [ -n "$aclfile" ] || fail "Redis has no aclfile, so the users it is given would vanish on a restart (D15)"
+  # While the default user is on, any process on the box signs in as it and reaches every key, so an
+  # environment's own user would keep nothing apart.
+  users="$(rcli ACL LIST)" || fail "cannot list Redis's users: $(redis_error "$users")"
+  if tr -d '\r' <<<"$users" | grep -q -E '^user default on( |$)'; then
+    fail "Redis's default user is on, so every process on the box reaches every key; turn it off first (D15)"
+  fi
+}
+
+# What an environment's user is given: Redis's own data types and the functions an app needs, never @all.
+# A module's commands carry only its own categories (and @read, @write and the like), so none is in these,
+# and a module command cannot be trusted to name its keys: JSON.MGET declares only its first key and reads
+# the rest, FT.SEARCH and TS.MRANGE take none. A server command added later stays out unless it joins one.
+GRANTED=(keyspace string hash list set sortedset stream bitmap hyperloglog geo pubsub scripting transaction connection)
+# Taken back from those: the commands that flush, watch, list, count or debug the whole server, or reset its
+# scripts (design 8.9). @dangerous holds KEYS, FLUSHALL, SORT, CLIENT LIST, MONITOR and the like.
+WITHHELD=(-@dangerous -scan -randomkey -dbsize '-client|tracking' '-pubsub|channels' '-pubsub|shardchannels'
+  '-pubsub|numsub' '-pubsub|shardnumsub' '-pubsub|numpat' -function '-script|flush' '-script|kill' '-script|debug')
+
+# granted_module_commands: the commands of loaded modules that GRANTED would give an environment, one per
+# line. There must be none.
+granted_module_commands() {
+  local modules m c reply mods="" granted=""
+  modules="$(rcli MODULE LIST)" || return 1
+  while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    reply="$(rcli COMMAND LIST FILTERBY MODULE "$m")" || return 1
+    mods+="$(tr -d '\r' <<<"$reply")"$'\n'
+  done < <(tr -d '\r' <<<"$modules" | awk 'prev == "name" { print } { prev = $0 }')
+  [ -n "${mods//[[:space:]]/}" ] || return 0
+  for c in "${GRANTED[@]}"; do
+    reply="$(rcli COMMAND LIST FILTERBY ACLCAT "$c")" || return 1
+    granted+="$(tr -d '\r' <<<"$reply")"$'\n'
+  done
+  grep -x -F -f <(grep . <<<"$mods") <<<"$granted" | sort -u || true
+}
+
+cmd_redis_user_add() {
+  words_are 2
+  env_number "${words[1]}"
+  local user="${app}_qa_${words[1]}" prefix="${app}:qa${words[1]}:" password hash leaks out
+  redis_ready
+  env_lock "redis-$user"
+  leaks="$(granted_module_commands)" \
+    || fail "redis-user-add ${words[1]}: cannot list Redis's modules and their commands: $(redis_error)"
+  if [ -n "$leaks" ]; then
+    fail "redis-user-add ${words[1]}: a module puts commands in a category environments are given, so its key checks would decide what they reach: $(tr '\n' ' ' <<<"$leaks" | cut -c1-160)"
+  fi
+  # Save first, so a Redis that cannot save its users is refused before a password changes.
+  out="$(rcli ACL SAVE)" \
+    || fail "redis-user-add ${words[1]}: Redis cannot save its users, so nothing was changed: $(redis_error "$out")"
+  password="$(new_password)"
+  [ "${#password}" = 48 ] || fail "could not read random bytes for the password"
+  # Redis stores and compares only this hash, so only the hash leaves the gate.
+  hash="$(printf '%s' "$password" | sha256sum | cut -d' ' -f1)"
+  # reset first: ACL SETUSER only adds to a user, so running it again would keep the old password.
+  out="$(rcli ACL SETUSER "$user" reset on "#$hash" "~$prefix*" "&$prefix*" "${GRANTED[@]/#/+@}" "${WITHHELD[@]}")" \
+    || fail "redis-user-add ${words[1]}: $(redis_error "$out")"
+  # A connection signed in with the old password stays signed in: close them, so the app reconnects.
+  rcli CLIENT KILL USER "$user" >/dev/null || true
+  out="$(rcli ACL SAVE)" \
+    || fail "redis-user-add ${words[1]}: the user changed but was not saved; run redis-user-add again once Redis can save: $(redis_error "$out")"
+  gate_log "redis-user-add ${words[1]}: $user ready"
+  printf 'REDIS_USERNAME=%s\nREDIS_PASSWORD=%s\nREDIS_PREFIX=%s\nHORIZON_PREFIX=%shorizon:\n' \
+    "$user" "$password" "$prefix" "$prefix"
+}
+
+cmd_redis_user_remove() {
+  words_are 2
+  env_number "${words[1]}"
+  local user="${app}_qa_${words[1]}" out
+  redis_ready
+  env_lock "redis-$user"
+  out="$(rcli ACL SAVE)" \
+    || fail "redis-user-remove ${words[1]}: Redis cannot save its users, so nothing was changed: $(redis_error "$out")"
+  # ACL DELUSER also closes the connections signed in as the user.
+  out="$(rcli ACL DELUSER "$user")" || fail "redis-user-remove ${words[1]}: $(redis_error "$out")"
+  out="$(rcli ACL SAVE)" \
+    || fail "redis-user-remove ${words[1]}: the user is gone but was not saved; run redis-user-remove again once Redis can save: $(redis_error "$out")"
+  gate_log "redis-user-remove ${words[1]}: $user removed"
+  echo "redis user $user: removed"
+}
+
+# One step of redis-clear, run inside Redis: SCAN from the cursor in ARGV[1] for keys matching ARGV[2], then
+# UNLINK what it found, 500 at a time. Key names never leave Redis: a name may hold a newline, and read back
+# line by line it would become two names, one of them outside the prefix. Replies with the next cursor and
+# how many keys UNLINK removed (SCAN may return a key twice).
+CLEAR_STEP="local r = redis.call('SCAN', ARGV[1], 'MATCH', ARGV[2], 'COUNT', 1000)
+local keys, n = r[2], 0
+for i = 1, #keys, 500 do n = n + redis.call('UNLINK', unpack(keys, i, math.min(i + 499, #keys))) end
+return {r[1], n}"
+
+cmd_redis_clear() {
+  words_are 2
+  env_number "${words[1]}"
+  local prefix="${app}:qa${words[1]}:" dbs db cursor reply n total=0
+  redis_ready
+  env_lock "redis-${app}_qa_${words[1]}"
+  dbs="$(config_get databases)" || fail "redis-clear ${words[1]}: cannot read Redis's databases setting: $(redis_error)"
+  [[ "$dbs" =~ ^[1-9][0-9]{0,5}$ ]] || fail "redis-clear ${words[1]}: Redis reports '${dbs:0:24}' databases"
+  # Every database: Laravel keeps its cache in a different one from its queues and sessions. Each step
+  # scans a slice of the keyspace, so Redis never stalls the way KEYS would stall it.
+  for ((db = 0; db < dbs; db++)); do
+    cursor=0
+    while :; do
+      reply="$(rcli -n "$db" EVAL "$CLEAR_STEP" 0 "$cursor" "$prefix*")" \
+        || fail "redis-clear ${words[1]}: database $db: $(redis_error "$reply")"
+      reply="$(tr -d '\r' <<<"$reply")"
+      cursor="$(sed -n 1p <<<"$reply")"
+      n="$(sed -n 2p <<<"$reply")"
+      [[ "$cursor" =~ ^[0-9]+$ && "$n" =~ ^[0-9]+$ ]] || fail "redis-clear ${words[1]}: database $db: an unexpected reply"
+      total=$((total + 10#$n))
+      if [ "$cursor" = 0 ]; then break; fi
+    done
+  done
+  gate_log "redis-clear ${words[1]}: $total keys under $prefix"
+  echo "redis $prefix: $total keys deleted"
+}
+
+gate_log "request: ${line:0:200}"
+case "$op" in
+  db-create) cmd_db_create ;;
+  db-drop) cmd_db_drop ;;
+  redis-user-add) cmd_redis_user_add ;;
+  redis-user-remove) cmd_redis_user_remove ;;
+  redis-clear) cmd_redis_clear ;;
+esac

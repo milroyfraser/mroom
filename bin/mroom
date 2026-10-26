@@ -15,6 +15,8 @@
 #                              of memory, box jobs, scheduled workflows) to its log channel
 #   mroom job run <name> [--every <duration>] -- <command...> | mroom job list
 #                              a box job that records how it ended, so the watchdog sees it fail or stop
+#   mroom gate provision       the forced command of the QA runner's SSH key: the only box operations
+#                              CI may run (design 8.2); never run by hand
 #   mroom version [--source]   the installed version (--source: the release or checkout it came from)
 #   mroom help
 #
@@ -49,6 +51,7 @@ case "$cmd" in
     ;;
   watchdog) exec "$ROOT/lib/watchdog" "$@" ;;
   job) exec "$ROOT/lib/job" "$@" ;;
+  gate) exec "$ROOT/lib/gate" "$@" ;;
   status | sessions | resume | restart | doctor | site | update | wt | user | keys | baseline | env | init | guard | default)
     not_yet "$cmd" 1
     ;;

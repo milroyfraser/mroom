@@ -154,6 +154,25 @@ t_watch_mcp() {
   run "$MROOM" config box MROOM_WATCH_MCP; expect_rc 1; expect_err_has "environment: MROOM_WATCH_MCP must be"
 }
 
+t_gate_names_are_plain_postgres_names() {
+  box $'MROOM_APP_NAME=shop\nMROOM_QA_TEMPLATE=shop_qa_template'
+  run "$MROOM" config box MROOM_APP_NAME; expect_rc 0; expect_out "shop"
+  run "$MROOM" config box MROOM_QA_TEMPLATE; expect_rc 0; expect_out "shop_qa_template"
+  local bad
+  for bad in Shop 1shop shop-qa "'shop;drop'" a_name_that_is_longer_than_thirty_two; do
+    box "MROOM_APP_NAME=$bad"
+    run "$MROOM" config box MROOM_APP_NAME; expect_rc 1; expect_err_has "MROOM_APP_NAME must match [a-z][a-z0-9_]{0,31}"
+  done
+  box 'MROOM_QA_TEMPLATE=qa-template'
+  run "$MROOM" config box MROOM_QA_TEMPLATE; expect_rc 1; expect_err_has "MROOM_QA_TEMPLATE must be a plain Postgres name"
+  for bad in pg pg_shop; do
+    box "MROOM_APP_NAME=$bad"
+    run "$MROOM" config box MROOM_APP_NAME; expect_rc 1; expect_err_has "may not be pg or start with pg_"
+  done
+  box 'MROOM_APP_NAME=pgshop'
+  run "$MROOM" config box MROOM_APP_NAME; expect_rc 0; expect_out pgshop
+}
+
 test_case reads-values t_reads_values
 test_case default-path-and-override t_default_path_and_override
 test_case missing-file-or-key t_missing_file_or_key
@@ -168,4 +187,5 @@ test_case values-never-echoed t_values_never_echoed
 test_case duplicate-refused t_duplicate_refused
 test_case unknown-key-asked t_unknown_key_asked
 test_case watch-mcp t_watch_mcp
+test_case gate-names t_gate_names_are_plain_postgres_names
 finish
