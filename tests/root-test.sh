@@ -229,6 +229,13 @@ t_what_root_setup_refuses() {
 EOF
   run env -u MROOM_ROOT_SETUP_TEST "$ROOT/lib/root-setup" --user "$USER_NAME" mailpit
   expect_rc 1; expect_err_has "run this as root, through mroom's root recipe (README, Root steps)"
+  # As root, the test setting is refused: its folders come from the environment.
+  printf '#!/bin/sh
+if [ "$1" = -u ]; then echo 0; else exec /usr/bin/id "$@"; fi
+' >"$T/bin/id"
+  chmod +x "$T/bin/id"
+  rs mailpit
+  expect_rc 1; expect_err_has "MROOM_ROOT_SETUP_TEST is a setting for tests: never set it as root"
   expect_no_file "$T/systemd/mroom-mailpit.service"
 }
 

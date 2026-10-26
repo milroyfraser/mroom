@@ -255,6 +255,9 @@ root_main() {
   done
   [ "${#parts[@]}" -gt 0 ] || root_die "name the parts to install: site-op, mailpit or garage"
   if [ -n "${MROOM_ROOT_SETUP_TEST:-}" ]; then
+    # Its folders come from the environment, where a link the box user planted could take root's writes
+    # anywhere: never as root.
+    [ "$(id -u)" != 0 ] || root_die "MROOM_ROOT_SETUP_TEST is a setting for tests: never set it as root"
     SYSTEMD_DIR="${MROOM_SYSTEMD_DIR:?for tests, MROOM_SYSTEMD_DIR}" LIBEXEC_DIR="${MROOM_LIBEXEC_DIR:?for tests, MROOM_LIBEXEC_DIR}"
     SUDOERS_DIR="${MROOM_SUDOERS_DIR:?for tests, MROOM_SUDOERS_DIR}"
     echo "WARNING: MROOM_ROOT_SETUP_TEST is set, so this writes to $SYSTEMD_DIR, $LIBEXEC_DIR and $SUDOERS_DIR: a setting for tests"
