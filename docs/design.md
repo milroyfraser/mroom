@@ -165,7 +165,7 @@ mroom/
   examples/single-app/, examples/two-folder/   neutral configs (and, later, hooks) for the two layouts of D1
   tests/                        shell tests (offline, fake PATH tools), fixtures
   install.sh                    copies a release or checkout into ~/.local/share/mroom/<version>, links
-                                ~/.local/bin/mroom to it, checks host requirements
+                                ~/.local/bin/mroom (and forge-api) to it, checks host requirements
   LICENSE, NOTICE, README.md, docs/
 ```
 
