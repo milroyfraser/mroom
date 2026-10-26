@@ -94,7 +94,7 @@ starts the host's deploy and checks that the new release is live; the host (Forg
 | D14 | The QA file store is Garage, not MinIO | MinIO's free binaries are gone: its download server answers 410 and its repository was archived in April 2026. Garage is one binary whose keys are granted bucket by bucket, which is what a key per environment needs; in the spike, a second environment's key got 403 reading and writing the first one's bucket. Garage has no object ACLs or bucket policies, so public files go through its website endpoint, and an app that sets per-file visibility declares that disk a swap (section 9) |
 | D15 | Every client of the box's Redis signs in as an ACL user, and the default user is off. A QA environment's user reaches only keys and channels under its own prefix, and no command that acts on the whole server | Forge site isolation keeps a PR's code out of other users' files, but not out of a Redis with no password: there it could read every environment's data and push jobs onto a queue whose workers run as `forge`. A key pattern limits only the keys a command declares, so the user gets only Redis's own types and functions, none of a module's commands (which may declare fewer keys than they read), and loses the commands among them that flush, watch, list or debug the whole server, or reset its scripts (section 8.9). Agent sessions, worktrees and the dev site run as the box's OS user and share one Redis user, since they can read each other's files anyway. That user still must not flush the QA environments' keys, so it is denied `@dangerous` too, or the QA environments use a Redis database it cannot select |
 | D16 | mroom runs one Reverb host for the QA environments, with an app provider that reads its apps from a file | Reverb's default provider reads its apps from config once, when the server starts, so adding an app means a restart. Reverb picks its provider through a Laravel manager, so a provider registered with `ApplicationManager::extend` that reads a file on each lookup adds and removes an environment's app without one, and no environment runs a Reverb process of its own. This comes from Reverb's source; building the host proves it. An environment's public app key comes from its PR number, so qa-plan can build the frontend without secrets, and its secret is random. An app id belongs to one PR only, because a removed app's open sockets stay open until they close |
-| D17 | Each QA site is a Forge isolated site with its own Unix user. The gate puts the PR's code into it as data, so no git credential is on the site, and its nginx config sets `disable_symlinks if_not_owner` | Isolation runs the site's PHP and its queue worker as that user, and an ACL keeps the user out of `forge`'s home; deleting the site removes the user. The spike created the worker with the site user through the API, though Forge's API spec lists only `root` and `forge`, so qa-up reads the new process back and deletes it unless it runs as the site user. A deploy key on the site would let any code there, a dependency's install script included, read the whole repository until someone revoked it, against D6. So qa-up fetches the PR's tree by commit, as data, and the gate unpacks it as the site user, the way `dist/` already arrives. `code-put` replaces the whole tree except `.env` and `storage/`, skips any `.env` in the tarball, and refuses links at `.env`, `storage` and `bootstrap/cache`. QA sites use Forge's standard deployments, because its zero-downtime script clones the repository. nginx runs as `forge` and follows symlinks; without the setting, a PR could link a file in its site to a secret in `forge`'s home and download it |
+| D17 | Each QA environment's sites are Forge isolated sites in the home of one Unix user of its own, `<app>_qa_<N>`. The gate puts the PR's code into them as data, so no git credential is on the site, and its nginx config sets `disable_symlinks if_not_owner` | Isolation runs the site's PHP and its queue worker as that user, and an ACL keeps the user out of `forge`'s home; deleting the site removes the user. The spike created the worker with the site user through the API, though Forge's API spec lists only `root` and `forge`, so qa-up reads the new process back and deletes it unless it runs as the site user. A deploy key on the site would let any code there, a dependency's install script included, read the whole repository until someone revoked it, against D6. So qa-up fetches the PR's tree by commit, as data, and the gate unpacks it as the site user, the way `dist/` already arrives. `code-put` replaces the whole tree except `.env` and `storage/`, skips any `.env` in the tarball, and refuses links at `.env`, `storage` and `bootstrap/cache`. QA sites use Forge's standard deployments, because its zero-downtime script clones the repository. nginx runs as `forge` and follows symlinks; without the setting, a PR could link a file in its site to a secret in `forge`'s home and download it |
 | D18 | Each QA environment has its own Postgres role, which owns only that environment's database, and no environment's role can connect to any other database | Isolation and D15 do not cover Postgres either: with one shared login, a PR's code could read, change or drop every QA database, the template and the dev site's database. Postgres lets every role connect to every database by default (`CONNECT` for `PUBLIC`), and every new database gets that grant again, since database-level grants are not copied from the template. So `pg_hba.conf` lets a QA role connect only to the database named after it (`sameuser`, for the group of QA roles), with the gate's own role on a line above, since it belongs to the group too, and `db-create` revokes the grant as well. mroom requires 16 or later: before 16, a role that may create roles may also grant itself any role, the administrator ones included, and from 15 `PUBLIC` can no longer create objects in the `public` schema (doctor checks it, since an upgrade or a restore keeps the old permissions). A cloned database's objects keep the template owner, so the template's objects belong to a role that owns nothing else, and `REASSIGN OWNED` hands them to the environment's role. It also moves databases and tablespaces, so the gate refuses to run while that role owns one |
 | D19 | Mail is caught by Mailpit. Each environment sends with its own SMTP login, `mail-read` matches mail on the login that sent it, and the gate restarts Mailpit when it adds or removes a login | Tested on the box: Mailpit reads its login file only when it starts, so a new login needs a restart. Stored mail survives, and a queued mail that fails during the restart is retried when its job allows more than one try (`mroom doctor --app` checks). Tags can be forged: a mail with an `X-Tags` header or a plus address gets the tag it names, so those sources are turned off, and `mail-read` matches the `Username` field, which only a login sets: SMTP, or the API login only the gate holds |
 | D20 | A Forge token that can add SSH keys, run commands or recipes, read the sudo or database password, edit nginx or deploy scripts, or create daemons or scheduled jobs reaches `forge` or root. Only the `qa` environment holds such a token. The box's token has none of those scopes except nginx, which gives nothing beyond what its users already have as `forge` | Forge's API spec lets a daemon run as `root`; a scheduled job, a recipe and an SSH key take a user of the caller's choice; a deploy script runs as its site's user, which for the dev site is `forge`; and scopes cover the whole account, not one site. qa-up creates workers, so its token reaches root and is guarded by who holds it (sections 8.1, 8.8). Every developer on the box can read the box's token and every agent can use it through `forge-api`, so it keeps reads and site settings, and a person sets up daemons and scheduled jobs with a short-lived token |
@@ -143,7 +143,8 @@ mroom/
   bin/mroom                     front door (today scripts/dev-box/mroom)
   bin/forge-api                 agent-facing Forge CLI (guards: --write, --secret, path pinning)
   lib/                          box commands: wt, site, site-pull, user, keys, baseline, agent-env, memory-preflight,
-                                job, watchdog, gate (the forced command CI reaches the box through, 8.2)
+                                job, watchdog, gate (the forced command CI reaches the box through, 8.2),
+                                site-op (the gate's work inside a QA site, as its user, D17)
   lib/core/                     config reader, forge client, chat adapter (Slack), tracker/errors adapters, job
                                 records, the watchdog's probes, util
   plugin/                       the Claude Code plugin
@@ -334,22 +335,28 @@ Invariants, each with a test:
      could notice the change runs later, in a job with default-branch code, boxed as in 8.5, reading the diff as
      data.
    - `qa-up` (`workflow_run` on qa-plan, environment `qa`, default-branch code only): create the site and the
-     environment's services, write `.env`, fetch the PR's tree by commit (GitHub's tarball, as data) and send it
+     environment's services, write `.env` through the gate (`env-put`, as the site user, so nothing follows a link
+     the PR's code left there), fetch the PR's tree by commit (GitHub's tarball, as data) and send it
      and the `dist/` artifact through the gate. The gate records the commit in its own state and unpacks both as
      the site user. Then **Forge** runs the deploy script (the `qa-deploy` hook), which pulls nothing (D17). The
      runner never executes PR code.
    - The Forge token belongs to an account whose only team holds the box (`mroom doctor` warns when the token sees
      another server). It creates workers, so it counts as root (D20), and only `qa` holds it.
    - Box operations go through a forced-command SSH gate covering `db-create` (with the environment's role),
-     `db-drop`, `redis-user-add`, `redis-user-remove`, `redis-clear`, `code-put`, `dist-put`, `env-sha`,
+     `db-drop`, `redis-user-add`, `redis-user-remove`, `redis-clear`, `code-put`, `dist-put`, `env-put`, `env-sha`,
      `signin-code`, `user-clean`, `db-read`, and for the QA services `bucket-create`, `bucket-drop`,
      `reverb-app-add`, `reverb-app-remove`, `mail-user-add`, `mail-user-remove`, `mail-read`, `mail-clear` and
      `template-load`. No CI key gets a shell on the box. The gate is installed from a release by a person.
    - Gate operations that touch a site's files or run its code (unpacking in `code-put` and `dist-put`, hashing
-     `.env` in `env-sha`, and `signin-code`) run as that site's user, through a sudoers rule that `mroom baseline`
-     installs, so the gate never runs a PR's code or follows its links as `forge`. `user-clean` runs as root
-     through the same rule, since it stops another user's processes. The commit `env-sha` reports comes from the
-     gate's own state, written as `forge` outside the site, never from a file the site can write.
+     `.env` in `env-sha`, `signin-code` and `user-clean`) run as that site's user. The gate calls `site-op`, a
+     root-owned copy of its release's own, through one sudoers rule that lets `forge` run it as any of Forge's
+     isolated users and never as root (`mroom baseline` installs both; until then a person does). So the gate
+     never runs a PR's code or follows its links as `forge`, and `user-clean` needs no root either: a user may
+     stop its own processes and delete its own files. `site-op` runs only as a QA site's user, on that
+     environment's own sites. The rule still lets `forge`, and so every agent on the box, put code into a QA
+     site and run its sign-in command; QA sites hold only QA data, and `forge` can already read every isolated
+     site's files on Forge. The commit `env-sha` reports comes from the gate's own
+     state, written as `forge` outside the site, never from a file the site can write.
    - QA sites are isolated (D17) and sign in to Redis and Postgres as their own users (D15, D18), so a PR's code
      cannot read the dev site's `.env` or another environment's data, or push jobs onto a queue whose workers run
      as `forge`.
@@ -401,12 +408,17 @@ Invariants, each with a test:
    - Only the gate holds the mail catcher's API login. `mail-read` returns mail for `qa.persona_domain` addresses
      sent with one environment's login, and teardown deletes that environment's mail (`mail-clear`).
    - Before qa-down deletes a site, `user-clean` stops the site user's processes and removes its files outside
-     its home, since the next user can be given the same UID.
+     its home (in `/tmp`, `/var/tmp`, `/dev/shm`, `/var/crash`, `/run/lock` and `/dev/mqueue`), its System V IPC
+     objects and its crontab, as that user, since the next user can be given the same UID. qa-down deletes the
+     site's daemons first, since supervisor restarts what is killed. PHP-FPM's master does the same for its pool's
+     workers, so they are stopped once, which ends any request in flight, and their fresh replacements stop when
+     Forge deletes the site, right after; a request in that gap could still leave a file.
    - `mroom doctor` checks the box: the default Redis user is refused; no QA role can reach another database, and
      `PUBLIC` can neither connect to the QA databases, the template or the dev site's database nor create in their
      `public` schema; each GitHub environment keeps its branch rule; each QA site's nginx config, set from an nginx
      template when the site is created, has `disable_symlinks if_not_owner`; each QA worker runs as its site's
-     user; `/home/forge` keeps its `group:isolated:---` entry; each PHP-FPM socket admits only its own site and
+     user; `/home/forge` keeps its `group:isolated:---` entry; sshd refuses the isolated group (`DenyGroups
+     isolated`), so a PR's code cannot add a key and log in; each PHP-FPM socket admits only its own site and
      nginx; and `fs.protected_hardlinks` is 1.
 
 ## 9. The app contract
@@ -420,7 +432,7 @@ What a Laravel app must have or add, documented in `docs/app-contract.md` and ch
   they start. With a separate SPA, the frontend build writes them to `version.json`. A deploy waits on these
   (section 10). In a QA environment the PR's own code serves the endpoint, so browser QA asks the gate instead:
   `env-sha` reports the commit the gate recorded when it unpacked the tree (D17). The gate also writes the version
-  file, since a tarball has no git history.
+  file, `version.json` in the backend with `"release": null`, since a tarball has no git history.
 - Honours the isolation keys in section 8.7; with a separate SPA, also `CLIENT_URL`, `CORS_ALLOWED_ORIGINS` and
   `SANCTUM_STATEFUL_DOMAINS`.
 - Uses the same services as production wherever a QA environment can have its own copy (section 8.9): a bucket for
