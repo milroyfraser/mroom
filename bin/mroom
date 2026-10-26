@@ -17,10 +17,10 @@
 #                              a box job that records how it ended, so the watchdog sees it fail or stop
 #   mroom gate provision       the forced command of the QA runner's SSH key: the only box operations
 #                              CI may run (design 8.2); never run by hand
-#   mroom baseline mailpit     the QA mail catcher at its pinned build, its logins, and the script that
-#                              installs its systemd units as root (design 8.9)
-#   mroom baseline garage      the QA file store at its pinned build, its config and secrets, its unit's
-#                              root script, its one-node layout and its two hosts' nginx configs
+#   mroom baseline mailpit     the QA mail catcher at its pinned build, its logins, and whether its systemd
+#                              units, which root installs with mroom's root recipe (D21), are this release's
+#   mroom baseline garage      the QA file store at its pinned build, its config and secrets, whether its
+#                              unit is this release's, its one-node layout and its two hosts' nginx configs
 #   mroom version [--source]   the installed version (--source: the release or checkout it came from)
 #   mroom help
 #

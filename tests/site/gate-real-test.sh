@@ -48,11 +48,8 @@ set_up() {
   sudo rm -rf /opt/mroom
   sudo cp -r "$ROOT" /opt/mroom
   sudo chmod -R a+rX /opt/mroom
-  sudo install -d -o root -g root -m 755 /usr/local/libexec/mroom
-  sudo install -o root -g root -m 755 /opt/mroom/lib/site-op /usr/local/libexec/mroom/site-op
-  printf '%s ALL=(%%isolated) NOPASSWD: /usr/local/libexec/mroom/site-op\n' "$BOX_USER" >"$T/sudoers"
-  if command -v visudo >/dev/null; then sudo visudo -cf "$T/sudoers" >/dev/null; fi
-  sudo install -o root -g root -m 440 "$T/sudoers" /etc/sudoers.d/mroom-gate
+  # site-op and its sudoers line, as the root recipe installs them: this release's lib/root-setup, as root.
+  sudo bash /opt/mroom/lib/root-setup --user "$BOX_USER" site-op
   as_box mkdir -p "/home/$BOX_USER/.config/mroom"
   printf 'MROOM_APP_NAME=shop\nMROOM_QA_ZONE=%s\nMROOM_QA_BACKEND_DIR=backend\nMROOM_QA_PHP=php\n' "$ZONE" \
     | as_box tee "/home/$BOX_USER/.config/mroom/box.env" >/dev/null
@@ -216,6 +213,18 @@ t_the_site_operations_with_real_users_and_sudo() {
 
   gate "user-clean 14"; expect_rc 1; expect_err_has "shop_qa_14 is not one of Forge's isolated users"
 
+  # root-setup installed site-op and the sudoers line owned by root, the line as written in the README.
+  run sudo stat -c '%U:%G %a' /usr/local/libexec/mroom/site-op /etc/sudoers.d/mroom-gate
+  expect_out $'root:root 755\nroot:root 440'
+  run sudo cat /etc/sudoers.d/mroom-gate; expect_out "$BOX_USER ALL=(%isolated) NOPASSWD: /usr/local/libexec/mroom/site-op"
+  expect_true "the installed site-op is not this release's" sudo cmp -s "$ROOT/lib/site-op" /usr/local/libexec/mroom/site-op
+  # Beside a root-setup in a folder others can change, like /tmp, site-op is refused. Mode 1777, as /tmp has:
+  # the sudo-rs job runs as root, so the folder is root's own there.
+  mkdir -p "$T/not-roots"
+  cp "$ROOT/lib/root-setup" "$ROOT/lib/site-op" "$T/not-roots/"
+  chmod 1777 "$T/not-roots"
+  run sudo bash "$T/not-roots/root-setup" --user "$BOX_USER" site-op
+  expect_rc 1; expect_err_has "is not in a folder only root can change"
   # The sudoers line runs site-op as an isolated user and nothing else, never as root.
   expect_true "the box user ran a shell as a site user" eval '! as_box sudo -n -u shop_qa_12 /bin/sh -c id >/dev/null 2>&1'
   expect_true "the box user ran site-op as root" eval '! as_box sudo -n -u root /usr/local/libexec/mroom/site-op clean >/dev/null 2>&1'

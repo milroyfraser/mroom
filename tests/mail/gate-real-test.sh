@@ -99,9 +99,6 @@ PY
 }
 squat_result() { wait "$(cat "$T/squatter.pid")" || true; rm -f "$T/squatter.pid"; cat "$T/squatter.log"; }
 
-# root_script_of <output>: the script baseline printed for a person to run as root.
-root_script_of() { sed -n '/^----- run as root -----$/,/^----- end -----$/p' <<<"$1" | sed '1d;$d'; }
-
 wait_ready() {
   for _ in $(seq 1 80); do
     if active mroom-mailpit.service && [ "$(port_owner)" = 0 ] \
@@ -123,11 +120,10 @@ t_the_mail_operations_against_the_real_mailpit() {
   printf 'MROOM_APP_NAME=shop\n' >"$HOME/.config/mroom/box.env"
   run "$MROOM" baseline mailpit
   expect_rc 0; expect_out_has "mailpit v1.32.0: installed, SHA-256"
-  # Install the units exactly as baseline tells a person to: its script, run as root.
-  local script
-  script="$(root_script_of "$out")"
-  expect_true "baseline printed no script to run as root" [ -n "$script" ]
-  sudo bash -c "$script"
+  expect_out_has "To be installed or updated: mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service."
+  # Install the units as the root recipe does: this release's lib/root-setup, run as root.
+  run sudo bash "$ROOT/lib/root-setup" --user "$(id -un)" --home "$HOME" mailpit
+  expect_rc 0; expect_out_has "systemd units written: mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service"
   wait_ready
   local run_dir="$HOME/.local/share/mroom-services/mailpit/run" pw12 pw13 pw25 n pids=() relay_pid started
   run port_owner; expect_out 0
