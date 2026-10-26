@@ -83,11 +83,13 @@ status_of() { head -n1 <<<"$1"; }
 body_of() { tail -n +2 <<<"$1"; }
 # web <socket|host:port> <Host> <path>: a plain GET; prints the HTTP status, then the body.
 web() {
+  local code
   if [[ "$1" == /* ]]; then
-    curl -q -s --max-time 10 --unix-socket "$1" -H "Host: $2" -w '\n%{http_code}' "http://localhost$3" | tac
+    code="$(curl -q -s --max-time 10 --unix-socket "$1" -H "Host: $2" -o "$T/web.body" -w '%{http_code}' "http://localhost$3")"
   else
-    curl -q -s --max-time 10 -H "Host: $2" -w '\n%{http_code}' "http://$1$3" | tac
+    code="$(curl -q -s --max-time 10 -H "Host: $2" -o "$T/web.body" -w '%{http_code}' "http://$1$3")"
   fi
+  printf '%s\n%s' "$code" "$(cat "$T/web.body")"
 }
 
 wait_ready() {
