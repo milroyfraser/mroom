@@ -63,8 +63,9 @@ wait_ready() {
 # listen_for <where> <key> <origin> <channel>: a socket in the background, subscribed to the channel once this
 # returns; heard waits for the first event it gets.
 listen_for() {
-  LISTEN_OUT="$T/listen.$1.$4"
-  LISTEN_OUT="${LISTEN_OUT//[:\/]/-}"
+  local name="listen.$1.$4"
+  # Only the file's own name loses its : and /, never the folder's path.
+  LISTEN_OUT="$T/${name//[:\/]/-}"
   client listen "$@" 15 >"$LISTEN_OUT" 2>&1 &
   LISTEN_PID=$!
   for _ in $(seq 1 100); do
