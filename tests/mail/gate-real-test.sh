@@ -268,8 +268,8 @@ s = socket.create_server(("127.0.0.1", 1025)); time.sleep(60)' mroom-ci-root-lis
   gate "mail-user-remove 12"; expect_rc 0
   expect_true "a removed login could still send" eval '! can_send shop_qa_12 "$pw12" ada@example.test after'
   expect_true "the other login stopped working" can_send shop_qa_13 "$pw13" ada@example.test still13
-  # A new password replaces the old one.
-  gate "mail-user-add 13"; expect_rc 0
+  # A new password, which --rotate gives, replaces the old one.
+  gate "mail-user-add 13 --rotate"; expect_rc 0
   expect_true "an old password still worked" eval '! can_send shop_qa_13 "$pw13" ada@example.test old13'
   expect_true "the new password does not work" can_send shop_qa_13 "$(field MAIL_PASSWORD "$out")" ada@example.test new13
   expect_true "systemd stopped running Mailpit" active mroom-mailpit.service
