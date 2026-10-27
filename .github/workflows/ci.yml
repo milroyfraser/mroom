@@ -43,7 +43,8 @@ jobs:
   test:
     name: tests
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The offline suites take over 5 minutes on a runner, more than half of it the QA suites.
+    timeout-minutes: 10
     steps:
       # With the tags: tests/root-test.sh checks the README's root recipe against lib/root-setup at its tag.
       - uses: actions/checkout@v4
