@@ -63,6 +63,10 @@ qa_names() {
   ((${#QA_USER} <= 32)) || { qa_say "$QA_USER is longer than a user name may be (32); shorten app.name"; return 1; }
 }
 
+# QA_SITE_RE: qa_names read backwards, for jq: a site name's environment number and zone, as its two captures. Every
+# name of an environment's sites is built in qa_names and read back with this, and nowhere else.
+QA_SITE_RE='\A(?:api|go)-([1-9][0-9]{0,8})\.(.+)\z'
+
 # qa_public_env: environment N's settings that are not secret, as KEY=value lines: what qa-plan builds the
 # frontend with, and part of what qa-up writes into the environment's .env. Every environment's hosts share the
 # zone, so the cookies have names of their own (design 8.7). A separate frontend reads the session and XSRF
@@ -110,7 +114,7 @@ qa_envs() {
   local sites
   qa_init || return 1
   sites="$(qa_all_sites)" || return 1
-  jq -rs --arg zone "$QA_ZONE" '[.[] | .attributes | ((.name // "") | [match("\\A(?:api|go)-([1-9][0-9]{0,8})\\.(.+)\\z").captures[].string]) as $m
+  jq -rs --arg zone "$QA_ZONE" --arg re "$QA_SITE_RE" '[.[] | .attributes | ((.name // "") | [match($re).captures[].string]) as $m
       | select(($m | length) == 2 and $m[1] == $zone) | {n: ($m[0] | tonumber), status: (.status // "unknown"), created: (.created_at // "")}]
     | group_by(.n)[] | "\(.[0].n) \(if any(.[]; .status != "removing") then "present" else "removing" end) \(
       [.[].created | select(. != "")] | min // "-")"' <<<"$sites"

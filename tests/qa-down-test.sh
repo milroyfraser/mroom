@@ -20,12 +20,12 @@ BOX_SIDE=$'db-drop 7\nredis-user-remove 7\nredis-clear 7\nmail-user-remove 7\nma
 
 # environment_7: pull request 7's two sites and its daemon, beside environment 70's.
 environment_7() {
-  site 11 api-7.qa.example.dev installed
-  site 12 go-7.qa.example.dev installed
-  site 13 api-70.qa.example.dev installed
-  process 5 shop_qa_7 /home/shop_qa_7/api-7.qa.example.dev/.
-  process 6 forge /home/shop_qa_7/api-7.qa.example.dev/.
-  process 7 shop_qa_70 /home/shop_qa_70/api-70.qa.example.dev/.
+  site 11 "$(api_host 7)" installed
+  site 12 "$(web_host 7)" installed
+  site 13 "$(api_host 70)" installed
+  process 5 "$(site_user 7)" "/home/$(site_user 7)/$(api_host 7)/."
+  process 6 forge "/home/$(site_user 7)/$(api_host 7)/."
+  process 7 "$(site_user 70)" "/home/$(site_user 70)/$(api_host 70)/."
 }
 # waiting_prs: two open pull requests that wait for a slot, 21 the longer.
 waiting_prs() {
@@ -74,9 +74,9 @@ t_the_ssh_key_stays_off_every_command_line() {
 
 t_a_loop_of_teardowns_loses_none_of_its_input() {
   qa_world
-  site 1 api-1.qa.example.dev installed
-  site 2 api-2.qa.example.dev installed
-  site 3 api-3.qa.example.dev installed
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  site 3 "$(api_host 3)" installed
   forge_set '.remove_reads = -1'
   # As OpenSSH does, the gate's stand-in reads stdin unless told not to (-n): in a loop, that would eat the list.
   run bash -c 'while read -r n; do "$0" "$n" --reason hand || exit 1; done <<<"$(printf "1\n2\n3\n")"' "$DOWN"
@@ -120,8 +120,8 @@ t_a_run_again_finishes_a_teardown_whose_box_side_failed() {
 
 t_a_site_stuck_removing_gets_the_delete_again_and_wakes_nobody() {
   qa_world; waiting_prs
-  site 11 api-7.qa.example.dev removing "$(ago 864000)" "$(ago 7200)"
-  site 12 go-7.qa.example.dev removing "$(ago 864000)" "$(ago 300)"
+  site 11 "$(api_host 7)" removing "$(ago 864000)" "$(ago 7200)"
+  site 12 "$(web_host 7)" removing "$(ago 864000)" "$(ago 300)"
   forge_set '.remove_reads = -1'
   run "$DOWN" 7 --wake
   expect_rc 0; expect_out_has "environment 7: Forge has it removing"
@@ -168,7 +168,7 @@ t_a_delete_that_finds_nothing_counts_as_done() {
   expect_rc 0
   run gate_log; expect_out $'user-clean 7\n'"$BOX_SIDE"
   # Any other answer still fails the step.
-  site 21 api-8.qa.example.dev installed
+  site 21 "$(api_host 8)" installed
   forge_set '.fail["DELETE /sites/21"] = 500'
   run "$DOWN" 8
   expect_rc 1; expect_err_has "DELETE /sites/21 -> HTTP 500"
@@ -209,6 +209,19 @@ t_the_check_reads_forge_and_changes_nothing() {
   run gate_log; expect_out ""
   forge_set '.fail["GET /sites"] = 500'
   run "$CHECK" 7; expect_rc 1; expect_out ""
+}
+
+t_an_environment_on_a_later_page_is_found() {
+  qa_world
+  # Forge lists at most 30 at a time, whatever page[size] asks: here 1, with environment 7 on the third page.
+  forge_set '.page_size = 1'
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  site 11 "$(api_host 7)" installed
+  run "$CHECK" 7; expect_out "state=present"
+  run "$DOWN" 7
+  expect_rc 0; expect_out_has "environment 7: Forge has it present"
+  run forge_writes; expect_out "DELETE /sites/11"
 }
 
 t_a_label_off_a_waiting_pull_request_stops_its_wait() {
@@ -260,6 +273,7 @@ test_case delete-404-is-done t_a_delete_that_finds_nothing_counts_as_done
 test_case parity-swaps t_services_qa_does_not_use_are_left_alone
 test_case forge-unreadable t_a_forge_that_cannot_be_read_stops_it
 test_case check t_the_check_reads_forge_and_changes_nothing
+test_case later-page t_an_environment_on_a_later_page_is_found
 test_case label-stops-wait t_a_label_off_a_waiting_pull_request_stops_its_wait
 test_case not-set-up t_a_qa_environment_not_set_up_has_nothing_to_tear_down
 test_case usage t_usage

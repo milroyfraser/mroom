@@ -25,16 +25,16 @@ reaper_world() {
 
 t_each_environment_past_its_time_gets_a_teardown() {
   reaper_world
-  site 1 api-1.qa.example.dev installed "$(ago $((9 * DAY)))"
-  site 2 go-1.qa.example.dev installed "$(ago $((9 * DAY)))"
-  site 3 api-3.qa.example.dev installed "$(ago "$DAY")"
-  site 4 api.qa.example.dev installed "$(ago $((90 * DAY)))"
-  site 5 api-8.qa.other.dev installed "$(ago $((9 * DAY)))"
-  site 6 api-09.qa.example.dev installed "$(ago $((9 * DAY)))"
+  site 1 "$(api_host 1)" installed "$(ago $((9 * DAY)))"
+  site 2 "$(web_host 1)" installed "$(ago $((9 * DAY)))"
+  site 3 "$(api_host 3)" installed "$(ago "$DAY")"
+  site 4 s3.qa.example.dev installed "$(ago $((90 * DAY)))"
+  site 5 "$(api_host 8 qa.other.dev)" installed "$(ago $((9 * DAY)))"
+  site 6 "$(api_host 09)" installed "$(ago $((9 * DAY)))"
   # Only its go site is left, after a teardown that stopped halfway.
-  site 7 go-12.qa.example.dev installed "$(ago $((9 * DAY)))"
+  site 7 "$(web_host 12)" installed "$(ago $((9 * DAY)))"
   # Forge gives no time for it.
-  site 8 api-13.qa.example.dev installed
+  site 8 "$(api_host 13)" installed
   forge_set '.sites[-1].created_at = null'
   run "$REAP"
   expect_rc 0; expect_out_has "started the teardown of 3 environment(s)"
@@ -50,26 +50,26 @@ dispatch qa-down.yml main pr_number=13 reason=ttl'
 
 t_an_environment_forge_is_removing_is_skipped_and_a_stuck_site_deleted_again() {
   reaper_world
-  site 2 api-2.qa.example.dev removing "$(ago $((9 * DAY)))"
-  site 6 api-6.qa.example.dev removing "$(ago $((9 * DAY)))" "$(ago 10800)"
-  site 7 api-7.qa.example.dev removing "$(ago $((9 * DAY)))" "$(ago 300)"
-  site 9 go-9.qa.example.dev removing "$(ago $((9 * DAY)))" "$(ago 7200)"
+  site 2 "$(api_host 2)" removing "$(ago $((9 * DAY)))"
+  site 6 "$(api_host 6)" removing "$(ago $((9 * DAY)))" "$(ago 10800)"
+  site 7 "$(api_host 7)" removing "$(ago $((9 * DAY)))" "$(ago 300)"
+  site 9 "$(web_host 9)" removing "$(ago $((9 * DAY)))" "$(ago 7200)"
   forge_set '.remove_reads = -1'
   run "$REAP"
   expect_rc 0; expect_out_has "environment 2: Forge is already removing it; skipped"
   # Removing for 3 hours, or 2 for a go site, gets the delete again; for 5 minutes, or with no time to tell, it does not.
-  expect_out_has "::warning::environment 6: api-6.qa.example.dev had been removing for 180 minutes, so the delete went again"
-  expect_out_has "::warning::environment 9: go-9.qa.example.dev had been removing for 120 minutes"
-  expect_true "a site removing for 5 minutes was warned about" lacks "$out" "environment 7: api-7"
+  expect_out_has "::warning::environment 6: $(api_host 6) had been removing for 180 minutes, so the delete went again"
+  expect_out_has "::warning::environment 9: $(web_host 9) had been removing for 120 minutes"
+  expect_true "a site removing for 5 minutes was warned about" lacks "$out" "environment 7: $(api_host 7)"
   run forge_writes; expect_out $'DELETE /sites/6\nDELETE /sites/9'
   run dispatches; expect_out ""
 }
 
 t_three_environments_past_their_time_get_three_teardowns() {
   reaper_world
-  site 1 api-1.qa.example.dev installed "$(ago $((9 * DAY)))"
-  site 2 api-2.qa.example.dev installed "$(ago $((8 * DAY)))"
-  site 3 api-3.qa.example.dev installed "$(ago $((7 * DAY)))"
+  site 1 "$(api_host 1)" installed "$(ago $((9 * DAY)))"
+  site 2 "$(api_host 2)" installed "$(ago $((8 * DAY)))"
+  site 3 "$(api_host 3)" installed "$(ago $((7 * DAY)))"
   run "$REAP"
   expect_rc 0
   run dispatches
@@ -80,8 +80,8 @@ dispatch qa-down.yml main pr_number=3 reason=ttl'
 t_the_time_comes_from_mroom_toml() {
   reaper_world
   printf 'ttl_days = 2\n' >>"$MROOM_CONFIG"
-  site 1 api-1.qa.example.dev installed "$(ago $((3 * DAY)))"
-  site 3 api-3.qa.example.dev installed "$(ago "$DAY")"
+  site 1 "$(api_host 1)" installed "$(ago $((3 * DAY)))"
+  site 3 "$(api_host 3)" installed "$(ago "$DAY")"
   export MROOM_QA_DOWN_WORKFLOW=qa-teardown.yml
   run "$REAP"
   expect_rc 0
@@ -90,7 +90,7 @@ t_the_time_comes_from_mroom_toml() {
 
 t_a_teardown_that_cannot_start_fails_the_run() {
   reaper_world
-  site 1 api-1.qa.example.dev installed "$(ago $((9 * DAY)))"
+  site 1 "$(api_host 1)" installed "$(ago $((9 * DAY)))"
   : >"$GH_FAKE/dispatch-fails"
   run "$REAP"
   expect_rc 1; expect_err_has "could not start the teardown of environment(s) 1; the next reap tries again"
@@ -99,7 +99,7 @@ t_a_teardown_that_cannot_start_fails_the_run() {
 
 t_a_forge_that_cannot_be_read_fails_the_run() {
   reaper_world
-  site 1 api-1.qa.example.dev installed "$(ago $((9 * DAY)))"
+  site 1 "$(api_host 1)" installed "$(ago $((9 * DAY)))"
   forge_set '.fail["GET /sites"] = 503'
   run "$REAP"
   expect_rc 1; expect_err_has "Forge's sites could not be read 3 times"
