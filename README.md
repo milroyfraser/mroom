@@ -662,16 +662,17 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
   reads as "no environment". Forge can accept a delete and never run it, so a site still removing after 30
   minutes gets the delete again, and the reaper warns about it: the same one two nights running needs a
   person in Forge.
-- **A teardown.** qa-down's first job only reads Forge, so a pull request that never had an environment gets
-  no teardown; one started by hand or by the reaper skips it. The second job runs every step, each skipping
-  what is already gone, whether or not Forge still has a site: daemons first, since supervisor starts again
-  what is stopped, then `user-clean`, then the sites right after (design 8.9), then the box's side. A
-  `user-clean` that fails keeps the sites. When a step fails, the comment names it, and "Re-run failed jobs"
-  or "Re-run all jobs" on that run finishes the teardown: the comment's hidden line keeps the state the
-  teardown started from, which the check takes when Forge has no site left, as a teardown by hand or by the
+- **A teardown.** qa-down's first job only reads Forge, so a pull request that never had an environment gets no
+  teardown; one started by hand or by the reaper skips it. The second job runs every step, each skipping what is
+  already gone, whether or not Forge still has a site: daemons first, since supervisor starts again what is
+  stopped, then `user-clean`, then the sites right after (design 8.9), then the box's side. A `user-clean` that
+  fails keeps the sites. Once the sites are gone, the environment no longer counts against `qa.max_envs`, so its
+  slot is given on then, whatever the box's side comes to. When a step fails, the comment names it, and "Re-run
+  failed jobs" or "Re-run all jobs" on that run finishes the teardown: the comment's hidden line keeps the state
+  the teardown started from, which the check takes when Forge has no site left, as a teardown by hand or by the
   reaper does. Teardowns, their checks and deploys of one pull request take turns, first in first out, so none
-  runs beside another and none waiting is dropped: a pull request closed during its first deploy is checked
-  once that deploy has made its sites.
+  runs beside another and none waiting is dropped: a pull request closed during its first deploy is checked once
+  that deploy has made its sites.
 - **The reaper** starts the app's qa-down workflow for each environment past its time (reason `ttl`) rather
   than tearing it down itself, so each teardown takes its pull request's turn, frees its slot and can be
   re-run on its own; the reaper holds the Forge token and no SSH key.
