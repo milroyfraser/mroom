@@ -7,6 +7,10 @@
 #   mroom baseline garage    the QA file store (D14): Garage at its pinned build, its config and secrets,
 #                            whether its systemd unit is this release's, its one-node layout, and the nginx
 #                            configs of its two hosts
+#   mroom baseline reverb    WebSockets for every QA environment (D16): mroom's Reverb host, this release's
+#                            reverb-host with the packages its composer.lock pins, its folders and an apps
+#                            file the gate fills, whether its systemd unit is this release's, and the nginx
+#                            config of its host
 #
 # It runs as the box user and changes nothing outside the box user's home. It can run again: a binary that
 # matches its pin and logins that exist are kept. Services live in ~/.local/share/mroom-services, which an
@@ -448,9 +452,133 @@ files.$zone, public files: /<bucket>/<path> reads <path> from a bucket whose web
 EOF
 }
 
+# reverb_build_id: the id of this release's reverb-host, from its files (its composer.lock pins every package),
+# so a build is made again only when they change.
+reverb_build_id() {
+  (cd "$MROOM_ROOT/reverb-host" && find . -type f ! -path './vendor/*' ! -path './bootstrap/cache/*' -print0 \
+    | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | cut -c1-16
+}
+
+setup_reverb() {
+  local base="$SERVICES/reverb" zone user id build old apps answers count previous php="$PHP"
+  need composer jq sha256sum curl
+  load_box || die "box.env could not be read"
+  zone="${BOX[MROOM_QA_ZONE]:-}" user="$(id -un)"
+  [[ "$HOME" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "systemd units need plain paths; $(printf '%q' "$HOME") is not"
+  [[ "$user" =~ ^[a-z_][a-z0-9_-]*$ && "$(id -gn)" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "the box user's name is not plain"
+  [ -d "$MROOM_ROOT/reverb-host" ] || die "this mroom has no reverb-host folder; install a release that has one"
+  # The unit runs this php, so it is the one that must be new enough.
+  [ -x "$php" ] || die "$php is missing; mroom's Reverb host needs PHP 8.3 or later"
+  "$php" -r 'exit(PHP_VERSION_ID >= 80300 ? 0 : 1);' \
+    || die "mroom's Reverb host needs PHP 8.3 or later; $php is $("$php" -r 'echo PHP_VERSION;')"
+  CHANGED=""
+  mkdir -p "$base/builds" "$base/run" "$base/apps"
+  chmod 700 "$SERVICES" "$base" "$base/builds" "$base/run" "$base/apps"
+  # Its apps: none until the gate adds one. The gate replaces this file whole, and the unit binds its folder,
+  # not the file, so the host sees each new one.
+  apps="$base/apps/apps.json"
+  if ! [ -f "$apps" ]; then
+    printf '{"apps": []}\n' >"$base/apps/.apps.json.new"
+    chmod 600 "$base/apps/.apps.json.new"
+    mv -f "$base/apps/.apps.json.new" "$apps"
+    echo "Reverb apps: $(home_short "$apps") made, with none yet"
+  fi
+  chmod 600 "$apps"
+
+  # This release's build, made once: its packages from reverb-host/composer.lock, and its provider manifest
+  # written now, since the unit runs it read-only.
+  id="$(reverb_build_id)"
+  build="$base/builds/$id"
+  if [ -f "$build/.ready" ]; then
+    echo "Reverb host: build $id installed, and matches this mroom"
+  else
+    rm -rf "$build" "$build.tmp"
+    mkdir -p "$build.tmp"
+    tar -C "$MROOM_ROOT/reverb-host" --exclude=./vendor -cf - . | tar -C "$build.tmp" -xf -
+    (cd "$build.tmp" && COMPOSER_NO_INTERACTION=1 composer install --no-dev --no-progress --prefer-dist \
+      --classmap-authoritative --quiet) || die "composer could not install the Reverb host's packages (reverb-host/composer.lock)"
+    (cd "$build.tmp" && CACHE_STORE=array QUEUE_CONNECTION=sync LOG_CHANNEL=stderr "$php" artisan list >/dev/null) \
+      || die "the Reverb host's build does not run: $php artisan list failed in $(home_short "$build.tmp")"
+    : >"$build.tmp/.ready"
+    mv "$build.tmp" "$build"
+    CHANGED=1
+    echo "Reverb host: build $id installed (Reverb $(jq -r '.packages[] | select(.name == "laravel/reverb") | .version' "$build/composer.lock"))"
+  fi
+  # current names the build, switched in one rename. A running host keeps the build it started from, since
+  # PHP resolves the link once, at start.
+  previous="$(readlink "$base/current" 2>/dev/null || true)"
+  if [ "$previous" != "builds/$id" ]; then
+    ln -sfn "builds/$id" "$base/.current.new"
+    mv -Tf "$base/.current.new" "$base/current"
+    CHANGED=1
+  fi
+  if [ -n "$CHANGED" ]; then
+    if restart_unit mroom-reverb.service "$base/"; then echo "Reverb host: restarted to run its build"
+    else echo "Reverb host: runs its build from its next start (mroom-reverb.service)"; fi
+  fi
+  # Older builds go. The one current named before this run stays until the next, since a host started earlier,
+  # or one systemd did not restart in time, may still run from it.
+  for old in "$base"/builds/*; do
+    if [ "$old" != "$build" ] && [ "builds/${old##*/}" != "$previous" ]; then rm -rf "$old"; fi
+  done
+
+  units_section reverb "" "One systemd unit runs mroom's Reverb host, as $user: it listens only on a Unix socket in
+$(home_short "$base/run"), and reads its apps from $(home_short "$apps")." "${REVERB_UNITS[@]}"
+  # A host just restarted gets a few seconds to answer.
+  answers=""
+  for _ in $(seq 1 20); do
+    if [ "$(curl -q -s --max-time 2 --unix-socket "$base/run/reverb.sock" -o /dev/null -w '%{http_code}' http://localhost/up 2>/dev/null)" = 200 ]; then
+      answers=1
+      break
+    fi
+    [ -n "$CHANGED" ] || break
+    sleep 0.25
+  done
+  count="$(jq '.apps | length' "$apps" 2>/dev/null)" || count=""
+  if [ -z "$answers" ]; then
+    echo "Reverb host does not answer yet: install its unit (the root recipe), then run mroom baseline reverb again."
+  elif [ -z "$count" ]; then
+    echo "Reverb host answers, but $(home_short "$apps") is not {\"apps\": [...]} in JSON, so it serves no apps."
+  else
+    echo "Reverb host answers; its apps file holds $count."
+  fi
+
+  # Browsers and the QA apps reach it through nginx, on one host of the QA zone, with TLS.
+  if [ -z "$zone" ]; then
+    echo "Set MROOM_QA_ZONE in box.env, and run this again for the nginx config of its host."
+    return 0
+  fi
+  cat <<EOF
+
+Browsers and QA apps reach the Reverb host through nginx, on ws.$zone: each environment's frontend opens its
+sockets there, and its backend sends its events there. Create it as a site in Forge, with its certificate,
+and put this in place of the site's location blocks (Forge's nginx runs as $user, who alone can open the
+socket). Its ^~ keeps any of Forge's "location ~" blocks left in place from taking a path. A socket stays
+open while either side speaks within its timeout: Reverb pings a quiet one every minute. Cookies stay out:
+Reverb reads none, and every environment's would count toward its limit on a request's size.
+
+ws.$zone, WebSockets and Reverb's HTTP API for every QA environment:
+
+    location ^~ / {
+        client_max_body_size 64k;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$http_host;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "Upgrade";
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header Cookie "";
+        proxy_read_timeout 180s;
+        proxy_send_timeout 180s;
+        proxy_buffering off;
+        proxy_pass http://unix:$base/run/reverb.sock;
+    }
+EOF
+}
+
 case "${1:-}" in
   mailpit) [ "$#" = 1 ] || die "usage: mroom baseline mailpit"; setup_mailpit ;;
   garage) [ "$#" = 1 ] || die "usage: mroom baseline garage"; setup_garage ;;
+  reverb) [ "$#" = 1 ] || die "usage: mroom baseline reverb"; setup_reverb ;;
   -h | --help | "") awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF" ;;
   *) die "unknown part '${1:0:40}'; mroom baseline --help lists them" ;;
 esac
