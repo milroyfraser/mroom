@@ -28,7 +28,16 @@ qa_world() {
   export MROOM_QA_SSH_HOST=box.example.dev MROOM_QA_SSH_KEY="$QA_KEY"
   export MROOM_QA_SSH_KNOWN_HOSTS="box.example.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAInotarealkey"
   export GITHUB_REPOSITORY=example/shop GH_TOKEN=fake-gh-token GITHUB_OUTPUT="$T/github-output"
+  # A runner's own: with them, the actions mask secrets and keep scratch files outside $T.
+  unset GITHUB_ACTIONS RUNNER_TEMP
 }
+
+# api_host <N> [<zone>], web_host <N> [<zone>], site_user <N>: the test side's one copy of how qa_names
+# (lib/core/qa.sh) names environment N's sites and their user, for the app shop in the zone qa.example.dev. Tests
+# build every such name with these, so a new naming scheme is an edit here and in the tests that pin it.
+api_host() { echo "api-$1.${2:-qa.example.dev}"; }
+web_host() { echo "go-$1.${2:-qa.example.dev}"; }
+site_user() { echo "shop_qa_$1"; }
 
 # ago <seconds>: the time that long before NOW, as Forge writes it.
 ago() { date -u -d "@$((NOW - $1))" +%Y-%m-%dT%H:%M:%SZ; }
@@ -59,8 +68,13 @@ comment() {
   jq --argjson id "$2" --arg login "$3" --arg body "$4" --arg at "${5:-2026-10-26T09:00:00Z}" \
     '. + [{id: $id, user: {login: $login}, body: $body, updated_at: $at}]' "$file" >"$file.new" && mv "$file.new" "$file"
 }
-# qa_body <state>: the body of a QA environment comment in that state.
-qa_body() { printf '### QA environment\n<!-- mroom-qa: %s -->\n\nSomething.\n' "$1"; }
+# qa_body <state> [<field>...]: the body of a QA environment comment in that state, with fields such as since=<time>.
+qa_body() {
+  local marker="$1"
+  shift
+  [ "$#" = 0 ] || marker+=" $*"
+  printf '### QA environment\n<!-- mroom-qa: %s -->\n\nSomething.\n' "$marker"
+}
 
 # Logs and what the fakes saw.
 gate_log() { cat "$GATE/gate.log" 2>/dev/null || true; }

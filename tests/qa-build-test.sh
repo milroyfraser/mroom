@@ -7,6 +7,8 @@ set -euo pipefail
 SUITE=qa-build
 # shellcheck source=tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/qa-world.sh
+source "$(dirname "${BASH_SOURCE[0]}")/qa-world.sh"
 skip_unless has_box_tools "this host lacks bash 5, flock or GNU date, which the QA actions need"
 skip_unless has_tomllib "python3 has no tomllib (needs 3.11+)"
 has_jq() { command -v jq >/dev/null 2>&1; }
@@ -59,11 +61,12 @@ t_the_build_gets_public_values_only() {
   app $'backend_dir = "api"\nfrontend_dir = "web"\n\n[app.build]\nfrontend = "npm run build"
 frontend_env = { VITE_API = "env:APP_URL", VITE_CLIENT = "env:CLIENT_URL", VITE_XSRF = "env:XSRF_COOKIE_NAME", VITE_PAYMENTS = "env:PAYMENTS_SECRET", VITE_MODE = "qa" }'
   mkdir -p "$T/app/web"
-  run "$BUILD" run 7 "$T/app"
+  # Even when the runner has the key in its own environment, the build never gets it.
+  run env PAYMENTS_SECRET=leaked-from-the-runner "$BUILD" run 7 "$T/app"
   expect_rc 0; expect_out_has "VITE_PAYMENTS reads PAYMENTS_SECRET, which is not one of a QA environment's public values"
   expect_out_has "built web/dist"
   run cat "$T/build.env"
-  expect_out $'VITE_API=https://api-7.qa.example.dev\nVITE_CLIENT=https://go-7.qa.example.dev\nVITE_MODE=qa\nVITE_PAYMENTS=\nVITE_XSRF=shop_qa_7_xsrf'
+  expect_out "VITE_API=https://$(api_host 7)"$'\n'"VITE_CLIENT=https://$(web_host 7)"$'\nVITE_MODE=qa\nVITE_PAYMENTS=\n'"VITE_XSRF=$(site_user 7)_xsrf"
   run cat "$T/tools.log"; expect_out $'npm ci (in /web)\nnpm run build (in /web)'
 }
 
@@ -71,7 +74,7 @@ t_vite_inside_laravel_gets_the_api_host_for_both() {
   app $'[app.build]\nfrontend = "npm run build"\nfrontend_env = { VITE_CLIENT = "env:CLIENT_URL" }'
   run env OUT=public/build "$BUILD" run 12 "$T/app"
   expect_rc 0; expect_out_has "built ./public/build"
-  run cat "$T/build.env"; expect_out "VITE_CLIENT=https://api-12.qa.example.dev"
+  run cat "$T/build.env"; expect_out "VITE_CLIENT=https://$(api_host 12)"
 }
 
 t_pnpm_installs_from_the_lockfile() {

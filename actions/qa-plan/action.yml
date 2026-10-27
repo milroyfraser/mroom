@@ -1,8 +1,9 @@
 name: QA plan
 description: >-
-  The path rules of the QA plan (design 8.2): could a user notice this pull request? Lists its changed files
-  through GitHub's API and answers scope (none, or maybe) and why, from mroom.toml's qa.visible_paths and
-  qa.hidden_paths and mroom's own rules (scope.sh). It reads the pull request as data and runs none of its code.
+  The path rules of the QA plan (design 8.2): could a user notice this pull request? Lists its changed files,
+  a renamed file's old name too, through GitHub's API and answers scope (none, or maybe) and why, from mroom.toml's
+  qa.visible_paths and qa.hidden_paths and mroom's own rules (plan.sh, scope.sh). It reads the pull request as data
+  and runs none of its code.
 inputs:
   pr:
     description: The pull request's number
@@ -30,9 +31,4 @@ runs:
         PR: ${{ inputs.pr }}
         MROOM_CONFIG: ${{ inputs.config }}
         GH_TOKEN: ${{ inputs.github-token }}
-      run: |
-        [[ "$PR" =~ ^[1-9][0-9]{0,8}$ ]] || { echo "::error::the pull request's number is not a number"; exit 1; }
-        # A listing that fails is an empty one, which scope.sh takes as maybe.
-        files="$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename')" \
-          || { echo "::warning::could not list the pull request's files"; files=""; }
-        "$GITHUB_ACTION_PATH/scope.sh" <<<"$files" | tee -a "$GITHUB_OUTPUT"
+      run: '"$GITHUB_ACTION_PATH/plan.sh" "$PR" | tee -a "$GITHUB_OUTPUT"'

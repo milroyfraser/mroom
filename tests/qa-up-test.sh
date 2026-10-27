@@ -219,7 +219,7 @@ t_a_new_environment_waits_for_a_slot() {
   run forge_writes; expect_out ""
   run gate_log; expect_out ""
   run sed -n 's/^refused=//p' "$GITHUB_OUTPUT"; expect_out_has "All 3 QA environments are in use"
-  run gh_log; expect_out_has 'POST 7 ### QA environment\n<!-- mroom-qa: waiting -->'
+  run gh_log; expect_out_has 'POST 7 ### QA environment\n<!-- mroom-qa: waiting since=2026-10-27T12:00:00Z -->'
   # An environment that exists is refreshed, however many there are.
   site 5 api-7.qa.example.dev installed
   forge_set '.sites[-1] += {user: "shop_qa_7", nginx: "server {\n    root /home/shop_qa_7/api-7.qa.example.dev/api/public;\n}\n"}'

@@ -39,13 +39,20 @@
 #                                      REGION, ENDPOINT, PATH_STYLE, and URL for a public one
 #               bucket-drop <N>        every bucket the environment has, whatever its disks: their keys
 #                                      deleted, and each bucket emptied and deleted
+#               reverb-app-add <N>     an app of its own on mroom's Reverb host (D16), which reads its apps
+#                                      from a file on every lookup, so nothing restarts; prints
+#                                      REVERB_APP_ID, REVERB_APP_KEY, REVERB_APP_SECRET (new for a new app,
+#                                      the same while it has one), REVERB_HOST, REVERB_PORT and REVERB_SCHEME
+#               reverb-app-remove <N>  the environment's app; its sockets already open stay until they close
 #
 # The client sends only the environment's number. The gate builds every name from box.env, which a person
 # sets: the database, role and Redis user are <MROOM_APP_NAME>_qa_<N>, the database is cloned from
 # MROOM_QA_TEMPLATE, and the Redis prefix is <MROOM_APP_NAME>:qa<N>:, so no argument can reach another
 # environment. Its buckets are <MROOM_APP_NAME>-qa-<N>-<disk>, each _ of the name a -, for the disk name
 # bucket-create also takes: [a-z][a-z0-9]{0,15}, with no - in it, so no disk's bucket is another
-# environment's or another disk's. Its sites, api-<N>.<MROOM_QA_ZONE> and go-<N>.<MROOM_QA_ZONE>, live in the home of a Forge
+# environment's or another disk's. Its Reverb app's id and key are both <MROOM_APP_NAME>-qa-<N>: public, so
+# the frontend builds without a secret, and the PR's alone, so no other PR is ever given an id whose sockets
+# may still be open. Its sites, api-<N>.<MROOM_QA_ZONE> and go-<N>.<MROOM_QA_ZONE>, live in the home of a Forge
 # isolated user of its own, also <MROOM_APP_NAME>_qa_<N>. The gate works in them only through site-op, run
 # as that user with sudo from a root-owned copy of this release's lib/site-op, so it never unpacks a
 # tarball, follows a PR's link or runs its code as the box user. It connects to Postgres 16 or later as its own role, through the libpq service mroom-gate
@@ -111,6 +118,7 @@ case "$role:$op" in
   provision:signin-code | provision:user-clean) ;;
   provision:mail-user-add | provision:mail-user-remove | provision:mail-read | provision:mail-clear) ;;
   provision:bucket-create | provision:bucket-drop) ;;
+  provision:reverb-app-add | provision:reverb-app-remove) ;;
   *) refuse "$role may not run '${op:0:24}'" ;;
 esac
 
@@ -1005,6 +1013,82 @@ cmd_bucket_drop() {
   if [ "$dropped" = 0 ]; then echo "environment ${words[1]} has no buckets, so nothing to drop"; fi
 }
 
+REVERB_BASE="$HOME/.local/share/mroom-services/reverb"
+REVERB_APPS="$REVERB_BASE/apps/apps.json"
+
+reverb_ready() {
+  [ -f "$REVERB_APPS" ] || fail "$(home_short "$REVERB_APPS") is missing; run mroom baseline reverb"
+  secret_file_ok "$REVERB_APPS" || fail "$(home_short "$REVERB_APPS") must be yours and mode 600"
+  need jq curl flock
+}
+
+# reverb_put <jq argument...>: the apps file, changed by the jq filter and put in place whole, by renaming, so
+# the Reverb host reads the old apps or the new ones, never half of either. Its folder, not the file, is what
+# the host's unit binds, so the host sees the new file.
+reverb_put() {
+  local new="$REVERB_BASE/apps/.apps.json.new"
+  if ! jq "$@" "$REVERB_APPS" >"$new" 2>/dev/null; then
+    rm -f -- "$new"
+    fail "$(home_short "$REVERB_APPS") could not be changed: it is not {\"apps\": [...]} in JSON"
+  fi
+  chmod 600 "$new"
+  mv -f -- "$new" "$REVERB_APPS"
+}
+
+cmd_reverb_app_add() {
+  words_are 2
+  env_number "${words[1]}"
+  local n="${words[1]}" id="${app}-qa-${words[1]}" zone secret
+  reverb_ready
+  zone="${BOX[MROOM_QA_ZONE]:-}"
+  [ -n "$zone" ] || fail "MROOM_QA_ZONE is not set in box.env"
+  env_lock reverb  # one apps file for every environment
+  [ "$(curl -q -s --max-time 5 --unix-socket "$REVERB_BASE/run/reverb.sock" -o /dev/null -w '%{http_code}' \
+    http://localhost/up 2>/dev/null)" = 200 ] \
+    || fail "the Reverb host does not answer; check mroom-reverb.service (mroom baseline reverb sets it up)"
+  # An app the environment has keeps its secret: Reverb holds the app each socket opened with, so a new secret
+  # would fail the private channels of every socket already open until it reconnects. Remove, then add, for a
+  # new one.
+  secret="$(jq -r --arg id "$id" '[.apps // [] | .[] | select(.app_id == $id) | .secret] | first // empty' \
+    "$REVERB_APPS" 2>/dev/null)" || fail "$(home_short "$REVERB_APPS") is not {\"apps\": [...]} in JSON"
+  if ! [[ "$secret" =~ ^[0-9a-f]{48}$ ]]; then
+    secret="$(new_password)"
+    [ "${#secret}" = 48 ] || fail "could not read random bytes for the secret"
+  fi
+  # Only the environment's two sites may open its sockets from a browser, at most 100 subscribed at once, and
+  # only a socket subscribed to a channel may send client events on it.
+  # shellcheck disable=SC2016 # jq's own $id, $secret, $n and $zone
+  reverb_put --arg id "$id" --arg secret "$secret" --arg n "$n" --arg zone "$zone" '
+    .apps |= ((. // []) | map(select(.app_id != $id)) + [{
+      app_id: $id, key: $id, secret: $secret,
+      allowed_origins: ["api-\($n).\($zone)", "go-\($n).\($zone)"],
+      ping_interval: 60, activity_timeout: 30, max_message_size: 10000, max_connections: 100,
+      accept_client_events_from: "members"
+    }])'
+  gate_log "reverb-app-add $n: $id ready"
+  printf 'REVERB_APP_ID=%s\nREVERB_APP_KEY=%s\nREVERB_APP_SECRET=%s\nREVERB_HOST=ws.%s\nREVERB_PORT=443\nREVERB_SCHEME=https\n' \
+    "$id" "$id" "$secret" "$zone"
+}
+
+cmd_reverb_app_remove() {
+  words_are 2
+  env_number "${words[1]}"
+  local id="${app}-qa-${words[1]}" had
+  reverb_ready
+  env_lock reverb
+  had="$(jq --arg id "$id" '[.apps // [] | .[] | select(.app_id == $id)] | length' "$REVERB_APPS" 2>/dev/null)" \
+    || fail "$(home_short "$REVERB_APPS") is not {\"apps\": [...]} in JSON"
+  if [ "$had" = 0 ]; then
+    gate_log "reverb-app-remove ${words[1]}: no app"
+    echo "environment ${words[1]} has no Reverb app, so nothing to remove"
+    return 0
+  fi
+  # shellcheck disable=SC2016 # jq's own $id
+  reverb_put --arg id "$id" '.apps |= ((. // []) | map(select(.app_id != $id)))'
+  gate_log "reverb-app-remove ${words[1]}: $id removed"
+  echo "Reverb app $id: removed; its sockets already open stay until they close"
+}
+
 # The operation and its environment only: each operation logs what it did, and an argument it refuses, such
 # as an address that is no persona's, never reaches the log.
 first="${words[1]:-}"
@@ -1028,4 +1112,6 @@ case "$op" in
   mail-clear) cmd_mail_clear ;;
   bucket-create) cmd_bucket_create ;;
   bucket-drop) cmd_bucket_drop ;;
+  reverb-app-add) cmd_reverb_app_add ;;
+  reverb-app-remove) cmd_reverb_app_remove ;;
 esac

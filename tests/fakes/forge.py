@@ -10,11 +10,11 @@ fake-forge-token reaches the organisation acme's server 42. Each call is logged 
 "<METHOD> <path and query>", with " <body>" after it for a write, and as "forge <METHOD> <path>" to $ORDER_LOG,
 when it is set, which the gate's stand-in (tests/fakes/ssh) writes too.
 
-As Forge does, it answers JSON:API resources, and lists at most page[size] items at a time with a cursor to the
-next page ("page_size" in the state lowers the most). A site it deletes turns removing, with updated_at now (MROOM_NOW,
-when set), and goes after "remove_reads" (1) more reads of the site list; -1 keeps it removing. A process it deletes
-goes at once, or turns removing and goes after "process_remove_reads" reads of the list. "fail": {"<METHOD> <path>":
-code} answers that code to every such call, and {"code": code, "times": n} to the next n only.
+As Forge does, it answers JSON:API resources, and lists at most 30 items at a time, whatever page[size] asks, with
+a cursor to the next page ("page_size" in the state lowers the most). A site it deletes turns removing, with updated_at
+now (MROOM_NOW, when set), and goes after "remove_reads" (1) more reads of the site list; -1 keeps it removing. A
+process it deletes goes at once, or turns removing and goes after "process_remove_reads" reads of the list. "fail":
+{"<METHOD> <path>": code} answers that code to every such call, and {"code": code, "times": n} to the next n only.
 
 What qa-up makes, it makes as Forge does, slowly: a site stays installing for "install_reads" (1) reads of the list,
 with an nginx config of Forge's shape; a certificate is inactive for "cert_reads" (1) reads; a deployment is deploying
@@ -66,7 +66,7 @@ def up_probe(out: str | None, write_out: str) -> int:
 
 
 def page(state: dict, items: list, kind: str, query: dict) -> dict:
-    size = min(int(query.get("page[size]", ["100"])[0]), state.get("page_size", 100))
+    size = min(int(query.get("page[size]", ["100"])[0]), state.get("page_size", 30))
     start = int(query.get("page[cursor]", ["0"])[0])
     rest = items[start + size:]
     return {"data": [resource(kind, i) for i in items[start:start + size]],

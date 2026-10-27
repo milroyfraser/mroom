@@ -140,6 +140,18 @@ jobs:
       - uses: actions/checkout@v4
       - run: tests/files/gate-real-test.sh
 
+  gate-reverb:
+    # The gate's Reverb operations against mroom's real Reverb host, which mroom baseline reverb builds from
+    # reverb-host and its composer.lock, run confined by the runner's systemd from the unit root-setup
+    # installs: an app per environment, its origins, signed events, a new secret, removal with no restart,
+    # sockets through an nginx made from baseline's config, and a restart.
+    name: gate on a real Reverb host
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/reverb/gate-real-test.sh
+
   install:
     # Phase 0 "done when": install.sh on a fresh Ubuntu installs mroom and `mroom config get app.name`
     # reads an example. A bare ubuntu:24.04 container is the fresh box.

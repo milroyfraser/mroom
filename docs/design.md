@@ -95,7 +95,7 @@ starts the host's deploy and checks that the new release is live; the host (Forg
 | D13 | QA environments use mroom's own Forge client (phase 1), not Laravel Harbor | Harbor creates and removes sites, which that client already does. Its documented setup holds the Forge token in a `pull_request` job (against D6), it creates empty databases where mroom clones a template, and its `.env` merge has open bugs with quotes, `#` and multi-line values |
 | D14 | The QA file store is Garage, not MinIO | MinIO's free binaries are gone: its download server answers 410 and its repository was archived in April 2026. Garage is one binary whose keys are granted bucket by bucket, which is what a key per environment needs; in the spike, a second environment's key got 403 reading and writing the first one's bucket. Garage has no object ACLs or bucket policies, so public files go through its website endpoint, and an app that sets per-file visibility declares that disk a swap (section 9) |
 | D15 | Every client of the box's Redis signs in as an ACL user, and the default user is off. A QA environment's user reaches only keys and channels under its own prefix, and no command that acts on the whole server | Forge site isolation keeps a PR's code out of other users' files, but not out of a Redis with no password: there it could read every environment's data and push jobs onto a queue whose workers run as `forge`. A key pattern limits only the keys a command declares, so the user gets only Redis's own types and functions, none of a module's commands (which may declare fewer keys than they read), and loses the commands among them that flush, watch, list or debug the whole server, or reset its scripts (section 8.9). Agent sessions, worktrees and the dev site run as the box's OS user and share one Redis user, since they can read each other's files anyway. That user still must not flush the QA environments' keys, so it is denied `@dangerous` too, or the QA environments use a Redis database it cannot select |
-| D16 | mroom runs one Reverb host for the QA environments, with an app provider that reads its apps from a file | Reverb's default provider reads its apps from config once, when the server starts, so adding an app means a restart. Reverb picks its provider through a Laravel manager, so a provider registered with `ApplicationManager::extend` that reads a file on each lookup adds and removes an environment's app without one, and no environment runs a Reverb process of its own. This comes from Reverb's source; building the host proves it. An environment's public app key comes from its PR number, so qa-plan can build the frontend without secrets, and its secret is random. An app id belongs to one PR only, because a removed app's open sockets stay open until they close |
+| D16 | mroom runs one Reverb host for the QA environments, with an app provider that reads its apps from a file | Reverb's default provider reads its apps from config once, when the server starts, so adding an app means a restart. Reverb picks its provider through a Laravel manager, so a provider registered with `ApplicationManager::extend` that reads a file on each lookup adds and removes an environment's app without one, and no environment runs a Reverb process of its own. Built on Reverb 1.12.0, the host proves it: `tests/reverb/gate-real-test.sh` adds, replaces and removes apps while it runs, and it never restarts. It listens on a Unix socket in a folder only the box user can open, so no site user can take its place, and its unit binds its apps' folder rather than the file, since a file bound on its own stays the one found at start. Its Pusher server sets the channel manager to each message's app, since Reverb 1.12.0 looks a client event's channel up in whichever app it served last (fixed upstream after 1.12.0), and closes a socket refused for its origin or the app's connection limit, which Reverb leaves open. An environment's public app key comes from its PR number, so qa-plan can build the frontend without secrets, and its secret is random. An app id belongs to one PR only, because a removed app's open sockets stay open until they close |
 | D17 | Each QA environment's sites are Forge isolated sites in the home of one Unix user of its own, `<app>_qa_<N>`. The gate puts the PR's code into them as data, so no git credential is on the site, and its nginx config sets `disable_symlinks if_not_owner` | Isolation runs the site's PHP and its queue worker as that user, and an ACL keeps the user out of `forge`'s home; deleting the site removes the user. The spike created the worker with the site user through the API, though Forge's API spec lists only `root` and `forge`, so qa-up reads the new process back and deletes it unless it runs as the site user. A deploy key on the site would let any code there, a dependency's install script included, read the whole repository until someone revoked it, against D6. So qa-up fetches the PR's tree by commit, as data, and the gate unpacks it as the site user, the way `dist/` already arrives. `code-put` replaces the whole tree except `.env` and `storage/`, skips any `.env` in the tarball, and refuses links at `.env`, `storage` and `bootstrap/cache`. QA sites use Forge's standard deployments, because its zero-downtime script clones the repository. nginx runs as `forge` and follows symlinks; without the setting, a PR could link a file in its site to a secret in `forge`'s home and download it |
 | D18 | Each QA environment has its own Postgres role, which owns only that environment's database, and no environment's role can connect to any other database | Isolation and D15 do not cover Postgres either: with one shared login, a PR's code could read, change or drop every QA database, the template and the dev site's database. Postgres lets every role connect to every database by default (`CONNECT` for `PUBLIC`), and every new database gets that grant again, since database-level grants are not copied from the template. So `pg_hba.conf` lets a QA role connect only to the database named after it (`sameuser`, for the group of QA roles), with the gate's own role on a line above, since it belongs to the group too, and `db-create` revokes the grant as well. mroom requires 16 or later: before 16, a role that may create roles may also grant itself any role, the administrator ones included, and from 15 `PUBLIC` can no longer create objects in the `public` schema (doctor checks it, since an upgrade or a restore keeps the old permissions). A cloned database's objects keep the template owner, so the template's objects belong to a role that owns nothing else, and `REASSIGN OWNED` hands them to the environment's role. It also moves databases and tablespaces, so the gate refuses to run while that role owns one |
 | D19 | Mail is caught by Mailpit. Each environment sends with its own SMTP login, `mail-read` matches mail on the login that sent it, and the gate restarts Mailpit when it adds or removes a login | Tested on the box: Mailpit reads its login file only when it starts, so a new login needs a restart: the gate stops Mailpit, which runs as the box user, and systemd starts it again. Stored mail survives, and a queued mail that fails during the restart is retried when its job allows more than one try (`mroom doctor --app` checks). Tags can be forged: a mail with an `X-Tags` header or a plus address gets the tag it names, so those sources are turned off, and `mail-read` matches the `Username` field, which only a login sets: SMTP, or the API login only the gate holds. A port is free while its server restarts, and any user on the box may take a free port, with the logins apps send to it, so Mailpit listens only on Unix sockets in the box user's own folder, and mroom's mail relay pipes apps' TCP mail to it. systemd holds the relay's port from boot, as root (a socket unit), so it stays held while the relay restarts too; the gate gives a login only while that socket is active on the port, or the relay itself holds it (found in three reviews, 26 Oct). Mailpit and the relay are systemd services that start again however often they stop, each Mailpit running a second before the next restart (3 under a supervisor such as Forge's daemons, which gives up after three quick stops), confined to their own files. A person installs the units as root from a script that holds their text, so root reads no file the box user can write |
@@ -131,7 +131,9 @@ starts the host's deploy and checks that the new release is live; the host (Forg
     can open, its RPC stays in a network of its own (`PrivateNetwork`), and it runs confined, as a systemd
     service whose unit root installs with mroom's root recipe (D21). Its secrets come from
     `rpc_secret_file` and `admin_token_file`, and `metrics_token_file` closes `/metrics`.
-  - mroom's Reverb host (D16) when `qa.parity.broadcast` is `same`, over WebSockets.
+  - mroom's Reverb host (D16) when `qa.parity.broadcast` is `same`, over WebSockets on `ws.<zone>`: nginx
+    passes them to a Unix socket in a folder only `forge` can open, and the host runs confined, as a systemd
+    service whose unit root installs with mroom's root recipe (D21).
   - Mailpit (D19) when `qa.parity.mail` is `catcher`, run as `mailpit --listen unix:<folder>/http.sock:0600
     --smtp unix:<folder>/smtp.sock:0600 --database <file> --smtp-auth-file <file> --smtp-auth-allow-insecure
     --tags-username --tags-disable x-tags,plus-addresses --ui-auth-file <file> --max 0 --max-age 7d`, in a
@@ -146,7 +148,9 @@ starts the host's deploy and checks that the new release is live; the host (Forg
   Each service's secrets, data and config sit under `forge`'s home, files mode 600 and directories 700, where no
   site user can read them: binaries and data in `~/.local/share/mroom-services`, which an uninstall of mroom
   leaves alone, and logins in `~/.config/mroom/secrets`. mroom commits the SHA-256 of each binary it was tested with, and `mroom baseline`
-  refuses any other: Garage publishes no checksums, and Mailpit's only digest is the one GitHub keeps.
+  refuses any other: Garage publishes no checksums, and Mailpit's only digest is the one GitHub keeps. The
+  Reverb host's PHP packages are pinned by `reverb-host/composer.lock`, each to its commit: Composer checks no
+  archive SHA-256 for them.
 - GitHub: a repo with Actions, three environments (`qa`, `persona`, `production`; section 8), a ruleset on the
   default branch that requires review from code owners, a `CODEOWNERS` that names only people, and an account for
   the box's agents with Write (D22).
@@ -216,7 +220,8 @@ version_path = "/version"          # returns {"release": "<tag>", "commit": "<sh
 [app.build]
 frontend = "pnpm build"
 frontend_env = { VITE_REVERB_APP_KEY = "env:REVERB_APP_KEY" }   # in QA, mroom sets the key from the PR (D16)
-frontend_dist = "dist"             # where the build writes, inside frontend_dir; public/build for Vite in Laravel
+frontend_dist = "dist"             # where the build writes, in the folder it runs in: frontend_dir, or for "."
+                                   # (Vite inside Laravel) backend_dir, where the default is public/build
 after_deploy = ["config:clear", "route:cache"]   # artisan commands
 daemons = ["horizon", "reverb"]          # QA skips reverb: mroom's Reverb host serves it (D16)
 queues = ["default", "mail"]
@@ -357,9 +362,12 @@ Invariants, each with a test:
    holds: on GitHub, only the agents' account (D22).
 2. **QA provisioning keeps PR code away from every secret:**
    - `qa-plan` (`pull_request`, no secrets): scope the change with path rules, build the frontend from the PR with
-     public values only, upload `dist/` and `plan.json` as artifacts. A Claude step that judges whether a user
-     could notice the change runs later, in a job with default-branch code, boxed as in 8.5, reading the diff as
-     data.
+     public values only, upload `dist/` as an artifact; qa-up scopes the change again itself, since nothing a job
+     that ran PR code leaves can be trusted. A Claude step that judges whether a user could notice the change
+     runs later, in a job with default-branch code, boxed as in 8.5, reading the diff as data.
+   - A job that runs PR code under a trusted trigger sets `cache-mode: read`. A dispatch from the default branch
+     (a person's, or a wake's) runs qa-plan under that branch, whose caches `workflow_dispatch` may write, so
+     without it the PR's code could leave a poisoned cache for the default branch's own builds.
    - `qa-up` (`workflow_run` on qa-plan, environment `qa`, default-branch code only): create the site and the
      environment's services, write `.env` through the gate (`env-put`, as the site user, so nothing follows a link
      the PR's code left there), fetch the PR's tree by commit (GitHub's tarball, as data) and send it
@@ -670,6 +678,17 @@ What the pilot's scripts learned after this table was drawn, which their ports k
   finds uncommitted changes there, or cannot fetch or switch to the branch) gives back a lock it took, never one
   the pull's owner held before it started. An owner's expired lock is taken anew, not renewed, so such a pull
   gives it back too. A failure after the switch keeps the lock, since the site may be half switched.
+- **Caches under a trusted trigger (`qa-plan`, phase 2a).** A job that runs a pull request's code under a trigger
+  that may write the default branch's caches (`workflow_dispatch`, `push`, `schedule` and the like) sets
+  `cache-mode: read`, or the pull request's code can save a cache the default branch's own builds restore.
+- **Finding runs (phase 2a).** A lookup of a workflow's runs, such as whether a deploy for a pull request is
+  running or which of its runs is the newest, finds them by workflow and by run name, never filtered by event: a
+  run started by `workflow_dispatch` is as much a run of that workflow as one started by `workflow_run`, and a
+  filter on the usual event hides it.
+- **Chains of runs (phase 2a).** A run started with the job token (`GITHUB_TOKEN`) starts no `workflow_run` when it
+  ends, and neither does a run it dispatches in turn. So in a chain the token started, each link dispatches the
+  next itself, all the way down: a woken plan dispatches qa-up, and qa-up dispatches what follows it. A workflow
+  that waits on `workflow_run` of a link also accepts that dispatch, or never runs for such a chain.
 
 ## 13. Before publishing
 
@@ -700,7 +719,7 @@ What the pilot's scripts learned after this table was drawn, which their ports k
 6. QA services (section 8.9): pick the box's S3-compatible store and confirm a key per bucket; confirm the box's
    Reverb can add and remove apps, and how short its restart is if it must restart; decide how the mail catcher
    tells environments apart (a header, or the sender). **Answered:** Garage, with a key per bucket proven (D14);
-   a Reverb host whose provider reads a file, so no restart (D16, from Reverb's source until the host is built);
+   a Reverb host whose provider reads a file, so no restart (D16, built and tested);
    and Mailpit, which tells environments apart by the SMTP login that sent each mail, and restarts when the gate
    changes a login (D19).
 7. D6 and shared credentials: `QA_ENV_TEMPLATE` gives every environment the same test-mode keys (a payment

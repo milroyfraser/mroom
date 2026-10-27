@@ -114,6 +114,41 @@ hidden_paths = "api/tests/*"'
   expect_rc 1; expect_err_has "qa.hidden_paths must be a list of strings"
 }
 
+# listing <files JSON>: plan.sh's run for pull request 7, with GitHub's list of its files faked.
+listing() {
+  mkdir -p "$T/gh" "$T/bin"
+  ln -sf "$ROOT/tests/fakes/gh" "$T/bin/gh"
+  [ -z "$1" ] || printf '%s\n' "$1" >"$T/gh/files-7.json"
+  run env PATH="$T/bin:$PATH" GH_FAKE="$T/gh" GITHUB_REPOSITORY=example/shop "$ROOT/actions/qa-plan/plan.sh" 7
+}
+
+t_a_renamed_file_counts_with_both_names() {
+  config "$SINGLE"
+  # A file moved from the app into the tests changes the app.
+  listing '[{"filename": "tests/Unit/OrderTotals.php", "previous_filename": "app/Orders/OrderTotals.php", "status": "renamed"}]'
+  expect_rc 0; expect_out $'scope=maybe\nreason=1 of 2 paths could reach the app: 1 app, 1 tests'
+  listing '[{"filename": "docs/new.md", "previous_filename": "docs/old.md", "status": "renamed"}, {"filename": "README.md"}]'
+  expect_out $'scope=none\nreason=only paths no user can see changed: 3 docs'
+}
+
+t_a_name_with_a_control_character_is_a_maybe() {
+  config "$SINGLE"
+  # GitHub lists a name with a newline as one string; read line by line it would be two names, one of them hidden.
+  listing '[{"filename": "resources/js/a.test.ts\ndocs/b.php", "status": "added"}]'
+  expect_rc 0; expect_out $'scope=maybe\nreason=1 of 1 paths could reach the app: 1 a name with a control character'
+  listing '[{"filename": "docs/a\tb.md", "status": "added"}]'
+  expect_out_has "scope=maybe"
+}
+
+t_a_listing_that_fails_is_a_maybe() {
+  config "$SINGLE"
+  listing ""
+  expect_rc 0; expect_out $'scope=maybe\nreason=no changed paths could be read'
+  expect_err_has "could not list the pull request's files"
+  run env PATH="$T/bin:$PATH" GH_FAKE="$T/gh" GITHUB_REPOSITORY=example/shop "$ROOT/actions/qa-plan/plan.sh" 07
+  expect_rc 2
+}
+
 test_case hidden-areas t_what_no_user_can_see
 test_case visible-areas t_what_a_user_could_see
 test_case one-visible-is-enough t_one_visible_path_among_hidden_ones_is_enough
@@ -122,4 +157,7 @@ test_case reason t_the_reason_names_the_areas_the_visible_ones_first
 test_case config-paths t_mroom_toml_names_more_paths
 test_case cut-short-list t_a_list_github_cut_short_is_a_maybe
 test_case broken-config t_a_broken_config_fails_instead_of_guessing
+test_case renamed-both-names t_a_renamed_file_counts_with_both_names
+test_case control-character t_a_name_with_a_control_character_is_a_maybe
+test_case listing-fails t_a_listing_that_fails_is_a_maybe
 finish

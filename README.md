@@ -284,12 +284,16 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 | `mail-clear <N>` | every mail the environment's login sent |
 | `bucket-create <N> <disk> [public]` | a bucket on the box's Garage (D14) for one of the app's file disks, and a new key that reaches that bucket alone; `public` turns on its website access. Prints `BUCKET`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `REGION`, `ENDPOINT`, `PATH_STYLE`, and `URL` for a public disk |
 | `bucket-drop <N>` | every bucket the environment has, whatever its disks: their keys deleted, and each bucket emptied and deleted |
+| `reverb-app-add <N>` | an app of its own on mroom's Reverb host (D16), which reads its apps from a file on every lookup, so nothing restarts; prints `REVERB_APP_ID`, `REVERB_APP_KEY`, `REVERB_APP_SECRET` (new for a new app, the same while it has one), `REVERB_HOST`, `REVERB_PORT` and `REVERB_SCHEME` |
+| `reverb-app-remove <N>` | the environment's app; its sockets already open stay until they close |
 
 The client sends only N, and the few words some operations also take, each of a fixed form. The
 database, role and Redis user are `<MROOM_APP_NAME>_qa_<N>`, and the database is cloned from
 `MROOM_QA_TEMPLATE`, both set by a person in `box.env`. A bucket is `<MROOM_APP_NAME>-qa-<N>-<disk>`, each
 `_` of the name a `-`, for the disk name `bucket-create` takes: `[a-z][a-z0-9]{0,15}`, with no `-` in it, so
-no disk's bucket is another environment's or another disk's. A password reaches
+no disk's bucket is another environment's or another disk's. Its Reverb app's id and key are both
+`<MROOM_APP_NAME>-qa-<N>`: public, so the frontend builds without a secret, and the PR's alone, so no other
+PR is ever given an id whose sockets may still be open. A password reaches
 Postgres only as a SCRAM verifier, through stdin, and Redis only as its SHA-256. Each request and refusal
 is logged, never a secret, to `~/.local/state/mroom/gate.log` and to syslog.
 
@@ -397,11 +401,34 @@ Files go to the box's Garage (D14), a bucket for each environment and file disk,
   that bucket's drop alone, and only then the bucket. The drop key goes when the drop ends, whether it
   worked or not; one a killed gate left goes with the next drop of that environment.
 
+WebSockets go to mroom's Reverb host (D16), one Reverb for every environment, each with an app of its own:
+
+- **No restart.** The host reads its apps from a file on every lookup, so `reverb-app-add` and
+  `reverb-app-remove` need none, and no environment's sockets drop when another's app comes or goes. The
+  gate replaces the file whole, by renaming, so the host reads the old apps or the new ones, never half.
+- **An app per environment.** Its id and key come from the PR. Its secret is new when the app is, and only
+  the gate, the host and the environment's `.env` hold it. A later `reverb-app-add` keeps it, since Reverb
+  keeps the app each socket opened with: a new secret would fail the private channels of every socket already
+  open. To change it, remove the app, then add it.
+- **Its limits.** A browser may open its sockets only from the environment's two sites, at most 100
+  subscribed at once, and only a socket subscribed to a channel may send client events on it. The host closes
+  a socket it refuses; Reverb itself only sends the error. It also gives each client event to its own app:
+  Reverb 1.12.0 looks the channel up in whichever app it served last, so with more than one app a valid one
+  is refused at random (fixed upstream after 1.12.0).
+- **One host.** Browsers and apps reach it through nginx on `ws.<zone>`: the frontend opens its sockets
+  there, and the backend sends its events there, signed with its secret.
+- **No port to take.** It listens only on a Unix socket in a folder only the box user can open, so no site
+  user can take its place, not even while it restarts. Confined like Garage, it sees only its build and its
+  apps folder, and has no network of its own.
+- **Removing.** A removed app's open sockets stay until they close: the host looks an app up only when a
+  socket opens or an event arrives, and no longer pings them, so nginx closes a dead one after its 180 s read
+  timeout. A new socket with its key is refused.
+
 **Set up once,** for an app named `shop`, on Postgres 16 or later and Redis 7 or later. Before Postgres 16,
 a role that may create roles may also grant itself the administrator ones, so the gate refuses older
 versions. CI runs these steps against a real Postgres, a real Redis 7 and 8, real site users and sudo, and
-the real Mailpit and Garage under systemd (`tests/pg/`, `tests/redis/`, `tests/site/`, `tests/mail/` and
-`tests/files/`).
+the real Mailpit, Garage and Reverb host under systemd (`tests/pg/`, `tests/redis/`, `tests/site/`,
+`tests/mail/`, `tests/files/` and `tests/reverb/`).
 
 Steps marked *as root* change what the box user cannot, so they must not trust anything the box user, or a
 program running as it, could have changed. Run them from a session those programs cannot change, a Forge
@@ -420,7 +447,8 @@ and runs it, which installs the `parts` named:
 - What root trusts is this repository's tags and README, so nothing on the box may write to it: the box's
   one GitHub credential, the agents' account (design D22), may write the app's repository, never this one.
 - `parts`: `site-op` always, `mailpit` when `qa.parity.mail` is `catcher`, `garage` when `qa.parity.files`
-  is `same`. `smtp_port` is `box.env`'s `MROOM_QA_SMTP_PORT`, 1025 unless set.
+  is `same`, `reverb` when `qa.parity.broadcast` is `same`. `smtp_port` is `box.env`'s
+  `MROOM_QA_SMTP_PORT`, 1025 unless set.
 - `root-setup` reads no file the box user can write: it writes each unit from its own text, checks `site-op`
   against the SHA-256 it holds, and runs again without harm, rewriting and restarting only what changed, or
   what a run that stopped halfway left. systemd itself, as root, still resolves the units' bind paths in the
@@ -431,9 +459,9 @@ and runs it, which installs the `parts` named:
 ```bash
 set -euo pipefail
 v=v0.4.0
-sum=2474ea7ad8c78bc048870910a268c1894050e9b081209c90eec4e2e0f9bec4a1
+sum=16d658f61a8ff9aba258fd3d7845cffacf94ece2f0a1478ad7c71537c2c7de1c
 user=forge
-parts=(site-op mailpit garage)
+parts=(site-op mailpit garage reverb)
 smtp_port=1025
 [[ "$v" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "v must be a release tag, such as v0.4.0" >&2; exit 1; }
 f="$(mktemp)"
@@ -594,18 +622,27 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
     box user, who alone can open Garage's sockets. The S3 host streams each body to Garage, so an unsigned
     upload is refused before nginx stores any of it.
 
+14. WebSockets, when `qa.parity.broadcast` is `same` (the default): `mroom baseline reverb`, then, *as root*,
+    the root recipe with `reverb` in its parts, which installs the Reverb host's systemd unit, then
+    `mroom baseline reverb` again, which says whether it answers. Baseline installs this release's
+    `reverb-host` with the packages its `composer.lock` pins, which takes Composer and PHP 8.3 or later at
+    `/usr/bin/php`, and makes its folders and an empty apps file (mode 600, in a folder of its own). With
+    `MROOM_QA_ZONE` set, it prints the nginx config of the host: create `ws.<zone>` as a site in Forge, with
+    its certificate, and put the printed block in place of its `location` blocks.
+
 ## QA environments
 
 Each pull request can have a QA environment of its own on the box: `api-<N>.<zone>` for the Laravel app and,
 for a frontend of its own, `go-<N>.<zone>`, with the services the QA gate gives it (design 8.2). Reusable
-workflows run it; the app calls each from a workflow of its own, pinned to the mroom release the box runs:
+workflows run it; the app calls each from a workflow of its own, pinned to the mroom release the box runs
+(`v0.4.0` below is the next release tag, the first with these workflows):
 
 | Workflow | Runs on | What it does |
 |---|---|---|
 | `qa-plan.yml` | a push to a pull request, or by hand | sorts the changed paths (could a user notice the change?), then builds the frontend from the pull request's code with public values only; it holds no secret |
 | `qa-up.yml` | the QA plan run completing | brings the environment up or refreshes it, when a user could notice the change, the environment exists, the `qa` label is on, or the plan was started by hand |
-| `qa-down.yml` | the pull request closing, its `qa` label coming off, or by hand | tears the environment down: its daemons, its site user's processes and files, its sites, then its database, Redis user and keys, mail and buckets, through the gate |
-| `qa-reap.yml` | a schedule, or by hand | tears down every environment older than `qa.ttl_days` (5) |
+| `qa-down.yml` | the pull request closing, its `qa` label coming off, the reaper, or by hand | tears the environment down: its daemons, its site user's processes and files, its sites, then its database, Redis user and keys, mail and buckets, through the gate |
+| `qa-reap.yml` | a schedule, or by hand | starts a teardown for every environment older than `qa.ttl_days` (5) |
 
 - **Who holds what.** Only jobs in the GitHub environment `qa` hold the Forge token and the box's SSH key,
   which reach root (design D20). `qa` admits the default branch alone, and those jobs check out only the
@@ -616,14 +653,32 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
   reads as "no environment". Forge can accept a delete and never run it, so a site still removing after 30
   minutes gets the delete again, and the reaper warns about it: the same one two nights running needs a
   person in Forge.
-- **The order of a teardown.** Daemons first, since supervisor starts again what is stopped, then
-  `user-clean`, then the sites right after (design 8.9). A `user-clean` that fails keeps the sites, so the
-  next teardown tries again. Each step skips what is already gone, so a teardown finishes a half-built or
-  half-removed environment.
+- **A teardown.** qa-down's first job only reads Forge, so a pull request that never had an environment gets
+  no teardown; one started by hand or by the reaper skips it. The second job runs every step, each skipping
+  what is already gone, whether or not Forge still has a site: daemons first, since supervisor starts again
+  what is stopped, then `user-clean`, then the sites right after (design 8.9), then the box's side. A
+  `user-clean` that fails keeps the sites. When a step fails, the comment names it, and "Re-run failed jobs"
+  on that run finishes the teardown. Teardowns and deploys of one pull request take turns, first in first
+  out, so none runs beside another and none waiting is dropped.
+- **The reaper** starts the app's qa-down workflow for each environment past its time (reason `ttl`) rather
+  than tearing it down itself, so each teardown takes its pull request's turn, frees its slot and can be
+  re-run on its own; the reaper holds the Forge token and no SSH key.
 - **The comment.** A pull request with an environment has one `### QA environment` comment, edited in place,
-  that says whether it is ready, waits for a slot, failed or was removed, and why. It is for people; the
-  waiting state also says which pull request gets a freed slot: the one that has waited longest, whose QA
-  plan qa-down and qa-reap start again.
+  that says whether it is ready, waits for a slot, failed, is being removed or was removed, and why. It is for
+  people; its hidden line also tells a teardown that frees a slot which pull request to wake: the one that has
+  waited longest, by the time it started waiting, which the comment keeps however often it is rewritten. The
+  wake marks it woken before it starts its QA plan again, so a second teardown close behind wakes another; a
+  woken one waits again after 30 minutes. It reads the comments of the 100 newest open pull requests, one
+  listing each, and no more. The wake's dispatch, made with the job token, does start the plan, but nothing
+  after it starts by itself: a run the job token started starts no `workflow_run` when it ends, and neither
+  does a run that one starts in turn. So each link of the chain starts the next itself: the plan hands itself
+  to qa-up (its `hand-over` job, which needs `actions: write`), and qa-up, started that way, starts what
+  follows it. When the label comes off a pull request with no environment, its comment stops saying it waits.
+- **Caches.** qa-plan's build job runs the pull request's code, and a run started by hand or by a wake runs
+  under the default branch, so it only reads caches (`cache-mode: read`): otherwise the pull request's code
+  could save a poisoned cache that the default branch's own builds restore. Any workflow of the app's that
+  runs a pull request's code under a trusted trigger (`workflow_dispatch`, `push`, `schedule` and the like)
+  should do the same.
 - **What qa-up makes.** Two Forge isolated sites in the home of one user of the environment's own,
   `<app>_qa_<N>` (design D17), each with a certificate, and nginx set to follow a link only to its owner's
   files (`disable_symlinks if_not_owner`), which it checks on every run before any code goes in. Then the code,
@@ -657,6 +712,8 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
   own, `<app>_qa_<N>_session` and `<app>_qa_<N>_xsrf`, since every environment shares the zone.
 - **The path rules.** The plan is `none` when every changed path is one no user can see: tests, docs, CI,
   agent and developer tooling; any other path, a path outside the app's folders included, makes it `maybe`.
+  A renamed file counts with both its names, and a name that holds a control character, a newline among them,
+  makes it `maybe` too.
   `qa.hidden_paths` adds paths no user can see (such as the app's console commands) and `qa.visible_paths`
   paths a user can, whatever the rules say (Markdown a page shows); each is a list of shell patterns in which
   `*` also matches `/`, and the visible ones are checked first.
@@ -698,6 +755,7 @@ jobs:
       github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login != 'dependabot[bot]' && (github.event.action != 'labeled' || github.event.label.name == 'qa'))
     permissions:
+      actions: write # the hand-over, for a plan the wake started; the build job itself only reads
       contents: read
       pull-requests: read
     uses: milroyfraser/mroom/.github/workflows/qa-plan.yml@v0.4.0
@@ -737,6 +795,7 @@ on:
   workflow_dispatch:
     inputs:
       pr_number: { description: The pull request whose environment to tear down, required: true, type: string }
+      reason: { description: Why it goes, required: true, type: choice, options: [hand, ttl], default: hand }
 permissions:
   contents: read
 jobs:
@@ -749,6 +808,7 @@ jobs:
     uses: milroyfraser/mroom/.github/workflows/qa-down.yml@v0.4.0
     with:
       pr: ${{ inputs.pr_number || github.event.pull_request.number }}
+      reason: ${{ inputs.reason || 'hand' }}
     secrets:
       MROOM_FORGE_TOKEN: ${{ secrets.MROOM_FORGE_TOKEN }}
       MROOM_QA_SSH_KEY: ${{ secrets.MROOM_QA_SSH_KEY }}
@@ -766,19 +826,19 @@ permissions:
 jobs:
   qa:
     permissions:
-      actions: write
+      actions: write # to start a teardown for each environment past its time
       contents: read
-      pull-requests: write
     uses: milroyfraser/mroom/.github/workflows/qa-reap.yml@v0.4.0
     secrets:
       MROOM_FORGE_TOKEN: ${{ secrets.MROOM_FORGE_TOKEN }}
-      MROOM_QA_SSH_KEY: ${{ secrets.MROOM_QA_SSH_KEY }}
 ```
 
 A caller passes the secrets by name, since `secrets: inherit` reaches only a workflow of the same
-organisation, and the secrets resolve from the `qa` environment that the called job names. A pull request
-based on another branch than the default one runs under that branch, which `qa` refuses: its environment goes
-with the reaper, or a teardown run by hand (`gh workflow run qa-down.yml -f pr_number=<N>`).
+organisation, and the secrets resolve from the `qa` environment that the called job names. Since 8 December
+2025, `pull_request_target` runs the default branch's workflow whatever a pull request's base, so a pull request
+based on another branch tears down like any other. The workflow files' names above are the defaults the reusable
+workflows start each other by (`plan-workflow`, `up-workflow`, `down-workflow` inputs); an app that names its own
+otherwise passes them. A teardown by hand: `gh workflow run qa-down.yml -f pr_number=<N>`.
 
 ## Regression label
 

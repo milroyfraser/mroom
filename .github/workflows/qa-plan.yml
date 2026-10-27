@@ -3,11 +3,15 @@ name: QA plan
 # The half of a pull request's QA environment that runs the pull request's code, so it holds no secret (design
 # 8.2). The app calls this workflow from one of its own on pull_request and workflow_dispatch (README, QA
 # environments). It sorts the changed paths first (actions/qa-plan), before any of the pull request's code runs,
-# and keeps that plan as the mroom-qa-plan artifact; then it builds the frontend for go-<N> with public values
-# only (actions/qa-plan/build.sh) and keeps it as the mroom-qa-dist artifact. When this run completes, qa-up
-# starts (workflow_run), which runs the default branch's workflow and mroom's actions at their pinned commit,
-# takes the build as data to copy and sorts the paths again itself, since nothing a run of the pull request's code
-# leaves can be trusted. Only qa-up uses the qa environment, which admits the default branch alone.
+# into the run's summary; then it builds the frontend for go-<N> with public values only (actions/qa-plan/build.sh)
+# and keeps it as the mroom-qa-dist artifact. When this run completes, qa-up starts (workflow_run), which runs the
+# default branch's workflow and mroom's actions at their pinned commit, takes the build as data to copy and sorts
+# the paths again itself, since nothing a run of the pull request's code leaves can be trusted. Only qa-up uses the
+# qa environment, which admits the default branch alone.
+#
+# A run started with the job token, as a wake starts it for a pull request that waited for a slot, starts no
+# workflow_run when it ends: the hand-over job then starts the app's qa-up workflow itself, naming this run. The
+# qa-up run it starts ends without a workflow_run too, so qa-up starts whatever follows it in the same way.
 on:
   workflow_call:
     inputs:
@@ -19,6 +23,10 @@ on:
         description: The Node version to build with, when the app has no .nvmrc or .node-version
         type: string
         default: lts/*
+      up-workflow:
+        description: The app's QA environment up workflow file, which the hand-over starts
+        type: string
+        default: qa-up.yml
 
 permissions:
   contents: read
@@ -38,6 +46,10 @@ jobs:
     concurrency:
       group: mroom-qa-plan-${{ inputs.pr }}
       cancel-in-progress: true
+    # The job runs the pull request's code, and a run started by hand or by a wake runs under the default branch,
+    # whose caches a workflow_dispatch may write: so it may only read them, or the pull request's code could leave
+    # a poisoned cache for the default branch's own builds (design 8.2).
+    cache-mode: read
     permissions:
       contents: read
       pull-requests: read
@@ -59,7 +71,7 @@ jobs:
           gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json number,headRefOid,isCrossRepository \
             --jq 'if .isCrossRepository then error("a pull request from a fork gets no QA environment") else "number=\(.number)\nsha=\(.headRefOid)" end' \
             >>"$GITHUB_OUTPUT"
-      # The pull request's files, as data: nothing of it runs before the plan is kept.
+      # The pull request's files, as data: nothing of it runs before the paths are sorted.
       - name: Check out the pull request
         uses: actions/checkout@v4
         with:
@@ -72,24 +84,12 @@ jobs:
         with:
           pr: ${{ steps.pr.outputs.number }}
           config: app/mroom.toml
-      - name: Write the plan
+      - name: Say what the paths are
         env:
-          PR: ${{ steps.pr.outputs.number }}
           SHA: ${{ steps.pr.outputs.sha }}
           SCOPE: ${{ steps.scope.outputs.scope }}
           REASON: ${{ steps.scope.outputs.reason }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/mroom-qa-plan"
-          jq -n --argjson pr "$PR" --arg sha "$SHA" --arg scope "$SCOPE" --arg reason "$REASON" \
-            '{pr: $pr, sha: $sha, scope: $scope, reason: $reason}' >"$RUNNER_TEMP/mroom-qa-plan/plan.json"
-          { echo "### QA plan for \`$SHA\`"; echo; echo "Paths: $SCOPE ($REASON)."; } >>"$GITHUB_STEP_SUMMARY"
-      - name: Keep the plan
-        uses: actions/upload-artifact@v4
-        with:
-          name: mroom-qa-plan
-          path: ${{ runner.temp }}/mroom-qa-plan/plan.json
-          retention-days: 1
-          if-no-files-found: error
+        run: '{ echo "### QA plan for \`$SHA\`"; echo; echo "Paths: $SCOPE ($REASON)."; } >>"$GITHUB_STEP_SUMMARY"'
       - name: What to build
         id: build
         env:
@@ -117,3 +117,28 @@ jobs:
           retention-days: 1
           if-no-files-found: error
           include-hidden-files: true
+
+  # A run the job token started (a wake's) ends without a workflow_run, so qa-up would never follow it: this job
+  # starts the app's qa-up workflow on the default branch, naming this run, whose plan qa-up checks again with
+  # GitHub before it trusts it. A run a person started gets its workflow_run as usual, so this job skips it.
+  hand-over:
+    name: QA hand-over
+    needs: build
+    if: >-
+      !cancelled() && github.event_name == 'workflow_dispatch' && github.triggering_actor == 'github-actions[bot]' &&
+      (needs.build.result == 'success' || needs.build.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write # to start the app's qa-up workflow
+    steps:
+      - name: Start qa-up for this plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
+          UP: ${{ inputs.up-workflow }}
+          BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          [[ "$PR" =~ ^[1-9][0-9]{0,8}$ ]] || { echo "::error::the pull request's number is not a number"; exit 1; }
+          [[ "$UP" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]] || { echo "::error::up-workflow is not a workflow file name"; exit 1; }
+          gh workflow run "$UP" --repo "$GITHUB_REPOSITORY" --ref "$BRANCH" -f pr="$PR" -f plan_run_id="$GITHUB_RUN_ID"
