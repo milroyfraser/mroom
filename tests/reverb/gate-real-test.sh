@@ -99,7 +99,7 @@ t_the_reverb_operations_against_the_real_host() {
   expect_rc 0; expect_out_has "systemd units written: mroom-reverb.service"
   wait_ready
   run "$MROOM" baseline reverb
-  expect_rc 0; expect_out_has "matches this mroom"; expect_out_has "Reverb host answers, with 0 apps."
+  expect_rc 0; expect_out_has "matches this mroom"; expect_out_has "Reverb host answers; its apps file holds 0."
   expect_out_has "systemd units: installed as this mroom writes them (mroom-reverb.service active)."
   local baseline_out="$out" app12 app13 key12 key13 secret12 secret13 old12 pid
   run stat -c %a "$(reverb_dir)/run"; expect_out 700
