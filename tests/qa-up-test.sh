@@ -50,6 +50,8 @@ app() {
   echo '<html>app</html>' >"$T/dist/index.html"
   echo 'console.log(1)' >"$T/dist/assets/app.js"
   export MROOM_QA_DIST="$T/dist" FORGE_UP="$T/up-codes" LABEL=qa
+  # A runner sets GITHUB_ACTIONS, with which up.sh masks its secrets; the test that wants that sets it itself.
+  unset GITHUB_ACTIONS
   export MROOM_QA_ENV_TEMPLATE=$'APP_NAME=Shop\nAPP_KEY=base64:from-the-template\nDB_PASSWORD=from-the-template\nMAPS_KEY=test-maps-key'
   echo 200 >"$FORGE_UP"
 }
