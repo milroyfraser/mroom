@@ -5,11 +5,16 @@ name: QA environment down
 # pull_request_target (closed, unlabeled) and workflow_dispatch (README, QA environments). Under pull_request_target
 # GitHub runs the default branch's copy of that workflow, whatever the pull request's base, and the qa environment
 # admits the default branch alone; this one checks out only the default branch's mroom.toml, and mroom at the
-# commit of this file, so the pull request is only a number. Two jobs:
+# commit of this file, so the pull request is only a number. Three jobs:
 #   check  reads Forge and changes nothing, so a pull request that never had an environment gets no teardown and no
-#          comment. A teardown started by hand or by the reaper skips it, and always runs.
+#          comment. A teardown that stopped partway counts as the environment it started from, so "Re-run all jobs"
+#          finishes it too. A teardown started by hand or by the reaper skips the check, and always runs.
 #   down   tears down, running every step and skipping what is already gone, so "Re-run failed jobs" finishes one
 #          that stopped halfway, with the check's answer from the first attempt.
+#   wake   when the teardown freed a slot, gives it to the pull request that has waited longest. One wake runs at a
+#          time for the whole repository, since two at once would wake the same pull request.
+# check and down take the pull request's group, which qa-up's deploy takes too, so neither runs beside a deploy: a
+# pull request closed during its first deploy is checked once that deploy has made its sites.
 on:
   workflow_call:
     inputs:
@@ -54,6 +59,10 @@ jobs:
     environment:
       name: qa
       deployment: false
+    concurrency:
+      group: mroom-qa-${{ inputs.pr }}
+      cancel-in-progress: false
+      queue: max
     permissions:
       contents: read
       pull-requests: write # a comment that said the pull request waits for a slot
@@ -80,7 +89,7 @@ jobs:
         uses: ./mroom/actions/qa-down
         with:
           pr: ${{ inputs.pr }}
-          check: "true"
+          step: check
           reason: ${{ github.event.action == 'closed' && 'closed' || 'label' }}
           label: ${{ inputs.label }}
           config: app/mroom.toml
@@ -106,9 +115,10 @@ jobs:
       cancel-in-progress: false
       queue: max
     permissions:
-      actions: write # to start the QA plan of a pull request that waits for a slot
       contents: read
       pull-requests: write # the QA environment comment
+    outputs:
+      freed: ${{ steps.down.outputs.freed }}
     steps:
       - name: Check out mroom
         uses: actions/checkout@v4
@@ -126,16 +136,17 @@ jobs:
           sparse-checkout: /mroom.toml
           sparse-checkout-cone-mode: false
       - name: Tear down
+        id: down
         uses: ./mroom/actions/qa-down
         with:
           pr: ${{ inputs.pr }}
+          step: down
           reason: >-
             ${{ github.event.action == 'closed' && 'closed' || github.event.action == 'unlabeled' && 'label' ||
             inputs.reason == 'ttl' && 'ttl' || 'hand' }}
           state: ${{ needs.check.outputs.state }}
           label: ${{ inputs.label }}
           config: app/mroom.toml
-          plan-workflow: ${{ inputs.plan-workflow }}
           forge-org: ${{ vars.MROOM_FORGE_ORG }}
           forge-server: ${{ vars.MROOM_FORGE_SERVER }}
           forge-token: ${{ secrets.MROOM_FORGE_TOKEN }}
@@ -143,3 +154,35 @@ jobs:
           ssh-user: ${{ vars.MROOM_QA_SSH_USER }}
           ssh-key: ${{ secrets.MROOM_QA_SSH_KEY }}
           ssh-known-hosts: ${{ vars.MROOM_QA_SSH_KNOWN_HOSTS }}
+
+  # One wake at a time for the whole repository: each lists the waiting pull requests and marks the one it wakes, so
+  # the next one, after it, picks another. Run beside each other, two would read before either marked, and wake the
+  # same pull request, while the other freed slot went unused. Needs GitHub alone: no environment, no secret.
+  wake:
+    name: QA wake
+    needs: down
+    if: "!cancelled() && needs.down.outputs.freed == 'true'"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: mroom-qa-wake
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      actions: write # to start the QA plan of the pull request that waited longest
+      contents: read
+      pull-requests: write # its QA environment comment
+    steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
+      - name: Wake the pull request that has waited longest
+        uses: ./mroom/actions/qa-down
+        with:
+          pr: ${{ inputs.pr }}
+          step: wake
+          plan-workflow: ${{ inputs.plan-workflow }}

@@ -138,12 +138,15 @@ jobs:
 
   # A run the job token started (a wake's) ends without a workflow_run, so qa-up would never follow it: this job
   # starts the app's qa-up workflow on the default branch, naming this run, whose plan qa-up checks again with
-  # GitHub before it trusts it. A run a person started gets its workflow_run as usual, so this job skips it.
+  # GitHub before it trusts it. A run a person started gets its workflow_run as usual, so this job skips it. It
+  # goes by the run's actor, the one who started its first attempt: a person's re-run of a woken plan is still the
+  # job token's run, and nothing says its end starts a workflow_run, so it hands over again; should one start too,
+  # qa-up deploys the same commit twice, which changes nothing.
   hand-over:
     name: QA hand-over
     needs: build
     if: >-
-      !cancelled() && github.event_name == 'workflow_dispatch' && github.triggering_actor == 'github-actions[bot]' &&
+      !cancelled() && github.event_name == 'workflow_dispatch' && github.actor == 'github-actions[bot]' &&
       (needs.build.result == 'success' || needs.build.result == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -158,5 +161,5 @@ jobs:
           BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           [[ "$PR" =~ ^[1-9][0-9]{0,8}$ ]] || { echo "::error::the pull request's number is not a number"; exit 1; }
-          [[ "$UP" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]] || { echo "::error::up-workflow is not a workflow file name"; exit 1; }
+          [[ "$UP" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*\.ya?ml$ ]] || { echo "::error::up-workflow is not a workflow file name"; exit 1; }
           gh workflow run "$UP" --repo "$GITHUB_REPOSITORY" --ref "$BRANCH" -f pr="$PR" -f plan_run_id="$GITHUB_RUN_ID"

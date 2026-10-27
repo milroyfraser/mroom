@@ -1,18 +1,19 @@
 name: QA environment down
 description: >-
-  Tears down one pull request's QA environment (design 8.2, 8.9), or with check, only reads whether Forge has one.
-  The teardown runs every step, each skipping what is already gone, so re-running it finishes one that stopped:
-  its daemons, its site user's processes and files (the gate's user-clean), its sites, then its database and role,
-  Redis user and keys, mail login and mail, and buckets, through the gate. The pull request's QA environment
-  comment says what happened, and a slot it freed goes to the pull request that has waited longest. Run it only from
-  a job in the qa environment that checks out the default branch alone (.github/workflows/qa-down.yml).
+  One step of tearing down a pull request's QA environment (design 8.2, 8.9). check only reads whether Forge has
+  one (output state). down tears it down, running every step and skipping what is already gone, so re-running it
+  finishes one that stopped: its daemons, its site user's processes and files (the gate's user-clean), its sites,
+  then its database and role, Redis user and keys, mail login and mail, and buckets, through the gate; the pull
+  request's QA environment comment says what happened, and output freed says whether it freed a slot. wake gives a
+  freed slot to the pull request that has waited longest. Run check and down only from a job in the qa environment
+  that checks out the default branch alone, and wake one at a time (.github/workflows/qa-down.yml).
 inputs:
   pr:
     description: The pull request's number, which is its environment's
     required: true
-  check:
-    description: true to read whether Forge has the environment (output state) and change nothing
-    default: "false"
+  step:
+    description: check (read whether Forge has the environment, and change nothing), down (tear it down) or wake
+    default: down
   reason:
     description: Why it goes, for the comment (closed, label, hand or ttl)
     default: hand
@@ -29,14 +30,14 @@ inputs:
     description: The app's QA plan workflow file, started for a pull request that waits for a slot
     default: qa-plan.yml
   forge-org:
-    description: The Forge organisation
-    required: true
+    description: The Forge organisation (not for wake)
+    default: ""
   forge-server:
     description: The Forge server id of the box; empty while the qa environment is not set up, which tears down nothing
     default: ""
   forge-token:
-    description: The qa environment's Forge token
-    required: true
+    description: The qa environment's Forge token (not for wake)
+    default: ""
   ssh-host:
     description: The box's host name (not for check)
     default: ""
@@ -56,12 +57,15 @@ outputs:
   state:
     description: With check, present, removing or absent
     value: ${{ steps.check.outputs.state }}
+  freed:
+    description: With down, true when the environment was present, so its slot is free now
+    value: ${{ steps.down.outputs.freed }}
 runs:
   using: composite
   steps:
     - id: check
       name: Does the pull request have a QA environment?
-      if: inputs.check == 'true'
+      if: inputs.step == 'check'
       shell: bash
       env:
         PR: ${{ inputs.pr }}
@@ -75,7 +79,7 @@ runs:
       run: '"$GITHUB_ACTION_PATH/check.sh" "$PR" --reason "$REASON" | tee -a "$GITHUB_OUTPUT"'
     - id: down
       name: Tear down the QA environment
-      if: inputs.check != 'true'
+      if: inputs.step == 'down'
       shell: bash
       env:
         PR: ${{ inputs.pr }}
@@ -84,8 +88,6 @@ runs:
         LABEL: ${{ inputs.label }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         MROOM_CONFIG: ${{ inputs.config }}
-        MROOM_QA_PLAN_WORKFLOW: ${{ inputs.plan-workflow }}
-        MROOM_QA_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         MROOM_FORGE_ORG: ${{ inputs.forge-org }}
         MROOM_FORGE_SERVER: ${{ inputs.forge-server }}
         MROOM_FORGE_TOKEN: ${{ inputs.forge-token }}
@@ -95,6 +97,15 @@ runs:
         MROOM_QA_SSH_KNOWN_HOSTS: ${{ inputs.ssh-known-hosts }}
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
-        args=(--reason "$REASON" --wake)
+        args=(--reason "$REASON")
         if [ -n "$STATE" ]; then args+=(--state "$STATE"); fi
         "$GITHUB_ACTION_PATH/down.sh" "$PR" "${args[@]}"
+    - id: wake
+      name: Give the freed slot to the pull request that has waited longest
+      if: inputs.step == 'wake'
+      shell: bash
+      env:
+        MROOM_QA_PLAN_WORKFLOW: ${{ inputs.plan-workflow }}
+        MROOM_QA_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: '"$GITHUB_ACTION_PATH/wake.sh"'

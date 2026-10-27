@@ -43,7 +43,9 @@ case "${args[0]} ${args[1]:-}" in
         n="${path%/files}"; n="${n##*/}"
         filter "$GH_FAKE/files-$n.json" "${jqf:-.}"
         ;;
-      GET\ repos/*/issues/*/comments)
+      GET\ repos/*/issues/*/comments*)
+        printf 'list %s\n' "$path" >>"$GH_FAKE/reads.log"
+        path="${path%%\?*}"
         n="${path%/comments}"; n="${n##*/}"
         file="$GH_FAKE/comments-$n.json"
         [ -f "$file" ] || echo '[]' >"$file"

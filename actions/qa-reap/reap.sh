@@ -29,10 +29,10 @@ FORGE_NAME="mroom qa-reap" QA_NAME="mroom qa-reap"
 workflow="${MROOM_QA_DOWN_WORKFLOW:-qa-down.yml}"
 
 if [ -z "${MROOM_FORGE_SERVER:-}" ]; then
-  echo "the qa environment has no MROOM_FORGE_SERVER yet, so there is nothing to reap"
+  echo "::warning::the qa environment has no MROOM_FORGE_SERVER yet, so there is nothing to reap"
   exit 0
 fi
-[[ "$workflow" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]] || { qa_say "MROOM_QA_DOWN_WORKFLOW is not a workflow file name"; exit 2; }
+[[ "$workflow" =~ $QA_WORKFLOW_RE ]] || { qa_say "MROOM_QA_DOWN_WORKFLOW is not a workflow file name"; exit 2; }
 need curl jq python3 gh
 trap qa_cleanup EXIT
 

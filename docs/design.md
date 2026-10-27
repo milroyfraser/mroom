@@ -692,6 +692,14 @@ What the pilot's scripts learned after this table was drawn, which their ports k
   ends, and neither does a run it dispatches in turn. So in a chain the token started, each link dispatches the
   next itself, all the way down: a woken plan dispatches qa-up, and qa-up dispatches what follows it. A workflow
   that waits on `workflow_run` of a link also accepts that dispatch, or never runs for such a chain.
+- **One picker at a time (qa-down, phase 2a).** A step that picks the next item off a shared list and marks it,
+  such as the wake that gives a freed slot to the pull request that waited longest, runs in a concurrency group
+  of its own: two side by side each read the list before either marks it, and pick the same item. Three teardowns
+  the reaper started at once woke one pull request three times, and the other two slots went unused.
+- **What a re-run reads (qa-down, phase 2a).** "Re-run failed jobs" keeps the outputs of the jobs that passed;
+  "Re-run all jobs" runs them again, against a world the first attempt changed. A job whose answer the first
+  attempt's own work spoils, such as a check that finds no site once the teardown deleted them, takes what the
+  first attempt left in a place it does not change, such as the comment's hidden line.
 
 ## 13. Before publishing
 

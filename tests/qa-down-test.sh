@@ -27,14 +27,10 @@ environment_7() {
   process 6 forge "/home/$(site_user 7)/$(api_host 7)/."
   process 7 "$(site_user 70)" "/home/$(site_user 70)/$(api_host 70)/."
 }
-# waiting_prs: two open pull requests that wait for a slot, 21 the longer.
-waiting_prs() {
-  jq -n '[{number: 20, isDraft: false}, {number: 21, isDraft: false}]' >"$GH_FAKE/prs.json"
-  comment 20 401 'github-actions[bot]' "$(qa_body waiting since=2026-10-26T10:00:00Z)"
-  comment 21 402 'github-actions[bot]' "$(qa_body waiting since=2026-10-26T08:00:00Z)"
-  export MROOM_QA_DEFAULT_BRANCH=main
-}
-dispatches() { grep '^dispatch' "$GH_FAKE/gh.log" 2>/dev/null || true; }
+# freed: what the teardown said about its slot, for qa-down's wake job.
+freed() { output_of freed; }
+# marker_of <PR>: the hidden line of the pull request's newest comment.
+marker_of() { jq -r '.[-1].body' "$GH_FAKE/comments-$1.json" | sed -n 2p; }
 
 t_an_environment_comes_down_in_order() {
   qa_world; environment_7
@@ -51,10 +47,12 @@ gate mail-user-remove 7\ngate mail-clear 7\ngate bucket-drop 7'
   run grep -c '^GET /background-processes' "$FORGE_LOG"; expect_out 3
   # The comment says it is being removed before anything goes, then that it was removed.
   run gh_log
-  expect_out $'PATCH 301 ### QA environment\\n<!-- mroom-qa: removing -->\\n\\nBeing removed: the pull request closed.
+  expect_out $'PATCH 301 ### QA environment\\n<!-- mroom-qa: removing was=present -->\\n\\nBeing removed: the pull request closed.
 PATCH 301 ### QA environment\\n<!-- mroom-qa: removed -->\\n\\nRemoved: the pull request closed.'
   run jq -r '[.sites[] | "\(.id) \(.status)"] | join(",")' "$FORGE_STATE"; expect_out "11 removing,12 removing,13 installed"
   run jq -r '[.processes[].id] | join(",")' "$FORGE_STATE"; expect_out "7"
+  # It held a slot, which the wake job gives on.
+  run freed; expect_out true
 }
 
 t_the_ssh_key_stays_off_every_command_line() {
@@ -87,50 +85,104 @@ t_a_loop_of_teardowns_loses_none_of_its_input() {
 
 t_with_no_site_every_step_still_runs() {
   qa_world
-  waiting_prs
-  run "$DOWN" 7 --reason hand --wake
-  expect_rc 0; expect_out_has "environment 7: Forge has it absent; tearing down whatever of it is left"
+  run "$DOWN" 7 --reason hand
+  expect_rc 0; expect_out_has "environment 7: absent when this teardown started; tearing down whatever of it is left"
   run gate_log; expect_out $'user-clean 7\n'"$BOX_SIDE"
   run forge_writes; expect_out ""
   # Nothing held a slot, so nobody is woken.
-  run dispatches; expect_out ""
+  run freed; expect_out false
   run grep -c '^POST 7 ' "$GH_FAKE/gh.log"; expect_out 1
 }
 
 t_a_run_again_finishes_a_teardown_whose_box_side_failed() {
-  qa_world; environment_7; waiting_prs
+  qa_world; environment_7
   forge_set '.remove_reads = 0'
   echo 1 >"$GATE/redis-user-remove.rc"
   echo 1 >"$GATE/bucket-drop.rc"
   export RUN_URL=https://github.example/runs/5
-  run "$DOWN" 7 --reason closed --state present --wake
+  run "$DOWN" 7 --reason closed --state present
   expect_rc 1; expect_err_has "environment 7: its sites are gone, but not the box's Redis user, buckets"
   run gh_log
-  expect_out_has 'mroom-qa: failed -->\n\nThe teardown stopped at the box'"'"'s Redis user, buckets, so part of the environment is left. Re-run the failed job ([run](https://github.example/runs/5)) to finish it'
-  run dispatches; expect_out ""
+  expect_out_has 'mroom-qa: failed was=present -->\n\nThe teardown stopped at the box'"'"'s Redis user, buckets, so part of the environment is left. Re-run the failed job ([run](https://github.example/runs/5)) to finish it'
+  run freed; expect_out ""
   # "Re-run failed jobs" runs the teardown again with the check's first answer, though Forge has no site now.
   rm "$GATE/redis-user-remove.rc" "$GATE/bucket-drop.rc"
   : >"$GATE/gate.log"
-  run "$DOWN" 7 --reason closed --state present --wake
+  run "$DOWN" 7 --reason closed --state present
   expect_rc 0
   run gate_log; expect_out $'user-clean 7\n'"$BOX_SIDE"
   run gh_log; expect_out_has 'mroom-qa: removed -->\n\nRemoved: the pull request closed.'
-  run dispatches; expect_out "dispatch qa-plan.yml main pr_number=21"
+  run freed; expect_out true
+}
+
+t_re_run_all_jobs_finishes_it_too() {
+  qa_world; environment_7
+  forge_set '.remove_reads = 0'
+  comment 7 301 'github-actions[bot]' "$(qa_body ready)"
+  echo 1 >"$GATE/db-drop.rc"
+  run "$DOWN" 7 --reason closed --state present
+  expect_rc 1
+  run marker_of 7; expect_out "<!-- mroom-qa: failed was=present -->"
+  # "Re-run all jobs" runs the check again: Forge has no site now, but the comment says a teardown stopped partway,
+  # from present, so the teardown runs again, and frees the slot.
+  rm "$GATE/db-drop.rc"
+  run "$CHECK" 7 --reason closed
+  expect_rc 0; expect_out "state=present"
+  expect_err_has "its last teardown stopped partway, from present: it runs again"
+  run "$DOWN" 7 --reason closed --state present
+  expect_rc 0
+  run freed; expect_out true
+  # Once it is done, the check finds nothing to do.
+  run "$CHECK" 7 --reason closed; expect_out "state=absent"
+  # A failed deploy's comment, which names no state a teardown started from, is no teardown to finish.
+  comment 7 302 'github-actions[bot]' "$(qa_body failed)"
+  run "$CHECK" 7 --reason closed; expect_out "state=absent"
+}
+
+t_a_dispatched_teardown_run_again_frees_its_slot() {
+  qa_world
+  site 11 "$(api_host 7)" installed
+  forge_set '.remove_reads = 0'
+  comment 7 301 'github-actions[bot]' "$(qa_body ready)"
+  echo 1 >"$GATE/bucket-drop.rc"
+  # The reaper's teardown has no check job, so no --state: it reads Forge, and its comment keeps what it read.
+  run "$DOWN" 7 --reason ttl
+  expect_rc 1
+  run marker_of 7; expect_out "<!-- mroom-qa: failed was=present -->"
+  rm "$GATE/bucket-drop.rc"
+  run "$DOWN" 7 --reason ttl
+  expect_rc 0; expect_out_has "environment 7: present when this teardown started"
+  run freed; expect_out true
 }
 
 t_a_site_stuck_removing_gets_the_delete_again_and_wakes_nobody() {
-  qa_world; waiting_prs
+  qa_world
   site 11 "$(api_host 7)" removing "$(ago 864000)" "$(ago 7200)"
   site 12 "$(web_host 7)" removing "$(ago 864000)" "$(ago 300)"
   forge_set '.remove_reads = -1'
-  run "$DOWN" 7 --wake
-  expect_rc 0; expect_out_has "environment 7: Forge has it removing"
+  run "$DOWN" 7
+  expect_rc 0; expect_out_has "environment 7: removing when this teardown started"
   expect_out_has "had been removing for 120 minutes; sent the delete again"
   expect_out_has "Forge is removing it"
   run forge_writes; expect_out "DELETE /sites/11"
   run gate_log; expect_out $'user-clean 7\n'"$BOX_SIDE"
   # A slot Forge was already freeing is no slot this teardown freed.
-  run dispatches; expect_out ""
+  run freed; expect_out false
+}
+
+t_the_comment_offers_a_push_only_to_an_open_pull_request() {
+  qa_world
+  site 11 "$(api_host 7)" installed "$(ago $((9 * 86400)))"
+  echo '{"state": "OPEN"}' >"$GH_FAKE/pr-7.json"
+  run "$DOWN" 7 --reason ttl
+  expect_rc 0
+  run gh_log; expect_out_has 'Being removed: it was older than 5 days; the next push that needs one brings it back.'
+  # A closed pull request gets no push, so the comment offers none.
+  : >"$GH_FAKE/gh.log"
+  echo '{"state": "CLOSED"}' >"$GH_FAKE/pr-7.json"
+  run "$DOWN" 7 --reason ttl
+  run gh_log; expect_out_has 'Being removed: it was older than 5 days.'
+  expect_true "a closed pull request was offered a push" lacks "$out" "next push"
 }
 
 t_a_failed_user_clean_keeps_the_sites() {
@@ -167,11 +219,16 @@ t_a_delete_that_finds_nothing_counts_as_done() {
   run "$DOWN" 7
   expect_rc 0
   run gate_log; expect_out $'user-clean 7\n'"$BOX_SIDE"
-  # Any other answer still fails the step.
+  # Any other answer still fails the step: a refusal (403) and a server's fault (500) alike.
   site 21 "$(api_host 8)" installed
   forge_set '.fail["DELETE /sites/21"] = 500'
   run "$DOWN" 8
   expect_rc 1; expect_err_has "DELETE /sites/21 -> HTTP 500"
+  site 31 "$(api_host 9)" installed
+  forge_set '.fail["DELETE /sites/31"] = 403'
+  run "$DOWN" 9
+  expect_rc 1; expect_err_has "DELETE /sites/31 -> HTTP 403"
+  run gate_log; expect_true "the box side ran after a refused delete" lacks "$out" "db-drop 9"
 }
 
 t_services_qa_does_not_use_are_left_alone() {
@@ -220,7 +277,7 @@ t_an_environment_on_a_later_page_is_found() {
   site 11 "$(api_host 7)" installed
   run "$CHECK" 7; expect_out "state=present"
   run "$DOWN" 7
-  expect_rc 0; expect_out_has "environment 7: Forge has it present"
+  expect_rc 0; expect_out_has "environment 7: present when this teardown started"
   run forge_writes; expect_out "DELETE /sites/11"
 }
 
@@ -243,8 +300,9 @@ t_a_label_off_a_waiting_pull_request_stops_its_wait() {
 t_a_qa_environment_not_set_up_has_nothing_to_tear_down() {
   qa_world; environment_7
   unset MROOM_FORGE_SERVER
-  run "$DOWN" 7; expect_rc 0; expect_out "the qa environment has no MROOM_FORGE_SERVER yet, so there is nothing to tear down"
+  run "$DOWN" 7; expect_rc 0; expect_out "::warning::the qa environment has no MROOM_FORGE_SERVER yet, so there is nothing to tear down"
   run "$CHECK" 7; expect_rc 0; expect_out "state=absent"
+  expect_err_has "::warning::the qa environment has no MROOM_FORGE_SERVER yet"
   expect_no_file "$FORGE_LOG"
 }
 
@@ -265,7 +323,10 @@ test_case ssh-key-off-command-lines t_the_ssh_key_stays_off_every_command_line
 test_case loop-loses-no-input t_a_loop_of_teardowns_loses_none_of_its_input
 test_case no-site-every-step t_with_no_site_every_step_still_runs
 test_case run-again-finishes t_a_run_again_finishes_a_teardown_whose_box_side_failed
+test_case re-run-all-jobs t_re_run_all_jobs_finishes_it_too
+test_case dispatched-run-again t_a_dispatched_teardown_run_again_frees_its_slot
 test_case stuck-removing t_a_site_stuck_removing_gets_the_delete_again_and_wakes_nobody
+test_case push-only-if-open t_the_comment_offers_a_push_only_to_an_open_pull_request
 test_case user-clean-fails t_a_failed_user_clean_keeps_the_sites
 test_case daemons-never-go t_daemons_that_never_go_keep_everything_else
 test_case one-box-step-fails t_one_box_step_failing_leaves_the_others_to_run
