@@ -104,10 +104,12 @@ t_a_run_again_finishes_a_teardown_whose_box_side_failed() {
   expect_rc 1; expect_err_has "environment 7: its sites are gone, but not the box's Redis user, buckets"
   run gh_log
   expect_out_has 'mroom-qa: failed was=present -->\n\nThe teardown stopped at the box'"'"'s Redis user, buckets, so part of the environment is left. Re-run the failed job ([run](https://github.example/runs/5)) to finish it'
-  run freed; expect_out ""
+  # Its sites went, so its slot is free, whatever the box's side came to: the wake job gives it on.
+  run freed; expect_out true
   # "Re-run failed jobs" runs the teardown again with the check's first answer, though Forge has no site now.
   rm "$GATE/redis-user-remove.rc" "$GATE/bucket-drop.rc"
   : >"$GATE/gate.log"
+  : >"$GITHUB_OUTPUT"
   run "$DOWN" 7 --reason closed --state present
   expect_rc 0
   run gate_log; expect_out $'user-clean 7\n'"$BOX_SIDE"
@@ -123,6 +125,8 @@ t_re_run_all_jobs_finishes_it_too() {
   run "$DOWN" 7 --reason closed --state present
   expect_rc 1
   run marker_of 7; expect_out "<!-- mroom-qa: failed was=present -->"
+  run freed; expect_out true
+  : >"$GITHUB_OUTPUT"
   # "Re-run all jobs" runs the check again: Forge has no site now, but the comment says a teardown stopped partway,
   # from present, so the teardown runs again, and frees the slot.
   rm "$GATE/db-drop.rc"
@@ -149,6 +153,8 @@ t_a_dispatched_teardown_run_again_frees_its_slot() {
   run "$DOWN" 7 --reason ttl
   expect_rc 1
   run marker_of 7; expect_out "<!-- mroom-qa: failed was=present -->"
+  run freed; expect_out true
+  : >"$GITHUB_OUTPUT"
   rm "$GATE/bucket-drop.rc"
   run "$DOWN" 7 --reason ttl
   expect_rc 0; expect_out_has "environment 7: present when this teardown started"

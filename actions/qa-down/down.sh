@@ -16,8 +16,8 @@
 # what qa-down's check job read; without it, Forge is read here. The comment's hidden line keeps the state the
 # teardown started from (removing was=present, failed was=present), so a run again finds it when Forge has no site
 # left: here, for a teardown started by hand or by the reaper, and in check.sh. Only an environment that was present
-# held a slot: freed=true goes to GITHUB_OUTPUT then, and qa-down's wake job gives the slot to the pull request that
-# has waited longest.
+# held a slot: freed=true goes to GITHUB_OUTPUT once its sites are gone, before the box's side, which may fail without
+# keeping the slot, and qa-down's wake job gives the slot to the pull request that has waited longest.
 #
 # Environment: MROOM_CONFIG (the app's mroom.toml, from its default branch), MROOM_FORGE_ORG, MROOM_FORGE_SERVER,
 # MROOM_FORGE_TOKEN, MROOM_QA_SSH_HOST, MROOM_QA_SSH_USER (forge), MROOM_QA_SSH_KEY and MROOM_QA_SSH_KNOWN_HOSTS;
@@ -155,6 +155,13 @@ for domain in "$QA_API" "$QA_WEB"; do
     echo "    deleted site $id"
   fi
 done
+# With its sites gone the environment no longer counts against qa.max_envs, so its slot is free now, whatever the
+# box's side comes to below: only an environment that was present held one, and qa-down's wake job gives it to the
+# pull request that waited longest. A run again of a teardown that stopped on the box's side wakes another, which
+# finds no slot and waits again.
+freed=false
+[ "$state" != present ] || freed=true
+if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "freed=$freed" >>"$GITHUB_OUTPUT"; fi
 
 # The box's side: each step is tried, and the run fails at the end if any did.
 failed=()
@@ -183,8 +190,4 @@ fi
 
 DONE=1
 comment removed "Removed: $why."
-# Only an environment that was present held a slot: the wake job gives it to the pull request that waited longest.
-freed=false
-[ "$state" != present ] || freed=true
-if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "freed=$freed" >>"$GITHUB_OUTPUT"; fi
 echo "environment $n: removed"
