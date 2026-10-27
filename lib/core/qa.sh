@@ -260,14 +260,27 @@ qa_comment() {
   fi
 }
 
+# qa_status <state> <text>: what pull request QA_N's QA environment comment is to say. In actions/qa-up, the comment
+# is written by the step after the others, which runs whatever happened before it (report.sh): this leaves it the
+# state and the text, in MROOM_QA_STATUS, its first line the state. Without MROOM_QA_STATUS, as when a script runs
+# on its own, it writes the comment itself.
+qa_status() {
+  if [ -n "${MROOM_QA_STATUS:-}" ]; then
+    printf '%s\n%s\n' "$1" "$2" >"$MROOM_QA_STATUS"
+  elif [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
+    qa_comment "$QA_N" "$1" "$2" </dev/null || echo "::warning::could not update the QA environment comment of pull request $QA_N"
+  fi
+}
+
 # qa_wake <slots>: after a teardown frees slots, starts the app's QA plan workflow (MROOM_QA_PLAN_WORKFLOW,
 # qa-plan.yml) on the default branch for the open pull requests that wait for a slot, the longest waiting first, at
 # most <slots>. Each one's comment is marked woken first, so a second teardown close behind wakes another; a woken
 # one counts as waiting again after MROOM_QA_WAKE_AGAIN (1800) seconds, in case its plan never ran.
 # The job token's dispatch does start the plan, but nothing after it starts by itself: a run the job token started
 # starts no workflow_run when it ends, and neither does a run that one starts in turn. So each link starts the next
-# itself: the plan dispatches qa-up (.github/workflows/qa-plan.yml, hand-over), and qa-up, started that way, must
-# dispatch whatever follows it in turn, whose workflow_run would never come either.
+# itself: the plan dispatches qa-up (.github/workflows/qa-plan.yml, hand-over), and qa-up, started that way,
+# dispatches the app's workflows that follow it in turn (.github/workflows/qa-up.yml, next-workflows), whose
+# workflow_run would never come either.
 # The cost is bounded: the 100 newest open pull requests, and one listing of each one's comments; one older than
 # those is not seen. Best-effort: a failure only warns.
 qa_wake() {

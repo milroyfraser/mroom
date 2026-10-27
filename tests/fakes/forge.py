@@ -16,12 +16,24 @@ now (MROOM_NOW, when set), and goes after "remove_reads" (1) more reads of the s
 process it deletes goes at once, or turns removing and goes after "process_remove_reads" reads of the list. "fail":
 {"<METHOD> <path>": code} answers that code to every such call, and {"code": code, "times": n} to the next n only.
 
-What qa-up makes, it makes as Forge does, slowly: a site stays installing for "install_reads" (1) reads of the list,
-with an nginx config of Forge's shape; a certificate is inactive for "cert_reads" (1) reads; a deployment is deploying
-for "deploy_reads" (1) reads, then ends "deploy_result" (finished) with "deploy_log" as its output; and a background
-process runs as the user asked for, or as "process_user" when the state names one, as a Forge that ignores the user
-would. Any other host plays the environment's /up: it answers the next code of $FORGE_UP (one a line, the last one
-repeating), 000 being no answer, and logs each to $FORGE_UP.log.
+What qa-up makes, it makes as Forge does, as Forge's own answers show it:
+- a site stays installing for "install_reads" (1) reads of the list. Forge gives its web_directory as an absolute path
+  and its php_version as "PHP 8.4". Its nginx config (GET sites/<id>/nginx) is the site.conf fragment alone, with no
+  server block and no root; each of its domains has the server block that includes it (GET
+  sites/<id>/domains/<id>/nginx). A PUT of the fragment is applied later, after "nginx_reads" (1) reads, or never
+  with "nginx_put_ignored";
+- a certificate, on the site's one domain, is inactive for "cert_reads" (1) reads; then it is active, or, for the next
+  "cert_fail" (0) asked for, failed. A cloned one becomes active only when it was sent with "enable": true;
+- a deployment is deploying for "deploy_reads" (1) reads, then ends "deploy_result" (finished), with "deploy_log" as
+  its output;
+- a background process may run as root, as forge, or as the isolated user of one of the server's sites; any other
+  user is refused (422). It runs as the user asked for, or as "process_user" when the state names one, as a Forge that
+  ignores the user would.
+Any other host plays the environment itself: /up answers the next code of $FORGE_UP (one a line, the last one
+repeating), 000 being no answer, and logs each to $FORGE_UP.log; /mroom-symlink-probe, a link to a root-owned file,
+answers 404 when the site's nginx config has disable_symlinks if_not_owner at its top level and 200 when it does not
+("probe_code" in the state answers that instead, as a box whose own config overrides the site's would), and logs each
+to $FORGE_UP.probe. "server_extra" adds a line to each domain's server block.
 """
 
 import datetime
@@ -33,6 +45,8 @@ import urllib.parse
 TOKEN = "fake-forge-token"
 BASE = "/api/orgs/acme/servers/42"
 STATE, LOG = os.environ["FORGE_STATE"], os.environ["FORGE_LOG"]
+HIDDEN = ("id", "remove_reads", "install_reads", "reads", "nginx", "pending_nginx", "nginx_reads", "script",
+          "certificates", "deployments", "fail", "enable")
 
 
 def now() -> str:
@@ -44,25 +58,7 @@ def now() -> str:
 
 
 def resource(kind: str, item: dict) -> dict:
-    hidden = ("id", "remove_reads", "install_reads", "reads", "nginx", "script", "certificates", "deployments")
-    return {"id": str(item["id"]), "type": kind, "attributes": {k: v for k, v in item.items() if k not in hidden}}
-
-
-def up_probe(out: str | None, write_out: str) -> int:
-    """The environment's /up: the next code of $FORGE_UP, the last one repeating."""
-    path = os.environ.get("FORGE_UP", "")
-    codes = open(path).read().split() if path and os.path.exists(path) else ["200"]
-    code = codes[0]
-    if len(codes) > 1:
-        with open(path, "w") as f:
-            f.write("\n".join(codes[1:]) + "\n")
-    with open(path + ".log", "a") as f:
-        f.write(f"{code}\n")
-    if out and out != "/dev/null":
-        open(out, "w").close()
-    if "%{http_code}" in write_out:
-        sys.stdout.write(code)
-    return 7 if code == "000" else 0
+    return {"id": str(item["id"]), "type": kind, "attributes": {k: v for k, v in item.items() if k not in HIDDEN}}
 
 
 def page(state: dict, items: list, kind: str, query: dict) -> dict:
@@ -86,21 +82,87 @@ def settle(items: list, field: str) -> list:
     return kept
 
 
-NGINX = """# FORGE CONFIG (DO NOT REMOVE!)
-include forge-conf/{name}/before/*;
+# A site's nginx config as Forge gives it: the site.conf fragment, which each of its domains includes inside its own
+# server block, below.
+SITE_CONF = """ssl_protocols TLSv1.2 TLSv1.3;
+ssl_prefer_server_ciphers off;
 
-server {{
-    listen 80;
-    server_name {name};
-    root /home/{user}/{name}{web};
+add_header X-Frame-Options "SAMEORIGIN";
+add_header X-Content-Type-Options "nosniff";
 
-    index index.html index.php;
+index index.html index.htm{index};
 
-    location / {{
-        try_files $uri $uri/ {fallback};
-    }}
+charset utf-8;
+
+# FORGE CONFIG (DO NOT REMOVE!)
+include forge-conf/{id}/server/*;
+
+location / {{
+    try_files $uri $uri/ {fallback};
+}}
+
+location = /favicon.ico {{ access_log off; log_not_found off; }}
+location = /robots.txt  {{ access_log off; log_not_found off; }}
+
+access_log off;
+error_log  /var/log/nginx/{id}-error.log error;
+{php}
+location ~ /\\.(?!well-known).* {{
+    deny all;
 }}
 """
+PHP_BLOCK = """
+error_page 404 /index.php;
+
+location ~ \\.php$ {{
+    fastcgi_split_path_info ^(.+\\.php)(/.+)$;
+    fastcgi_pass unix:/var/run/php/{fpm}-fpm-{user}.sock;
+    fastcgi_index index.php;
+    include fastcgi_params;
+    include forge_fastcgi_defaults;
+}}
+"""
+DOMAIN_CONF = """# FORGE CONFIG (DO NOT REMOVE!)
+include forge-conf/{id}/before/*;
+
+server {{
+    http2 on;
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name {name};
+    server_tokens off;
+    root {web};
+{extra}
+    # FORGE SSL (DO NOT REMOVE!)
+    ssl_certificate /etc/nginx/ssl/domains/{domain}/server.crt;
+    ssl_certificate_key /etc/nginx/ssl/domains/{domain}/server.key;
+
+    include forge-conf/{id}/site.conf;
+}}
+
+# FORGE CONFIG (DO NOT REMOVE!)
+include forge-conf/{id}/after/*;
+"""
+
+
+def site_conf(site: dict) -> str:
+    php = site.get("php_version")
+    fpm = "php" + php.removeprefix("PHP ").replace(".", "") if php else ""
+    return SITE_CONF.format(id=site["id"], index=" index.php" if php else "",
+                            fallback="/index.php?$query_string" if php else "=404",
+                            php=PHP_BLOCK.format(fpm=fpm, user=site.get("user", "forge")) if php else "")
+
+
+def guarded(conf: str) -> bool:
+    """Whether nginx would refuse a link to another owner's file: disable_symlinks if_not_owner at the fragment's top
+    level, outside comments and blocks. Its own reading, line by line, apart from the one qa-up uses."""
+    depth = 0
+    for line in conf.splitlines():
+        line = line.split("#", 1)[0]
+        if depth == 0 and line.strip() == "disable_symlinks if_not_owner;":
+            return True
+        depth += line.count("{") - line.count("}")
+    return False
 
 
 def site_of(state: dict, site_id: str) -> dict | None:
@@ -113,39 +175,75 @@ def new_id(state: dict) -> int:
 
 
 def make_site(state: dict, body: dict) -> dict:
+    user = body.get("isolated_user", "forge") if body.get("is_isolated") else "forge"
+    root = f"/home/{user}/{body['name']}"
     web = (body.get("web_directory") or "/").rstrip("/")
-    site = {"id": new_id(state), "name": body["name"], "status": "installing", "user": body.get("isolated_user", "forge"),
+    php = body.get("php_version")
+    site = {"id": new_id(state), "name": body["name"], "status": "installing", "user": user,
             "isolated": bool(body.get("is_isolated")), "created_at": now(), "type": body.get("type"),
-            "php_version": body.get("php_version"), "web_directory": body.get("web_directory"),
-            "install_reads": state.get("install_reads", 1)}
-    site["nginx"] = NGINX.format(name=site["name"], user=site["user"], web=web,
-                                 fallback="/index.php?$query_string" if body.get("type") == "php" else "=404")
+            "php_version": f"PHP {php[3]}.{php[4:]}" if php and len(php) >= 5 else None,
+            "root_directory": root, "web_directory": root + web, "install_reads": state.get("install_reads", 1)}
     state.setdefault("sites", []).append(site)
     return site
 
 
+def certificates(state: dict, site: dict) -> list:
+    for cert in site.get("certificates", []):
+        if not cert["active"] and cert["request_status"] not in ("failed", "created"):
+            cert["reads"] -= 1
+            if cert["reads"] < 0:
+                if cert["fail"]:
+                    cert.update(request_status="failed", status="failed")
+                elif cert["type"] == "clone" and not cert["enable"]:
+                    cert.update(request_status="created", status="installed")
+                else:
+                    cert.update(request_status="created", status="installed", active=True)
+    return site.get("certificates", [])
+
+
 def site_route(state: dict, method: str, site: dict, rest: list, query: dict, body: dict | None) -> tuple[int, object]:
+    domain = str(site["id"] * 10)
     if rest == ["nginx"] and method == "GET":
-        return 200, {"data": {"id": str(site["id"]), "type": "nginxConfigs", "attributes": {"content": site.get("nginx")}}}
+        if "pending_nginx" in site and not state.get("nginx_put_ignored"):
+            site["nginx_reads"] -= 1
+            if site["nginx_reads"] < 0:
+                site["nginx"] = site.pop("pending_nginx")
+        site.setdefault("nginx", site_conf(site))
+        return 200, {"data": {"id": str(site["id"]), "type": "nginxConfigs", "attributes": {"content": site["nginx"]}}}
     if rest == ["nginx"] and method == "PUT":
-        site["nginx"] = body["config"]
-        return 200, None
-    if rest == ["certificates"] and method == "GET":
-        for cert in site.get("certificates", []):
-            if not cert["active"]:
-                cert["reads"] -= 1
-                if cert["reads"] < 0:
-                    cert.update(active=True, request_status="created")
-        return 200, {"data": [resource("certificates", c) for c in site.get("certificates", [])]}
+        site.update(pending_nginx=body["config"], nginx_reads=state.get("nginx_reads", 1))
+        return 202, None
     if rest == ["domains"] and method == "GET":
-        return 200, {"data": [{"id": str(site["id"] * 10), "type": "domains", "attributes": {"name": site["name"], "type": "primary"}}]}
-    if len(rest) == 3 and rest[0] == "domains" and rest[2] == "certificates" and method == "POST":
-        if rest[1] != str(site["id"] * 10):
-            return 404, {"message": "Not Found."}
-        cert = {"id": new_id(state), "type": body["type"], "active": False, "request_status": "creating",
-                "reads": state.get("cert_reads", 1)}
+        return 200, {"data": [{"id": domain, "type": "domainRecords",
+                               "attributes": {"name": site["name"], "type": "primary", "status": "enabled"}}]}
+    if rest[:2] != ["domains", domain]:
+        return 404, {"message": f"the fake has no {method} for a site's {'/'.join(rest)}"}
+    rest = rest[2:]
+    if rest == ["nginx"] and method == "GET":
+        web = site.get("web_directory") or f"/home/{site.get('user', 'forge')}/{site['name']}"
+        extra = state.get("server_extra", "")
+        conf = DOMAIN_CONF.format(id=site["id"], name=site["name"], web=web, domain=domain, extra=extra + "\n" if extra else "")
+        return 200, {"data": {"id": domain, "type": "nginxConfigs", "attributes": {"content": conf}}}
+    if rest == ["certificates"] and method == "GET":
+        return 200, {"data": [resource("certificates", c) for c in certificates(state, site)]}
+    if rest == ["certificates"] and method == "POST":
+        fail = state.get("cert_fail", 0) > 0
+        if fail:
+            state["cert_fail"] -= 1
+        cert = {"id": new_id(state), "type": body["type"], "enable": bool(body.get("enable")), "active": False,
+                "request_status": "creating", "status": "installing", "reads": state.get("cert_reads", 1), "fail": fail}
         site.setdefault("certificates", []).append(cert)
         return 202, {"data": resource("certificates", cert)}
+    if len(rest) == 2 and rest[0] == "certificates" and method == "DELETE":
+        kept = [c for c in site.get("certificates", []) if str(c["id"]) != rest[1]]
+        if len(kept) == len(site.get("certificates", [])):
+            return 404, {"message": "Not Found."}
+        site["certificates"] = kept
+        return 202, None
+    return 404, {"message": f"the fake has no {method} for a domain's {'/'.join(rest)}"}
+
+
+def deployment_route(state: dict, method: str, site: dict, rest: list, query: dict, body: dict | None):
     if rest == ["deployments", "script"] and method == "PUT":
         site["script"] = body["content"]
         return 200, None
@@ -167,7 +265,7 @@ def site_route(state: dict, method: str, site: dict, rest: list, query: dict, bo
             if deployment["reads"] < 0:
                 deployment["status"] = state.get("deploy_result", "finished")
         return 200, {"data": resource("deployments", deployment)}
-    return 404, {"message": f"the fake has no {method} for a site's {'/'.join(rest)}"}
+    return None
 
 
 def route(state: dict, method: str, path: str, query: dict, body: dict | None) -> tuple[int, object]:
@@ -189,7 +287,8 @@ def route(state: dict, method: str, path: str, query: dict, body: dict | None) -
         site = site_of(state, parts[1])
         if site is None:
             return 404, {"message": "Not Found."}
-        return site_route(state, method, site, parts[2:], query, body)
+        return deployment_route(state, method, site, parts[2:], query, body) \
+            or site_route(state, method, site, parts[2:], query, body)
     if len(parts) == 2 and parts[0] == "sites" and method == "DELETE":
         for site in state.get("sites", []):
             if str(site["id"]) == parts[1]:
@@ -200,9 +299,12 @@ def route(state: dict, method: str, path: str, query: dict, body: dict | None) -
         state["processes"] = settle(state.get("processes", []), "remove_reads")
         return 200, page(state, state["processes"], "backgroundProcesses", query)
     if parts == ["background-processes"] and method == "POST":
-        process = {"id": new_id(state), "user": state.get("process_user", body["user"]), "directory": body.get("directory"),
-                   "command": body["command"], "processes": body["processes"], "status": "installing",
-                   "site_id": body.get("site_id"), "name": body["name"]}
+        users = {"root", "forge"} | {s.get("user") for s in state.get("sites", []) if s.get("isolated")}
+        if body.get("user") not in users:
+            return 422, {"message": "The selected user is invalid.", "errors": {"user": ["The selected user is invalid."]}}
+        process = {"id": new_id(state), "command": body["command"], "user": state.get("process_user", body["user"]),
+                   "directory": body.get("directory"), "processes": body["processes"], "status": "installing",
+                   "created_at": now()}
         state.setdefault("processes", []).append(process)
         return 202, {"data": resource("backgroundProcesses", process)}
     if len(parts) == 2 and parts[0] == "background-processes" and method == "GET":
@@ -219,6 +321,32 @@ def route(state: dict, method: str, path: str, query: dict, body: dict | None) -
                 return 202, None
         return 404, {"message": "Not Found."}
     return 404, {"message": f"the fake has no {method} {path}"}
+
+
+def environment(host: str, path: str, out: str | None, write_out: str) -> int:
+    """The environment's own answers: /up from $FORGE_UP, and the link nginx must refuse from the site's config."""
+    up = os.environ.get("FORGE_UP", "")
+    if path == "/mroom-symlink-probe":
+        with open(STATE) as f:
+            state = json.load(f)
+        site = next((s for s in state.get("sites", []) if s.get("name") == host), None)
+        code = "000" if site is None else "404" if guarded(site.get("nginx") or site_conf(site)) else "200"
+        code = state.get("probe_code", code)
+        with open(up + ".probe", "a") as f:
+            f.write(f"{code}\n")
+    else:
+        codes = open(up).read().split() if up and os.path.exists(up) else ["200"]
+        code = codes[0]
+        if len(codes) > 1:
+            with open(up, "w") as f:
+                f.write("\n".join(codes[1:]) + "\n")
+        with open(up + ".log", "a") as f:
+            f.write(f"{code}\n")
+    if out and out != "/dev/null":
+        open(out, "w").close()
+    if "%{http_code}" in write_out:
+        sys.stdout.write(code)
+    return 7 if code == "000" else 0
 
 
 def main(argv: list[str]) -> int:
@@ -254,7 +382,7 @@ def main(argv: list[str]) -> int:
     parsed = urllib.parse.urlsplit(url)
     path, query = parsed.path, urllib.parse.parse_qs(parsed.query)
     if parsed.netloc != "forge.laravel.com":
-        return up_probe(out, write_out)
+        return environment(parsed.netloc, path, out, write_out)
     with open(STATE) as f:
         state = json.load(f)
     with open(LOG, "a") as f:

@@ -8,23 +8,33 @@
 #   2. waits for a site of the environment that Forge is still removing, sending the delete again when it is stuck;
 #      then, for a new environment, counts the others: from qa.max_envs (5) on, it waits for a slot
 #   3. the api site, and the go site for a frontend of its own: Forge isolated sites in the home of the user
-#      <app>_qa_<N>, each with a certificate and nginx's disable_symlinks if_not_owner, which is checked on every
-#      run before any code goes in; the go site also serves index.html for a path it does not have
-#   4. the code: GitHub's tarball of the commit through the gate's code-put, with Vite's build inside the Laravel
+#      <app>_qa_<N>, each with a certificate (one that failed is deleted and asked for again, once), and nginx's
+#      disable_symlinks if_not_owner at the top of its config, which each of its domains includes in its server
+#      block: checked on every run, after Forge has applied it, before any code goes in. The go site also serves
+#      index.html for a path it does not have. A site's PHP version is set when it is made: a site that runs
+#      another than app.php is refused, since it needs making again
+#   4. any daemon of the environment that does not run as its site user is deleted, and nothing goes on while one
+#      is left: it would run the pull request's code as that user, forge or root (D20)
+#   5. the code: GitHub's tarball of the commit through the gate's code-put, with Vite's build inside the Laravel
 #      app put into it; a frontend of its own goes to the go site through dist-put
-#   5. the environment's services through the gate: its database and role, Redis user, mail login and a bucket for
-#      each file disk, as [qa.parity] says. qa.parity.broadcast = "same" waits for mroom's Reverb host
-#   6. its .env: MROOM_QA_ENV_TEMPLATE, then mroom's own values, through env-put, as the site user
-#   7. Forge's deploy, whose script pulls nothing and runs the app's qa-deploy and qa-fixtures hooks or their
-#      defaults; then one queue worker, which must run as the site user
-#   8. https://api-<N>.<zone>/up, asked until it answers 200
-# Then the pull request's QA environment comment says it is ready, or waits for a slot, or failed.
+#   6. the environment's services through the gate: its database and role, Redis user, mail login and a bucket for
+#      each file disk, as [qa.parity] says, and its app key. The gate keeps their passwords and the key, so each
+#      deploy gets the same ones and its users stay signed in
+#   7. its .env: MROOM_QA_ENV_TEMPLATE, then mroom's own values, through env-put, as the site user
+#   8. Forge's deploy, whose script refuses to run as any user but the site user, pulls nothing, links a root-owned
+#      file into the web root to prove nginx refuses such a link, and runs the app's qa-deploy and qa-fixtures hooks
+#      or their defaults; then one queue worker, which also refuses any other user, kept only when Forge's record
+#      names the site user, and made again when its command changed
+#   9. https://api-<N>.<zone>/up, asked until it answers 200, and the link of step 8, which must not answer 200
+# What the pull request's QA environment comment is to say goes to qa_status: ready, waiting for a slot, or failed,
+# and why.
 #
 # Environment: as down.sh's, and MROOM_QA_ENV_TEMPLATE (the shared .env: third-party test-mode keys, no app key and
 # no credentials for the box), MROOM_QA_DIST (the folder of qa-plan's build), MROOM_QA_CERTIFICATE (a wildcard
 # certificate to clone; without it, each site gets its own from Let's Encrypt), MROOM_QA_NGINX_TEMPLATE (an nginx
-# template for new sites) and RUN_URL (this run, for the comment). Writes app_url, api_url and refused to
-# GITHUB_OUTPUT. Exit codes: 0 up, or waiting for a slot; 1 failed; 2 a usage error.
+# template for new sites), MROOM_QA_STATUS (lib/core/qa.sh, qa_status) and RUN_URL (this run, for the comment).
+# Writes sha, app_url, api_url and refused to GITHUB_OUTPUT. Exit codes: 0 up, or waiting for a slot; 1 failed; 2 a
+# usage error.
 set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
@@ -50,15 +60,13 @@ umask 077
 
 WORK="" DONE=""
 output() { if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "$1" >>"$GITHUB_OUTPUT"; fi; }
-can_comment() { [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; }
 # die <why>: stops the run, and leaves the why for the comment, also from a subshell.
 die() { if [ -n "$WORK" ]; then printf '%s' "$1" >"$WORK/failed"; fi; qa_say "$1"; exit 1; }
 on_exit() {
   local why=""
   if [ -n "$WORK" ] && [ -f "$WORK/failed" ]; then why="$(cat "$WORK/failed")"; fi
-  if [ "$1" != 0 ] && [ -z "$DONE" ] && can_comment; then
-    qa_comment "$n" failed "The deploy of \`$sha\` failed${why:+: $why}${RUN_URL:+ ([run]($RUN_URL))}. The next push tries again; a half-built environment goes when the pull request closes." \
-      || echo "::warning::could not update the QA environment comment of pull request $n"
+  if [ "$1" != 0 ] && [ -z "$DONE" ]; then
+    qa_status failed "The deploy of \`$sha\` failed${why:+: $why}${RUN_URL:+ ([run]($RUN_URL))}. The next push tries again; a half-built environment goes when the pull request closes."
   fi
   qa_cleanup
   if [ -n "$WORK" ]; then rm -rf "$WORK"; fi
@@ -67,11 +75,10 @@ trap 'on_exit $?' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-WORK="$(mktemp -d)"
+qa_names "$n"
+WORK="$(qa_temp)"
 pause="${MROOM_QA_POLL:-5}"
 [[ "$pause" =~ ^[1-9][0-9]?$ ]] || pause=5
-
-qa_names "$n"
 qa_gate_init
 
 # 1. What the app asks for, from the default branch's mroom.toml, all checked before anything is made. A key that
@@ -80,7 +87,7 @@ qa_gate_init
 setting() { qa_config "$1" "$2" || die "mroom.toml's $1 could not be read"; }
 broadcast="$(setting qa.parity.broadcast same)"
 if [ "$broadcast" = same ]; then
-  die "not yet: qa.parity.broadcast = \"same\" needs mroom's Reverb host, which is wired in later (design D16); set it to \"log\" in mroom.toml until then"
+  die "not yet: qa.parity.broadcast = \"same\" needs mroom's Reverb host, which exists but is not wired into QA environments yet (design D16); set it to \"log\" in mroom.toml until then"
 fi
 mail="$(setting qa.parity.mail catcher)"
 files="$(setting qa.parity.files same)"
@@ -128,6 +135,9 @@ if [ -n "$build" ] && [ -n "$QA_FRONTEND" ]; then
     [ "$QA_BACKEND" = . ] || tree_dist="$QA_BACKEND/$tree_dist"
   fi
 fi
+# The worker refuses to run as any user but the site user, as the deploy script does: exit 78, a setup error, which
+# supervisor stops retrying after a few tries.
+worker_command="bash -c 'test \"\$(id -un)\" = $QA_USER || exit 78; exec $php_bin artisan queue:work --queue=$queues --tries=3 --max-time=3600'"
 
 # site_id <domain>: the site's id, or nothing when there is none or Forge is removing it.
 site_id() {
@@ -164,16 +174,17 @@ if [ -z "$api_id" ]; then
     echo "::warning::$refused"
     output "refused=$refused"
     DONE=1
-    if can_comment; then qa_comment "$n" waiting "$refused" || echo "::warning::could not update the QA environment comment"; fi
+    qa_status waiting "$refused"
     exit 0
   fi
 fi
 
 # 3. The sites.
-# site_ready <domain>: waits until Forge has made the site, and refuses one that is not isolated in the
-# environment's own user's home (D17), such as a site someone made by hand.
+# site_ready <domain> <web root>: waits until Forge has made the site, and refuses one that is not isolated in the
+# environment's own user's home (D17), such as a site someone made by hand, one whose web root is elsewhere, and a
+# PHP site that runs another PHP version than app.php.
 site_ready() {
-  local site status waited=0
+  local site status waited=0 web want
   while :; do
     site="$(forge_site "$1")"
     status="$(jq -r '.attributes.status // "missing"' <<<"${site:-null}")"
@@ -187,6 +198,14 @@ site_ready() {
   done
   jq -e --arg user "$QA_USER" '.attributes.isolated == true and .attributes.user == $user' <<<"$site" >/dev/null \
     || die "$1 is not a Forge isolated site of the user $QA_USER; delete it in Forge and run again"
+  # Forge gives the web root as an absolute path.
+  web="$(jq -r '.attributes.web_directory // ""' <<<"$site")" want="/home/$QA_USER/$1$2"
+  if [ -n "$web" ] && [ "${web%/}" != "${want%/}" ]; then
+    die "$1's web root is ${web:0:120}, not $want; delete the site in Forge and run again"
+  fi
+  if [ "$2" != / ] && [ "$(jq -r '.attributes.php_version // ""' <<<"$site")" != "PHP $php" ]; then
+    die "$1 runs $(jq -r '.attributes.php_version // "an unknown PHP"' <<<"$site" | cut -c1-20), and app.php is $php. A site's PHP version is set when it is made: tear the environment down (gh workflow run qa-down.yml -f pr_number=$n), and the next deploy makes it with PHP $php"
+  fi
 }
 
 # make_site <domain> <type> <web directory>: sets SITE_ID to the site's, made when there is none.
@@ -208,54 +227,80 @@ make_site() {
   SITE_ID="$id"
 }
 
-# certificate <site id>: an active certificate, cloned from MROOM_QA_CERTIFICATE or from Let's Encrypt, waited for:
-# the site's health is asked over https.
+# primary_domain <site id>: the id of the site's primary domain, whose certificates and server block these are.
+primary_domain() {
+  local domain
+  domain="$(forge GET "/sites/$1/domains" | jq -r '[.data[]? | select(.attributes.type == "primary")][0].id // empty')" \
+    || die "Forge's domains of site $1 could not be read"
+  [[ "$domain" =~ ^[0-9]+$ ]] || die "Forge gave site $1 no primary domain"
+  echo "$domain"
+}
+
+# certificate <site id> <domain id>: an active certificate on the domain, cloned from MROOM_QA_CERTIFICATE (and
+# enabled) or from Let's Encrypt, waited for, since the site's health is asked over https. One that failed, as one
+# from Let's Encrypt can when the domain does not answer yet, is deleted and asked for again, once; failing again, it
+# needs a person.
 certificate() {
-  local domain body waited=0
-  if [ "$(forge GET "/sites/$1/certificates" | jq '[.data[]?.attributes
-      | select(.active == true or ((.request_status // "") | IN("verifying", "creating")))] | length')" = 0 ]; then
-    domain="$(forge GET "/sites/$1/domains" | jq -r '[.data[]? | select(.attributes.type == "primary")][0].id // empty')"
-    [[ "$domain" =~ ^[0-9]+$ ]] || die "Forge gave site $1 no primary domain"
-    if [[ "${MROOM_QA_CERTIFICATE:-}" =~ ^[0-9]+$ ]]; then
-      body="$(jq -nc --argjson id "$MROOM_QA_CERTIFICATE" '{type: "clone", clone: {certificate_id: $id}}')"
-    else
-      body='{"type":"letsencrypt","letsencrypt":{"verification_method":"http-01","key_type":"ecdsa"}}'
-    fi
-    forge POST "/sites/$1/domains/$domain/certificates" "$body" >/dev/null
-    echo "    asked for a certificate"
+  local base="/sites/$1/domains/$2/certificates" body certs failed asked=0 waited=0
+  if [[ "${MROOM_QA_CERTIFICATE:-}" =~ ^[0-9]+$ ]]; then
+    body="$(jq -nc --argjson id "$MROOM_QA_CERTIFICATE" '{type: "clone", enable: true, clone: {certificate_id: $id}}')"
+  else
+    body='{"type":"letsencrypt","letsencrypt":{"verification_method":"http-01","key_type":"ecdsa"}}'
   fi
-  until forge GET "/sites/$1/certificates" | jq -e 'any(.data[]?; .attributes.active == true)' >/dev/null; do
+  while :; do
+    certs="$(forge GET "$base")" || die "Forge's certificates of site $1 could not be read"
+    if jq -e 'any(.data[]?; .attributes.active == true)' <<<"$certs" >/dev/null; then return 0; fi
+    failed="$(jq -r '[.data[]? | select(.attributes.request_status == "failed" or .attributes.status == "failed") | .id
+      | tostring | select(test("\\A[0-9]+\\z"))] | first // empty' <<<"$certs")"
+    if [ -n "$failed" ]; then
+      ((asked < 2)) || die "the certificate of site $1 failed again; look at it in Forge, then run the deploy again"
+      qa_delete "$base/$failed" || die "Forge would not delete the failed certificate $failed of site $1"
+      echo "    deleted certificate $failed, which failed"
+      continue
+    fi
+    if ! jq -e 'any(.data[]?; (.attributes.request_status // "") | IN("creating", "verifying", "installing", "created"))' \
+      <<<"$certs" >/dev/null; then
+      ((asked < 2)) || die "site $1 has no certificate, though one was asked for twice"
+      forge POST "$base" "$body" >/dev/null || die "Forge refused a certificate for site $1"
+      asked=$((asked + 1))
+      echo "    asked for a certificate"
+    fi
     ((waited < ${MROOM_QA_CERT_WAIT:-300})) || die "site $1 had no active certificate after ${waited}s"
     sleep "$pause"
     waited=$((waited + pause))
   done
 }
 
-# guard_nginx <site id> [spa]: nginx runs as the box user and follows links, so it must follow one only when the
-# link and its target have one owner (disable_symlinks if_not_owner), or code put into the site could link to a box
-# user's file and serve it (D17). With spa, a path the site does not have serves index.html, so a single-page
-# app's routes survive a reload. Checked on every run, after the certificate, and before any code goes in.
+# nginx_conf <guard|check|includes> [--spa]: lib's nginx parser, on stdin (actions/qa-up/nginx-conf).
+nginx_conf() { python3 -I "$HERE/nginx-conf" "$@"; }
+
+# guard_nginx <site id> <domain id> [--spa]: nginx runs as the box user and follows links, so it must follow one only
+# when the link and its target have one owner (disable_symlinks if_not_owner), or code put into the site could link
+# to a box user's file and serve it (D17). The site's config is the fragment each of its domains includes in its
+# server block: the guard goes at its top level, and the domain's server block must include it and set nothing of
+# its own. Forge applies a new config later, so it is read back until it has it. With --spa, a path the site does
+# not have serves index.html, so a single-page app's routes survive a reload. Checked on every run, after the
+# certificate, and before any code goes in.
 guard_nginx() {
-  local config want
-  config="$(forge GET "/sites/$1/nginx" | jq -r '.data.attributes.content // empty')"
+  local config want why waited=0
+  forge GET "/sites/$1/domains/$2/nginx" | jq -r '.data.attributes.content // ""' | nginx_conf includes \
+    || die "site $1's nginx server block does not take its site config as it is, so no code goes in"
+  config="$(forge GET "/sites/$1/nginx" | jq -r '.data.attributes.content // empty')" \
+    || die "Forge's nginx config of site $1 could not be read"
   [ -n "$config" ] || die "Forge gave site $1 no nginx config"
-  want="$config"
-  if ! grep -q 'disable_symlinks if_not_owner;' <<<"$want"; then
-    want="$(awk '{ print } /^[[:space:]]*root[[:space:]]+[^;]+;[[:space:]]*$/ {
-      match($0, /^[[:space:]]*/); printf "%sdisable_symlinks if_not_owner;\n", substr($0, 1, RLENGTH) }' <<<"$want")"
-  fi
-  # shellcheck disable=SC2016  # nginx's own $uri
-  if [ "${2:-}" = spa ]; then want="${want//'try_files $uri $uri/ =404;'/'try_files $uri $uri/ /index.html;'}"; fi
-  if [ "$want" != "$config" ]; then
-    forge PUT "/sites/$1/nginx" "$(jq -nc --arg c "$want" '{config: $c}')" >/dev/null
-    config="$(forge GET "/sites/$1/nginx" | jq -r '.data.attributes.content // empty')"
-    echo "    nginx config: links followed only to their owner's files${2:+, and the single-page fallback}"
-  fi
-  grep -q 'disable_symlinks if_not_owner;' <<<"$config" || die "site $1's nginx config has no root line for disable_symlinks, so no code goes in"
-  # shellcheck disable=SC2016
-  if [ "${2:-}" = spa ] && ! grep -qF 'try_files $uri $uri/ /index.html;' <<<"$config"; then
-    die "site $1's nginx config has no try_files line to send unknown paths to index.html"
-  fi
+  if nginx_conf check ${3:+"$3"} <<<"$config" 2>/dev/null; then return 0; fi
+  want="$(nginx_conf guard ${3:+"$3"} <<<"$config")" || die "site $1's nginx config does not parse, so no code goes in"
+  # A disable_symlinks inside a block, or a try_files mroom does not know, would stay as it is: a person fixes it.
+  why="$(nginx_conf check ${3:+"$3"} <<<"$want" 2>&1)" \
+    || die "site $1's nginx config cannot be guarded as it is ($why), so no code goes in; fix it in Forge"
+  forge PUT "/sites/$1/nginx" "$(jq -nc --arg c "$want" '{config: $c}')" >/dev/null || die "Forge refused site $1's nginx config"
+  echo "    nginx config: links followed only to their owner's files${3:+, and the single-page fallback}"
+  until config="$(forge GET "/sites/$1/nginx" | jq -r '.data.attributes.content // empty')" \
+    && nginx_conf check ${3:+"$3"} <<<"$config" 2>/dev/null; do
+    ((waited < ${MROOM_QA_NGINX_WAIT:-120})) || die "site $1's nginx config still lacked the guard ${waited}s after it was sent, so no code goes in"
+    sleep "$pause"
+    waited=$((waited + pause))
+  done
 }
 
 echo "==> Site $QA_API"
@@ -263,20 +308,49 @@ web_root=/public
 [ "$QA_BACKEND" = . ] || web_root="/$QA_BACKEND/public"
 make_site "$QA_API" php "$web_root"
 api_id="$SITE_ID"
-site_ready "$QA_API"
-certificate "$api_id"
-guard_nginx "$api_id"
+site_ready "$QA_API" "$web_root"
+api_domain="$(primary_domain "$api_id")"
+certificate "$api_id" "$api_domain"
+guard_nginx "$api_id" "$api_domain"
 web_id=""
 if qa_separate_frontend; then
   echo "==> Site $QA_WEB"
   make_site "$QA_WEB" static-html /
   web_id="$SITE_ID"
-  site_ready "$QA_WEB"
-  certificate "$web_id"
-  guard_nginx "$web_id" spa
+  site_ready "$QA_WEB" /
+  web_domain="$(primary_domain "$web_id")"
+  certificate "$web_id" "$web_domain"
+  guard_nginx "$web_id" "$web_domain" --spa
 fi
 
-# 4. The code, as data.
+# 4. Daemons that run as anyone but the site user go before any code does, and are waited for until Forge has them
+# gone: the next deploy would start them on the pull request's code.
+# env_daemons: the environment's daemons (lib/core/qa.sh, qa_processes), with their commands, one JSON per line.
+env_daemons() {
+  local items
+  items="$(forge_list /background-processes)" || return 1
+  jq -c --arg user "$QA_USER" --arg home "/home/$QA_USER/" 'select(.attributes.user == $user
+    or ((.attributes.directory // "") | startswith($home))) | select(.id | tostring | test("\\A[0-9]+\\z"))
+    | {id: (.id | tostring), user: (.attributes.user // "unknown"), status: (.attributes.status // "unknown"),
+       command: (.attributes.command // "")}' <<<"$items"
+}
+echo "==> Daemons"
+waited=0
+while :; do
+  others="$(env_daemons | jq -c --arg user "$QA_USER" 'select(.user != $user)')" || die "Forge's daemons could not be read"
+  [ -n "$others" ] || break
+  while IFS= read -r daemon; do
+    id="$(jq -r .id <<<"$daemon")" user="$(jq -r .user <<<"$daemon" | cut -c1-32)"
+    [ "$(jq -r .status <<<"$daemon")" != removing ] || continue
+    qa_delete "/background-processes/$id" || die "Forge would not delete daemon $id, which runs as $user, so no code goes in"
+    echo "    deleted daemon $id, which ran as $user"
+  done <<<"$others"
+  ((waited < ${MROOM_QA_DAEMON_WAIT:-120})) || die "daemons of the environment still run as another user ${waited}s after they were deleted, so no code goes in"
+  sleep "$pause"
+  waited=$((waited + pause))
+done
+
+# 5. The code, as data.
 echo "==> Code: $sha"
 gh api "repos/$GITHUB_REPOSITORY/tarball/$sha" >"$WORK/code.tgz" || die "GitHub gave no tarball of $sha"
 if [ -n "$tree_dist" ]; then
@@ -294,25 +368,30 @@ if [ -n "$web_id" ]; then
   qa_show "$out"
 fi
 
-# 5. The services, through the gate. What it gives is kept for the .env, masked in the log, never printed.
+# 6. The services, through the gate. What it gives is kept for the .env, masked in the log, never printed.
 : >"$WORK/values"
 set_env() { printf '%s=%s\n' "$1" "$2" >>"$WORK/values"; }
 # service <what> <operation> <argument...>: the gate's KEY=value lines, kept in $WORK/gate for keep and gate_value,
-# its passwords and secret keys masked, and its other lines shown.
+# its passwords, secret keys and app key masked. Any other line is shown only when it is a plain message: one that
+# could hold a value, or a workflow command, is not shown at all.
+PLAIN='^[A-Za-z0-9 ._:,/()-]{1,200}$'
 service() {
-  local what="$1" out line
+  local what="$1" out line hidden=0
   shift
   echo "==> $what"
   out="$(qa_gate "$@")" || die "the gate could not give the environment its $what ($1)"
   : >"$WORK/gate"
   while IFS= read -r line; do
-    if [[ "$line" =~ ^([A-Z][A-Z_]*)=([!-~]*)$ ]]; then
-      case "${BASH_REMATCH[1]}" in *PASSWORD | *SECRET*) qa_mask "${BASH_REMATCH[2]}" ;; esac
+    if [[ "$line" =~ ^([A-Z][A-Z0-9_]*)=([!-~]*)$ ]]; then
+      case "${BASH_REMATCH[1]}" in *PASSWORD | *SECRET* | APP_KEY) qa_mask "${BASH_REMATCH[2]}" ;; esac
       printf '%s=%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" >>"$WORK/gate"
-    elif [ -n "$line" ]; then
+    elif [[ "$line" =~ $PLAIN && "$line" != *::* ]]; then
       qa_show "$line"
+    elif [ -n "$line" ]; then
+      hidden=$((hidden + 1))
     fi
   done <<<"$out"
+  if ((hidden > 0)); then echo "    ($hidden line(s) of the gate's answer not shown, since they may hold a value)"; fi
 }
 gate_value() { sed -n "s/^$1=//p" "$WORK/gate" | head -n1; }
 # keep <KEY...>: the gate's values of these keys, into the .env under the same names.
@@ -330,10 +409,13 @@ set_env DB_CONNECTION pgsql
 set_env DB_HOST 127.0.0.1
 keep DB_DATABASE DB_USERNAME DB_PASSWORD
 service "Redis user" redis-user-add "$n"
-keep REDIS_USERNAME REDIS_PASSWORD REDIS_PREFIX HORIZON_PREFIX
+keep REDIS_USERNAME REDIS_PASSWORD REDIS_PREFIX HORIZON_PREFIX REDIS_HOST REDIS_PORT
 if [ "$mail" = catcher ]; then
   service "mail login" mail-user-add "$n"
   keep MAIL_MAILER MAIL_HOST MAIL_PORT MAIL_USERNAME MAIL_PASSWORD
+  # Plain SMTP to the relay on the box, whatever the template says about TLS.
+  set_env MAIL_SCHEME smtp
+  set_env MAIL_ENCRYPTION null
 else
   set_env MAIL_MAILER log
 fi
@@ -355,14 +437,15 @@ else
 fi
 set_env BROADCAST_CONNECTION log
 set_env BROADCAST_DRIVER log
+service "app key" app-key "$n"
+keep APP_KEY
 
-# 6. The .env: the template, without any key mroom sets, then mroom's values. A new app key each deploy, since the
-# template holds none and the environment's own .env cannot be read back.
-app_key="base64:$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
-qa_mask "$app_key"
-set_env APP_KEY "$app_key"
+# 7. The .env: the template, without any key mroom sets, then mroom's values.
+set_env APP_ENV qa
 # Off: the hosts are public, and a debug page shows the environment's settings.
 set_env APP_DEBUG false
+# The hosts answer over https alone.
+set_env SESSION_SECURE_COOKIE true
 while IFS= read -r line; do set_env "${line%%=*}" "${line#*=}"; done < <(qa_public_env)
 set_env CACHE_PREFIX "${QA_USER}_cache_"
 printf '%s\n' "${MROOM_QA_ENV_TEMPLATE:-}" >"$WORK/template"
@@ -375,13 +458,16 @@ want="$(printf '%s' "$(cat "$WORK/env")" | sha256sum | cut -d' ' -f1)"
 [ "$out" = "env=$want" ] || die "the .env the gate wrote is not the one sent"
 echo "    written, $(wc -l <"$WORK/env" | tr -d ' ') lines"
 
-# 7. Forge's deploy: a script that pulls nothing, then the queue worker.
+# 8. Forge's deploy: a script that runs as the site user alone and pulls nothing, then the queue worker.
 deploy_script() {
   local root="/home/$QA_USER/$QA_API" command
   printf '%s\n' "# Written by mroom's qa-up for QA environment $n (design 6, D17). The gate put the tree in place, so this" \
-    "# pulls nothing and builds no frontend; Forge runs it as the site's own user." \
-    "set -eo pipefail" "php=\"\${FORGE_PHP:-$php_bin}\"" "composer=\"\${FORGE_COMPOSER:-composer}\"" \
+    "# pulls nothing and builds no frontend; Forge runs it as the site's own user, and as no other." \
+    "set -eo pipefail" "test \"\$(id -un)\" = $QA_USER || exit 78" \
+    "php=\"\${FORGE_PHP:-$php_bin}\"" "composer=\"\${FORGE_COMPOSER:-composer}\"" \
     "export MROOM_QA_ENV=$n" "cd $backend_path" \
+    "# A link to a root-owned file, which nginx must refuse to follow (qa-up asks for it)." \
+    "ln -sfn /etc/os-release public/mroom-symlink-probe" \
     "if [ -x $root/.mroom/hooks/qa-deploy ]; then" "  $root/.mroom/hooks/qa-deploy" "else" \
     "  \$composer install --no-interaction --prefer-dist --optimize-autoloader" "  \"\$php\" artisan migrate --force"
   # shellcheck disable=SC2016  # the script's own $php
@@ -425,50 +511,64 @@ done
 echo "    deploy $deployment finished"
 
 echo "==> Queue worker"
-daemons="$(qa_processes)" || die "Forge's daemons could not be read"
-mine=""
-while read -r id status user; do
-  [ -n "$id" ] || continue
-  if [ "$user" = "$QA_USER" ]; then mine="$id"; continue; fi
-  # A daemon as another user would run the pull request's code as that user, forge or root (D20).
-  forge DELETE "/background-processes/$id" >/dev/null
-  echo "    deleted daemon $id, which ran as $user"
+daemons="$(env_daemons)" || die "Forge's daemons could not be read"
+mine="" stale=""
+while IFS= read -r daemon; do
+  [ -n "$daemon" ] || continue
+  [ "$(jq -r .user <<<"$daemon")" = "$QA_USER" ] || die "a daemon of the environment runs as another user again, so the worker waits"
+  [ "$(jq -r .status <<<"$daemon")" != removing ] || continue
+  if [ "$(jq -r .command <<<"$daemon")" = "$worker_command" ] && [ -z "$mine" ]; then
+    mine="$(jq -r .id <<<"$daemon")"
+  else
+    stale+="$(jq -r .id <<<"$daemon") "
+  fi
 done <<<"$daemons"
+# A worker whose command is not the one wanted now (other queues or another PHP) goes, and a new one comes.
+for id in $stale; do
+  qa_delete "/background-processes/$id" || die "Forge would not delete the old worker $id"
+  echo "    deleted worker $id, whose command is not the one wanted now"
+done
 if [ -z "$mine" ]; then
   body="$(jq -nc --arg name "${QA_USER}-queue" --argjson site "$api_id" --arg user "$QA_USER" --arg dir "$backend_path" \
-    --arg command "$php_bin artisan queue:work --queue=$queues --tries=3 --max-time=3600" \
-    '{name: $name, site_id: $site, command: $command, user: $user, directory: $dir, processes: 1}')"
+    --arg command "$worker_command" '{name: $name, site_id: $site, command: $command, user: $user, directory: $dir, processes: 1}')"
   made="$(forge POST /background-processes "$body")" || die "Forge refused the queue worker, run as $QA_USER (design D17)"
   mine="$(jq -r '.data.id // empty' <<<"$made")"
   [[ "$mine" =~ ^[0-9]+$ ]] || die "Forge made no queue worker"
-  # Forge's API names only root and forge as a daemon's user: the new one is read back, and kept only when it runs
-  # as the site user (D17).
+  # Forge's API names only root and forge as a daemon's user: the new one is read back, and kept only when Forge's
+  # record of it names the site user (D17).
   user="$(forge GET "/background-processes/$mine" | jq -r '.data.attributes.user // ""')"
   if [ "$user" != "$QA_USER" ]; then
-    forge DELETE "/background-processes/$mine" >/dev/null || true
-    die "Forge started the queue worker as ${user:-an unknown user}, not $QA_USER, so it was deleted again"
+    if qa_delete "/background-processes/$mine"; then
+      die "Forge started the queue worker as ${user:-an unknown user}, not $QA_USER, so it was deleted again"
+    fi
+    die "Forge started the queue worker as ${user:-an unknown user}, not $QA_USER, and would not delete it: delete daemon $mine in Forge"
   fi
   echo "    created worker $mine, run as $QA_USER"
 else
   echo "    worker $mine runs as $QA_USER"
 fi
 
-# 8. Health.
+# 9. Health, and the proof that nginx refuses a link to a file of another owner: the deploy linked one into the web
+# root. Refused, the link answers 403, or 404 when try_files sends it on to the app; served, it answers 200.
 echo "==> https://$QA_API/up"
 code="$(qa_up_code "https://$QA_API")"
 [ "$code" = 200 ] || die "https://$QA_API/up answered $code, still, after ${MROOM_QA_UP_TRIES:-6} tries"
 echo "    200"
+probe="$(curl -q -s -o /dev/null -m 20 -w '%{http_code}' "https://$QA_API/mroom-symlink-probe")" || probe=000
+case "$probe" in
+  200) die "https://$QA_API served a link to a root-owned file, so nginx follows links it must not (D17); nothing else is checked until it does not" ;;
+  000) die "https://$QA_API/mroom-symlink-probe did not answer, so whether nginx follows links cannot be told" ;;
+esac
+echo "    a link to a root-owned file: refused ($probe)"
 
 app_url="https://$QA_API"
 if qa_separate_frontend; then app_url="https://$QA_WEB"; fi
+output "sha=$sha"
 output "app_url=$app_url"
 output "api_url=https://$QA_API"
 DONE=1
-if can_comment; then
-  table="| | |"$'\n'"|---|---|"$'\n'
-  if qa_separate_frontend; then table+="| App | $app_url |"$'\n'; fi
-  table+="| API | https://$QA_API |"
-  qa_comment "$n" ready "$table"$'\n\n'"Updated for \`$sha\`. Every push that needs it refreshes it. It goes when the pull request closes, its ${LABEL:-qa} label comes off, or after $ttl days." \
-    || echo "::warning::could not update the QA environment comment of pull request $n"
-fi
+table="| | |"$'\n'"|---|---|"$'\n'
+if qa_separate_frontend; then table+="| App | $app_url |"$'\n'; fi
+table+="| API | https://$QA_API |"
+qa_status ready "$table"$'\n\n'"Updated for \`$sha\`. Every push that needs it refreshes it. It goes when the pull request closes, its ${LABEL:-qa} label comes off, or after $ttl days."
 echo "environment $n: up at $app_url"
