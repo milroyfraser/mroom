@@ -657,22 +657,28 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
   what is already gone, whether or not Forge still has a site: daemons first, since supervisor starts again
   what is stopped, then `user-clean`, then the sites right after (design 8.9), then the box's side. A
   `user-clean` that fails keeps the sites. When a step fails, the comment names it, and "Re-run failed jobs"
-  on that run finishes the teardown. Teardowns and deploys of one pull request take turns, first in first
-  out, so none runs beside another and none waiting is dropped.
+  or "Re-run all jobs" on that run finishes the teardown: the comment's hidden line keeps the state the
+  teardown started from, which the check takes when Forge has no site left, as a teardown by hand or by the
+  reaper does. Teardowns, their checks and deploys of one pull request take turns, first in first out, so none
+  runs beside another and none waiting is dropped: a pull request closed during its first deploy is checked
+  once that deploy has made its sites.
 - **The reaper** starts the app's qa-down workflow for each environment past its time (reason `ttl`) rather
   than tearing it down itself, so each teardown takes its pull request's turn, frees its slot and can be
   re-run on its own; the reaper holds the Forge token and no SSH key.
 - **The comment.** A pull request with an environment has one `### QA environment` comment, edited in place,
   that says whether it is ready, waits for a slot, failed, is being removed or was removed, and why. It is for
-  people; its hidden line also tells a teardown that frees a slot which pull request to wake: the one that has
-  waited longest, by the time it started waiting, which the comment keeps however often it is rewritten. The
-  wake marks it woken before it starts its QA plan again, so a second teardown close behind wakes another; a
-  woken one waits again after 30 minutes. It reads the comments of the 100 newest open pull requests, one
-  listing each, and no more. The wake's dispatch, made with the job token, does start the plan, but nothing
+  people; its hidden line also tells which pull request gets a freed slot: the one that has waited longest, by
+  the time it started waiting, which the comment keeps however often it is rewritten. A teardown that freed a
+  slot ends with qa-down's wake job, of which one runs at a time for the repository, so two teardowns close
+  together wake two pull requests, not one twice. The wake marks the pull request woken before it starts its
+  QA plan again, so the next wake picks another; a woken one waits again after 30 minutes, and one whose plan
+  could not be started at once. It reads the 100 newest open pull requests and their comments, one listing
+  each, 100 a page, and no more. The wake's dispatch, made with the job token, does start the plan, but nothing
   after it starts by itself: a run the job token started starts no `workflow_run` when it ends, and neither
   does a run that one starts in turn. So each link of the chain starts the next itself: the plan hands itself
   to qa-up (its `hand-over` job, which needs `actions: write`), and qa-up, started that way, starts what
-  follows it. When the label comes off a pull request with no environment, its comment stops saying it waits.
+  follows it. The hand-over goes by the plan run's actor, so a person's re-run of a woken plan hands over too.
+  When the label comes off a pull request with no environment, its comment stops saying it waits.
 - **Caches.** qa-plan's build job runs the pull request's code, and a run started by hand or by a wake runs
   under the default branch, so it only reads caches (`cache-mode: read`): otherwise the pull request's code
   could save a poisoned cache that the default branch's own builds restore. Any workflow of the app's that
@@ -699,11 +705,15 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
 1. A GitHub environment `qa`, deploying from the default branch only, with the secrets `MROOM_FORGE_TOKEN`
    (from a Forge account whose only team holds the box; teardowns and the reaper need `server:view`,
    `site:delete` and `server:delete-daemons`) and `MROOM_QA_SSH_KEY` (the private half of the key the box forces to
-   `mroom gate provision`), and the variables `MROOM_FORGE_ORG`, `MROOM_FORGE_SERVER`, `MROOM_QA_SSH_HOST`,
+   `mroom gate provision`). The variables `MROOM_FORGE_ORG`, `MROOM_FORGE_SERVER`, `MROOM_QA_SSH_HOST`,
    `MROOM_QA_SSH_KNOWN_HOSTS` (the box's host key line, as `ssh-keyscan -t ed25519 <host>` prints it, checked
    against the box's own `/etc/ssh/ssh_host_ed25519_key.pub`) and, when the box user is not `forge`,
-   `MROOM_QA_SSH_USER`. Every name and host the workflows build comes from the default branch's `mroom.toml`
-   (`app.name`, `qa.zone`, the app's folders), and must match the box's `box.env`.
+   `MROOM_QA_SSH_USER` go in the repository's variables, not the `qa` environment's: none is secret, and every
+   job of the called workflows reads the repository's, while GitHub's docs never say an environment's own
+   reach a called workflow's job that sets `deployment: false`. Until
+   `MROOM_FORGE_SERVER` is set, the workflows tear down and reap nothing, with a warning. Every name and host
+   the workflows build comes from the default branch's `mroom.toml` (`app.name`, `qa.zone`, the app's
+   folders), and must match the box's `box.env`.
 2. The label: `gh label create qa --description "Forces a QA environment on; taking it off tears it down"`.
 3. The app's own workflows, which name a run after its pull request so that qa-up can tell which one it was:
 

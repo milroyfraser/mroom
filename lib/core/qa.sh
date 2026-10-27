@@ -63,6 +63,10 @@ qa_names() {
   ((${#QA_USER} <= 32)) || { qa_say "$QA_USER is longer than a user name may be (32); shorten app.name"; return 1; }
 }
 
+# QA_WORKFLOW_RE: a workflow file's name, as a dispatch takes it: never one that starts with -, which gh would read as
+# an option.
+QA_WORKFLOW_RE='^[A-Za-z0-9_][A-Za-z0-9._-]*\.ya?ml$'
+
 # QA_SITE_RE: qa_names read backwards, for jq: a site name's environment number and zone, as its two captures. Every
 # name of an environment's sites is built in qa_names and read back with this, and nowhere else.
 QA_SITE_RE='\A(?:api|go)-([1-9][0-9]{0,8})\.(.+)\z'
@@ -201,26 +205,32 @@ qa_cleanup() {
 }
 
 # qa_comment_newest <PR>: the newest of github-actions[bot]'s QA environment comments on the pull request, as
-# {"id", "state", "since", "woken", "updated_at"} on one line, or nothing. Found by its heading, never as the bot's
-# last comment, which may be another of its comments. The state and its times come from the comment's hidden line.
+# {"id", "state", "since", "woken", "was", "updated_at"} on one line, or nothing. Found by its heading, never as the
+# bot's last comment, which may be another of its comments. The state and its fields come from the comment's hidden
+# line. 100 comments a page, the most GitHub gives.
 qa_comment_newest() {
   local found
-  found="$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$1/comments" --jq '.[]
+  found="$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$1/comments?per_page=100" --jq '.[]
     | select(.user.login == "github-actions[bot]" and ((.body // "") | startswith("### QA environment\n")))
-    | ([.body | match("\n<!-- mroom-qa: ([a-z]+)((?: [a-z]+=[0-9TZ:-]+)*) -->\n").captures[].string]) as $m
-    | def field($k): [($m[1] // "") | match(" " + $k + "=([0-9TZ:-]+)").captures[].string][0] // "";
-      {id, updated_at, state: ($m[0] // ""), since: field("since"), woken: field("woken")} | @json')" || return 1
+    | ([.body | match("\n<!-- mroom-qa: ([a-z]+)((?: [a-z]+=[0-9A-Za-z:-]+)*) -->\n").captures[].string]) as $m
+    | def field($k): [($m[1] // "") | match(" " + $k + "=([0-9A-Za-z:-]+)").captures[].string][0] // "";
+      {id, updated_at, state: ($m[0] // ""), since: field("since"), woken: field("woken"), was: field("was")}
+    | @json')" || return 1
   tail -n1 <<<"$found"
 }
 
-# qa_comment <PR> <state> <text>: writes the pull request's one QA environment comment: the heading, a hidden line
-# with the state (ready, waiting, woken, idle, failed, removing or removed) and its times, then the text, which is
-# mroom's own words, never text from the pull request. A pull request that keeps waiting keeps the time it started
+# qa_comment <PR> <state> <text> [<field>=<value>...]: writes the pull request's one QA environment comment: the
+# heading, a hidden line with the state (ready, waiting, woken, idle, failed, removing, removed or skipped), its times
+# and the fields given (a teardown's was=<the state it started from>), then the text, which is mroom's own words,
+# never text from the pull request. A pull request that keeps waiting keeps the time it started
 # waiting (since), whatever rewrites the comment meanwhile; woken is when a freed slot last started its plan. Edits
 # the newest one, or makes one.
 qa_comment() {
-  local body id now newest previous since="" marker
+  local body id now newest previous since="" marker field
   [[ "$2" =~ ^[a-z]+$ ]] || { qa_say "a comment state is a lowercase word"; return 1; }
+  for field in "${@:4}"; do
+    [[ "$field" =~ ^[a-z]+=[0-9A-Za-z:-]+$ ]] || { qa_say "a comment field is <word>=<plain value>"; return 1; }
+  done
   newest="$(qa_comment_newest "$1")" || return 1
   id="$(jq -r '.id // empty' <<<"${newest:-null}")"
   previous="$(jq -r '.state // ""' <<<"${newest:-null}")"
@@ -232,6 +242,7 @@ qa_comment() {
     marker+=" since=$since"
   fi
   if [ "$2" = woken ]; then marker+=" woken=$now"; fi
+  for field in "${@:4}"; do marker+=" $field"; done
   body="$(jq -n --arg b "$(printf '%s\n<!-- mroom-qa: %s -->\n\n%s\n' "$QA_HEADING" "$marker" "$3")" '{body: $b}')"
   if [ -n "$id" ]; then
     [[ "$id" =~ ^[0-9]+$ ]] || { qa_say "the comment's id is not a number"; return 1; }
@@ -243,20 +254,25 @@ qa_comment() {
 
 # qa_wake <slots>: after a teardown frees slots, starts the app's QA plan workflow (MROOM_QA_PLAN_WORKFLOW,
 # qa-plan.yml) on the default branch for the open pull requests that wait for a slot, the longest waiting first, at
-# most <slots>. Each one's comment is marked woken first, so a second teardown close behind wakes another; a woken
-# one counts as waiting again after MROOM_QA_WAKE_AGAIN (1800) seconds, in case its plan never ran.
+# most <slots>. It runs in qa-down's wake job, one wake at a time for the whole repository (its concurrency group):
+# two at once would each read the comments before the other marked one, and wake the same pull request. Each one's
+# comment is marked woken first, so the next wake picks another; a woken one counts as waiting again after
+# MROOM_QA_WAKE_AGAIN (1800) seconds, in case its plan never ran, and one whose plan could not be started waits again
+# at once.
 # The job token's dispatch does start the plan, but nothing after it starts by itself: a run the job token started
 # starts no workflow_run when it ends, and neither does a run that one starts in turn. So each link starts the next
 # itself: the plan dispatches qa-up (.github/workflows/qa-plan.yml, hand-over), and qa-up, started that way, must
 # dispatch whatever follows it in turn, whose workflow_run would never come either.
-# The cost is bounded: the 100 newest open pull requests, and one listing of each one's comments; one older than
-# those is not seen. Best-effort: a failure only warns.
+# The cost is bounded: one listing of the 100 newest open pull requests, and one of each one's comments, 100 a page;
+# one older than those is not seen. It lists every open pull request, not the waiting ones alone, since only their
+# comment's hidden line tells those apart, and GitHub's search does not promise to see it. Best-effort: a failure
+# only warns.
 qa_wake() {
   local slots="$1" workflow="${MROOM_QA_PLAN_WORKFLOW:-qa-plan.yml}" again="${MROOM_QA_WAKE_AGAIN:-1800}"
   local prs pr found state since woken cutoff waiting="" picked=0
   [[ "$slots" =~ ^[0-9]+$ ]] || { qa_say "the number of slots to wake for is not a number"; return 1; }
   ((slots > 0)) || return 0
-  [[ "$workflow" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]] || { qa_say "MROOM_QA_PLAN_WORKFLOW is not a workflow file name"; return 1; }
+  [[ "$workflow" =~ $QA_WORKFLOW_RE ]] || { qa_say "MROOM_QA_PLAN_WORKFLOW is not a workflow file name"; return 1; }
   [[ "$again" =~ ^[0-9]{1,6}$ ]] || again=1800
   cutoff="$(date -u -d "@$(($(mroom_now) - again))" +%Y-%m-%dT%H:%M:%SZ)"
   prs="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,isDraft \
@@ -275,14 +291,18 @@ qa_wake() {
   if [ -z "$waiting" ]; then echo "no pull request waits for a QA environment slot"; return 0; fi
   for pr in $(sort <<<"$waiting" | awk 'NF == 2 { print $2 }'); do
     ((picked < slots)) || break
-    # Marked first, so a second wake close behind this one does not pick it as well.
-    if ! qa_comment "$pr" woken "A QA environment slot freed up at $(qa_now), so its QA plan was started again. It deploys if it still needs an environment." </dev/null; then
+    # Marked first, so the next wake does not pick it as well.
+    if ! qa_comment "$pr" woken "A QA environment slot freed up at $(qa_now); its QA plan is being started again, and deploys if it still needs an environment." </dev/null; then
       echo "::warning::could not mark pull request $pr as woken, so it is left for the next wake"
       continue
     fi
     picked=$((picked + 1))
     echo "starting the QA plan for pull request $pr, which waited for a slot"
-    gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" ${MROOM_QA_DEFAULT_BRANCH:+--ref "$MROOM_QA_DEFAULT_BRANCH"} \
-      -f pr_number="$pr" </dev/null || echo "::warning::could not start the QA plan for pull request $pr"
+    if ! gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" ${MROOM_QA_DEFAULT_BRANCH:+--ref "$MROOM_QA_DEFAULT_BRANCH"} \
+      -f pr_number="$pr" </dev/null; then
+      echo "::warning::could not start the QA plan for pull request $pr, so it waits again"
+      qa_comment "$pr" waiting "Waits for a QA environment slot: one freed up at $(qa_now), but its QA plan could not be started, so the next one tries again." </dev/null \
+        || echo "::warning::could not say so in the QA environment comment of pull request $pr"
+    fi
   done
 }

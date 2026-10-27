@@ -77,6 +77,16 @@ t_three_environments_past_their_time_get_three_teardowns() {
 dispatch qa-down.yml main pr_number=3 reason=ttl'
 }
 
+t_an_environments_age_is_its_oldest_sites() {
+  reaper_world
+  # A go site made 9 days ago, and an api site made again yesterday: the environment is 9 days old.
+  site 1 "$(api_host 4)" installed "$(ago "$DAY")"
+  site 2 "$(web_host 4)" installed "$(ago $((9 * DAY)))"
+  run "$REAP"
+  expect_rc 0
+  run dispatches; expect_out "dispatch qa-down.yml main pr_number=4 reason=ttl"
+}
+
 t_the_time_comes_from_mroom_toml() {
   reaper_world
   printf 'ttl_days = 2\n' >>"$MROOM_CONFIG"
@@ -111,15 +121,21 @@ t_a_qa_environment_not_set_up_has_nothing_to_reap() {
   reaper_world
   unset MROOM_FORGE_SERVER
   run "$REAP"
-  expect_rc 0; expect_out "the qa environment has no MROOM_FORGE_SERVER yet, so there is nothing to reap"
+  expect_rc 0; expect_out "::warning::the qa environment has no MROOM_FORGE_SERVER yet, so there is nothing to reap"
   expect_no_file "$FORGE_LOG"
-  export MROOM_FORGE_SERVER=42 MROOM_QA_DOWN_WORKFLOW='qa down.yml'
-  run "$REAP"; expect_rc 2; expect_err_has "MROOM_QA_DOWN_WORKFLOW is not a workflow file name"
+  export MROOM_FORGE_SERVER=42
+  local name
+  # A name gh would read as an option, or one that is not a file name, is refused.
+  for name in 'qa down.yml' '-x.yml' '--help.yml' 'qa-down' '../qa-down.yml'; do
+    run env MROOM_QA_DOWN_WORKFLOW="$name" "$REAP"; expect_rc 2; expect_err_has "MROOM_QA_DOWN_WORKFLOW is not a workflow file name"
+  done
+  run env MROOM_QA_DOWN_WORKFLOW=_qa-down.yaml "$REAP"; expect_rc 0
 }
 
 test_case each-past-its-time t_each_environment_past_its_time_gets_a_teardown
 test_case removing-and-stuck t_an_environment_forge_is_removing_is_skipped_and_a_stuck_site_deleted_again
 test_case three-teardowns t_three_environments_past_their_time_get_three_teardowns
+test_case age-of-oldest-site t_an_environments_age_is_its_oldest_sites
 test_case ttl-from-config t_the_time_comes_from_mroom_toml
 test_case teardown-cannot-start t_a_teardown_that_cannot_start_fails_the_run
 test_case forge-unreadable t_a_forge_that_cannot_be_read_fails_the_run

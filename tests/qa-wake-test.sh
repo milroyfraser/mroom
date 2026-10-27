@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317  # the t_* functions run indirectly, through test_case
-# Tests for the wake and the comment it reads (lib/core/qa.sh, qa_wake and qa_comment): a freed slot goes to the pull
-# request that has waited longest, by the time it started waiting, which the comment keeps across rewrites; it is
-# marked woken before its plan starts, so a second wake close behind picks another; a woken one waits again after
-# half an hour; drafts, other people's comments and other states are skipped; and the cost stays bounded.
+# Tests for the wake and the comment it reads (lib/core/qa.sh, qa_wake and qa_comment; actions/qa-down/wake.sh): a
+# freed slot goes to the pull request that has waited longest, by the time it started waiting, which the comment
+# keeps across rewrites; it is marked woken before its plan starts, so the next wake picks another, and two wakes run
+# one after the other, as qa-down's wake job runs them, wake two pull requests; a woken one waits again after half an
+# hour, and one whose plan could not be started at once; drafts, other people's comments and other states are
+# skipped; and the cost stays bounded.
 set -euo pipefail
 SUITE=qa-wake
 # shellcheck source=tests/lib.sh
@@ -42,7 +44,7 @@ t_a_woken_pull_request_is_marked_before_its_plan_starts() {
   run grep -E '^(PATCH|dispatch)' "$GH_FAKE/gh.log"
   expect_out_has $'PATCH 402 ### QA environment\\n<!-- mroom-qa: woken since=2026-10-26T08:00:00Z woken=2026-10-27T12:00:00Z -->'
   case "$out" in "PATCH 402"*$'\n'"dispatch qa-plan.yml main pr_number=21") ok ;; *) fail "the mark did not come before the dispatch" ;; esac
-  # A second teardown close behind wakes the next one, not the same one twice.
+  # The next wake picks the next one, not the same one twice.
   lib 'qa_wake 1'
   run dispatches; expect_out $'dispatch qa-plan.yml main pr_number=21\ndispatch qa-plan.yml main pr_number=20'
 }
@@ -85,15 +87,78 @@ t_drafts_other_comments_and_other_states_wake_nothing() {
   lib 'qa_wake 5'
   expect_rc 0; expect_out_has "no pull request waits for a QA environment slot"
   run dispatches; expect_out ""
+  # No slot, no reading at all.
+  : >"$GH_FAKE/reads.log"
   lib 'qa_wake 0'; expect_rc 0
-  run grep -c . "$GH_FAKE/reads.log"; expect_out 1
+  run grep -c . "$GH_FAKE/reads.log"; expect_out 0
 }
 
 t_the_cost_is_bounded() {
   qa_world
-  prs '[20]'
+  prs '[20, 21]'
   lib 'qa_wake 1'
-  run cat "$GH_FAKE/reads.log"; expect_out_has "pr list --repo example/shop --state open --limit 100"
+  # One listing of the 100 newest open pull requests, and one of each one's comments, 100 a page.
+  run grep '^pr list' "$GH_FAKE/reads.log"
+  expect_out "pr list --repo example/shop --state open --limit 100 --json number,isDraft"
+  run grep '^list ' "$GH_FAKE/reads.log"
+  expect_out $'list repos/example/shop/issues/20/comments?per_page=100\nlist repos/example/shop/issues/21/comments?per_page=100'
+}
+
+t_a_plan_that_cannot_be_started_waits_again() {
+  qa_world; export MROOM_QA_DEFAULT_BRANCH=main
+  prs '[21]'
+  comment 21 402 'github-actions[bot]' "$(qa_body waiting since=2026-10-26T08:00:00Z)"
+  : >"$GH_FAKE/dispatch-fails"
+  lib 'qa_wake 1'
+  expect_rc 0; expect_out_has "::warning::could not start the QA plan for pull request 21, so it waits again"
+  # It waits again, from when it first started waiting, and the comment says nothing was started.
+  run marker_of 21; expect_out "<!-- mroom-qa: waiting since=2026-10-26T08:00:00Z -->"
+  run jq -r '.[-1].body' "$GH_FAKE/comments-21.json"
+  expect_out_has "but its QA plan could not be started, so the next one tries again"
+  expect_true "the comment says the plan was started" lacks "$out" "was started"
+}
+
+t_two_teardowns_close_together_wake_two_pull_requests() {
+  qa_world; export MROOM_QA_DEFAULT_BRANCH=main
+  prs '[20, 21, 22, 23]'
+  comment 20 401 'github-actions[bot]' "$(qa_body waiting since=2026-10-26T10:00:00Z)"
+  comment 21 402 'github-actions[bot]' "$(qa_body waiting since=2026-10-26T08:00:00Z)"
+  comment 22 403 'github-actions[bot]' "$(qa_body ready)"
+  comment 23 404 'github-actions[bot]' "$(qa_body ready)"
+  # A GitHub that takes a moment for every call, as the real one does: two wakes side by side would each read before
+  # the other marked, and wake 21 twice. qa-down's wake job runs one at a time for the repository (its concurrency
+  # group, mroom-qa-wake, queue: max), which a lock stands in for here.
+  mv "$T/bin/gh" "$T/bin/gh-fake"
+  printf '#!/bin/sh\n/bin/sleep 0.2\nexec "%s" "$@"\n' "$T/bin/gh-fake" >"$T/bin/gh"
+  chmod +x "$T/bin/gh"
+  local i
+  for i in 1 2; do
+    flock "$T/wake.lock" env MROOM_ROOT="$ROOT" "$ROOT/actions/qa-down/wake.sh" >"$T/wake-$i.out" 2>&1 &
+  done
+  wait
+  run bash -c "grep '^dispatch' '$GH_FAKE/gh.log' | sort"
+  expect_out $'dispatch qa-plan.yml main pr_number=20\ndispatch qa-plan.yml main pr_number=21'
+}
+
+t_wake_sh_needs_github() {
+  qa_world
+  unset GH_TOKEN
+  run "$ROOT/actions/qa-down/wake.sh"
+  expect_rc 2; expect_err_has "GH_TOKEN and GITHUB_REPOSITORY are needed to wake a pull request"
+}
+
+t_a_plan_workflow_gh_would_read_as_an_option_is_refused() {
+  qa_world
+  prs '[21]'
+  comment 21 402 'github-actions[bot]' "$(qa_body waiting since=2026-10-26T08:00:00Z)"
+  local name
+  for name in '-x.yml' '--repo.yml' 'qa plan.yml' 'qa-plan'; do
+    export MROOM_QA_PLAN_WORKFLOW="$name"
+    lib 'qa_wake 1'
+    expect_rc 1; expect_err_has "MROOM_QA_PLAN_WORKFLOW is not a workflow file name"
+  done
+  unset MROOM_QA_PLAN_WORKFLOW
+  run dispatches; expect_out ""
 }
 
 t_waiting_keeps_its_start_across_rewrites() {
@@ -118,5 +183,9 @@ test_case mark-fails t_one_that_cannot_be_marked_is_left_for_the_next_wake
 test_case woken-waits-again t_a_woken_pull_request_waits_again_after_half_an_hour
 test_case nothing-to-wake t_drafts_other_comments_and_other_states_wake_nothing
 test_case cost-bounded t_the_cost_is_bounded
+test_case dispatch-fails t_a_plan_that_cannot_be_started_waits_again
+test_case two-at-once t_two_teardowns_close_together_wake_two_pull_requests
+test_case wake-sh t_wake_sh_needs_github
+test_case plan-workflow-name t_a_plan_workflow_gh_would_read_as_an_option_is_refused
 test_case since-kept t_waiting_keeps_its_start_across_rewrites
 finish
