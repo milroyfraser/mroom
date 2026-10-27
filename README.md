@@ -275,6 +275,7 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 | `code-put <N> <commit>` | the PR's tree, GitHub's tarball of that commit on stdin, into the environment's API site (D17); the gate records the commit |
 | `dist-put <N>` | the frontend's built files, a tarball on stdin, into the environment's web site |
 | `env-put <N>` | the API site's `.env`, on stdin, written as the site user (mode 600), replacing rather than following any link the PR's code left there; prints `env=` its SHA-256 |
+| `probe-link <N> api\|web` | a link at the site's web root to the installed `site-op`, which is root's own: nginx must refuse to serve it, and qa-up asks for it before any code goes in (D17) |
 | `env-sha <N>` | `env=` the SHA-256 of the API site's `.env` (or `missing`), and `commit=` the commit `code-put` recorded (or `none`) |
 | `signin-code <N> <email>` | a sign-in code for a persona address, from the app's `php artisan mroom:signin-code <email>` or its `qa-signin` hook |
 | `app-key <N> [--rotate]` | `APP_KEY`, the environment's Laravel app key |
@@ -283,7 +284,7 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 | `mail-user-remove <N>` | the environment's SMTP login |
 | `mail-read <N> <email>` | as JSON, the newest five mails the environment's login sent to a persona address (To, Cc or Bcc), and only to personas: sender, recipients, subject and text |
 | `mail-clear <N>` | every mail the environment's login sent |
-| `bucket-create <N> <disk> [public]` | a bucket on the box's Garage (D14) for one of the app's file disks, and a new key that reaches that bucket alone; `public` turns on its website access. Prints `BUCKET`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `REGION`, `ENDPOINT`, `PATH_STYLE`, and `URL` for a public disk |
+| `bucket-create <N> <disk> [public] [--rotate]` | a bucket on the box's Garage (D14) for one of the app's file disks, and a key that reaches that bucket alone; `public` turns on its website access. Prints `BUCKET`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `REGION`, `ENDPOINT`, `PATH_STYLE`, and `URL` for a public disk |
 | `bucket-drop <N>` | every bucket the environment has, whatever its disks: their keys deleted, and each bucket emptied and deleted |
 | `reverb-app-add <N>` | an app of its own on mroom's Reverb host (D16), which reads its apps from a file on every lookup, so nothing restarts; prints `REVERB_APP_ID`, `REVERB_APP_KEY`, `REVERB_APP_SECRET` (new for a new app, the same while it has one), `REVERB_HOST`, `REVERB_PORT` and `REVERB_SCHEME` |
 | `reverb-app-remove <N>` | the environment's app; its sockets already open stay until they close |
@@ -298,12 +299,12 @@ PR is ever given an id whose sockets may still be open. A password reaches
 Postgres only as a SCRAM verifier, through stdin, and Redis only as its SHA-256. Each request and refusal
 is logged, never a secret, to `~/.local/state/mroom/gate.log` and to syslog.
 
-The gate makes an environment's passwords and its app key once, and keeps them in
+The gate makes an environment's passwords, its bucket keys and its app key once, and keeps them in
 `~/.local/state/mroom/qa/<app>_qa_<N>.secrets` (mode 600, beside the commit `code-put` records), so every
 later request gives the same ones and a deploy changes nothing under the running app: its users stay signed
-in, and its connections stay up. `--rotate` makes a new one. `db-drop`, `redis-user-remove` and
-`mail-user-remove` delete those of their own service, and `user-clean` the app key. A bucket's key is new on
-every `bucket-create`, as D14 has it, since no user notices it.
+in, its connections stay up, and its workers and the file URLs it gave out keep working. `--rotate` makes a
+new one, and the old one stops working. `db-drop`, `redis-user-remove`, `mail-user-remove` and `bucket-drop`
+delete those of their own service, and `user-clean` the app key.
 
 A Redis user gets Redis's own data types and the functions an app needs (`@keyspace`, `@string`, `@hash`,
 `@list`, `@set`, `@sortedset`, `@stream`, `@bitmap`, `@hyperloglog`, `@geo`, `@pubsub`, `@scripting`,
@@ -699,26 +700,39 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
   default branch's run named `PR #<N>`, at the commit its build job is named after. It deploys only the pull
   request's head: a run that waited its turn behind a newer push stops, and that push's own run deploys it.
 - **What qa-up makes.** A Forge isolated site, and a second for a frontend of its own, in the home of one user
-  of the environment's own, `<app>_qa_<N>` (design D17), each with a certificate (one that fails is deleted
-  and asked for again, once; failing again, it needs a person), and nginx set to follow a link only when the
-  link and its target have one owner: `disable_symlinks if_not_owner` at the top of the site's config, the
-  fragment each of its domains includes in its server block. Forge applies a new config later, so qa-up reads
-  it back until it has the guard, and lets no code in before. A site's PHP version is set when it is made: a
-  site that runs another than `app.php` is refused, with how to make it again. Any daemon of the environment
-  that runs as another user is deleted before any code goes in, since it would run the pull request's code as
-  that user. Then the code, as data: GitHub's tarball of the commit through the gate's `code-put`, with Vite's
-  build put into it when Vite runs inside the Laravel app, and a frontend of its own through `dist-put`. Then
-  the environment's services through the gate, as `[qa.parity]` says, its `.env` through `env-put`, and
-  Forge's deploy, whose script runs as the site user or not at all, pulls nothing, links a root-owned file into
-  the web root, then runs the tree's `.mroom/hooks/qa-deploy` (or composer install, `migrate --force` and
+  of the environment's own, `<app>_qa_<N>` (design D17), each with a certificate (one that fails is deleted,
+  waited for until Forge has it gone, and asked for again, once; failing again, it needs a person; one Forge
+  installed but did not enable is enabled), and nginx set to follow a link only when the link and its target
+  have one owner: `disable_symlinks if_not_owner` at the top of the site's config, the fragment each of its
+  domains includes in its server block. Forge applies a new config later, so qa-up reads it back until it has
+  the guard, and lets no code in before. Then the proof that it works on the box, before any code too: the
+  gate's `probe-link` links the box's `site-op`, a root-owned file, into each site's web root, and the run
+  stops if asking for that link still brings back that file, by the SHA-256 the gate gives, after as many
+  tries as `/up` gets (nginx takes a config Forge has just written a moment later). The body is compared, not
+  the status: with the guard, the request goes on to the app or the single-page fallback, which may well
+  answer 200. A site's PHP version is set when it is made: a site that runs another than `app.php` is refused,
+  with how to make it again. Any daemon or scheduled job of the environment that runs as another user is
+  deleted before any code goes in, since it would run the pull request's code as that user: one that runs from
+  a folder in the site user's home, or whose command names that home or one of the sites, and any scheduled
+  job of the sites' own. Then the code, as data: GitHub's tarball of the commit through the gate's
+  `code-put`, with Vite's build put into it when Vite runs inside the Laravel app, and a frontend of its own
+  through `dist-put`. Then the environment's services through the gate, as `[qa.parity]` says, its `.env`
+  through `env-put`, and Forge's deploy, whose script runs as the site user or not at all, pulls nothing, then
+  runs the tree's `.mroom/hooks/qa-deploy` (or composer install, `migrate --force` and
   `app.build.after_deploy`), then `.mroom/hooks/qa-fixtures` (or `php artisan mroom:qa-fixtures` when the app
   has it), then `queue:restart`. Then one queue worker for `app.build.queues`, which also runs as the site
   user or not at all, kept only when Forge's record of it names the site user, and made again when its
   command changed (other queues, another PHP). Then `/up`, asked up to 6 times 5 seconds apart, since a new
-  site, or any site while PHP-FPM or nginx reloads, answers 502 for a moment; and the linked file, which must
-  not answer 200: nginx refusing it proves the guard works on the box. Each step checks its own resource, so
-  the next run repairs one that stopped halfway. From `qa.max_envs` (5) environments on, a new one waits for
-  a slot; one that exists is always refreshed.
+  site, or any site while PHP-FPM or nginx reloads, answers 502 for a moment; only once it answers 200 is the
+  commit said to be deployed. Each step checks its own resource, so the next run repairs one that stopped
+  halfway. From `qa.max_envs` (5) environments on, a new one waits for a slot; one that exists is always
+  refreshed. Two first deploys at once each count the others inside their own pull request's turn, so a new
+  environment counts again once its site is made, by the order Forge made the environments' first sites in:
+  one past `qa.max_envs` deletes its site again and waits.
+- **No required checks.** None of the QA workflows' checks can be a required one: the plan's build job is
+  named after the commit it builds (`QA build <sha>`), so its name changes with every push, and a required
+  check is matched by its name. The QA environment comment says how each deploy went; require the app's own
+  CI.
 - **When it says no.** A pull request that is closed, has moved on, or whose change no user could notice gets
   no environment. A build that failed, `qa.parity.broadcast = "same"` (the default: mroom's Reverb host exists,
   but qa-up does not wire environments into it yet, so set `broadcast = "log"` meanwhile), and a pull request
@@ -727,17 +741,18 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
   action's last step, which runs whatever happened before it, so a step that failed before it could say why
   is said too.
 - **The `.env`.** `MROOM_QA_ENV_TEMPLATE` (third-party test-mode keys only: no app key, no credential for the
-  box), less every key mroom sets, then mroom's: the `APP_KEY` the gate keeps for the environment,
-  `APP_ENV=qa`, `APP_DEBUG=false`, `SESSION_SECURE_COOKIE=true` (the hosts answer over https alone), the public
-  values below, the database, Redis user, host, port and prefixes the gate gives, and as `[qa.parity]` says:
-  the mail login with plain SMTP to the box (`MAIL_SCHEME=smtp`, `MAIL_ENCRYPTION=null`, whatever the template
-  says) for `catcher`, or `MAIL_MAILER=log`; for each disk of `qa.disks`, a bucket and a key of its own under
-  Laravel's s3 env names with the disk's prefix in place of `AWS_` (`files = "AWS_"` gives `AWS_BUCKET`,
-  `AWS_ACCESS_KEY_ID` and the rest; a disk in `qa.public_disks` also gets `<prefix>URL`), or
-  `FILESYSTEM_DISK=local`; and `BROADCAST_CONNECTION=log`. The passwords and secret keys the gate gives, and
-  the app key, are masked in the run's log, and a line of the gate's answer that could hold a value is never
-  shown. The gate keeps the passwords and the app key (QA gate, above), so every deploy gets the same ones,
-  and the environment's users stay signed in.
+  box), less every entry whose key mroom sets (read entry by entry, so a quoted value of several lines stays
+  whole), then mroom's: the `APP_KEY` the gate keeps for the environment, `APP_ENV=qa` (which Laravel counts as
+  not production: a known gap, design 9), `APP_DEBUG=false`, `SESSION_SECURE_COOKIE=true` (the hosts answer over
+  https alone), the public values below, the database, Redis user, host, port and prefixes the gate gives, and as
+  `[qa.parity]` says: the mail login with plain SMTP to the box (`MAIL_SCHEME=smtp`, `MAIL_ENCRYPTION=null`,
+  whatever the template says) for `catcher`, or `MAIL_MAILER=log`; for each disk of `qa.disks`, a bucket and a
+  key of its own under Laravel's s3 env names with the disk's prefix in place of `AWS_` (`files = "AWS_"` gives
+  `AWS_BUCKET`, `AWS_ACCESS_KEY_ID` and the rest; a disk in `qa.public_disks` also gets `<prefix>URL`), or
+  `FILESYSTEM_DISK=local`; and `BROADCAST_CONNECTION=log`. The passwords and secret keys the gate gives, and the
+  app key, are masked in the run's log, and a line of the gate's answer that could hold a value is never shown.
+  The gate keeps the passwords, the bucket keys and the app key (QA gate, above), so every deploy gets the same
+  ones, and the environment's users stay signed in.
 - **What the plan builds.** `app.frontend_dir` is a folder for a frontend of its own (it gets the go site),
   `.` for Vite inside the Laravel app, or empty for no frontend; `app.build.frontend` is the command, and
   without one nothing is built; `app.build.frontend_dist` is where it writes (`dist`, or `public/build` for
@@ -890,9 +905,12 @@ otherwise passes them. A teardown by hand: `gh workflow run qa-down.yml -f pr_nu
 **A workflow that follows qa-up**, such as a browser check on `workflow_run` of the app's QA environment up
 workflow, never starts after a qa-up run the job token started, since that run ends with no `workflow_run`
 either. Name it in qa-up's `next-workflows`, and give it `workflow_dispatch` with the inputs `pr` and
-`up_run_id`: qa-up starts it once the environment is up. It takes the rest from GitHub, as qa-up does from its
-plan's run, and finds the runs it looks for by workflow and name, never by event, since a dispatched run is as
-much a run of its workflow as one `workflow_run` started.
+`up_run_id`: qa-up starts it once its deploy ran, whether the environment came up or not, as the
+`workflow_run` would have. It takes the rest from GitHub, how the deploy went included, from the run
+`up_run_id` names, as qa-up does from its plan's run, and finds the runs it looks for by workflow and name,
+never by event, since a dispatched run is as much a run of its workflow as one `workflow_run` started. qa-up
+goes by the run's first starter here too, so a person's re-run of a dispatched qa-up starts it again; should
+that re-run also end with a `workflow_run`, it runs twice for one commit.
 
 ## Regression label
 
