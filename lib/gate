@@ -24,6 +24,9 @@
 #               dist-put <N>           the frontend's built files, a tarball on stdin, into its web site
 #               env-put <N>            the API site's .env, on stdin, written as the site user, so a link
 #                                      the PR's code left there is replaced, never followed; prints env=<SHA>
+#               probe-link <N> api|web a link at the site's web root to the installed site-op, root's own,
+#                                      which nginx must refuse to serve; qa-up asks for it before any code
+#                                      goes in (D17). Prints sha256=<the file's SHA-256> and target=<its path>
 #               env-sha <N>            env=<the SHA-256 of the API site's .env, or missing> and
 #                                      commit=<the commit code-put recorded, or none>
 #               signin-code <N> <email>  a sign-in code from the app, for a persona address only
@@ -39,9 +42,9 @@
 #               mail-user-remove <N>   the environment's SMTP login
 #               mail-read <N> <email>  the newest five mails its login sent to persona addresses alone, as JSON
 #               mail-clear <N>         every mail its login sent
-#               bucket-create <N> <disk> [public]
+#               bucket-create <N> <disk> [public] [--rotate]
 #                                      a bucket on the box's Garage (D14) for one of the app's file disks,
-#                                      and a new key that reaches that bucket alone; public turns on its
+#                                      and a key that reaches that bucket alone; public turns on its
 #                                      website access. Prints BUCKET, ACCESS_KEY_ID, SECRET_ACCESS_KEY,
 #                                      REGION, ENDPOINT, PATH_STYLE, and URL for a public one
 #               bucket-drop <N>        every bucket the environment has, whatever its disks: their keys
@@ -55,7 +58,7 @@
 # A password or the app key is made once and kept (secrets_file), so every later request gives the same one and a
 # deploy changes nothing under the running app: its users stay signed in and its connections stay up. --rotate
 # makes a new one. Each teardown operation deletes those of its own service, and user-clean the app key. A
-# bucket's key is new on every bucket-create, as D14 has it: no user notices a new one.
+# bucket's key is kept the same way, so a deploy revokes no key the running app holds.
 #
 # The client sends only the environment's number. The gate builds every name from box.env, which a person
 # sets: the database, role and Redis user are <MROOM_APP_NAME>_qa_<N>, the database is cloned from
@@ -126,7 +129,7 @@ op="${words[0]}"
 case "$role:$op" in
   provision:db-create | provision:db-drop) ;;
   provision:redis-user-add | provision:redis-user-remove | provision:redis-clear) ;;
-  provision:code-put | provision:dist-put | provision:env-put | provision:env-sha) ;;
+  provision:code-put | provision:dist-put | provision:env-put | provision:env-sha | provision:probe-link) ;;
   provision:signin-code | provision:user-clean | provision:app-key) ;;
   provision:mail-user-add | provision:mail-user-remove | provision:mail-read | provision:mail-clear) ;;
   provision:bucket-create | provision:bucket-drop) ;;
@@ -254,6 +257,10 @@ secret_keep() {
       *) value="$(new_password)" ;;
     esac
     [[ "$value" =~ $3 ]] || fail "could not read random bytes for the $2"
+    # What was noted of the service as it stood with the old value no longer holds once the value is new.
+    case "$2" in
+      REDIS_PASSWORD) secrets_write "$1" "$(secrets_other "$1" REDIS_ACL REDIS_RULES)" ;;
+    esac
     secrets_write "$1" "$(secrets_with "$1" "$2" "$value")"
     SECRET="$value" KEPT=0
   fi
@@ -269,10 +276,15 @@ secret_note() {
 secret_get() { sed -n "s/^$2=//p" "$(secrets_file "$1")" 2>/dev/null | head -n1 || true; }
 # secrets_forget <N> <KEY...>: deletes the keys; the file goes with its last one.
 secrets_forget() {
-  local n="$1"
-  [ -f "$(secrets_file "$n")" ] || return 0
+  local n="$1" file
+  shift
+  file="$(secrets_file "$n")"
+  [ "$#" -gt 0 ] && [ -f "$file" ] || return 0
   secrets_lock "$n"
-  secrets_write "$n" "$(secrets_other "$@")"
+  secrets_write "$n" "$(secrets_other "$n" "$@")"
+  # With its last key gone go its lock, and what a write that stopped left beside it. Only a teardown forgets, and
+  # the environment's teardowns and deploys take turns, so nothing waits on the lock meanwhile.
+  if [ ! -f "$file" ]; then rm -f -- "$file".?????? "$(mroom_state_dir)/gate-secrets-${app}_qa_$n.lock"; fi
   secrets_unlock
 }
 PASSWORD_RE='^[0-9a-f]{48}$'
@@ -491,7 +503,7 @@ acl_line() {
 cmd_redis_user_add() {
   rotate_or_not
   env_number "${words[1]}"
-  local user="${app}_qa_${words[1]}" prefix="${app}:qa${words[1]}:" password hash leaks out line
+  local user="${app}_qa_${words[1]}" prefix="${app}:qa${words[1]}:" password hash rules leaks out line
   redis_ready
   env_lock "redis-$user"
   leaks="$(granted_module_commands)" \
@@ -501,18 +513,22 @@ cmd_redis_user_add() {
   fi
   secret_keep "${words[1]}" REDIS_PASSWORD "$PASSWORD_RE"
   password="$SECRET"
-  # A user just as the gate left it last time, with the kept password, is left alone: resetting it would sign out
-  # every connection the app has open. The gate keeps a digest of the user's line, never the line.
+  # Redis stores and compares only this hash, so only the hash leaves the gate.
+  hash="$(printf '%s' "$password" | sha256sum | cut -d' ' -f1)"
+  # What the user is to be: its password's hash, its prefix and the commands this release gives and withholds.
+  rules="$(printf '%s\n' "$user" "$hash" "$prefix" "${GRANTED[*]}" "${WITHHELD[*]}" | sha256sum | cut -d' ' -f1)"
+  # A user just as the gate left it last time is left alone, since resetting it would sign out every connection
+  # the app has open: it holds the kept password, its line is the one the gate saved, and what it was to be then is
+  # what it is to be now. The gate keeps digests, never the line.
   line="$(acl_line "$user")" || fail "redis-user-add ${words[1]}: cannot list Redis's users: $(redis_error)"
-  if [ "$KEPT" = 1 ] && [ -n "$line" ] \
-    && [ "$(printf '%s' "$line" | sha256sum | cut -d' ' -f1)" = "$(secret_get "${words[1]}" REDIS_ACL)" ]; then
+  if [ "$KEPT" = 1 ] && [[ " $line " == *" #$hash "* ]] \
+    && [ "$(printf '%s' "$line" | sha256sum | cut -d' ' -f1)" = "$(secret_get "${words[1]}" REDIS_ACL)" ] \
+    && [ "$rules" = "$(secret_get "${words[1]}" REDIS_RULES)" ]; then
     gate_log "redis-user-add ${words[1]}: $user unchanged"
   else
-    # Save first, so a Redis that cannot save its users is refused before a password changes.
+    # Save first, so a Redis that cannot save its users is refused before the user changes.
     out="$(rcli ACL SAVE)" \
-      || fail "redis-user-add ${words[1]}: Redis cannot save its users, so nothing was changed: $(redis_error "$out")"
-    # Redis stores and compares only this hash, so only the hash leaves the gate.
-    hash="$(printf '%s' "$password" | sha256sum | cut -d' ' -f1)"
+      || fail "redis-user-add ${words[1]}: Redis cannot save its users, so the user was left as it was; run redis-user-add again once it can: $(redis_error "$out")"
     # reset first: ACL SETUSER only adds to a user, so running it again would keep the old password.
     out="$(rcli ACL SETUSER "$user" reset on "#$hash" "~$prefix*" "&$prefix*" "${GRANTED[@]/#/+@}" "${WITHHELD[@]}")" \
       || fail "redis-user-add ${words[1]}: $(redis_error "$out")"
@@ -523,6 +539,7 @@ cmd_redis_user_add() {
       || fail "redis-user-add ${words[1]}: the user changed but was not saved; run redis-user-add again once Redis can save: $(redis_error "$out")"
     # Only a saved user counts as unchanged next time.
     secret_note "${words[1]}" REDIS_ACL "$(printf '%s' "$line" | sha256sum | cut -d' ' -f1)"
+    secret_note "${words[1]}" REDIS_RULES "$rules"
     gate_log "redis-user-add ${words[1]}: $user ready"
   fi
   printf 'REDIS_USERNAME=%s\nREDIS_PASSWORD=%s\nREDIS_PREFIX=%s\nHORIZON_PREFIX=%shorizon:\nREDIS_HOST=%s\nREDIS_PORT=%s\n' \
@@ -541,7 +558,7 @@ cmd_redis_user_remove() {
   out="$(rcli ACL DELUSER "$user")" || fail "redis-user-remove ${words[1]}: $(redis_error "$out")"
   out="$(rcli ACL SAVE)" \
     || fail "redis-user-remove ${words[1]}: the user is gone but was not saved; run redis-user-remove again once Redis can save: $(redis_error "$out")"
-  secrets_forget "${words[1]}" REDIS_PASSWORD REDIS_ACL
+  secrets_forget "${words[1]}" REDIS_PASSWORD REDIS_ACL REDIS_RULES
   gate_log "redis-user-remove ${words[1]}: $user removed"
   echo "redis user $user: removed"
 }
@@ -668,6 +685,24 @@ cmd_env_put() {
   [[ "$env" =~ ^[0-9a-f]{64}$ ]] || fail "env-put ${words[1]}: site-op gave no hash"
   gate_log "env-put ${words[1]}: .env written into $API_DOMAIN"
   printf 'env=%s\n' "$env"
+}
+
+cmd_probe_link() {
+  words_are 3
+  env_number "${words[1]}"
+  case "${words[2]}" in api | web) ;; *) refuse "probe-link: its second argument is api or web" ;; esac
+  site_ready
+  site_user_exists || fail "there is no user $SITE_USER; qa-up creates the site first"
+  env_lock "site-$SITE_USER"
+  local out
+  if [ "${words[2]}" = api ]; then
+    out="$(site_op probe-link "$API_DOMAIN" "$BACKEND")" || fail "probe-link ${words[1]}: $(site_error)"
+  else
+    out="$(site_op probe-link "$WEB_DOMAIN")" || fail "probe-link ${words[1]}: $(site_error)"
+  fi
+  [[ "$out" =~ ^([0-9a-f]{64})\ (/[[:print:]]+)$ ]] || fail "probe-link ${words[1]}: site-op named no file and SHA-256"
+  gate_log "probe-link ${words[1]}: ${words[2]}"
+  printf 'sha256=%s\ntarget=%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
 }
 
 cmd_env_sha() {
@@ -1099,11 +1134,42 @@ new_key() {
   printf '%s\n%s\n' "$id" "$secret"
 }
 
+# kept_key <N> <bucket> <bucket id> <disk>: the disk's key the gate keeps, as new_key prints one, when Garage still
+# has it under the bucket's name: allowed on the bucket again, and any other key of that name deleted. Nothing when
+# there is none to keep, or --rotate asked for a new one.
+kept_key() {
+  local id secret info stray
+  [ "$ROTATE" = 0 ] || return 0
+  id="$(secret_get "$1" "BUCKET_KEY_$4")" secret="$(secret_get "$1" "BUCKET_SECRET_$4")"
+  [[ "$id" =~ ^GK[0-9a-f]{24}$ && "$secret" =~ ^[0-9a-f]{64}$ ]] || return 0
+  if ! info="$(garage_api GET "/v2/GetKeyInfo?id=$id")"; then
+    grep -q '^HTTP 404' "$GARAGE_ERR" && return 0
+    fail "$op ${words[1]}: $(garage_error)"
+  fi
+  [ "$(jq -r '.name // ""' <<<"$info")" = "$2" ] || return 0
+  garage_api POST /v2/AllowBucketKey "$(jq -nc --arg b "$3" --arg k "$id" \
+    '{bucketId: $b, accessKeyId: $k, permissions: {read: true, write: true, owner: false}}')" >/dev/null \
+    || fail "$op ${words[1]}: $(garage_error)"
+  # A key of the bucket's name that is not the kept one is one a stopped request left: it goes.
+  stray="$(garage_api GET /v2/ListKeys)" || fail "$op ${words[1]}: $(garage_error)"
+  for stray in $(jq -r --arg n "$2" --arg id "$id" '.[] | select(.name == $n and .id != $id) | .id
+      | select(test("\\AGK[0-9a-f]{24}\\z"))' <<<"$stray"); do
+    garage_api POST "/v2/DeleteKey?id=$stray" >/dev/null || fail "$op ${words[1]}: $(garage_error)"
+  done
+  printf '%s\n%s\n' "$id" "$secret"
+}
+
 cmd_bucket_create() {
-  [ "${#words[@]}" = 3 ] || [ "${#words[@]}" = 4 ] || refuse "bucket-create takes 2 or 3 arguments, got $((${#words[@]} - 1))"
+  local rotate_word=""
+  if [ "${#words[@]}" -ge 4 ] && [ "${words[-1]}" = --rotate ]; then
+    ROTATE=1 rotate_word=1
+    unset 'words[-1]'
+  fi
+  [ "${#words[@]}" = 3 ] || [ "${#words[@]}" = 4 ] \
+    || refuse "bucket-create takes 2 or 3 arguments and an optional --rotate, got $((${#words[@]} - 1 + ${rotate_word:-0}))"
   env_number "${words[1]}"
   disk_name "${words[2]}"
-  local public=false bucket id old key zone="${BOX[MROOM_QA_ZONE]:-}"
+  local public=false bucket id old=0 key zone="${BOX[MROOM_QA_ZONE]:-}"
   if [ "${#words[@]}" = 4 ]; then
     [ "${words[3]}" = public ] || refuse "bucket-create: its third argument can only be public"
     public=true
@@ -1117,9 +1183,15 @@ cmd_bucket_create() {
       || fail "bucket-create ${words[1]}: $(garage_error)"
     [[ "$id" =~ ^[0-9a-f]{64}$ ]] || fail "Garage gave no id for the new bucket $bucket"
   fi
-  # A new key every time: the old ones stop working, so a key left in an old .env reaches nothing.
-  old="$(drop_keys "$bucket")"
-  key="$(new_key "$bucket" "$id" true true)"
+  # The key the gate keeps for the disk, so a deploy revokes nothing the running app holds; a new one when there is
+  # none, or with --rotate, and then the old ones stop working, so a key left in an old .env reaches nothing.
+  key="$(kept_key "${words[1]}" "$bucket" "$id" "${words[2]}")" || exit 1
+  if [ -z "$key" ]; then
+    old="$(drop_keys "$bucket")"
+    key="$(new_key "$bucket" "$id" true true)"
+    secret_note "${words[1]}" "BUCKET_KEY_${words[2]}" "$(sed -n 1p <<<"$key")"
+    secret_note "${words[1]}" "BUCKET_SECRET_${words[2]}" "$(sed -n 2p <<<"$key")"
+  fi
   garage_api POST "/v2/UpdateBucket?id=$id" "$(jq -nc --argjson on "$public" \
     '{websiteAccess: ({enabled: $on} + (if $on then {indexDocument: "index.html"} else {} end))}')" >/dev/null \
     || fail "bucket-create ${words[1]}: $(garage_error)"
@@ -1164,6 +1236,10 @@ cmd_bucket_drop() {
     dropped=$((dropped + 1))
   done 3< <(jq -r --arg p "$prefix" "$GARAGE_OURS"' .[] | select(.id | test("\\A[0-9a-f]{64}\\z"))
       | (.globalAliases | map(select(ours($p))) | first) as $a | select($a) | "\(.id) \($a)"' <<<"$buckets")
+  # The keys it kept for its disks went with the buckets.
+  local kept=()
+  mapfile -t kept < <(sed -n 's/^\(BUCKET_\(KEY\|SECRET\)_[a-z][a-z0-9]*\)=.*/\1/p' "$(secrets_file "${words[1]}")" 2>/dev/null || true)
+  secrets_forget "${words[1]}" "${kept[@]}"
   gate_log "bucket-drop ${words[1]}: $dropped buckets dropped, $old keys deleted"
   if [ "$dropped" = 0 ]; then echo "environment ${words[1]} has no buckets, so nothing to drop"; fi
 }
@@ -1259,6 +1335,7 @@ case "$op" in
   dist-put) cmd_dist_put ;;
   env-put) cmd_env_put ;;
   env-sha) cmd_env_sha ;;
+  probe-link) cmd_probe_link ;;
   signin-code) cmd_signin_code ;;
   user-clean) cmd_user_clean ;;
   app-key) cmd_app_key ;;

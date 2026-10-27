@@ -276,6 +276,29 @@ t_db_create_keeps_its_password_until_it_is_rotated_or_dropped() {
   expect_true "a malformed kept password was used" eval '[[ "$(password_of "$out")" =~ ^[0-9a-f]{48}$ ]]'
 }
 
+t_the_last_key_forgotten_takes_the_lock_and_stray_files_with_it() {
+  redis_world
+  local state="$HOME/.local/state/mroom"
+  gate provision "db-create 12"; expect_rc 0
+  gate provision "redis-user-add 12"; expect_rc 0
+  gate provision "db-create 13"; expect_rc 0
+  # What a write cut off halfway leaves beside the file.
+  : >"$state/qa/shop_qa_12.secrets.Ab12Cd"
+  expect_file "$state/gate-secrets-shop_qa_12.lock"
+  # With a key left, the file, its lock and the stray stay.
+  gate provision "redis-user-remove 12"; expect_rc 0
+  expect_file "$state/qa/shop_qa_12.secrets"
+  expect_file "$state/gate-secrets-shop_qa_12.lock"
+  expect_file "$state/qa/shop_qa_12.secrets.Ab12Cd"
+  # The last one goes, and they go with it; environment 13's stay.
+  gate provision "db-drop 12"; expect_rc 0
+  expect_no_file "$state/qa/shop_qa_12.secrets"
+  expect_no_file "$state/qa/shop_qa_12.secrets.Ab12Cd"
+  expect_no_file "$state/gate-secrets-shop_qa_12.lock"
+  expect_file "$state/qa/shop_qa_13.secrets"
+  expect_file "$state/gate-secrets-shop_qa_13.lock"
+}
+
 t_app_key_is_kept_until_it_is_rotated() {
   world
   local first
@@ -497,6 +520,45 @@ t_an_unchanged_redis_user_is_left_alone() {
   expect_true "the teardown kept the password" lacks "$(kept 12)" "REDIS_"
 }
 
+t_a_rotate_that_stopped_is_finished_by_the_next_request() {
+  redis_world
+  local first second hash
+  gate provision "redis-user-add 12"; expect_rc 0
+  first="$(sed -n 's/^REDIS_PASSWORD=//p' <<<"$out")"
+  # The rotate keeps its new password, then stops: Redis cannot save, so Redis keeps the old one.
+  : >"$T/redis/save-fails"
+  gate provision "redis-user-add 12 --rotate"; expect_rc 1
+  expect_err_has "Redis cannot save its users, so the user was left as it was; run redis-user-add again once it can"
+  rm "$T/redis/save-fails"
+  # The next request is no "unchanged" one: Redis has the old password's hash, so the user is set with the kept one.
+  : >"$T/redis.log"
+  gate provision "redis-user-add 12"; expect_rc 0
+  second="$(sed -n 's/^REDIS_PASSWORD=//p' <<<"$out")"
+  expect_true "the rotate's new password was not the one kept" [ "$second" != "$first" ]
+  hash="$(printf '%s' "$second" | sha256sum | cut -d' ' -f1)"
+  run redis_log; expect_out_has "ACL SETUSER shop_qa_12 reset on #$hash "
+  expect_true "the gate gave a password Redis does not have" has "$(cat "$T/redis/users/shop_qa_12")" "#$hash "
+}
+
+t_a_release_that_changes_the_rules_sets_every_user_again() {
+  redis_world
+  gate provision "redis-user-add 12"; expect_rc 0
+  # The next release withholds one command more: the same user is set again, with the new rule.
+  mkdir -p "$T/release"
+  cp -R "$ROOT/bin" "$ROOT/lib" "$T/release/"
+  sed -i 's/^WITHHELD=(-@dangerous /WITHHELD=(-@dangerous -object /' "$T/release/lib/gate"
+  grep -q '^WITHHELD=(-@dangerous -object ' "$T/release/lib/gate" || fail "the next release's rule was not written"
+  : >"$T/redis.log"
+  run env SSH_ORIGINAL_COMMAND="redis-user-add 12" "$T/release/bin/mroom" gate provision
+  expect_rc 0
+  run redis_log; expect_out_has "ACL SETUSER shop_qa_12 reset"
+  expect_true "the new rule never reached the user" has "$(cat "$T/redis/users/shop_qa_12")" " -object "
+  # And once set, it is left alone again.
+  : >"$T/redis.log"
+  run env SSH_ORIGINAL_COMMAND="redis-user-add 12" "$T/release/bin/mroom" gate provision
+  run redis_log; expect_true "an unchanged user was reset" lacks "$out" "ACL SETUSER"
+}
+
 t_a_user_that_was_not_saved_is_set_again() {
   redis_world; : >"$T/redis/save-fails-later"
   gate provision "redis-user-add 12"; expect_rc 1
@@ -566,7 +628,7 @@ t_an_error_reply_is_reported_from_either_stream() {
 t_a_redis_that_cannot_save_is_refused_before_a_change() {
   redis_world; : >"$T/redis/save-fails"
   gate provision "redis-user-add 3"
-  expect_rc 1; expect_err_has "redis-user-add 3: Redis cannot save its users, so nothing was changed: ERR There was an error"
+  expect_rc 1; expect_err_has "redis-user-add 3: Redis cannot save its users, so the user was left as it was; run redis-user-add again once it can: ERR There was an error"
   expect_true "a user changed anyway" lacks "$(redis_log)" "ACL SETUSER"
   gate provision "redis-user-remove 3"
   expect_rc 1; expect_err_has "redis-user-remove 3: Redis cannot save its users, so nothing was changed"
@@ -671,6 +733,8 @@ test_case scram-rfc-7677 t_the_password_verifier_matches_rfc_7677
 test_case redis-user-add t_redis_user_add_limits_the_user_to_its_prefix
 test_case redis-user-unchanged t_an_unchanged_redis_user_is_left_alone
 test_case redis-user-unsaved t_a_user_that_was_not_saved_is_set_again
+test_case redis-rotate-stopped t_a_rotate_that_stopped_is_finished_by_the_next_request
+test_case redis-new-rules t_a_release_that_changes_the_rules_sets_every_user_again
 test_case redis-without-modules t_without_modules_there_is_nothing_to_check
 test_case redis-module-leak t_a_module_command_in_a_granted_category_is_refused
 test_case redis-aclfile-and-version t_redis_without_an_aclfile_or_older_than_7_is_refused
@@ -680,6 +744,7 @@ test_case redis-error-either-stream t_an_error_reply_is_reported_from_either_str
 test_case redis-save-fails t_a_redis_that_cannot_save_is_refused_before_a_change
 test_case redis-save-fails-later t_a_change_that_could_not_be_saved_says_so
 test_case redis-user-remove t_redis_user_remove_deletes_the_user_and_saves
+test_case secrets-cleanup t_the_last_key_forgotten_takes_the_lock_and_stray_files_with_it
 test_case redis-clear t_redis_clear_deletes_the_prefix_inside_redis_in_every_database
 test_case redis-clear-cursor t_redis_clear_follows_the_cursor
 test_case redis-clear-database-count t_redis_clear_refuses_a_strange_database_count
