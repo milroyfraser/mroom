@@ -47,6 +47,10 @@ def main(argv: list[str]) -> int:
             return 1
         for folder, folders, files in os.walk(build):
             folders.sort()
+            # os.walk lists a link to a folder among the folders, and does not go into it: refused, not dropped.
+            if any(os.path.islink(os.path.join(folder, f)) for f in folders):
+                print("merge-build: the build holds something other than files and folders", file=sys.stderr)
+                return 1
             rel = os.path.relpath(folder, build)
             arc = target if rel == "." else f"{target}/{rel}"
             for path, name in [(folder, arc)] + [(os.path.join(folder, f), f"{arc}/{f}") for f in sorted(files)]:

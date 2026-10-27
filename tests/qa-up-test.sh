@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317,SC2016  # t_* run through test_case; a $ in single quotes is nginx's or the script's own
 # Tests for bringing a QA environment up (actions/qa-up/up.sh): isolated sites whose nginx refuses links to other
-# owners' files before any code goes in, at the top of Forge's site.conf fragment, once Forge applied it; certificates
-# that fail asked for again once; daemons of another user gone before the code; the code and the frontend as data
-# through the gate; the environment's own services, kept secrets and .env; a deploy script and a worker that refuse
-# any user but the site user; /up asked again after a 502, and a link to a root-owned file refused; slots; and
-# secrets never in the log. Offline: Forge, GitHub and the gate are fakes that answer as the real ones do.
+# owners' files before any code goes in, at the top of Forge's site.conf fragment, once Forge applied it, and proved
+# on each site by a link to a root-owned file whose content must not come back; certificates that fail deleted, waited
+# for and asked for again once, and one not enabled enabled; daemons and scheduled jobs of another user gone before
+# the code; the code and the frontend as data through the gate; the environment's own services, kept secrets and
+# .env, the template read entry by entry; a deploy script and a worker that refuse any user but the site user; /up
+# asked again after a 502, and the commit said to be deployed only after it; slots, two first deploys at once
+# included; and secrets never in the log. Offline: Forge, GitHub and the gate are fakes that answer as the real ones
+# do.
 set -euo pipefail
 SUITE=qa-up
 # shellcheck source=tests/lib.sh
@@ -62,6 +65,7 @@ up() { run "$UP" 7 "$SHA"; }
 state() { jq -r "$1" "$FORGE_STATE"; }
 env_sent() { cat "$GATE/env-put.in"; }
 has_line() { grep -qxF -- "$2" <<<"$1"; }
+has_text() { case "$1" in *"$2"*) return 0 ;; esac; return 1; }
 members() { tar -tzf "$1" | sort; }
 API="$(api_host 7)" WEB="$(web_host 7)"
 
@@ -69,6 +73,7 @@ t_a_new_environment_comes_up() {
   app "$TWO" api/artisan=php api/public/index.php=php
   up
   expect_rc 0; expect_out_has "environment 7: up at https://$WEB"
+  expect_out_has "$WEB: a link to a root-owned file is not served (it answered 200 with another body)"
   # Both sites isolated in the user's own home; Forge gives the web root as an absolute path.
   run state '[.sites[] | "\(.name) \(.type) \(.user) \(.isolated) \(.web_directory) \(.php_version)"] | join("\n")'
   expect_out "$API php shop_qa_7 true /home/shop_qa_7/$API/api/public PHP 8.4"$'\n'"$WEB static-html shop_qa_7 true /home/shop_qa_7/$WEB null"
@@ -81,6 +86,7 @@ t_a_new_environment_comes_up() {
   run order
   expect_out $'forge POST /sites\nforge POST /sites/101/domains/1010/certificates\nforge PUT /sites/101/nginx
 forge POST /sites\nforge POST /sites/103/domains/1030/certificates\nforge PUT /sites/103/nginx
+gate probe-link 7 api\ngate probe-link 7 web
 gate code-put 7 '"$SHA"$'\ngate dist-put 7\ngate db-create 7\ngate redis-user-add 7\ngate mail-user-add 7
 gate bucket-create 7 files\ngate bucket-create 7 media public\ngate app-key 7\ngate env-put 7
 forge PUT /sites/101/deployments/script\nforge POST /sites/101/deployments\nforge POST /background-processes'
@@ -90,8 +96,9 @@ forge PUT /sites/101/deployments/script\nforge POST /sites/101/deployments\nforg
   # The commit is said to be deployed only now, at the end.
   run cat "$GITHUB_OUTPUT"; expect_out "sha=$SHA"$'\n'"app_url=https://$WEB"$'\n'"api_url=https://$API"
   run cat "$FORGE_UP.log"; expect_out 200
-  # The link to a root-owned file the deploy made: refused.
-  run cat "$FORGE_UP.probe"; expect_out 404
+  # The link to the box's site-op, put before any code: not served. The api site's app answers 404, and the go site's
+  # single-page fallback 200 with its index.html: neither is the linked file.
+  run cat "$FORGE_UP.probe"; expect_out $'404\n200'
 }
 
 t_nginx_is_guarded_once_forge_applied_it() {
@@ -149,15 +156,47 @@ t_a_server_block_that_overrides_the_fragment_keeps_the_code_out() {
 
 t_a_link_nginx_still_serves_stops_the_deploy() {
   app "$TWO" api/artisan=php
-  # Forge's config is guarded, but the link to a root-owned file is served, as when a config of the box's own
-  # overrides the site's: the run fails.
-  forge_set '.probe_code = "200"'
+  # Forge's config is guarded, but nginx serves the link to the box's site-op anyway, as when a config of the box's
+  # own overrides the site's: the run stops before any code goes in.
+  forge_set '.probe_follows = true'
   up
-  expect_rc 1; expect_err_has "https://$API served a link to a root-owned file, so nginx follows links it must not (D17)"
+  expect_rc 1
+  expect_err_has "https://$API served a link to a root-owned file, so nginx follows links it must not (D17), and no code goes in"
+  run gate_log; expect_out "probe-link 7 api"
   run gh_log; expect_out_has "mroom-qa: failed"
+  # The go site is proved too.
+  app "$TWO" api/artisan=php
+  forge_set ".probe_follows = \"$WEB\""
+  up
+  expect_rc 1; expect_err_has "https://$WEB served a link to a root-owned file"
+  run gate_log; expect_out $'probe-link 7 api\nprobe-link 7 web'
+  # Served only until nginx has reloaded the config Forge just wrote: asked again, it is refused, and the run goes on.
+  app "$TWO" api/artisan=php
+  forge_set '.probe_follows_for = 1'
+  up
+  expect_rc 0; expect_out_has "$API: a link to a root-owned file is not served (it answered 404 with another body)"
+  run cat "$FORGE_UP.probe"; expect_out $'200\n404\n200'
+  # With the guard, the request goes on to the app, which here answers 200 to any path: that is not the linked file.
+  app "$TWO" api/artisan=php
+  forge_set '.catch_all = true'
+  up
+  expect_rc 0
+  run cat "$FORGE_UP.probe"; expect_out $'200\n200'
+  # No answer, a gate that cannot put the link, or one that names no SHA-256: nothing can be told, and no code goes in.
+  app "$TWO" api/artisan=php
   forge_set '.probe_code = "000"'
   up
   expect_rc 1; expect_err_has "https://$API/mroom-symlink-probe did not answer, so whether nginx follows links cannot be told"
+  app "$TWO" api/artisan=php
+  echo 1 >"$GATE/probe-link.rc"
+  up
+  expect_rc 1; expect_err_has "the gate could not put the link that proves nginx's guard in $API"
+  run gate_log; expect_out "probe-link 7 api"
+  app "$TWO" api/artisan=php
+  printf 'target=/usr/local/libexec/mroom/site-op\n' >"$GATE/probe-link.out"
+  up
+  expect_rc 1; expect_err_has "the gate named no SHA-256 of the file it linked in $API, so the proof cannot be judged"
+  run gate_log; expect_out "probe-link 7 api"
 }
 
 t_the_env_holds_the_environments_own_values() {
@@ -187,6 +226,25 @@ t_the_env_holds_the_environments_own_values() {
   # The app key is the gate's, the same each deploy, so the environment's users stay signed in.
   up
   run grep -c "^APP_KEY=$APP_KEY\$" "$GATE/env-put.in"; expect_out 1
+}
+
+t_the_template_is_read_entry_by_entry() {
+  app "$TWO" api/artisan=php
+  export MROOM_QA_ENV_TEMPLATE=$'APP_NAME=Shop\nPRIVATE_KEY="-----BEGIN KEY-----\nAPP_KEY=part-of-the-key\n-----END KEY-----"\n# a comment\nexport APP_KEY=base64:from-the-template\nNOTE=\'one\nDB_PASSWORD=inside\ntwo\'\nDB_PASSWORD=from-the-template'
+  up
+  expect_rc 0
+  local sent block note
+  sent="$(env_sent)"
+  block=$'PRIVATE_KEY="-----BEGIN KEY-----\nAPP_KEY=part-of-the-key\n-----END KEY-----"'
+  note=$'NOTE=\'one\nDB_PASSWORD=inside\ntwo\''
+  # A quoted value of several lines stays whole, a line in it that looks like a key mroom sets too.
+  expect_true "a value of several lines lost a line" has_text "$sent" "$block"
+  expect_true "a single-quoted value lost a line" has_text "$sent" "$note"
+  expect_true "a comment went" has_line "$sent" "# a comment"
+  # The template's own entries of keys mroom sets go, one with export too, and mroom's own come once.
+  expect_true "the template's app key or password was kept" lacks "$sent" "from-the-template"
+  run grep -c -x -F "APP_KEY=$APP_KEY" <<<"$sent"; expect_out 1
+  run grep -c -x -F "DB_PASSWORD=db-pw-7" <<<"$sent"; expect_out 1
 }
 
 t_secrets_never_reach_the_log() {
@@ -238,7 +296,8 @@ t_the_deploy_script_and_the_worker_refuse_any_other_user() {
   expect_rc 0
   run state '.sites[0].script'
   expect_out_has $'set -eo pipefail\ntest "$(id -un)" = shop_qa_7 || exit 78\n'
-  expect_out_has $'cd /home/shop_qa_7/'"$API"$'/api\n# A link to a root-owned file, which nginx must refuse to follow (qa-up asks for it).\nln -sfn /etc/os-release public/mroom-symlink-probe'
+  expect_out_has $'cd /home/shop_qa_7/'"$API"$'/api\nif [ -x /home/shop_qa_7/'"$API"$'/.mroom/hooks/qa-deploy ]; then'
+  expect_true "the deploy script links a probe of its own" lacks "$out" "mroom-symlink-probe"
   expect_out_has $'if [ -x /home/shop_qa_7/'"$API"$'/.mroom/hooks/qa-deploy ]; then\n  /home/shop_qa_7/'"$API"$'/.mroom/hooks/qa-deploy\nelse'
   expect_out_has $'  "$php" artisan migrate --force\n  "$php" artisan config:cache\n  "$php" artisan route:cache\nfi'
   expect_out_has '"$php" artisan mroom:qa-fixtures'
@@ -280,7 +339,7 @@ example-shop-aaaaaaa/public/build/assets/app.js
 example-shop-aaaaaaa/public/build/index.html
 example-shop-aaaaaaa/public/index.php"
   expect_no_file "$GATE/dist-put.in"
-  run gate_log; expect_out $'code-put 7 '"$SHA"$'\ndb-create 7\nredis-user-add 7\napp-key 7\nenv-put 7'
+  run gate_log; expect_out $'probe-link 7 api\ncode-put 7 '"$SHA"$'\ndb-create 7\nredis-user-add 7\napp-key 7\nenv-put 7'
   local sent
   sent="$(env_sent)"
   expect_true ".env lacks MAIL_MAILER=log" has_line "$sent" MAIL_MAILER=log
@@ -297,9 +356,9 @@ t_an_existing_environment_is_refreshed() {
   : >"$ORDER_LOG"
   up
   expect_rc 0
-  # No second site, certificate, nginx edit or worker: only the code, the services, the .env and a deploy.
+  # No second site, certificate, nginx edit or worker: only the proof, the code, the services, the .env and a deploy.
   run order
-  expect_out $'gate code-put 7 '"$SHA"$'\ngate dist-put 7\ngate db-create 7\ngate redis-user-add 7\ngate mail-user-add 7
+  expect_out $'gate probe-link 7 api\ngate probe-link 7 web\ngate code-put 7 '"$SHA"$'\ngate dist-put 7\ngate db-create 7\ngate redis-user-add 7\ngate mail-user-add 7
 gate bucket-create 7 files\ngate bucket-create 7 media public\ngate app-key 7\ngate env-put 7
 forge PUT /sites/101/deployments/script\nforge POST /sites/101/deployments'
   run state '.sites | length'; expect_out 2
@@ -398,7 +457,7 @@ t_daemons_of_another_user_go_before_the_code() {
   process 50 forge "/home/shop_qa_7/$API/api"
   up
   expect_rc 0; expect_out_has "deleted daemon 50, which ran as forge"
-  run order; expect_out_has $'forge DELETE /background-processes/50\ngate code-put 7'
+  run order; expect_out_has $'forge DELETE /background-processes/50\ngate probe-link 7 api\ngate probe-link 7 web\ngate code-put 7'
   run state '[.processes[].user] | join(",")'; expect_out "shop_qa_7"
   # One that does not go keeps the code out.
   app "$TWO" api/artisan=php
@@ -416,6 +475,86 @@ t_daemons_of_another_user_go_before_the_code() {
   expect_rc 1; expect_err_has "Forge would not delete daemon 50, which runs as forge, so no code goes in"
   expect_true "a refused delete was reported as done" lacks "$out" "deleted daemon 50"
   run gate_log; expect_out ""
+}
+
+t_daemons_and_scheduled_jobs_found_by_their_command_go_too() {
+  app "$TWO" api/artisan=php
+  made_site 40 7 api /api/public 8.4
+  made_site 41 7 web /
+  # forge's own daemon, from forge's home, that runs the site's artisan; a scheduled job of the server's, as root,
+  # that names the site; one of the api site's own, as forge, that names no path at all. Kept: environment 17's,
+  # which name its own home and site, and the site user's own.
+  process 50 forge /home/forge running "php8.4 /home/shop_qa_7/$API/api/artisan horizon"
+  process 51 forge /home/forge running "php8.4 /home/shop_qa_17/$(api_host 17)/api/artisan horizon"
+  job 60 root "curl -s https://$API/cron"
+  job 61 forge "php8.4 /home/shop_qa_17/$(api_host 17)/api/artisan schedule:run"
+  job 62 shop_qa_7 "php8.4 /home/shop_qa_7/$API/api/artisan schedule:run"
+  job 63 forge "php artisan schedule:run" 40
+  job 64 shop_qa_7 "php artisan schedule:run" 41
+  up
+  expect_rc 0
+  expect_out_has "deleted daemon 50, which ran as forge"
+  expect_out_has "deleted scheduled job 60, which ran as root"
+  expect_out_has "deleted scheduled job 63, which ran as forge"
+  run order
+  expect_out_has $'forge DELETE /background-processes/50\nforge DELETE /scheduled-jobs/60\nforge DELETE /sites/40/scheduled-jobs/63'
+  expect_out_has $'forge DELETE /sites/40/scheduled-jobs/63\ngate probe-link 7 api'
+  run state '[.processes[].id] | map(tostring) | join(",")'; expect_out "51,104"
+  run state '[.jobs[].id] | map(tostring) | join(",")'; expect_out "61,62"
+  run state '[.sites[] | .jobs // [] | .[].id] | map(tostring) | join(",")'; expect_out "64"
+  # One Forge never finishes deleting keeps the code out, and one it will not delete is said as it is.
+  app "$TWO" api/artisan=php
+  job 60 root "curl -s https://$API/cron"
+  forge_set '.job_remove_reads = -1'
+  export MROOM_QA_DAEMON_WAIT=10
+  up
+  expect_rc 1; expect_err_has "scheduled jobs of the environment still run as another user 10s after they were deleted, so no code goes in"
+  run gate_log; expect_out ""
+  run grep -c '^DELETE /scheduled-jobs/60$' "$FORGE_LOG"; expect_out 1
+  app "$TWO" api/artisan=php
+  job 60 root "curl -s https://$API/cron"
+  forge_set '.fail["DELETE /scheduled-jobs/60"] = 500'
+  up
+  expect_rc 1; expect_err_has "Forge would not delete scheduled job 60, which runs as root, so no code goes in"
+  run gate_log; expect_out ""
+}
+
+t_a_daemon_that_turns_up_during_the_deploy_keeps_the_worker_out() {
+  app "$TWO" api/artisan=php
+  forge_set ".deploy_adds_process = {user: \"forge\", directory: \"/home/forge\", status: \"running\", processes: 1,
+    command: \"php8.4 /home/shop_qa_7/$API/api/artisan queue:work\"}"
+  up
+  expect_rc 1; expect_err_has "a daemon of the environment runs as another user again, so the worker waits"
+  run forge_writes; expect_true "a worker was made beside it" lacks "$out" "POST /background-processes"
+  run output_of sha; expect_out ""
+  run gh_log; expect_out_has "mroom-qa: failed"
+}
+
+t_two_first_deploys_at_once_never_pass_max_envs() {
+  local other
+  other="{name: \"$(api_host 8)\", type: \"php\", is_isolated: true, isolated_user: \"$(site_user 8)\",
+    web_directory: \"/api/public\", php_version: \"php84\"}"
+  app "$TWO" api/artisan=php
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  # Environment 8's first deploy also counted 2 of 3, and made its site just before this one's: this one gives way.
+  forge_set ".sites_made_first = [$other]"
+  up
+  expect_rc 0
+  expect_out_has "another environment took the last slot first, so site 102 is deleted again"
+  expect_out_has "::warning::All 3 QA environments are in use, so this pull request waits for a slot."
+  run forge_writes; expect_out_has $'\nDELETE /sites/102'
+  run state '[.sites[] | "\(.id) \(.status)"] | join(",")'; expect_out "1 installed,2 installed,101 installing,102 removing"
+  run gate_log; expect_out ""
+  run output_of sha; expect_out ""
+  run gh_log; expect_out_has 'mroom-qa: waiting since=2026-10-27T12:00:00Z'
+  # Made just after this one's, environment 8 is the one past qa.max_envs: this one goes on.
+  app "$TWO" api/artisan=php
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  forge_set ".sites_made_after = [$other]"
+  up
+  expect_rc 0; expect_out_has "environment 7: up at https://$WEB"
 }
 
 t_a_worker_forge_runs_as_another_user_is_deleted() {
@@ -464,9 +603,13 @@ t_up_is_asked_again_after_a_502_and_fails_when_it_stays_down() {
   printf '502\n' >"$FORGE_UP"
   : >"$FORGE_UP.log"
   : >"$T/sleep.log"
+  : >"$GITHUB_OUTPUT"
   export MROOM_QA_UP_PAUSE=7
   up
   expect_rc 1; expect_err_has "https://$API/up answered 502, still, after 6 tries"
+  # The commit is said to be deployed only once /up answers, so a follower never takes a broken one for it.
+  run output_of sha; expect_out ""
+  run output_of app_url; expect_out ""
   run grep -c . "$FORGE_UP.log"; expect_out 6
   # Five pauses between the six tries, none after the last.
   run grep -c -x 7 "$T/sleep.log"; expect_out 5
@@ -493,6 +636,34 @@ t_certificates_are_asked_for_and_a_failed_one_again_once() {
   up
   expect_rc 1; expect_err_has "the certificate of site 101 failed again; look at it in Forge, then run the deploy again"
   run gate_log; expect_out ""
+  # Forge says how it failed after the dash: still failed.
+  app "$TWO" api/artisan=php
+  forge_set '.cert_fail = 1 | .cert_fail_status = "failed-unknown"'
+  up
+  expect_rc 0; expect_out_has "deleted certificate 102, which failed"
+  # A delete Forge never carries out is waited for, never sent again, until the wait ends.
+  app "$TWO" api/artisan=php
+  forge_set '.cert_fail = 1 | .cert_remove_reads = 1000'
+  export MROOM_QA_CERT_WAIT=10
+  up
+  expect_rc 1; expect_err_has "site 101 still had the failed certificate 102 it was asked to delete after 10s"
+  run grep -c '^DELETE /sites/101/domains/1010/certificates/102$' "$FORGE_LOG"; expect_out 1
+  run grep -c '^POST /sites/101/domains/1010/certificates ' "$FORGE_LOG"; expect_out 1
+  unset MROOM_QA_CERT_WAIT
+  # A clone Forge installed but did not enable is enabled, once.
+  app "$TWO" api/artisan=php
+  export MROOM_QA_CERTIFICATE=55
+  forge_set '.clone_enable_ignored = true'
+  up
+  expect_rc 0; expect_out_has "enabled certificate 102"
+  run grep -c '^POST /sites/101/domains/1010/certificates/102/actions {"action":"enable"}$' "$FORGE_LOG"; expect_out 1
+  app "$TWO" api/artisan=php
+  forge_set '.clone_enable_ignored = true | .enable_ignored = true'
+  export MROOM_QA_CERT_WAIT=10
+  up
+  expect_rc 1; expect_err_has "site 101 had no active certificate after 10s"
+  run grep -c '^POST /sites/101/domains/1010/certificates/102/actions ' "$FORGE_LOG"; expect_out 1
+  run grep -c '^POST /sites/101/domains/1010/certificates ' "$FORGE_LOG"; expect_out 1
 }
 
 t_a_site_forge_is_removing_is_waited_for() {
@@ -551,6 +722,7 @@ test_case nginx-guard-in-comment t_a_guard_in_a_comment_or_a_block_does_not_coun
 test_case nginx-server-block t_a_server_block_that_overrides_the_fragment_keeps_the_code_out
 test_case link-served t_a_link_nginx_still_serves_stops_the_deploy
 test_case env-values t_the_env_holds_the_environments_own_values
+test_case env-entries t_the_template_is_read_entry_by_entry
 test_case secrets-off-the-log t_secrets_never_reach_the_log
 test_case gate-lines-hidden t_a_gate_line_that_could_hold_a_value_is_never_shown
 test_case runner-temp t_scratch_files_go_under_the_runners_temp
@@ -565,6 +737,9 @@ test_case not-isolated t_a_site_that_is_not_isolated_or_of_another_user_is_refus
 test_case broadcast-not-yet t_broadcast_same_is_not_yet
 test_case build-with-a-link t_a_build_with_a_link_is_refused_before_anything_is_made
 test_case daemons-before-code t_daemons_of_another_user_go_before_the_code
+test_case jobs-by-command t_daemons_and_scheduled_jobs_found_by_their_command_go_too
+test_case daemon-during-deploy t_a_daemon_that_turns_up_during_the_deploy_keeps_the_worker_out
+test_case slots-at-once t_two_first_deploys_at_once_never_pass_max_envs
 test_case worker-as-another-user t_a_worker_forge_runs_as_another_user_is_deleted
 test_case failed-deploy-output t_a_failed_deploy_shows_its_output_but_runs_no_command
 test_case up-asked-again t_up_is_asked_again_after_a_502_and_fails_when_it_stays_down

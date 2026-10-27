@@ -77,6 +77,12 @@ t_a_build_with_a_link_or_a_fifo_is_refused() {
   run merged public/build
   expect_rc 1; expect_err_has "the build holds something other than files and folders"
   rm "$T/dist/assets/leak.txt"
+  # A link to a folder, which os.walk neither goes into nor lists among the files: refused, not dropped.
+  mkdir -p "$T/elsewhere"; echo secret >"$T/elsewhere/key.txt"
+  ln -s "$T/elsewhere" "$T/dist/assets/more"
+  run merged public/build
+  expect_rc 1; expect_err_has "the build holds something other than files and folders"
+  rm "$T/dist/assets/more"
   mkfifo "$T/dist/pipe"
   run merged public/build
   expect_rc 1; expect_err_has "the build holds something other than files and folders"

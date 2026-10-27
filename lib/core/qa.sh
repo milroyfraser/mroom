@@ -124,6 +124,20 @@ qa_envs() {
       [.[].created | select(. != "")] | min // "-")"' <<<"$sites"
 }
 
+# qa_env_rank <N>: environment N's place, from 1, among the environments with a site Forge is not removing, by the
+# id of each one's first such site: the order Forge made them in. 0 when N has no such site.
+qa_env_rank() {
+  local sites
+  qa_init || return 1
+  sites="$(qa_all_sites)" || return 1
+  jq -rs --arg zone "$QA_ZONE" --arg re "$QA_SITE_RE" --argjson n "$1" '[.[] | . as $site
+      | select(($site.id | tostring) | test("\\A[0-9]{1,15}\\z")) | .attributes
+      | select((.status // "") != "removing") | ((.name // "") | [match($re).captures[].string]) as $m
+      | select(($m | length) == 2 and $m[1] == $zone) | {n: ($m[0] | tonumber), id: ($site.id | tostring | tonumber)}]
+    | group_by(.n) | map({n: .[0].n, first: (map(.id) | min)}) | sort_by(.first) | map(.n) | index($n)
+    | if . == null then 0 else . + 1 end' <<<"$sites"
+}
+
 # qa_delete <path>: deletes a Forge resource; one that is already gone (404) counts as deleted, since a teardown run
 # again, or one beside it, may have deleted it first.
 qa_delete() {
@@ -156,14 +170,27 @@ qa_redelete_stuck() {
   echo "$age"
 }
 
-# qa_processes: "<id> <status> <user>" for each of environment N's Forge background processes: those run as its
-# site user, and any run from a folder in that user's home, such as one Forge started as another user.
-qa_processes() {
+# qa_jobs <path> [all]: environment N's Forge daemons (/background-processes) or scheduled jobs (/scheduled-jobs),
+# one JSON object a line, {id, user, status, command}: those run as its site user, from a folder in its home, or with
+# a command that names its home or one of its sites, wherever they run from and as whomever, such as a daemon of
+# forge's that runs the site's artisan. With all, every one in the list, which is then one of the environment's own
+# sites' (/sites/<id>/scheduled-jobs).
+qa_jobs() {
   local items
-  items="$(forge_list /background-processes)" || return 1
-  jq -r --arg user "$QA_USER" --arg home "/home/$QA_USER/" 'select(.attributes.user == $user
-    or ((.attributes.directory // "") | startswith($home))) | (.id | tostring) as $id | select($id | test("\\A[0-9]+\\z"))
-    | "\($id) \(.attributes.status // "unknown") \(.attributes.user // "unknown")"' <<<"$items"
+  items="$(forge_list "$1")" || return 1
+  jq -c --arg user "$QA_USER" --arg home "/home/$QA_USER/" --arg api "$QA_API" --arg web "$QA_WEB" --arg all "${2:-}" '
+    select($all == "all" or .attributes.user == $user or ((.attributes.directory // "") | startswith($home))
+      or ((.attributes.command // "") | contains($home) or contains($api) or contains($web)))
+    | (.id | tostring) as $id | select($id | test("\\A[0-9]+\\z"))
+    | {id: $id, user: (.attributes.user // "unknown"), status: (.attributes.status // "unknown"),
+       command: (.attributes.command // "")}' <<<"$items"
+}
+
+# qa_processes: "<id> <status> <user>" for each of environment N's Forge daemons (qa_jobs).
+qa_processes() {
+  local jobs
+  jobs="$(qa_jobs /background-processes)" || return 1
+  jq -r '"\(.id) \(.status) \(.user)"' <<<"$jobs"
 }
 
 # qa_gate_init: the runner's way to the box's gate. MROOM_QA_SSH_KEY is a private key whose line in the box user's

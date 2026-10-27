@@ -25,7 +25,7 @@ plan_run() {
   jq -n --argjson id "$id" --arg event "$2" --arg sha "$3" '{id: $id, event: $event, head_sha: $sha,
     head_branch: "feat/x", path: ".github/workflows/qa-plan.yml", display_title: "QA plan · PR #7",
     html_url: "https://github.example/runs/\($id)", repository: {id: 1, full_name: "example/shop"},
-    head_repository: {id: 1, full_name: "example/shop"}, triggering_actor: {login: "a-person"}, pull_requests: []}' >"$file"
+    head_repository: {id: 1, full_name: "example/shop"}, actor: {login: "a-person"}, triggering_actor: {login: "a-person"}, pull_requests: []}' >"$file"
   shift 3
   for change in "$@"; do jq "$change" "$file" >"$file.new" && mv "$file.new" "$file"; done
 }
@@ -130,9 +130,13 @@ t_a_dispatch_counts_only_on_the_default_branch() {
   build_job 101 success "$NEWER"
   resolve RUN_ID=101
   expect_out "go=true number=12 sha=$NEWER draft=false forced=false built=true dispatched=true woken=false run_id=101 run_url=https://github.example/runs/101 "
-  # The job token's dispatch is a wake's.
-  plan_run 101 workflow_dispatch "$HEAD" '.head_branch = "main" | .display_title = "PR #12" | .triggering_actor.login = "github-actions[bot]"'
+  # The job token's dispatch is a wake's, and a person's re-run of it still is: the run's first starter counts.
+  plan_run 101 workflow_dispatch "$HEAD" '.head_branch = "main" | .display_title = "PR #12" | .actor.login = "github-actions[bot]" | .triggering_actor.login = "github-actions[bot]"'
   resolve RUN_ID=101; expect_out_has "dispatched=true woken=true"
+  plan_run 101 workflow_dispatch "$HEAD" '.head_branch = "main" | .display_title = "PR #12" | .actor.login = "github-actions[bot]"'
+  resolve RUN_ID=101; expect_out_has "dispatched=true woken=true"
+  plan_run 101 workflow_dispatch "$HEAD" '.head_branch = "main" | .display_title = "PR #12" | .triggering_actor.login = "github-actions[bot]"'
+  resolve RUN_ID=101; expect_out_has "dispatched=true woken=false"
   plan_run 101 workflow_dispatch "$HEAD" '.display_title = "PR #12"'
   resolve RUN_ID=101; expect_out "go=false "; expect_err_has "counts only on the default branch"
   plan_run 101 workflow_dispatch "$HEAD" '.head_branch = "main" | .display_title = "PR #12; rm -rf /"'
@@ -153,7 +157,7 @@ t_the_newest_run_of_a_pull_request_may_be_a_dispatched_one() {
   pr_now 12 OPEN "$NEWER"
   plan_run 101 pull_request "$HEAD" "$(linked 12 "$HEAD")"
   build_job 101 success "$HEAD"
-  plan_run 102 workflow_dispatch "$HEAD" '.head_branch = "main" | .display_title = "PR #12" | .triggering_actor.login = "github-actions[bot]"'
+  plan_run 102 workflow_dispatch "$HEAD" '.head_branch = "main" | .display_title = "PR #12" | .actor.login = "github-actions[bot]"'
   build_job 102 success "$NEWER"
   resolve RUN_ID=102 DISPATCHED_PR=12; expect_out_has "go=true number=12 sha=$NEWER"; expect_out_has "woken=true run_id=102"
   resolve RUN_ID=101; expect_out "go=false "; expect_err_has "has moved on"

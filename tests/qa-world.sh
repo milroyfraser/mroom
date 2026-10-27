@@ -26,6 +26,8 @@ qa_world() {
   export T PATH="$T/bin:$PATH" TMPDIR="$T/tmp" MROOM_NOW="$NOW"
   export FORGE_STATE="$T/forge.json" FORGE_LOG="$T/forge.log" ORDER_LOG="$T/order.log" GATE="$T/gate"
   export GATE_KEY="$QA_KEY" GH_FAKE="$T/gh"
+  # The box's site-op, root's, which the gate's probe-link links into a web root: this release's.
+  export SITE_OP_INSTALLED="$ROOT/lib/site-op"
   export MROOM_CONFIG="$T/mroom.toml" MROOM_FORGE_ORG=acme MROOM_FORGE_SERVER=42 MROOM_FORGE_TOKEN=fake-forge-token
   export MROOM_QA_SSH_HOST=box.example.dev MROOM_QA_SSH_KEY="$QA_KEY"
   export MROOM_QA_SSH_KNOWN_HOSTS="box.example.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAInotarealkey"
@@ -82,12 +84,25 @@ pr_toml() {
   if [ "$#" -ge 2 ]; then printf '%s\n' "$2" >"$GH_FAKE/contents-$1/mroom.toml"; else cp "$MROOM_CONFIG" "$GH_FAKE/contents-$1/mroom.toml"; fi
 }
 
-# process <id> <user> <directory> [<status>]: a background process on the fake Forge.
+# process <id> <user> <directory> [<status> [<command>]]: a background process on the fake Forge.
 process() {
   local item
   item="$(jq -nc --argjson id "$1" --arg user "$2" --arg dir "$3" --arg status "${4:-running}" \
-    '{id: $id, user: $user, directory: $dir, status: $status, command: "php artisan queue:work", processes: 1}')"
+    --arg command "${5:-php artisan queue:work}" \
+    '{id: $id, user: $user, directory: $dir, status: $status, command: $command, processes: 1}')"
   forge_set ".processes += [$item]"
+}
+
+# job <id> <user> <command> [<site id>]: a scheduled job on the fake Forge: the server's, or that site's own.
+job() {
+  local item
+  item="$(jq -nc --argjson id "$1" --arg user "$2" --arg command "$3" \
+    '{id: $id, user: $user, command: $command, status: "installed", frequency: "minutely", cron: "* * * * *"}')"
+  if [ -n "${4:-}" ]; then
+    forge_set "(.sites[] | select(.id == $4) | .jobs) += [$item]"
+  else
+    forge_set ".jobs += [$item]"
+  fi
 }
 
 # comment <PR> <id> <login> <body> [<updated_at>]: a comment on the pull request, for the fake GitHub.

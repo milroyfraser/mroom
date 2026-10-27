@@ -22,11 +22,11 @@
 #
 # Prints, for GITHUB_OUTPUT: go=true|false, and with go=true: number, sha (the commit the plan built, which is the
 # pull request's head), draft, forced (the label is on), built (the build job succeeded), dispatched (the plan was
-# started by hand or by a wake), woken (by the job token: a wake), run_id and run_url (the plan run checked here,
-# whose build qa-up deploys). go=false, with a notice, when there is nothing to deploy: no plan of this repository,
-# a build job that never ran to an end, a dispatch that did not run on the default branch or names another pull
-# request, a closed pull request or a fork's, or a build of a commit the pull request has since moved past, whose
-# newer push brings its own run. Exits 1 when GitHub cannot be read.
+# started by hand or by a wake), woken (first started by the job token: a wake), run_id and run_url (the plan run
+# checked here, whose build qa-up deploys). go=false, with a notice, when there is nothing to deploy: no plan of this
+# repository, a build job that never ran to an end, a dispatch that did not run on the default branch or names
+# another pull request, a closed pull request or a fork's, or a build of a commit the pull request has since moved
+# past, whose newer push brings its own run. Exits 1 when GitHub cannot be read.
 set -euo pipefail
 
 repo="${GITHUB_REPOSITORY:?}"
@@ -96,7 +96,9 @@ case "$event" in
     [ -z "${DISPATCHED_PR:-}" ] || [ "$DISPATCHED_PR" = "$pr" ] \
       || stop "the hand-over named pull request ${DISPATCHED_PR:0:12}, but run $RUN_ID is for pull request $pr"
     dispatched=true
-    [ "$(get .triggering_actor.login)" != "github-actions[bot]" ] || woken=true
+    # By who started the run first (actor), not who re-ran it (triggering_actor): a person's re-run of a woken plan
+    # is still the wake's, as the plan's hand-over takes it.
+    [ "$(get .actor.login)" != "github-actions[bot]" ] || woken=true
     ;;
   *) stop "a QA plan started by '${event:-nothing}' deploys nothing" ;;
 esac

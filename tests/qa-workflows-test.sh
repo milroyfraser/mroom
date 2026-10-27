@@ -122,9 +122,16 @@ t_the_workflows_after_qa_up_are_started_only_for_a_run_the_job_token_started() {
   local next
   next="$(job "$W/qa-up.yml" next)"
   expect_true "the next job runs for more than a dispatch" grep -qF "github.event_name == 'workflow_dispatch'" <<<"$next"
-  expect_true "the next job runs for a person's dispatch" grep -qF "github.triggering_actor == 'github-actions[bot]'" <<<"$next"
-  expect_true "the next job runs when the environment did not come up" grep -qF "needs.deploy.outputs.app-url != ''" <<<"$next"
-  expect_true "the next job names no pull request or run" grep -qF -- '-f pr="$PR" -f up_run_id="$GITHUB_RUN_ID"' <<<"$next"
+  expect_true "the next job runs for a person's dispatch" grep -qF "github.actor == 'github-actions[bot]'" <<<"$next"
+  expect_true "the next job goes by who re-ran qa-up" eval '! grep -q triggering_actor <<<"$next"'
+  # Whenever the deploy ran, whatever it came to, as the workflow_run would have; not when it was skipped.
+  expect_true "the next job runs only when the environment came up" eval '! grep -q app-url <<<"$next"'
+  expect_true "the next job does not run whenever the deploy ran" \
+    grep -qF "(needs.deploy.result == 'success' || needs.deploy.result == 'failure')" <<<"$next"
+  expect_true "the next job runs when the run was cancelled" grep -qF '!cancelled() &&' <<<"$next"
+  expect_true "the next job does not hand next.sh the pull request and the list" \
+    has "$next" '        run: mroom/actions/qa-up/next.sh "$PR" "$NEXT"'
+  expect_true "the next job runs another mroom's next.sh" has "$next" '          ref: ${{ job.workflow_sha }}'
 }
 
 t_the_comment_comes_from_a_step_that_always_runs() {

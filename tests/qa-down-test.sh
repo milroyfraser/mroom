@@ -195,6 +195,16 @@ t_a_failed_user_clean_keeps_the_sites() {
   run gh_log; expect_out_has "The teardown stopped at user-clean"
 }
 
+t_a_daemon_found_by_its_command_goes_too() {
+  qa_world; environment_7
+  # forge's own daemon, from forge's home, that runs environment 7's artisan, goes; environment 70's stays.
+  process 8 forge /home/forge running "php8.4 /home/$(site_user 7)/$(api_host 7)/artisan horizon"
+  process 9 forge /home/forge running "php8.4 /home/$(site_user 70)/$(api_host 70)/artisan horizon"
+  run "$DOWN" 7 --reason closed --state present
+  expect_rc 0
+  run jq -r '[.processes[].id] | join(",")' "$FORGE_STATE"; expect_out "7,9"
+}
+
 t_daemons_that_never_go_keep_everything_else() {
   qa_world; environment_7
   forge_set '.process_remove_reads = -1'
@@ -328,6 +338,7 @@ test_case dispatched-run-again t_a_dispatched_teardown_run_again_frees_its_slot
 test_case stuck-removing t_a_site_stuck_removing_gets_the_delete_again_and_wakes_nobody
 test_case push-only-if-open t_the_comment_offers_a_push_only_to_an_open_pull_request
 test_case user-clean-fails t_a_failed_user_clean_keeps_the_sites
+test_case daemon-by-command t_a_daemon_found_by_its_command_goes_too
 test_case daemons-never-go t_daemons_that_never_go_keep_everything_else
 test_case one-box-step-fails t_one_box_step_failing_leaves_the_others_to_run
 test_case delete-404-is-done t_a_delete_that_finds_nothing_counts_as_done

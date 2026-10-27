@@ -8,7 +8,9 @@
 # identity file of mode 600 that holds the test's key, $GATE_KEY. As OpenSSH does without -n, it reads its stdin and
 # sends it on, whatever the request: a put's stdin is kept as $GATE/<operation>.in, and any other request's is read
 # and dropped, so a caller in a loop that forgets -n loses the rest of its loop's input. It answers as the gate does
-# for app "shop" (lib/gate), or from $GATE/<operation>.out and $GATE/<operation>.rc when the test wrote them.
+# for app "shop" (lib/gate), or from $GATE/<operation>.out and $GATE/<operation>.rc when the test wrote them; its
+# probe-link links $SITE_OP_INSTALLED, the box's root-owned site-op, which the Forge stand-in serves when nginx
+# follows that link.
 set -euo pipefail
 printf '%s\n' "$@" >>"$GATE/ssh.argv"
 echo "--" >>"$GATE/ssh.argv"
@@ -66,6 +68,7 @@ case "$op" in
     printf 'BUCKET=shop-qa-%s-%s\nACCESS_KEY_ID=GK%s\nSECRET_ACCESS_KEY=bucket-pw-%s\nREGION=garage\nENDPOINT=https://s3.qa.example.dev\nPATH_STYLE=true\n' \
       "$n" "${words[2]}" "${words[2]}" "${words[2]}"
     if [ "${words[3]:-}" = public ]; then printf 'URL=https://files.qa.example.dev/shop-qa-%s-%s\n' "$n" "${words[2]}"; fi ;;
+  probe-link) printf 'sha256=%s\ntarget=/usr/local/libexec/mroom/site-op\n' "$(sha256sum <"$SITE_OP_INSTALLED" | cut -d' ' -f1)" ;;
   code-put) echo "$api: 12 entries unpacked, 0 .env skipped" ;;
   dist-put) echo "$web: 3 entries unpacked, 0 .env skipped" ;;
   env-put) printf 'env=%s\n' "$(printf '%s' "$(cat "$GATE/env-put.in")" | sha256sum | cut -d' ' -f1)" ;;

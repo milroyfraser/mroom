@@ -210,35 +210,35 @@ jobs:
           nginx-template: ${{ vars.MROOM_QA_NGINX_TEMPLATE }}
 
   # A run the job token started (the plan's hand-over) ends with no workflow_run, so a workflow of the app's that
-  # waits for one would never start: this job starts each of next-workflows itself, once the environment is up. A
-  # run a person or a workflow_run started ends with its workflow_run as usual, so this job skips it.
+  # waits for one would never start: this job starts each of next-workflows itself (actions/qa-up/next.sh) once the
+  # deploy ran, whatever it came to, as that workflow_run would have; the follower reads how it went from GitHub's
+  # record of this run. A run a person or a workflow_run started ends with its workflow_run as usual, so this job
+  # skips it. It goes by github.actor, the run's first starter, so a person's re-run of a dispatched run starts them
+  # too: GitHub does not say whether such a re-run ends with a workflow_run, and a follower started twice for one
+  # commit does no harm.
   next:
     name: QA next workflows
     needs: [pr, deploy]
     if: >-
       !cancelled() && inputs.next-workflows != '' && github.event_name == 'workflow_dispatch' &&
-      github.triggering_actor == 'github-actions[bot]' && needs.deploy.outputs.app-url != ''
+      github.actor == 'github-actions[bot]' && (needs.deploy.result == 'success' || needs.deploy.result == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       actions: write # to start the app's workflows
+      contents: read
     steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
       - name: Start the workflows that follow qa-up
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ needs.pr.outputs.number }}
           NEXT: ${{ inputs.next-workflows }}
-          BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          [[ "$PR" =~ ^[1-9][0-9]{0,8}$ ]] || { echo "::error::the pull request's number is not a number"; exit 1; }
-          failed=0
-          for workflow in $NEXT; do
-            if ! [[ "$workflow" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]]; then
-              echo "::error::next-workflows holds a name that is not a workflow file name"
-              failed=1
-              continue
-            fi
-            gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref "$BRANCH" -f pr="$PR" -f up_run_id="$GITHUB_RUN_ID" \
-              </dev/null || failed=1
-          done
-          exit "$failed"
+          MROOM_QA_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: mroom/actions/qa-up/next.sh "$PR" "$NEXT"
