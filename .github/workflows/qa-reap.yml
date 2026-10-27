@@ -4,19 +4,19 @@ name: QA environment reap
 # to close a pull request (design 8.2). The app calls this workflow from one of its own on a schedule and
 # workflow_dispatch (README, QA environments), which run under the default branch, the only one the qa
 # environment admits. It checks out only the default branch's mroom.toml, and mroom at the commit of this file.
-# The next push that needs an environment brings it back, and each slot freed goes to a pull request that waits
-# for one. Until the qa environment has MROOM_FORGE_SERVER, there is nothing to reap.
+# It tears nothing down itself: for each environment past its time it starts the app's qa-down workflow, whose
+# teardown takes the pull request's concurrency group, wakes a waiting pull request when it frees a slot and can be
+# re-run on its own. So it holds the Forge token, to read the environments and send a stuck delete again, and no
+# SSH key. Until the qa environment has MROOM_FORGE_SERVER, there is nothing to reap.
 on:
   workflow_call:
     inputs:
-      plan-workflow:
-        description: The app's QA plan workflow file, started for a pull request that waits for a slot
+      down-workflow:
+        description: The app's QA environment down workflow file, started for each environment past its time
         type: string
-        default: qa-plan.yml
+        default: qa-down.yml
     secrets:
       MROOM_FORGE_TOKEN:
-        required: true
-      MROOM_QA_SSH_KEY:
         required: true
 
 permissions:
@@ -31,14 +31,17 @@ jobs:
   reap:
     name: QA reap
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 15
     environment:
       name: qa
       deployment: false
+    # One reaper at a time; it takes no pull request's group, which its teardowns take each.
+    concurrency:
+      group: mroom-qa-reap
+      cancel-in-progress: false
     permissions:
-      actions: write # to start the QA plan of a pull request that waits for a slot
+      actions: write # to start a teardown for each environment past its time
       contents: read
-      pull-requests: write # the QA environment comments
     steps:
       - name: Check out mroom
         uses: actions/checkout@v4
@@ -59,11 +62,7 @@ jobs:
         uses: ./mroom/actions/qa-reap
         with:
           config: app/mroom.toml
-          plan-workflow: ${{ inputs.plan-workflow }}
+          down-workflow: ${{ inputs.down-workflow }}
           forge-org: ${{ vars.MROOM_FORGE_ORG }}
           forge-server: ${{ vars.MROOM_FORGE_SERVER }}
           forge-token: ${{ secrets.MROOM_FORGE_TOKEN }}
-          ssh-host: ${{ vars.MROOM_QA_SSH_HOST }}
-          ssh-user: ${{ vars.MROOM_QA_SSH_USER }}
-          ssh-key: ${{ secrets.MROOM_QA_SSH_KEY }}
-          ssh-known-hosts: ${{ vars.MROOM_QA_SSH_KNOWN_HOSTS }}

@@ -59,7 +59,8 @@ t_the_build_gets_public_values_only() {
   app $'backend_dir = "api"\nfrontend_dir = "web"\n\n[app.build]\nfrontend = "npm run build"
 frontend_env = { VITE_API = "env:APP_URL", VITE_CLIENT = "env:CLIENT_URL", VITE_XSRF = "env:XSRF_COOKIE_NAME", VITE_PAYMENTS = "env:PAYMENTS_SECRET", VITE_MODE = "qa" }'
   mkdir -p "$T/app/web"
-  run "$BUILD" run 7 "$T/app"
+  # Even when the runner has the key in its own environment, the build never gets it.
+  run env PAYMENTS_SECRET=leaked-from-the-runner "$BUILD" run 7 "$T/app"
   expect_rc 0; expect_out_has "VITE_PAYMENTS reads PAYMENTS_SECRET, which is not one of a QA environment's public values"
   expect_out_has "built web/dist"
   run cat "$T/build.env"

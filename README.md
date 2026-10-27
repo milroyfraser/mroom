@@ -598,13 +598,14 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
 
 Each pull request can have a QA environment of its own on the box: `api-<N>.<zone>` for the Laravel app and,
 for a frontend of its own, `go-<N>.<zone>`, with the services the QA gate gives it (design 8.2). Reusable
-workflows run it; the app calls each from a workflow of its own, pinned to the mroom release the box runs:
+workflows run it; the app calls each from a workflow of its own, pinned to the mroom release the box runs
+(`v0.4.0` below is the next release tag, the first with these workflows):
 
 | Workflow | Runs on | What it does |
 |---|---|---|
 | `qa-plan.yml` | a push to a pull request, or by hand | sorts the changed paths (could a user notice the change?), then builds the frontend from the pull request's code with public values only; it holds no secret |
-| `qa-down.yml` | the pull request closing, its `qa` label coming off, or by hand | tears the environment down: its daemons, its site user's processes and files, its sites, then its database, Redis user and keys, mail and buckets, through the gate |
-| `qa-reap.yml` | a schedule, or by hand | tears down every environment older than `qa.ttl_days` (5) |
+| `qa-down.yml` | the pull request closing, its `qa` label coming off, the reaper, or by hand | tears the environment down: its daemons, its site user's processes and files, its sites, then its database, Redis user and keys, mail and buckets, through the gate |
+| `qa-reap.yml` | a schedule, or by hand | starts a teardown for every environment older than `qa.ttl_days` (5) |
 
 - **Who holds what.** Only jobs in the GitHub environment `qa` hold the Forge token and the box's SSH key,
   which reach root (design D20). `qa` admits the default branch alone, and those jobs check out only the
@@ -615,14 +616,32 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
   reads as "no environment". Forge can accept a delete and never run it, so a site still removing after 30
   minutes gets the delete again, and the reaper warns about it: the same one two nights running needs a
   person in Forge.
-- **The order of a teardown.** Daemons first, since supervisor starts again what is stopped, then
-  `user-clean`, then the sites right after (design 8.9). A `user-clean` that fails keeps the sites, so the
-  next teardown tries again. Each step skips what is already gone, so a teardown finishes a half-built or
-  half-removed environment.
+- **A teardown.** qa-down's first job only reads Forge, so a pull request that never had an environment gets
+  no teardown; one started by hand or by the reaper skips it. The second job runs every step, each skipping
+  what is already gone, whether or not Forge still has a site: daemons first, since supervisor starts again
+  what is stopped, then `user-clean`, then the sites right after (design 8.9), then the box's side. A
+  `user-clean` that fails keeps the sites. When a step fails, the comment names it, and "Re-run failed jobs"
+  on that run finishes the teardown. Teardowns and deploys of one pull request take turns, first in first
+  out, so none runs beside another and none waiting is dropped.
+- **The reaper** starts the app's qa-down workflow for each environment past its time (reason `ttl`) rather
+  than tearing it down itself, so each teardown takes its pull request's turn, frees its slot and can be
+  re-run on its own; the reaper holds the Forge token and no SSH key.
 - **The comment.** A pull request with an environment has one `### QA environment` comment, edited in place,
-  that says whether it is ready, waits for a slot, failed or was removed, and why. It is for people; the
-  waiting state also says which pull request gets a freed slot: the one that has waited longest, whose QA
-  plan qa-down and qa-reap start again.
+  that says whether it is ready, waits for a slot, failed, is being removed or was removed, and why. It is for
+  people; its hidden line also tells a teardown that frees a slot which pull request to wake: the one that has
+  waited longest, by the time it started waiting, which the comment keeps however often it is rewritten. The
+  wake marks it woken before it starts its QA plan again, so a second teardown close behind wakes another; a
+  woken one waits again after 30 minutes. It reads the comments of the 100 newest open pull requests, one
+  listing each, and no more. The wake's dispatch, made with the job token, does start the plan, but nothing
+  after it starts by itself: a run the job token started starts no `workflow_run` when it ends, and neither
+  does a run that one starts in turn. So each link of the chain starts the next itself: the plan hands itself
+  to qa-up (its `hand-over` job, which needs `actions: write`), and qa-up, started that way, starts what
+  follows it. When the label comes off a pull request with no environment, its comment stops saying it waits.
+- **Caches.** qa-plan's build job runs the pull request's code, and a run started by hand or by a wake runs
+  under the default branch, so it only reads caches (`cache-mode: read`): otherwise the pull request's code
+  could save a poisoned cache that the default branch's own builds restore. Any workflow of the app's that
+  runs a pull request's code under a trusted trigger (`workflow_dispatch`, `push`, `schedule` and the like)
+  should do the same.
 - **What the plan builds.** `app.frontend_dir` is a folder for a frontend of its own (it gets the go site),
   `.` for Vite inside the Laravel app, or empty for no frontend; `app.build.frontend` is the command, and
   without one nothing is built; `app.build.frontend_dist` is where it writes (`dist`, or `public/build` for
@@ -633,6 +652,8 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
   own, `<app>_qa_<N>_session` and `<app>_qa_<N>_xsrf`, since every environment shares the zone.
 - **The path rules.** The plan is `none` when every changed path is one no user can see: tests, docs, CI,
   agent and developer tooling; any other path, a path outside the app's folders included, makes it `maybe`.
+  A renamed file counts with both its names, and a name that holds a control character, a newline among them,
+  makes it `maybe` too.
   `qa.hidden_paths` adds paths no user can see (such as the app's console commands) and `qa.visible_paths`
   paths a user can, whatever the rules say (Markdown a page shows); each is a list of shell patterns in which
   `*` also matches `/`, and the visible ones are checked first.
@@ -640,8 +661,8 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
 **Set up once**, in the app's repository, besides the QA gate above:
 
 1. A GitHub environment `qa`, deploying from the default branch only, with the secrets `MROOM_FORGE_TOKEN`
-   (from a Forge account whose only team holds the box; teardowns need `server:view`, `site:delete` and
-   `server:delete-daemons`) and `MROOM_QA_SSH_KEY` (the private half of the key the box forces to
+   (from a Forge account whose only team holds the box; teardowns and the reaper need `server:view`,
+   `site:delete` and `server:delete-daemons`) and `MROOM_QA_SSH_KEY` (the private half of the key the box forces to
    `mroom gate provision`), and the variables `MROOM_FORGE_ORG`, `MROOM_FORGE_SERVER`, `MROOM_QA_SSH_HOST`,
    `MROOM_QA_SSH_KNOWN_HOSTS` (the box's host key line, as `ssh-keyscan -t ed25519 <host>` prints it, checked
    against the box's own `/etc/ssh/ssh_host_ed25519_key.pub`) and, when the box user is not `forge`,
@@ -669,6 +690,7 @@ jobs:
       github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login != 'dependabot[bot]' && (github.event.action != 'labeled' || github.event.label.name == 'qa'))
     permissions:
+      actions: write # the hand-over, for a plan the wake started; the build job itself only reads
       contents: read
       pull-requests: read
     uses: milroyfraser/mroom/.github/workflows/qa-plan.yml@v0.4.0
@@ -685,6 +707,7 @@ on:
   workflow_dispatch:
     inputs:
       pr_number: { description: The pull request whose environment to tear down, required: true, type: string }
+      reason: { description: Why it goes, required: true, type: choice, options: [hand, ttl], default: hand }
 permissions:
   contents: read
 jobs:
@@ -697,6 +720,7 @@ jobs:
     uses: milroyfraser/mroom/.github/workflows/qa-down.yml@v0.4.0
     with:
       pr: ${{ inputs.pr_number || github.event.pull_request.number }}
+      reason: ${{ inputs.reason || 'hand' }}
     secrets:
       MROOM_FORGE_TOKEN: ${{ secrets.MROOM_FORGE_TOKEN }}
       MROOM_QA_SSH_KEY: ${{ secrets.MROOM_QA_SSH_KEY }}
@@ -714,19 +738,19 @@ permissions:
 jobs:
   qa:
     permissions:
-      actions: write
+      actions: write # to start a teardown for each environment past its time
       contents: read
-      pull-requests: write
     uses: milroyfraser/mroom/.github/workflows/qa-reap.yml@v0.4.0
     secrets:
       MROOM_FORGE_TOKEN: ${{ secrets.MROOM_FORGE_TOKEN }}
-      MROOM_QA_SSH_KEY: ${{ secrets.MROOM_QA_SSH_KEY }}
 ```
 
 A caller passes the secrets by name, since `secrets: inherit` reaches only a workflow of the same
-organisation, and the secrets resolve from the `qa` environment that the called job names. A pull request
-based on another branch than the default one runs under that branch, which `qa` refuses: its environment goes
-with the reaper, or a teardown run by hand (`gh workflow run qa-down.yml -f pr_number=<N>`).
+organisation, and the secrets resolve from the `qa` environment that the called job names. Since 8 December
+2025, `pull_request_target` runs the default branch's workflow whatever a pull request's base, so a pull request
+based on another branch tears down like any other. The workflow files' names above are the defaults the reusable
+workflows start each other by (`plan-workflow`, `up-workflow`, `down-workflow` inputs); an app that names its own
+otherwise passes them. A teardown by hand: `gh workflow run qa-down.yml -f pr_number=<N>`.
 
 ## Regression label
 

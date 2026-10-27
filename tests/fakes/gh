@@ -5,10 +5,12 @@
 #   gh api --paginate repos/<repo>/issues/<N>/comments --jq <filter>   comments-<N>.json (a list), filtered
 #   gh api -X PATCH repos/<repo>/issues/comments/<id> --input -        "PATCH <id> <body>"; edits the comment
 #   gh api -X POST repos/<repo>/issues/<N>/comments --input -          "POST <N> <body>"; adds the comment
-#   gh pr list --repo <repo> ... --json ... --jq <filter>              prs.json, filtered
-#   gh workflow run <file> --repo <repo> [--ref <branch>] -f pr_number=<N>    "dispatch <file> <branch> <N>"
+#   gh api --paginate repos/<repo>/pulls/<N>/files --jq <filter>       files-<N>.json (a list), filtered
+#   gh pr list --repo <repo> ... --json ... --jq <filter>              prs.json, filtered; its arguments go to reads.log
+#   gh workflow run <file> --repo <repo> [--ref <branch>] -f k=v...    "dispatch <file> <branch> k=v..."
 #
-# A body is logged with its newlines as \n. With $GH_FAKE/down, every call fails as GitHub being unreachable.
+# A body is logged with its newlines as \n. With $GH_FAKE/down, every call fails as GitHub being unreachable; with
+# $GH_FAKE/patch-fails-<id>, an edit of that comment fails; with $GH_FAKE/dispatch-fails, every dispatch does.
 set -euo pipefail
 shopt -s nullglob
 log() { printf '%s\n' "$*" >>"$GH_FAKE/gh.log"; }
@@ -31,6 +33,10 @@ case "${args[0]} ${args[1]:-}" in
   "api repos/"*)
     path="${args[1]}"
     case "$method $path" in
+      GET\ repos/*/pulls/*/files)
+        n="${path%/files}"; n="${n##*/}"
+        filter "$GH_FAKE/files-$n.json" "${jqf:-.}"
+        ;;
       GET\ repos/*/issues/*/comments)
         n="${path%/comments}"; n="${n##*/}"
         file="$GH_FAKE/comments-$n.json"
@@ -39,6 +45,7 @@ case "${args[0]} ${args[1]:-}" in
         ;;
       PATCH\ repos/*/issues/comments/*)
         id="${path##*/}" body="$(jq -r .body)"
+        if [ -f "$GH_FAKE/patch-fails-$id" ]; then echo "gh: Server Error (HTTP 502)" >&2; exit 1; fi
         log "PATCH $id ${body//$'\n'/\\n}"
         for file in "$GH_FAKE"/comments-*.json; do
           jq --argjson id "$id" --arg b "$body" 'map(if .id == $id then .body = $b | .updated_at = "2026-10-27T12:00:00Z" else . end)' \
@@ -56,16 +63,20 @@ case "${args[0]} ${args[1]:-}" in
       *) echo "fake gh: unexpected $method $path" >&2; exit 1 ;;
     esac
     ;;
-  "pr list") filter "$GH_FAKE/prs.json" "${jqf:-.}" ;;
+  "pr list")
+    printf '%s\n' "${args[*]}" >>"$GH_FAKE/reads.log"
+    filter "$GH_FAKE/prs.json" "${jqf:-.}"
+    ;;
   "workflow run")
-    file="${args[2]}" ref="(default)" n=""
+    file="${args[2]}" ref="(default)" fields=""
     for ((i = 3; i < ${#args[@]}; i++)); do
       case "${args[i]}" in
         --ref) ref="${args[i + 1]}" ;;
-        pr_number=*) n="${args[i]#pr_number=}" ;;
+        -f) fields+=" ${args[i + 1]}" ;;
       esac
     done
-    log "dispatch $file $ref $n"
+    if [ -f "$GH_FAKE/dispatch-fails" ]; then echo "could not create workflow dispatch event: HTTP 422" >&2; exit 1; fi
+    log "dispatch $file $ref${fields}"
     ;;
   *) echo "fake gh: unexpected ${args[*]}" >&2; exit 1 ;;
 esac

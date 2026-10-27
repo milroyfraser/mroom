@@ -1,20 +1,27 @@
 name: QA environment down
 description: >-
-  Tears down one pull request's QA environment, when Forge has one (design 8.2, 8.9): its daemons, its site
-  user's processes and files (the gate's user-clean), its sites, then its database and role, Redis user and
-  keys, mail login and mail, and buckets, through the gate. Then the pull request's QA environment comment says
-  it was removed, and the slot it freed goes to the pull request that has waited longest. Run it only from a job
-  in the qa environment that checks out the default branch alone (.github/workflows/qa-down.yml).
+  Tears down one pull request's QA environment (design 8.2, 8.9), or with check, only reads whether Forge has one.
+  The teardown runs every step, each skipping what is already gone, so re-running it finishes one that stopped:
+  its daemons, its site user's processes and files (the gate's user-clean), its sites, then its database and role,
+  Redis user and keys, mail login and mail, and buckets, through the gate. The pull request's QA environment
+  comment says what happened, and a slot it freed goes to the pull request that has waited longest. Run it only from
+  a job in the qa environment that checks out the default branch alone (.github/workflows/qa-down.yml).
 inputs:
   pr:
     description: The pull request's number, which is its environment's
     required: true
-  why:
-    description: Why it was removed, for the comment
-    default: ""
-  always:
-    description: true to clear the box's side even when Forge has no site of the environment
+  check:
+    description: true to read whether Forge has the environment (output state) and change nothing
     default: "false"
+  reason:
+    description: Why it goes, for the comment (closed, label, hand or ttl)
+    default: hand
+  state:
+    description: What the check read (present, removing or absent); empty reads Forge again
+    default: ""
+  label:
+    description: The label that forces a QA environment on
+    default: qa
   config:
     description: The app's mroom.toml, checked out from the default branch
     default: mroom.toml
@@ -25,40 +32,57 @@ inputs:
     description: The Forge organisation
     required: true
   forge-server:
-    description: The Forge server id of the box
-    required: true
+    description: The Forge server id of the box; empty while the qa environment is not set up, which tears down nothing
+    default: ""
   forge-token:
     description: The qa environment's Forge token
     required: true
   ssh-host:
-    description: The box's host name
-    required: true
+    description: The box's host name (not for check)
+    default: ""
   ssh-user:
     description: The box user whose authorized_keys forces the gate on the key
     default: forge
   ssh-key:
-    description: The private key the box forces to mroom gate provision
-    required: true
+    description: The private key the box forces to mroom gate provision (not for check)
+    default: ""
   ssh-known-hosts:
-    description: The box's host key line
-    required: true
+    description: The box's host key line (not for check)
+    default: ""
   github-token:
     description: A token that may write pull request comments and start workflows
     default: ${{ github.token }}
 outputs:
-  freed:
-    description: true when the environment held a slot that is now free
-    value: ${{ steps.down.outputs.freed }}
+  state:
+    description: With check, present, removing or absent
+    value: ${{ steps.check.outputs.state }}
 runs:
   using: composite
   steps:
-    - id: down
-      name: Tear down the QA environment
+    - id: check
+      name: Does the pull request have a QA environment?
+      if: inputs.check == 'true'
       shell: bash
       env:
         PR: ${{ inputs.pr }}
-        WHY: ${{ inputs.why }}
-        ALWAYS: ${{ inputs.always }}
+        REASON: ${{ inputs.reason }}
+        LABEL: ${{ inputs.label }}
+        MROOM_CONFIG: ${{ inputs.config }}
+        MROOM_FORGE_ORG: ${{ inputs.forge-org }}
+        MROOM_FORGE_SERVER: ${{ inputs.forge-server }}
+        MROOM_FORGE_TOKEN: ${{ inputs.forge-token }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: '"$GITHUB_ACTION_PATH/check.sh" "$PR" --reason "$REASON" | tee -a "$GITHUB_OUTPUT"'
+    - id: down
+      name: Tear down the QA environment
+      if: inputs.check != 'true'
+      shell: bash
+      env:
+        PR: ${{ inputs.pr }}
+        REASON: ${{ inputs.reason }}
+        STATE: ${{ inputs.state }}
+        LABEL: ${{ inputs.label }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         MROOM_CONFIG: ${{ inputs.config }}
         MROOM_QA_PLAN_WORKFLOW: ${{ inputs.plan-workflow }}
         MROOM_QA_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -71,7 +95,6 @@ runs:
         MROOM_QA_SSH_KNOWN_HOSTS: ${{ inputs.ssh-known-hosts }}
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
-        args=(--wake)
-        if [ "$ALWAYS" = true ]; then args+=(--always); fi
-        if [ -n "$WHY" ]; then args+=(--why "$WHY"); fi
+        args=(--reason "$REASON" --wake)
+        if [ -n "$STATE" ]; then args+=(--state "$STATE"); fi
         "$GITHUB_ACTION_PATH/down.sh" "$PR" "${args[@]}"

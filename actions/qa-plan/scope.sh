@@ -2,7 +2,7 @@
 # scope.sh — the path rules of the QA plan (actions/qa-plan; design 8.2): could a user notice this change? The
 # cheap, certain half of the plan, which needs no model.
 #
-#   scope.sh < paths          one changed path per line, as GitHub lists a pull request's files
+#   scope.sh < paths          one changed path per line, as plan.sh lists a pull request's files
 #
 # Prints two lines, for GITHUB_OUTPUT:
 #   scope=none|maybe
@@ -11,7 +11,8 @@
 # none when every path is in an area no user can see: tests, docs, CI, agent and developer tooling. maybe when
 # any path could reach the app. A path outside the app's folders that no rule names is a maybe too, since a new
 # top-level folder should be looked at, not waved through; so is an empty list, which means it could not be
-# read, and one of 3000 paths or more, the most GitHub lists. The first rule that matches a path decides it:
+# read, one of 3000 paths or more, the most GitHub lists, and a name that holds a control character. Otherwise the
+# first rule that matches a path decides it:
 #   1. qa.visible_paths in mroom.toml: paths a user can see, whatever the rules below say
 #   2. qa.hidden_paths: paths no user can see, such as the app's console commands
 #   3. mroom's own rules, below, for where a Laravel + Vite app keeps what (app.backend_dir, app.frontend_dir)
@@ -45,6 +46,9 @@ app_area=backend
 area() {
   local p="$1" pattern
   kind=visible
+  # A name no rule can be trusted to read: GitHub's list shows a name with a newline as two lines, which plan.sh
+  # passes on as one line holding a control character instead.
+  if [[ "$p" == *[[:cntrl:]]* ]]; then name="a name with a control character"; return; fi
   for pattern in "${visible[@]}"; do
     # shellcheck disable=SC2053  # the pattern is meant to match as a pattern
     if [[ -n "$pattern" && "$p" == $pattern ]]; then name=qa.visible_paths; return; fi
