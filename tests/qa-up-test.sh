@@ -657,11 +657,12 @@ t_certificates_are_asked_for_and_a_failed_one_again_once() {
   up
   expect_rc 0; expect_out_has "enabled certificate 102"
   run grep -c '^POST /sites/101/domains/1010/certificates/102/actions {"action":"enable"}$' "$FORGE_LOG"; expect_out 1
+  # One whose enable Forge ignores is waited for, neither enabled again nor asked for anew, until the wait ends.
   app "$TWO" api/artisan=php
   forge_set '.clone_enable_ignored = true | .enable_ignored = true'
-  export MROOM_QA_CERT_WAIT=10
+  export MROOM_QA_CERT_WAIT=30
   up
-  expect_rc 1; expect_err_has "site 101 had no active certificate after 10s"
+  expect_rc 1; expect_err_has "site 101 had no active certificate after 30s"
   run grep -c '^POST /sites/101/domains/1010/certificates/102/actions ' "$FORGE_LOG"; expect_out 1
   run grep -c '^POST /sites/101/domains/1010/certificates ' "$FORGE_LOG"; expect_out 1
 }

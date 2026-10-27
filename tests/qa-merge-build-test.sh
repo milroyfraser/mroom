@@ -12,18 +12,19 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 skip_unless has_tomllib "python3 has no tomllib (needs 3.11+)"
 
 MERGE="$ROOT/actions/qa-up/merge-build"
-TOP=example-shop-aaaaaaa
+# TREE: the tarball's one top folder. (TOP is tests/lib.sh's temp root, which its exit trap removes.)
+TREE=example-shop-aaaaaaa
 
 # tarball: GitHub's tarball of a commit in $T/code.tgz: a global header naming the commit, one top folder, an
 # executable artisan, and a build committed at public/build; and a build in $T/dist.
 tarball() {
-  mkdir -p "$T/src/$TOP/public/build" "$T/dist/assets"
-  printf 'php\n' >"$T/src/$TOP/artisan"
-  chmod 755 "$T/src/$TOP/artisan"
-  printf 'old\n' >"$T/src/$TOP/public/build/old.js"
-  printf 'index\n' >"$T/src/$TOP/public/index.php"
-  chmod 755 "$T/src/$TOP" "$T/src/$TOP/public" "$T/src/$TOP/public/build"
-  chmod 644 "$T/src/$TOP/public/build/old.js" "$T/src/$TOP/public/index.php"
+  mkdir -p "$T/src/$TREE/public/build" "$T/dist/assets"
+  printf 'php\n' >"$T/src/$TREE/artisan"
+  chmod 755 "$T/src/$TREE/artisan"
+  printf 'old\n' >"$T/src/$TREE/public/build/old.js"
+  printf 'index\n' >"$T/src/$TREE/public/index.php"
+  chmod 755 "$T/src/$TREE" "$T/src/$TREE/public" "$T/src/$TREE/public/build"
+  chmod 644 "$T/src/$TREE/public/build/old.js" "$T/src/$TREE/public/index.php"
   python3 -I - "$T/src" "$T/code.tgz" <<'PY'
 import os, sys, tarfile
 src, dst = sys.argv[1:]
@@ -47,24 +48,24 @@ t_the_build_takes_its_place_in_the_tree() {
   run merged public/build
   expect_rc 0
   run listing
-  expect_out "$TOP 0o755 $(id -u):$(id -g)
-$TOP/artisan 0o755 $(id -u):$(id -g)
-$TOP/public 0o755 $(id -u):$(id -g)
-$TOP/public/build 0o755 0:0
-$TOP/public/build/assets 0o755 0:0
-$TOP/public/build/assets/app.js 0o644 0:0
-$TOP/public/build/index.html 0o644 0:0
-$TOP/public/index.php 0o644 $(id -u):$(id -g)"
+  expect_out "$TREE 0o755 $(id -u):$(id -g)
+$TREE/artisan 0o755 $(id -u):$(id -g)
+$TREE/public 0o755 $(id -u):$(id -g)
+$TREE/public/build 0o755 0:0
+$TREE/public/build/assets 0o755 0:0
+$TREE/public/build/assets/app.js 0o644 0:0
+$TREE/public/build/index.html 0o644 0:0
+$TREE/public/index.php 0o644 $(id -u):$(id -g)"
   run python3 -I -c 'import sys, tarfile; print(tarfile.open(sys.argv[1]).pax_headers.get("comment"))' "$T/out.tgz"
   expect_out "$(printf 'a%.0s' {1..40})"
-  run tar -xzOf "$T/out.tgz" "$TOP/public/build/assets/app.js"; expect_out "console.log(1)"
+  run tar -xzOf "$T/out.tgz" "$TREE/public/build/assets/app.js"; expect_out "console.log(1)"
 }
 
 t_a_path_inside_a_backend_folder_works_and_one_outside_the_tree_is_refused() {
   tarball
   run merged ./public/build/
   expect_rc 0
-  run listing; expect_out_has "$TOP/public/build/index.html"
+  run listing; expect_out_has "$TREE/public/build/index.html"
   local bad
   for bad in "" / ../x public/../../x; do
     run merged "$bad"; expect_rc 2; expect_err_has "is not a path inside the tree"
