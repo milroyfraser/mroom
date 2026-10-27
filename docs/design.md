@@ -243,6 +243,8 @@ persona_domain = ".test"           # sign-in codes are only ever read for these 
 db_read_allowlist = []             # REQUIRED when browser QA is on: tables and columns the agent may read
 hidden_paths = []                  # the plan's path rules: paths no user can see, beyond mroom's own rules
 visible_paths = []                 # paths a user can see, whatever the rules say (shell patterns, * matches /)
+disks = { files = "AWS_" }         # a bucket per file disk, under Laravel's s3 env names with this prefix
+public_disks = []                  # the disks whose files are public (a bucket with website access)
 
 [qa.parity]                        # how QA runs each production service (section 9); defaults shown
 database = "seeded"                # seeded (factories) | snapshot (opt-in masked copy, section 9)

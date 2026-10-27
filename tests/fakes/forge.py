@@ -11,10 +11,17 @@ fake-forge-token reaches the organisation acme's server 42. Each call is logged 
 when it is set, which the gate's stand-in (tests/fakes/ssh) writes too.
 
 As Forge does, it answers JSON:API resources, and lists at most page[size] items at a time with a cursor to the
-next page ("page_size" in the state lowers the most). A site it deletes turns removing, with updated_at now (MROOM_NOW, when set), and
-goes after "remove_reads" (1) more reads of the site list; -1 keeps it removing. A process it deletes goes at
-once, or turns removing and goes after "process_remove_reads" reads of the list. "fail": {"<METHOD> <path>": code}
-answers that code to every such call, and {"code": code, "times": n} to the next n only.
+next page ("page_size" in the state lowers the most). A site it deletes turns removing, with updated_at now (MROOM_NOW,
+when set), and goes after "remove_reads" (1) more reads of the site list; -1 keeps it removing. A process it deletes
+goes at once, or turns removing and goes after "process_remove_reads" reads of the list. "fail": {"<METHOD> <path>":
+code} answers that code to every such call, and {"code": code, "times": n} to the next n only.
+
+What qa-up makes, it makes as Forge does, slowly: a site stays installing for "install_reads" (1) reads of the list,
+with an nginx config of Forge's shape; a certificate is inactive for "cert_reads" (1) reads; a deployment is deploying
+for "deploy_reads" (1) reads, then ends "deploy_result" (finished) with "deploy_log" as its output; and a background
+process runs as the user asked for, or as "process_user" when the state names one, as a Forge that ignores the user
+would. Any other host plays the environment's /up: it answers the next code of $FORGE_UP (one a line, the last one
+repeating), 000 being no answer, and logs each to $FORGE_UP.log.
 """
 
 import datetime
@@ -37,8 +44,25 @@ def now() -> str:
 
 
 def resource(kind: str, item: dict) -> dict:
-    return {"id": str(item["id"]), "type": kind,
-            "attributes": {k: v for k, v in item.items() if k not in ("id", "remove_reads")}}
+    hidden = ("id", "remove_reads", "install_reads", "reads", "nginx", "script", "certificates", "deployments")
+    return {"id": str(item["id"]), "type": kind, "attributes": {k: v for k, v in item.items() if k not in hidden}}
+
+
+def up_probe(out: str | None, write_out: str) -> int:
+    """The environment's /up: the next code of $FORGE_UP, the last one repeating."""
+    path = os.environ.get("FORGE_UP", "")
+    codes = open(path).read().split() if path and os.path.exists(path) else ["200"]
+    code = codes[0]
+    if len(codes) > 1:
+        with open(path, "w") as f:
+            f.write("\n".join(codes[1:]) + "\n")
+    with open(path + ".log", "a") as f:
+        f.write(f"{code}\n")
+    if out and out != "/dev/null":
+        open(out, "w").close()
+    if "%{http_code}" in write_out:
+        sys.stdout.write(code)
+    return 7 if code == "000" else 0
 
 
 def page(state: dict, items: list, kind: str, query: dict) -> dict:
@@ -62,14 +86,110 @@ def settle(items: list, field: str) -> list:
     return kept
 
 
+NGINX = """# FORGE CONFIG (DO NOT REMOVE!)
+include forge-conf/{name}/before/*;
+
+server {{
+    listen 80;
+    server_name {name};
+    root /home/{user}/{name}{web};
+
+    index index.html index.php;
+
+    location / {{
+        try_files $uri $uri/ {fallback};
+    }}
+}}
+"""
+
+
+def site_of(state: dict, site_id: str) -> dict | None:
+    return next((s for s in state.get("sites", []) if str(s["id"]) == site_id), None)
+
+
+def new_id(state: dict) -> int:
+    state["next_id"] = state.get("next_id", 100) + 1
+    return state["next_id"]
+
+
+def make_site(state: dict, body: dict) -> dict:
+    web = (body.get("web_directory") or "/").rstrip("/")
+    site = {"id": new_id(state), "name": body["name"], "status": "installing", "user": body.get("isolated_user", "forge"),
+            "isolated": bool(body.get("is_isolated")), "created_at": now(), "type": body.get("type"),
+            "php_version": body.get("php_version"), "web_directory": body.get("web_directory"),
+            "install_reads": state.get("install_reads", 1)}
+    site["nginx"] = NGINX.format(name=site["name"], user=site["user"], web=web,
+                                 fallback="/index.php?$query_string" if body.get("type") == "php" else "=404")
+    state.setdefault("sites", []).append(site)
+    return site
+
+
+def site_route(state: dict, method: str, site: dict, rest: list, query: dict, body: dict | None) -> tuple[int, object]:
+    if rest == ["nginx"] and method == "GET":
+        return 200, {"data": {"id": str(site["id"]), "type": "nginxConfigs", "attributes": {"content": site.get("nginx")}}}
+    if rest == ["nginx"] and method == "PUT":
+        site["nginx"] = body["config"]
+        return 200, None
+    if rest == ["certificates"] and method == "GET":
+        for cert in site.get("certificates", []):
+            if not cert["active"]:
+                cert["reads"] -= 1
+                if cert["reads"] < 0:
+                    cert.update(active=True, request_status="created")
+        return 200, {"data": [resource("certificates", c) for c in site.get("certificates", [])]}
+    if rest == ["domains"] and method == "GET":
+        return 200, {"data": [{"id": str(site["id"] * 10), "type": "domains", "attributes": {"name": site["name"], "type": "primary"}}]}
+    if len(rest) == 3 and rest[0] == "domains" and rest[2] == "certificates" and method == "POST":
+        if rest[1] != str(site["id"] * 10):
+            return 404, {"message": "Not Found."}
+        cert = {"id": new_id(state), "type": body["type"], "active": False, "request_status": "creating",
+                "reads": state.get("cert_reads", 1)}
+        site.setdefault("certificates", []).append(cert)
+        return 202, {"data": resource("certificates", cert)}
+    if rest == ["deployments", "script"] and method == "PUT":
+        site["script"] = body["content"]
+        return 200, None
+    if rest == ["deployments"] and method == "POST":
+        deployment = {"id": new_id(state), "status": "deploying", "reads": state.get("deploy_reads", 1)}
+        site.setdefault("deployments", []).append(deployment)
+        return 202, None
+    if rest == ["deployments"] and method == "GET":
+        newest = list(reversed(site.get("deployments", [])))[: int(query.get("page[size]", ["100"])[0])]
+        return 200, {"data": [resource("deployments", d) for d in newest], "meta": {"next_cursor": None}}
+    if len(rest) in (2, 3) and rest[0] == "deployments" and method == "GET":
+        deployment = next((d for d in site.get("deployments", []) if str(d["id"]) == rest[1]), None)
+        if deployment is None:
+            return 404, {"message": "Not Found."}
+        if len(rest) == 3 and rest[2] == "log":
+            return 200, {"data": {"type": "deploymentOutputs", "attributes": {"output": state.get("deploy_log", "")}}}
+        if deployment["status"] == "deploying":
+            deployment["reads"] -= 1
+            if deployment["reads"] < 0:
+                deployment["status"] = state.get("deploy_result", "finished")
+        return 200, {"data": resource("deployments", deployment)}
+    return 404, {"message": f"the fake has no {method} for a site's {'/'.join(rest)}"}
+
+
 def route(state: dict, method: str, path: str, query: dict, body: dict | None) -> tuple[int, object]:
     parts = path.strip("/").split("/")
+    if parts == ["sites"] and method == "POST":
+        return 202, {"data": resource("sites", make_site(state, body))}
     if parts == ["sites"] and method == "GET":
+        for site in state.get("sites", []):
+            if site.get("status") == "installing" and site.get("install_reads", 0) >= 0:
+                site["install_reads"] -= 1
+                if site["install_reads"] < 0:
+                    site["status"] = "installed"
         state["sites"] = settle(state.get("sites", []), "remove_reads")
         sites = state["sites"]
         if "filter[name]" in query:
             sites = [s for s in sites if s["name"] == query["filter[name]"][0]]
         return 200, page(state, sites, "sites", query)
+    if len(parts) > 2 and parts[0] == "sites":
+        site = site_of(state, parts[1])
+        if site is None:
+            return 404, {"message": "Not Found."}
+        return site_route(state, method, site, parts[2:], query, body)
     if len(parts) == 2 and parts[0] == "sites" and method == "DELETE":
         for site in state.get("sites", []):
             if str(site["id"]) == parts[1]:
@@ -79,6 +199,15 @@ def route(state: dict, method: str, path: str, query: dict, body: dict | None) -
     if parts == ["background-processes"] and method == "GET":
         state["processes"] = settle(state.get("processes", []), "remove_reads")
         return 200, page(state, state["processes"], "backgroundProcesses", query)
+    if parts == ["background-processes"] and method == "POST":
+        process = {"id": new_id(state), "user": state.get("process_user", body["user"]), "directory": body.get("directory"),
+                   "command": body["command"], "processes": body["processes"], "status": "installing",
+                   "site_id": body.get("site_id"), "name": body["name"]}
+        state.setdefault("processes", []).append(process)
+        return 202, {"data": resource("backgroundProcesses", process)}
+    if len(parts) == 2 and parts[0] == "background-processes" and method == "GET":
+        process = next((p for p in state.get("processes", []) if str(p["id"]) == parts[1]), None)
+        return (200, {"data": resource("backgroundProcesses", process)}) if process else (404, {"message": "Not Found."})
     if len(parts) == 2 and parts[0] == "background-processes" and method == "DELETE":
         for process in state.get("processes", []):
             if str(process["id"]) == parts[1]:
@@ -124,6 +253,8 @@ def main(argv: list[str]) -> int:
 
     parsed = urllib.parse.urlsplit(url)
     path, query = parsed.path, urllib.parse.parse_qs(parsed.query)
+    if parsed.netloc != "forge.laravel.com":
+        return up_probe(out, write_out)
     with open(STATE) as f:
         state = json.load(f)
     with open(LOG, "a") as f:
@@ -135,7 +266,7 @@ def main(argv: list[str]) -> int:
 
     key = f"{method} {path.removeprefix(BASE)}"
     failing = state.get("fail", {}).get(key)
-    if parsed.netloc != "forge.laravel.com" or not path.startswith(BASE + "/") or not auth:
+    if not path.startswith(BASE + "/") or not auth:
         code, answer = 401, {"message": "Unauthenticated."}
     elif isinstance(failing, int):
         code, answer = failing, {"message": "failing, as the test asked"}

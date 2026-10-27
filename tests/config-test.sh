@@ -217,6 +217,29 @@ visible_paths = ["web/src/content/*"]'
   run "$MROOM" config get qa.visible_paths; expect_out "web/src/content/*"
   run "$MROOM" config get app.frontend_dir --default .; expect_out ""
   run "$MROOM" config get app.build.frontend_dist --default ..; expect_rc 2
+  toml '[app]
+name = "shop"
+
+[qa]
+disks = { files = "AWS_", "Media-Disk" = "MEDIA_", logs = "aws" }
+public_disks = ["public_files"]'
+  run "$MROOM" config validate; expect_rc 1
+  expect_err_has 'qa.disks has a disk name that is not [a-z][a-z0-9]{0,15}: "Media-Disk"'
+  expect_err_has 'qa.public_disks has a disk name that is not [a-z][a-z0-9]{0,15}: "public_files"'
+  toml '[app]
+name = "shop"
+
+[qa]
+disks = { logs = "aws" }'
+  run "$MROOM" config validate; expect_rc 1; expect_err_has 'qa.disks.logs must be the prefix of env names, such as AWS_ (got "aws")'
+  toml '[app]
+name = "shop"
+
+[qa]
+disks = { files = "AWS_", media = "MEDIA_" }
+public_disks = ["media"]'
+  run "$MROOM" config validate; expect_rc 0
+  run "$MROOM" config get qa.disks; expect_out $'files=AWS_\nmedia=MEDIA_'
 }
 
 t_shape_errors() {

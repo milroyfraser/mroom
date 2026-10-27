@@ -1,0 +1,145 @@
+name: QA environment up
+description: >-
+  Decides whether a push brings its pull request's QA environment up (start.sh), and if so creates or refreshes
+  it (up.sh): Forge isolated sites, the code as data through the gate, the environment's own services and .env,
+  Forge's deploy, a queue worker run as the site user, and a health check (design 8.2, D17). Run it only from a job
+  in the qa environment that checks out the default branch alone, after the pull request was resolved from
+  GitHub's records (.github/workflows/qa-up.yml).
+inputs:
+  pr:
+    description: The pull request's number, which is its environment's
+    required: true
+  sha:
+    description: The pull request's head commit, which the QA plan built
+    required: true
+  scope:
+    description: The path rules' answer, none or maybe
+    default: maybe
+  reason:
+    description: Why, from the path rules
+    default: ""
+  forced:
+    description: true when the label forces the environment on
+    default: "false"
+  draft:
+    description: true for a draft pull request
+    default: "false"
+  dispatched:
+    description: true for a QA plan started by hand or by a freed slot
+    default: "false"
+  built:
+    description: true when the QA plan's build job succeeded
+    default: "false"
+  plan-run-id:
+    description: The QA plan run, whose build this deploys
+    required: true
+  plan-run-url:
+    description: The QA plan run's page, for the comment
+    default: ""
+  label:
+    description: The label that forces an environment on
+    default: qa
+  config:
+    description: The app's mroom.toml, checked out from the default branch
+    default: mroom.toml
+  forge-org:
+    description: The Forge organisation
+    required: true
+  forge-server:
+    description: The Forge server id of the box
+    required: true
+  forge-token:
+    description: The qa environment's Forge token
+    required: true
+  ssh-host:
+    description: The box's host name
+    required: true
+  ssh-user:
+    description: The box user whose authorized_keys forces the gate on the key
+    default: forge
+  ssh-key:
+    description: The private key the box forces to mroom gate provision
+    required: true
+  ssh-known-hosts:
+    description: The box's host key line
+    required: true
+  env-template:
+    description: The shared .env every environment starts from (third-party test-mode keys only)
+    default: ""
+  certificate:
+    description: A wildcard certificate in Forge to clone onto each site; empty asks Let's Encrypt for each
+    default: ""
+  nginx-template:
+    description: An nginx template in Forge for new sites; qa-up checks each site's config either way
+    default: ""
+  github-token:
+    description: A token that may read the repository and its runs, and write pull request comments
+    default: ${{ github.token }}
+outputs:
+  start:
+    description: true when the environment was to come up
+    value: ${{ steps.start.outputs.start }}
+  app-url:
+    description: The environment's address for people
+    value: ${{ steps.up.outputs.app_url }}
+  api-url:
+    description: The environment's Laravel app
+    value: ${{ steps.up.outputs.api_url }}
+  refused:
+    description: Why a new environment waits for a slot, when it does
+    value: ${{ steps.up.outputs.refused }}
+runs:
+  using: composite
+  steps:
+    - id: start
+      name: Should the environment come up?
+      shell: bash
+      env:
+        PR: ${{ inputs.pr }}
+        SHA: ${{ inputs.sha }}
+        SCOPE: ${{ inputs.scope }}
+        REASON: ${{ inputs.reason }}
+        FORCED: ${{ inputs.forced }}
+        DRAFT: ${{ inputs.draft }}
+        DISPATCHED: ${{ inputs.dispatched }}
+        BUILT: ${{ inputs.built }}
+        LABEL: ${{ inputs.label }}
+        RUN_URL: ${{ inputs.plan-run-url }}
+        MROOM_CONFIG: ${{ inputs.config }}
+        MROOM_FORGE_ORG: ${{ inputs.forge-org }}
+        MROOM_FORGE_SERVER: ${{ inputs.forge-server }}
+        MROOM_FORGE_TOKEN: ${{ inputs.forge-token }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: '"$GITHUB_ACTION_PATH/start.sh" | tee -a "$GITHUB_OUTPUT"'
+    # The build qa-plan made from the pull request, with public values only: files to put, never code to run here.
+    - name: Get the frontend build
+      if: steps.start.outputs.start == 'true' && steps.start.outputs.dist == 'true'
+      uses: actions/download-artifact@v4
+      with:
+        name: mroom-qa-dist
+        path: ${{ runner.temp }}/mroom-qa-dist
+        run-id: ${{ inputs.plan-run-id }}
+        github-token: ${{ inputs.github-token }}
+    - id: up
+      name: Bring the environment up
+      if: steps.start.outputs.start == 'true'
+      shell: bash
+      env:
+        PR: ${{ inputs.pr }}
+        SHA: ${{ inputs.sha }}
+        LABEL: ${{ inputs.label }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        MROOM_CONFIG: ${{ inputs.config }}
+        MROOM_QA_DIST: ${{ steps.start.outputs.dist == 'true' && format('{0}/mroom-qa-dist', runner.temp) || '' }}
+        MROOM_QA_ENV_TEMPLATE: ${{ inputs.env-template }}
+        MROOM_QA_CERTIFICATE: ${{ inputs.certificate }}
+        MROOM_QA_NGINX_TEMPLATE: ${{ inputs.nginx-template }}
+        MROOM_FORGE_ORG: ${{ inputs.forge-org }}
+        MROOM_FORGE_SERVER: ${{ inputs.forge-server }}
+        MROOM_FORGE_TOKEN: ${{ inputs.forge-token }}
+        MROOM_QA_SSH_HOST: ${{ inputs.ssh-host }}
+        MROOM_QA_SSH_USER: ${{ inputs.ssh-user }}
+        MROOM_QA_SSH_KEY: ${{ inputs.ssh-key }}
+        MROOM_QA_SSH_KNOWN_HOSTS: ${{ inputs.ssh-known-hosts }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: '"$GITHUB_ACTION_PATH/up.sh" "$PR" "$SHA"'

@@ -7,6 +7,10 @@
 #   gh api -X POST repos/<repo>/issues/<N>/comments --input -          "POST <N> <body>"; adds the comment
 #   gh pr list --repo <repo> ... --json ... --jq <filter>              prs.json, filtered
 #   gh workflow run <file> --repo <repo> [--ref <branch>] -f pr_number=<N>    "dispatch <file> <branch> <N>"
+#   gh api repos/<repo>/tarball/<sha>                                  tarball.tgz, as GitHub's of that commit
+#   gh api repos/<repo>/actions/runs/<id>/jobs --jq <filter>           jobs-<id>.json, filtered
+#   gh api repos/<repo>/commits/<sha>/pulls                            pulls.json
+#   gh pr view <N> --repo <repo> --json ... [--jq <filter>]            pr-<N>.json, filtered
 #
 # A body is logged with its newlines as \n. With $GH_FAKE/down, every call fails as GitHub being unreachable.
 set -euo pipefail
@@ -53,8 +57,21 @@ case "${args[0]} ${args[1]:-}" in
         jq --arg b "$body" '. + [{id: (900 + length), user: {login: "github-actions[bot]"}, body: $b,
           updated_at: "2026-10-27T12:00:00Z"}]' "$file" >"$file.new" && mv "$file.new" "$file"
         ;;
+      GET\ repos/*/tarball/*)
+        log "tarball ${path##*/}"
+        cat "$GH_FAKE/tarball.tgz"
+        ;;
+      GET\ repos/*/actions/runs/*/jobs)
+        id="${path%/jobs}"; id="${id##*/}"
+        filter "$GH_FAKE/jobs-$id.json" "${jqf:-.}"
+        ;;
+      GET\ repos/*/commits/*/pulls) cat "$GH_FAKE/pulls.json" ;;
       *) echo "fake gh: unexpected $method $path" >&2; exit 1 ;;
     esac
+    ;;
+  "pr view")
+    [ -f "$GH_FAKE/pr-${args[2]}.json" ] || { echo "no pull request ${args[2]}" >&2; exit 1; }
+    filter "$GH_FAKE/pr-${args[2]}.json" "${jqf:-.}"
     ;;
   "pr list") filter "$GH_FAKE/prs.json" "${jqf:-.}" ;;
   "workflow run")

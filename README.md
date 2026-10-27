@@ -603,6 +603,7 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
 | Workflow | Runs on | What it does |
 |---|---|---|
 | `qa-plan.yml` | a push to a pull request, or by hand | sorts the changed paths (could a user notice the change?), then builds the frontend from the pull request's code with public values only; it holds no secret |
+| `qa-up.yml` | the QA plan run completing | brings the environment up or refreshes it, when a user could notice the change, the environment exists, the `qa` label is on, or the plan was started by hand |
 | `qa-down.yml` | the pull request closing, its `qa` label coming off, or by hand | tears the environment down: its daemons, its site user's processes and files, its sites, then its database, Redis user and keys, mail and buckets, through the gate |
 | `qa-reap.yml` | a schedule, or by hand | tears down every environment older than `qa.ttl_days` (5) |
 
@@ -623,6 +624,28 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
   that says whether it is ready, waits for a slot, failed or was removed, and why. It is for people; the
   waiting state also says which pull request gets a freed slot: the one that has waited longest, whose QA
   plan qa-down and qa-reap start again.
+- **What qa-up makes.** Two Forge isolated sites in the home of one user of the environment's own,
+  `<app>_qa_<N>` (design D17), each with a certificate, and nginx set to follow a link only to its owner's
+  files (`disable_symlinks if_not_owner`), which it checks on every run before any code goes in. Then the code,
+  as data: GitHub's tarball of the commit through the gate's `code-put`, with Vite's build put into it when
+  Vite runs inside the Laravel app, and a frontend of its own through `dist-put`. Then the environment's
+  services through the gate, as `[qa.parity]` says, its `.env` through `env-put`, and Forge's deploy, whose
+  script pulls nothing: the tree's `.mroom/hooks/qa-deploy` (or composer install, `migrate --force` and
+  `app.build.after_deploy`), then `.mroom/hooks/qa-fixtures` (or `php artisan mroom:qa-fixtures` when the app
+  has it), then `queue:restart`. Then one queue worker for `app.build.queues`, kept only when Forge runs it as
+  the site user, and `/up`, asked up to 6 times 5 seconds apart, since a new site, or any site while PHP-FPM or
+  nginx reloads, answers 502 for a moment. Each step checks its own resource, so the next run repairs one that
+  stopped halfway. From `qa.max_envs` (5) environments on, a new one waits for a slot; one that exists is
+  always refreshed.
+- **The `.env`.** `MROOM_QA_ENV_TEMPLATE` (third-party test-mode keys only: no app key, no credential for the
+  box), less every key mroom sets, then mroom's: a new `APP_KEY` on each deploy, `APP_DEBUG=false`, the public
+  values below, the database, Redis user and prefixes the gate gives, and as `[qa.parity]` says: the mail login
+  (`catcher`) or `MAIL_MAILER=log`; for each disk of `qa.disks`, a bucket and a key of its own under Laravel's
+  s3 env names with the disk's prefix in place of `AWS_` (`files = "AWS_"` gives `AWS_BUCKET`,
+  `AWS_ACCESS_KEY_ID` and the rest; a disk in `qa.public_disks` also gets `<prefix>URL`), or
+  `FILESYSTEM_DISK=local`; and `BROADCAST_CONNECTION=log`. `broadcast = "same"`, the default, waits for mroom's
+  Reverb host: until it is wired in, qa-up refuses it and says so, so set `broadcast = "log"`. Each value the
+  gate gives is masked in the run's log.
 - **What the plan builds.** `app.frontend_dir` is a folder for a frontend of its own (it gets the go site),
   `.` for Vite inside the Laravel app, or empty for no frontend; `app.build.frontend` is the command, and
   without one nothing is built; `app.build.frontend_dist` is where it writes (`dist`, or `public/build` for
@@ -639,14 +662,19 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
 
 **Set up once**, in the app's repository, besides the QA gate above:
 
-1. A GitHub environment `qa`, deploying from the default branch only, with the secrets `MROOM_FORGE_TOKEN`
-   (from a Forge account whose only team holds the box; teardowns need `server:view`, `site:delete` and
-   `server:delete-daemons`) and `MROOM_QA_SSH_KEY` (the private half of the key the box forces to
-   `mroom gate provision`), and the variables `MROOM_FORGE_ORG`, `MROOM_FORGE_SERVER`, `MROOM_QA_SSH_HOST`,
+1. A GitHub environment `qa`, deploying from the default branch only, with the secrets `MROOM_FORGE_TOKEN`,
+   `MROOM_QA_SSH_KEY` (the private half of the key the box forces to `mroom gate provision`) and
+   `MROOM_QA_ENV_TEMPLATE`, and the variables `MROOM_FORGE_ORG`, `MROOM_FORGE_SERVER`, `MROOM_QA_SSH_HOST`,
    `MROOM_QA_SSH_KNOWN_HOSTS` (the box's host key line, as `ssh-keyscan -t ed25519 <host>` prints it, checked
-   against the box's own `/etc/ssh/ssh_host_ed25519_key.pub`) and, when the box user is not `forge`,
-   `MROOM_QA_SSH_USER`. Every name and host the workflows build comes from the default branch's `mroom.toml`
-   (`app.name`, `qa.zone`, the app's folders), and must match the box's `box.env`.
+   against the box's own `/etc/ssh/ssh_host_ed25519_key.pub`) and, when they apply, `MROOM_QA_SSH_USER` (when
+   the box user is not `forge`), `MROOM_QA_CERTIFICATE` (a wildcard certificate in Forge to clone onto each
+   site; without it each site asks Let's Encrypt) and `MROOM_QA_NGINX_TEMPLATE` (an nginx template for new
+   sites). The Forge token comes from an account whose only team holds the box, with exactly the scopes these
+   calls need: `server:view`, `site:create`, `site:delete`, `site:meta`, `site:manage-ssl`, `site:manage-nginx`,
+   `site:manage-deploys`, `server:create-daemons` and `server:delete-daemons`. Creating daemons reaches root
+   (design D20), which is why only `qa` holds it. Every name and host the workflows build comes from the
+   default branch's `mroom.toml` (`app.name`, `qa.zone`, the app's folders), and must match the box's
+   `box.env`.
 2. The label: `gh label create qa --description "Forces a QA environment on; taking it off tears it down"`.
 3. The app's own workflows, which name a run after its pull request so that qa-up can tell which one it was:
 
@@ -674,6 +702,29 @@ jobs:
     uses: milroyfraser/mroom/.github/workflows/qa-plan.yml@v0.4.0
     with:
       pr: ${{ inputs.pr_number || github.event.pull_request.number }}
+```
+
+```yaml
+# .github/workflows/qa-up.yml
+name: QA environment up
+run-name: "QA environment · ${{ github.event.workflow_run.pull_requests[0] && format('PR #{0}', github.event.workflow_run.pull_requests[0].number) || github.event.workflow_run.display_title }}"
+on:
+  workflow_run:
+    workflows: [QA plan]
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  qa:
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+    uses: milroyfraser/mroom/.github/workflows/qa-up.yml@v0.4.0
+    secrets:
+      MROOM_FORGE_TOKEN: ${{ secrets.MROOM_FORGE_TOKEN }}
+      MROOM_QA_SSH_KEY: ${{ secrets.MROOM_QA_SSH_KEY }}
+      MROOM_QA_ENV_TEMPLATE: ${{ secrets.MROOM_QA_ENV_TEMPLATE }}
 ```
 
 ```yaml

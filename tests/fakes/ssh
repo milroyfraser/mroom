@@ -40,7 +40,20 @@ if [ -f "$GATE/$op.rc" ] && [ "$(cat "$GATE/$op.rc")" != 0 ]; then
   exit "$(cat "$GATE/$op.rc")"
 fi
 if [ -f "$GATE/$op.out" ]; then cat "$GATE/$op.out"; exit 0; fi
+read -r -a words <<<"$request"
 case "$op" in
+  db-create) printf 'database shop_qa_%s: created\nDB_DATABASE=shop_qa_%s\nDB_USERNAME=shop_qa_%s\nDB_PASSWORD=db-pw-%s\n' "$n" "$n" "$n" "$n" ;;
+  redis-user-add)
+    printf 'REDIS_USERNAME=shop_qa_%s\nREDIS_PASSWORD=redis-pw-%s\nREDIS_PREFIX=shop:qa%s:\nHORIZON_PREFIX=shop:qa%s:horizon:\n' "$n" "$n" "$n" "$n" ;;
+  mail-user-add)
+    printf 'MAIL_MAILER=smtp\nMAIL_HOST=127.0.0.1\nMAIL_PORT=1025\nMAIL_USERNAME=shop_qa_%s\nMAIL_PASSWORD=mail-pw-%s\n' "$n" "$n" ;;
+  bucket-create)
+    printf 'BUCKET=shop-qa-%s-%s\nACCESS_KEY_ID=GK%s\nSECRET_ACCESS_KEY=bucket-pw-%s\nREGION=garage\nENDPOINT=https://s3.qa.example.dev\nPATH_STYLE=true\n' \
+      "$n" "${words[2]}" "${words[2]}" "${words[2]}"
+    if [ "${words[3]:-}" = public ]; then printf 'URL=https://files.qa.example.dev/shop-qa-%s-%s\n' "$n" "${words[2]}"; fi ;;
+  code-put) echo "api-$n.qa.example.dev: 12 entries unpacked, 0 .env skipped" ;;
+  dist-put) echo "go-$n.qa.example.dev: 3 entries unpacked, 0 .env skipped" ;;
+  env-put) printf 'env=%s\n' "$(printf '%s' "$(cat "$GATE/env-put.in")" | sha256sum | cut -d' ' -f1)" ;;
   user-clean) echo "shop_qa_$n: 2 processes stopped, 1 files and IPC objects removed outside its home" ;;
   db-drop) echo "database shop_qa_$n: dropped" ;;
   redis-user-remove) echo "redis user shop_qa_$n: removed" ;;

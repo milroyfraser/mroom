@@ -173,6 +173,25 @@ qa_cleanup() {
   forge_cleanup
 }
 
+# qa_up_code <url>: <url>/up's HTTP code, asked up to MROOM_QA_UP_TRIES (6) times, MROOM_QA_UP_PAUSE (5) seconds
+# apart, until it answers 200. A site Forge has just made answers 502 for a few seconds, and so does any site on the
+# box while PHP-FPM or nginx reloads for another, so one answer never says an environment is down. Each try waits
+# 20 seconds at most; 000 means nothing answered.
+qa_up_code() {
+  local code=000 tries="${MROOM_QA_UP_TRIES:-6}" pause="${MROOM_QA_UP_PAUSE:-5}" i
+  [[ "$tries" =~ ^[1-9][0-9]?$ ]] || tries=6
+  [[ "$pause" =~ ^[0-9]{1,2}$ ]] || pause=5
+  for ((i = 1; i <= tries; i++)); do
+    code="$(curl -q -s -o /dev/null -m 20 -w '%{http_code}' "$1/up")" || code=000
+    [ "$code" != 200 ] || break
+    if ((i < tries)); then sleep "$pause"; fi
+  done
+  echo "$code"
+}
+
+# qa_mask <value>: on a runner, tells GitHub to hide the value wherever a later line of the log would show it.
+qa_mask() { if [ "${GITHUB_ACTIONS:-}" = true ] && [ -n "$1" ]; then echo "::add-mask::$1"; fi; }
+
 # qa_comment_newest <PR>: the newest of github-actions[bot]'s QA environment comments on the pull request, as
 # {"id", "state", "updated_at"} on one line, or nothing. Found by its heading, never as the bot's last comment,
 # which may be another of its comments.
