@@ -1,15 +1,18 @@
 name: QA environment up
 
-# The half of a pull request's QA environment that holds secrets, started when its QA plan run completes (design
-# 8.2). The app calls this workflow from one of its own on workflow_run (README, QA environments). workflow_run
-# always runs the default branch's copy of that workflow, every job here checks out the default branch's
-# mroom.toml and mroom at the commit of this file, and the qa environment admits the default branch alone, so no
-# pull request code runs next to the Forge token or the box's SSH key: the pull request is read as data, its
-# changed paths, the frontend its plan built and GitHub's tarball of its commit. The jobs:
-#   pr      which pull request and commit, from GitHub's records only (actions/qa-up/resolve.sh)
+# The half of a pull request's QA environment that holds secrets (design 8.2). The app calls this workflow from one
+# of its own (README, QA environments), started when its QA plan run completes (workflow_run) or, for a plan the job
+# token started, by that plan's hand-over job (workflow_dispatch, with the inputs pr and plan_run_id), since such a
+# plan ends with no workflow_run. Either way it runs the default branch's copy of that workflow, every job here
+# checks out the default branch's mroom.toml and mroom at the commit of this file, and the qa environment admits the
+# default branch alone, so no pull request code runs next to the Forge token or the box's SSH key: the pull request
+# is read as data, its changed paths, the frontend its plan built and GitHub's tarball of its commit. The jobs:
+#   pr      which pull request and commit, from GitHub's record of the plan run alone (actions/qa-up/resolve.sh)
 #   plan    the path rules, again, from GitHub's list of the changed files (actions/qa-plan)
 #   deploy  in the qa environment, one at a time per pull request: whether the environment comes up
 #           (actions/qa-up/start.sh), and if so, bringing it up (actions/qa-up/up.sh)
+#   next    for a run the job token started, which ends with no workflow_run either: the app's workflows that
+#           follow this one (next-workflows), started by dispatch
 on:
   workflow_call:
     inputs:
@@ -17,6 +20,17 @@ on:
         description: The label that forces a QA environment on
         type: string
         default: qa
+      plan-workflow:
+        description: The app's QA plan workflow file; a run of any other workflow deploys nothing
+        type: string
+        default: qa-plan.yml
+      next-workflows:
+        description: >-
+          The app's workflows that follow a QA environment coming up, on workflow_run of the app's qa-up workflow:
+          space-separated file names. A qa-up run the job token started ends with no workflow_run, so qa-up then
+          starts each of these itself, with the inputs pr and up_run_id
+        type: string
+        default: ""
     secrets:
       MROOM_FORGE_TOKEN:
         required: true
@@ -29,8 +43,8 @@ on:
         description: The pull request's number
         value: ${{ jobs.pr.outputs.number }}
       sha:
-        description: The commit the environment serves, when it came up
-        value: ${{ jobs.pr.outputs.sha }}
+        description: The commit the environment serves, once it came up
+        value: ${{ jobs.deploy.outputs.sha }}
       app-url:
         description: The environment's address for people
         value: ${{ jobs.deploy.outputs.app-url }}
@@ -51,10 +65,13 @@ defaults:
 
 jobs:
   # A cancelled plan was replaced by a newer push, whose own run follows; a skipped one was for no pull request of
-  # this repository. resolve.sh also reads the build job's own conclusion.
+  # this repository. resolve.sh also reads the build job's own conclusion. Of the event that started this run, only
+  # the plan run's id is taken.
   pr:
     name: QA pull request
-    if: github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure'
+    if: >-
+      github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' ||
+      github.event.workflow_run.conclusion == 'failure'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -65,10 +82,11 @@ jobs:
       go: ${{ steps.pr.outputs.go }}
       number: ${{ steps.pr.outputs.number }}
       sha: ${{ steps.pr.outputs.sha }}
-      draft: ${{ steps.pr.outputs.draft }}
-      forced: ${{ steps.pr.outputs.forced }}
       built: ${{ steps.pr.outputs.built }}
       dispatched: ${{ steps.pr.outputs.dispatched }}
+      woken: ${{ steps.pr.outputs.woken }}
+      run-id: ${{ steps.pr.outputs.run_id }}
+      run-url: ${{ steps.pr.outputs.run_url }}
     steps:
       - name: Check out mroom
         uses: actions/checkout@v4
@@ -81,13 +99,10 @@ jobs:
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT: ${{ github.event.workflow_run.event }}
-          LINKED: ${{ github.event.workflow_run.pull_requests[0].number }}
-          TITLE: ${{ github.event.workflow_run.display_title }}
-          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_ID: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.plan_run_id || github.event.workflow_run.id }}
+          DISPATCHED_PR: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.pr || '' }}
+          PLAN_WORKFLOW: ${{ inputs.plan-workflow }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
           LABEL: ${{ inputs.label }}
         run: mroom/actions/qa-up/resolve.sh | tee -a "$GITHUB_OUTPUT"
 
@@ -135,17 +150,20 @@ jobs:
     environment:
       name: qa
       deployment: false
-    # Never cancelled: a deploy cut off halfway leaves a half-built environment. One runs at a time per pull
-    # request, a newer one waiting replaces an older one waiting, and qa-down takes the same group, so the newest
-    # push deploys and never runs beside a teardown. Whether the environment exists is read inside the group.
+    # Never cancelled: a deploy cut off halfway leaves a half-built environment. The deploys and teardowns of one
+    # pull request share this group and take turns, first in first out, none of them dropped (queue: max), so
+    # none runs beside another; each reads the state it acts on inside the group, and an older push's deploy
+    # that waited behind a newer one stops, since its pull request has moved on (start.sh).
     concurrency:
       group: mroom-qa-${{ needs.pr.outputs.number }}
       cancel-in-progress: false
+      queue: max
     permissions:
       actions: read # the QA plan's build
-      contents: read # GitHub's tarball of the commit
+      contents: read # GitHub's tarball of the commit, and the pull request's mroom.toml
       pull-requests: write # the QA environment comment
     outputs:
+      sha: ${{ steps.up.outputs.sha }}
       app-url: ${{ steps.up.outputs.app-url }}
       api-url: ${{ steps.up.outputs.api-url }}
       refused: ${{ steps.up.outputs.refused }}
@@ -173,12 +191,11 @@ jobs:
           sha: ${{ needs.pr.outputs.sha }}
           scope: ${{ needs.plan.outputs.scope }}
           reason: ${{ needs.plan.outputs.reason }}
-          forced: ${{ needs.pr.outputs.forced }}
-          draft: ${{ needs.pr.outputs.draft }}
           dispatched: ${{ needs.pr.outputs.dispatched }}
+          woken: ${{ needs.pr.outputs.woken }}
           built: ${{ needs.pr.outputs.built }}
-          plan-run-id: ${{ github.event.workflow_run.id }}
-          plan-run-url: ${{ github.event.workflow_run.html_url }}
+          plan-run-id: ${{ needs.pr.outputs.run-id }}
+          plan-run-url: ${{ needs.pr.outputs.run-url }}
           label: ${{ inputs.label }}
           config: app/mroom.toml
           forge-org: ${{ vars.MROOM_FORGE_ORG }}
@@ -191,3 +208,37 @@ jobs:
           env-template: ${{ secrets.MROOM_QA_ENV_TEMPLATE }}
           certificate: ${{ vars.MROOM_QA_CERTIFICATE }}
           nginx-template: ${{ vars.MROOM_QA_NGINX_TEMPLATE }}
+
+  # A run the job token started (the plan's hand-over) ends with no workflow_run, so a workflow of the app's that
+  # waits for one would never start: this job starts each of next-workflows itself, once the environment is up. A
+  # run a person or a workflow_run started ends with its workflow_run as usual, so this job skips it.
+  next:
+    name: QA next workflows
+    needs: [pr, deploy]
+    if: >-
+      !cancelled() && inputs.next-workflows != '' && github.event_name == 'workflow_dispatch' &&
+      github.triggering_actor == 'github-actions[bot]' && needs.deploy.outputs.app-url != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write # to start the app's workflows
+    steps:
+      - name: Start the workflows that follow qa-up
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ needs.pr.outputs.number }}
+          NEXT: ${{ inputs.next-workflows }}
+          BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          [[ "$PR" =~ ^[1-9][0-9]{0,8}$ ]] || { echo "::error::the pull request's number is not a number"; exit 1; }
+          failed=0
+          for workflow in $NEXT; do
+            if ! [[ "$workflow" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]]; then
+              echo "::error::next-workflows holds a name that is not a workflow file name"
+              failed=1
+              continue
+            fi
+            gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref "$BRANCH" -f pr="$PR" -f up_run_id="$GITHUB_RUN_ID" \
+              </dev/null || failed=1
+          done
+          exit "$failed"

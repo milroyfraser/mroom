@@ -10,6 +10,8 @@
 #   gh workflow run <file> --repo <repo> [--ref <branch>] -f k=v...    "dispatch <file> <branch> k=v..."
 #   gh api repos/<repo>/tarball/<sha>                                  tarball.tgz, as GitHub's of that commit
 #   gh api repos/<repo>/actions/runs/<id>/jobs --jq <filter>           jobs-<id>.json, filtered
+#   gh api repos/<repo>/actions/runs/<id>                              run-<id>.json
+#   gh api repos/<repo>/contents/<file>?ref=<sha> -H <accept>          contents-<sha>/<file>, as it is
 #   gh api repos/<repo>/commits/<sha>/pulls                            pulls.json
 #   gh pr view <N> --repo <repo> --json ... [--jq <filter>]            pr-<N>.json, filtered
 #
@@ -28,7 +30,7 @@ while [ "$#" -gt 0 ]; do
     --jq) jqf="$2"; shift 2 ;;
     -X) method="$2"; shift 2 ;;
     --paginate) shift ;;
-    --input) shift 2 ;;
+    --input | -H) shift 2 ;;
     *) args+=("$1"); shift ;;
   esac
 done
@@ -71,6 +73,17 @@ case "${args[0]} ${args[1]:-}" in
       GET\ repos/*/actions/runs/*/jobs)
         id="${path%/jobs}"; id="${id##*/}"
         filter "$GH_FAKE/jobs-$id.json" "${jqf:-.}"
+        ;;
+      GET\ repos/*/actions/runs/*)
+        id="${path##*/}"
+        [ -f "$GH_FAKE/run-$id.json" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+        filter "$GH_FAKE/run-$id.json" "${jqf:-.}"
+        ;;
+      GET\ repos/*/contents/*)
+        file="${path#*/contents/}" ref="${path##*ref=}"
+        file="${file%%\?*}"
+        [ -f "$GH_FAKE/contents-$ref/$file" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+        cat "$GH_FAKE/contents-$ref/$file"
         ;;
       GET\ repos/*/commits/*/pulls) cat "$GH_FAKE/pulls.json" ;;
       *) echo "fake gh: unexpected $method $path" >&2; exit 1 ;;

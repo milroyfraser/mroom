@@ -2,12 +2,13 @@ name: QA plan
 
 # The half of a pull request's QA environment that runs the pull request's code, so it holds no secret (design
 # 8.2). The app calls this workflow from one of its own on pull_request and workflow_dispatch (README, QA
-# environments). It sorts the changed paths first (actions/qa-plan), before any of the pull request's code runs,
-# into the run's summary; then it builds the frontend for go-<N> with public values only (actions/qa-plan/build.sh)
-# and keeps it as the mroom-qa-dist artifact. When this run completes, qa-up starts (workflow_run), which runs the
-# default branch's workflow and mroom's actions at their pinned commit, takes the build as data to copy and sorts
-# the paths again itself, since nothing a run of the pull request's code leaves can be trusted. Only qa-up uses the
-# qa environment, which admits the default branch alone.
+# environments). Its first job reads the pull request's head commit, and the build job, named after that commit,
+# sorts the changed paths (actions/qa-plan), before any of the pull request's code runs, into the run's summary;
+# then it builds the frontend for go-<N> with public values only (actions/qa-plan/build.sh) and keeps it as the
+# mroom-qa-dist artifact. When this run completes, qa-up starts (workflow_run), which runs the default branch's
+# workflow and mroom's actions at their pinned commit, takes the build as data to copy and sorts the paths again
+# itself, since nothing a run of the pull request's code leaves can be trusted. Only qa-up uses the qa environment,
+# which admits the default branch alone.
 #
 # A run started with the job token, as a wake starts it for a pull request that waited for a slot, starts no
 # workflow_run when it ends: the hand-over job then starts the app's qa-up workflow itself, naming this run. The
@@ -37,9 +38,36 @@ defaults:
     shell: bash
 
 jobs:
+  # The pull request and its head commit, read from GitHub in a job of their own, where none of its code runs: the
+  # build job is named after that commit, which is how qa-up knows, from GitHub's record of this run alone, which
+  # commit a plan started on the default branch built.
+  pr:
+    name: QA pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      number: ${{ steps.pr.outputs.number }}
+      sha: ${{ steps.pr.outputs.sha }}
+    steps:
+      - name: Which pull request and commit
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
+        run: |
+          [[ "$PR" =~ ^[1-9][0-9]{0,8}$ ]] || { echo "::error::the pull request's number is not a number"; exit 1; }
+          gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json number,headRefOid,isCrossRepository \
+            --jq 'if .isCrossRepository then error("a pull request from a fork gets no QA environment") else "number=\(.number)\nsha=\(.headRefOid)" end' \
+            >>"$GITHUB_OUTPUT"
+
   build:
-    # qa-up finds this job by its name, and deploys only when it succeeded.
-    name: QA build
+    # qa-up finds this job by its name, deploys only when it succeeded, and takes the commit in its name for the
+    # one built.
+    name: QA build ${{ needs.pr.outputs.sha }}
+    needs: pr
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # A newer push replaces a build still running.
@@ -61,39 +89,29 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: mroom
           persist-credentials: false
-      - name: Which pull request and commit
-        id: pr
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ inputs.pr }}
-        run: |
-          [[ "$PR" =~ ^[1-9][0-9]{0,8}$ ]] || { echo "::error::the pull request's number is not a number"; exit 1; }
-          gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json number,headRefOid,isCrossRepository \
-            --jq 'if .isCrossRepository then error("a pull request from a fork gets no QA environment") else "number=\(.number)\nsha=\(.headRefOid)" end' \
-            >>"$GITHUB_OUTPUT"
       # The pull request's files, as data: nothing of it runs before the paths are sorted.
       - name: Check out the pull request
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.pr.outputs.sha }}
+          ref: ${{ needs.pr.outputs.sha }}
           path: app
           persist-credentials: false
       - name: Sort the changed paths
         id: scope
         uses: ./mroom/actions/qa-plan
         with:
-          pr: ${{ steps.pr.outputs.number }}
+          pr: ${{ needs.pr.outputs.number }}
           config: app/mroom.toml
       - name: Say what the paths are
         env:
-          SHA: ${{ steps.pr.outputs.sha }}
+          SHA: ${{ needs.pr.outputs.sha }}
           SCOPE: ${{ steps.scope.outputs.scope }}
           REASON: ${{ steps.scope.outputs.reason }}
         run: '{ echo "### QA plan for \`$SHA\`"; echo; echo "Paths: $SCOPE ($REASON)."; } >>"$GITHUB_STEP_SUMMARY"'
       - name: What to build
         id: build
         env:
-          PR: ${{ steps.pr.outputs.number }}
+          PR: ${{ needs.pr.outputs.number }}
         run: mroom/actions/qa-plan/build.sh settings "$PR" app | tee -a "$GITHUB_OUTPUT"
       - name: Node
         if: steps.build.outputs.dist != ''
@@ -105,7 +123,7 @@ jobs:
       - name: Build the frontend
         if: steps.build.outputs.dist != ''
         env:
-          PR: ${{ steps.pr.outputs.number }}
+          PR: ${{ needs.pr.outputs.number }}
         run: mroom/actions/qa-plan/build.sh run "$PR" app
       # qa-up downloads it from this run; to qa-up, the build is files to copy, never code to run.
       - name: Keep the build
