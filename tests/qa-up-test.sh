@@ -577,14 +577,14 @@ t_daemons_and_scheduled_jobs_found_by_their_command_go_too() {
   made_site 40 7 api /api/public 8.4
   made_site 41 7 web /
   # forge's own daemon, from forge's home, that runs the site's artisan; a scheduled job of the server's, as root,
-  # that runs it too; one of the api site's own, as forge, that names no path at all. Kept: environment 17's,
+  # that runs it too; one of the api site's own, as forge, that runs it as well. Kept: environment 17's,
   # which name its own home and site, and the site user's own.
   process 50 forge /home/forge running "php8.4 /home/shop_qa_7/$API/api/artisan horizon"
   process 51 forge /home/forge running "php8.4 /home/shop_qa_17/$(api_host 17)/api/artisan horizon"
   job 60 root "php8.4 /home/shop_qa_7/$API/api/artisan schedule:run"
   job 61 forge "php8.4 /home/shop_qa_17/$(api_host 17)/api/artisan schedule:run"
   job 62 shop_qa_7 "php8.4 /home/shop_qa_7/$API/api/artisan schedule:run"
-  job 63 forge "php artisan schedule:run" 40
+  job 63 forge "php8.4 /home/shop_qa_7/$API/api/artisan schedule:run" 40
   job 64 shop_qa_7 "php artisan schedule:run" 41
   # Forge's list of the server's scheduled jobs may hold the sites' own too, which a delete through the server's path
   # misses: they go through their site's. A job or daemon that only asks a site for a page names no folder of it, and
