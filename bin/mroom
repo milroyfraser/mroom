@@ -21,6 +21,9 @@
 #                              units, which root installs with mroom's root recipe (D21), are this release's
 #   mroom baseline garage      the QA file store at its pinned build, its config and secrets, whether its
 #                              unit is this release's, its one-node layout and its two hosts' nginx configs
+#   mroom baseline reverb      WebSockets for every QA environment: mroom's Reverb host with its pinned
+#                              packages, its apps file, whether its unit is this release's, and its host's
+#                              nginx config
 #   mroom version [--source]   the installed version (--source: the release or checkout it came from)
 #   mroom help
 #

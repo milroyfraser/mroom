@@ -111,19 +111,38 @@ t_the_garage_unit() {
   expect_no_file "$T/systemd/mroom-mailpit.service"
 }
 
+t_the_reverb_unit() {
+  world
+  rs reverb
+  expect_rc 0; expect_out_has "systemd units written: mroom-reverb.service"
+  local base="$T/home/.local/share/mroom-services/reverb" line
+  run mode "$T/systemd/mroom-reverb.service"; expect_out 644
+  for line in "ExecStart=/usr/bin/php -d pcre.jit=0 $base/current/artisan reverb-host:start" "User=$USER_NAME" \
+    "Group=$GROUP_NAME" "Restart=always" "StartLimitIntervalSec=0" "PrivateNetwork=yes" "RestrictAddressFamilies=AF_UNIX" \
+    "MemoryDenyWriteExecute=yes" "ProtectHome=tmpfs" "ProtectSystem=strict" "UMask=0077" \
+    "BindReadOnlyPaths=$base" "BindPaths=$base/run" \
+    "Environment=REVERB_HOST_SOCKET=$base/run/reverb.sock REVERB_HOST_APPS=$base/apps/apps.json"; do
+    expect_true "the unit lacks: $line" grep -qxF -- "$line" "$T/systemd/mroom-reverb.service"
+  done
+  # The apps file is never bound on its own: that would keep the file the host found at start.
+  expect_true "the unit binds the apps file itself" eval '! grep -q "apps.json" <(grep -E "^Bind" "$T/systemd/mroom-reverb.service")'
+  run log_of systemctl; expect_out $'systemctl daemon-reload\nsystemctl enable --now mroom-reverb.service'
+  expect_no_file "$T/systemd/mroom-garage.service"
+}
+
 # Every line of every unit is one this test allows: a unit could otherwise give the box user root, through
 # lines such as AmbientCapabilities=, SupplementaryGroups=, LoadCredential=, StandardOutput=file: or
 # RuntimeDirectory=, which a checklist of what to refuse would always miss some of.
 t_every_unit_line_is_one_mroom_allows() {
   world
-  rs mailpit garage; expect_rc 0
+  rs mailpit garage reverb; expect_rc 0
   run python3 -I - "$USER_NAME" "$GROUP_NAME" "$T/home" "$T"/systemd/mroom-* <<'PY'
 import re, sys
 user, group, home, *files = sys.argv[1:]
 allowed = {
     "Unit": {"Description", "Requires", "After", "StartLimitIntervalSec"},
     "Socket": {"ListenStream", "Accept"},
-    "Service": {"User", "Group", "ExecStart", "WorkingDirectory", "Restart", "RestartSec", "UMask", "LimitNOFILE",
+    "Service": {"User", "Group", "ExecStart", "Environment", "WorkingDirectory", "Restart", "RestartSec", "UMask", "LimitNOFILE",
                 "NoNewPrivileges", "ProtectSystem", "ProtectHome", "BindReadOnlyPaths", "BindPaths", "PrivateTmp",
                 "PrivateDevices", "PrivateNetwork", "RestrictAddressFamilies", "SystemCallFilter",
                 "SystemCallArchitectures", "CapabilityBoundingSet", "LockPersonality", "MemoryDenyWriteExecute",
@@ -131,6 +150,8 @@ allowed = {
                 "ProtectKernelModules", "ProtectControlGroups"},
     "Install": {"WantedBy"},
 }
+envs = {"APP_ENV", "APP_DEBUG", "LOG_CHANNEL", "CACHE_STORE", "QUEUE_CONNECTION", "REVERB_HOST_SOCKET",
+        "REVERB_HOST_APPS"}
 must = {"User": user, "Group": group, "NoNewPrivileges": "yes", "CapabilityBoundingSet": "", "ProtectSystem": "strict",
         "ProtectHome": "tmpfs", "RestrictSUIDSGID": "yes"}
 bad = []
@@ -150,8 +171,15 @@ for path in files:
             continue
         seen[key] = value
         if key == "ExecStart" and not (re.match(r"/usr/bin/python3 -I " + re.escape(home) + "/", value)
+                                       or re.match(r"/usr/bin/php -d pcre\.jit=0 " + re.escape(home) + "/", value)
                                        or value.startswith(home + "/")):
             bad.append(f"{path}:{n}: runs something outside the box user's home: {line}")
+        # Only these settings, with plain values: no LD_PRELOAD, PATH or the like.
+        if key == "Environment":
+            for word in value.split(" "):
+                name, _, setting = word.partition("=")
+                if name not in envs or not re.fullmatch(r"[A-Za-z0-9_./-]+", setting):
+                    bad.append(f"{path}:{n}: sets {word}")
         if key == "ListenStream" and not re.fullmatch(r"127\.0\.0\.1:\d{4,5}", value):
             bad.append(f"{path}:{n}: listens beyond 127.0.0.1: {line}")
         if key == "WantedBy" and value not in ("sockets.target", "multi-user.target"):
@@ -247,7 +275,7 @@ t_what_root_setup_refuses() {
     run "$ROOT/lib/root-setup" $args
     expect_rc 1; expect_err_has "$message"
   done <<EOF
---user $USER_NAME|name the parts to install: site-op, mailpit or garage
+--user $USER_NAME|name the parts to install: site-op, mailpit, garage or reverb
 --user $USER_NAME nginx|unknown argument 'nginx'
 --user|--user needs a value
 --user Bad mailpit|--user needs the box user's name
@@ -307,6 +335,7 @@ t_the_readme_recipe() {
   expect_out_has "site-op: installed from $v"
   expect_out_has "systemd units written: mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service"
   expect_out_has "systemd units written: mroom-garage.service"
+  expect_out_has "systemd units written: mroom-reverb.service"
   run log_of curl; expect_out_has "https://raw.githubusercontent.com/milroyfraser/mroom/refs/tags/$v/lib/root-setup"
   # A file that is not the one its sum names never runs.
   rm -r "$T/systemd" "$T/libexec" "$T/sudoers"; mkdir "$T/systemd" "$T/libexec" "$T/sudoers"
@@ -322,6 +351,7 @@ t_the_readme_recipe() {
 
 test_case mailpit t_the_mailpit_units
 test_case garage t_the_garage_unit
+test_case reverb t_the_reverb_unit
 test_case allowed-lines t_every_unit_line_is_one_mroom_allows
 test_case site-op t_site_op_and_its_sudoers_line
 test_case halfway t_a_run_that_stops_halfway_is_finished_by_the_next

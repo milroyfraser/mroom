@@ -12,6 +12,8 @@
 #   mailpit   the systemd units of the QA mail catcher (D19): the socket that holds the SMTP port from boot,
 #             as root, and mroom's mail relay and Mailpit, which run as the box user
 #   garage    the systemd unit of the QA file store, Garage (D14), which runs as the box user
+#   reverb    the systemd unit of mroom's Reverb host (D16), WebSockets for every QA environment, which runs
+#             as the box user
 #
 # --home is the box user's home, where its services live (the one /etc/passwd names when not given),
 # --smtp-port the port QA apps send mail to (mailpit; 1025 when not given), and --release the tag whose
@@ -23,10 +25,12 @@ set -euo pipefail
 ROOT_SETUP_REPO="milroyfraser/mroom"
 # The SHA-256 of this release's lib/site-op; tests/root-test.sh fails while it is another file's.
 SITE_OP_SHA256="033c9563a72f4b0d9df686865e0ad99526de4ffa60f43adc61315d7276da7cf4"
-# The units name this python, which root's own PATH also finds first on Ubuntu.
+# The units name this python and this php, which root's own PATH also finds first on Ubuntu.
 PYTHON=/usr/bin/python3
+PHP=/usr/bin/php
 MAILPIT_UNITS=(mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service)
 GARAGE_UNITS=(mroom-garage.service)
+REVERB_UNITS=(mroom-reverb.service)
 
 # unit_text <unit> <user> <group> <home> <port>: one of mroom's systemd units, as this release writes it. The
 # socket holds the SMTP port from boot, as root, and hands it to the relay; the services run as the box user,
@@ -174,6 +178,54 @@ ProtectControlGroups=yes
 WantedBy=multi-user.target
 EOF
       ;;
+    mroom-reverb.service)
+      base="$services/reverb"
+      cat <<EOF
+# Written by mroom's root-setup (reverb). mroom's Reverb host, one Reverb for every QA environment (design
+# D16): it listens only on a Unix socket in a folder only $user can open, which nginx passes the QA zone's
+# WebSocket host to, reads its apps from a file the gate replaces whole, and sees nothing else of the home.
+# Its apps live in a folder, not a file bound on its own, which would keep the file it found at start. PHP's
+# PCRE JIT needs memory both written and run, which this unit refuses.
+[Unit]
+Description=mroom's Reverb host: WebSockets for every QA environment
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+User=$user
+Group=$group
+ExecStart=$PHP -d pcre.jit=0 $base/current/artisan reverb-host:start
+Environment=APP_ENV=production APP_DEBUG=false LOG_CHANNEL=stderr CACHE_STORE=array QUEUE_CONNECTION=sync
+Environment=REVERB_HOST_SOCKET=$base/run/reverb.sock REVERB_HOST_APPS=$base/apps/apps.json
+Restart=always
+RestartSec=1
+UMask=0077
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindReadOnlyPaths=$base
+BindPaths=$base/run
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      ;;
     *) return 1 ;;
   esac
 }
@@ -270,11 +322,11 @@ root_main() {
         case "$1" in --user) user="$2" ;; --home) home="$2" ;; --smtp-port) port="$2" ;; --release) release="$2" ;; esac
         shift 2
         ;;
-      site-op | mailpit | garage) parts+=("$1"); shift ;;
-      *) root_die "unknown argument '${1:0:40}'; the parts are site-op, mailpit and garage" ;;
+      site-op | mailpit | garage | reverb) parts+=("$1"); shift ;;
+      *) root_die "unknown argument '${1:0:40}'; the parts are site-op, mailpit, garage and reverb" ;;
     esac
   done
-  [ "${#parts[@]}" -gt 0 ] || root_die "name the parts to install: site-op, mailpit or garage"
+  [ "${#parts[@]}" -gt 0 ] || root_die "name the parts to install: site-op, mailpit, garage or reverb"
   if [ -n "${MROOM_ROOT_SETUP_TEST:-}" ]; then
     # Its folders come from the environment, where a link the box user planted could take root's writes
     # anywhere: never as root.
@@ -309,6 +361,10 @@ root_main() {
         root_units "$user" "$group" "$home" "$port" "${MAILPIT_UNITS[@]}"
         ;;
       garage) root_units "$user" "$group" "$home" "$port" "${GARAGE_UNITS[@]}" ;;
+      reverb)
+        [ -x "$PHP" ] || root_die "$PHP is missing; mroom's Reverb host needs PHP 8.3 or later"
+        root_units "$user" "$group" "$home" "$port" "${REVERB_UNITS[@]}"
+        ;;
     esac
   done
 }

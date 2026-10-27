@@ -396,8 +396,8 @@ t_garage_keeps_its_secrets_and_sets_its_layout_once() {
 
 t_usage_and_unknown_parts() {
   world
-  run "$MROOM" baseline; expect_rc 0; expect_out_has "mroom baseline mailpit"
-  run "$MROOM" baseline reverb; expect_rc 1; expect_err_has "unknown part 'reverb'"
+  run "$MROOM" baseline; expect_rc 0; expect_out_has "mroom baseline mailpit"; expect_out_has "mroom baseline reverb"
+  run "$MROOM" baseline redis; expect_rc 1; expect_err_has "unknown part 'redis'"
   run "$MROOM" baseline mailpit extra; expect_rc 1; expect_err_has "usage: mroom baseline mailpit"
 }
 
