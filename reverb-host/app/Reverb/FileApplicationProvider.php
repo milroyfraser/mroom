@@ -17,11 +17,15 @@ use Laravel\Reverb\Exceptions\InvalidApplication;
  * The gate replaces the file whole, renaming a new one into place, so a lookup sees the old apps or the new
  * ones, never half of either. A missing file holds no apps, and so does one that cannot be read or parsed: the
  * error is logged once, and every connection is refused until the file is right again. An entry without a plain
- * id, key and secret is left out, and a setting it leaves out takes Reverb's default.
+ * id, key and secret is left out, also logged once. A setting an entry leaves out takes a default that refuses
+ * rather than allows: no allowed origins, so a browser's socket is refused, and client events only from sockets
+ * subscribed to the channel; the ping interval, activity timeout and message size take Reverb's defaults.
  */
 class FileApplicationProvider implements ApplicationProvider
 {
     private ?string $lastError = null;
+
+    private int $lastDropped = 0;
 
     public function __construct(private readonly string $path)
     {
@@ -75,7 +79,14 @@ class FileApplicationProvider implements ApplicationProvider
             return $this->broken('is not {"apps": [...]} in JSON');
         }
 
-        return $this->read(array_values(array_filter($data['apps'], fn (mixed $app) => $this->plain($app))));
+        $apps = array_values(array_filter($data['apps'], fn (mixed $app) => $this->plain($app)));
+        $dropped = count($data['apps']) - count($apps);
+        if ($dropped > 0 && $dropped !== $this->lastDropped) {
+            Log::error("reverb-host: {$dropped} apps left out of {$this->path}: an id, key or secret is not plain");
+        }
+        $this->lastDropped = $dropped;
+
+        return $this->read($apps);
     }
 
     private function plain(mixed $app): bool

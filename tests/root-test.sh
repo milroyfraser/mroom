@@ -117,7 +117,7 @@ t_the_reverb_unit() {
   expect_rc 0; expect_out_has "systemd units written: mroom-reverb.service"
   local base="$T/home/.local/share/mroom-services/reverb" line
   run mode "$T/systemd/mroom-reverb.service"; expect_out 644
-  for line in "ExecStart=/usr/bin/php -d pcre.jit=0 $base/current/artisan reverb-host:start" "User=$USER_NAME" \
+  for line in "ExecStart=/usr/bin/php -d pcre.jit=0 -d opcache.jit=disable $base/current/artisan reverb-host:start" "User=$USER_NAME" \
     "Group=$GROUP_NAME" "Restart=always" "StartLimitIntervalSec=0" "PrivateNetwork=yes" "RestrictAddressFamilies=AF_UNIX" \
     "MemoryDenyWriteExecute=yes" "ProtectHome=tmpfs" "ProtectSystem=strict" "UMask=0077" \
     "BindReadOnlyPaths=$base" "BindPaths=$base/run" \
@@ -150,7 +150,7 @@ allowed = {
                 "ProtectKernelModules", "ProtectControlGroups"},
     "Install": {"WantedBy"},
 }
-envs = {"APP_ENV", "APP_DEBUG", "LOG_CHANNEL", "CACHE_STORE", "QUEUE_CONNECTION", "REVERB_HOST_SOCKET",
+envs = {"APP_ENV", "APP_DEBUG", "LOG_CHANNEL", "LOG_LEVEL", "CACHE_STORE", "QUEUE_CONNECTION", "REVERB_HOST_SOCKET",
         "REVERB_HOST_APPS"}
 must = {"User": user, "Group": group, "NoNewPrivileges": "yes", "CapabilityBoundingSet": "", "ProtectSystem": "strict",
         "ProtectHome": "tmpfs", "RestrictSUIDSGID": "yes"}
@@ -171,7 +171,7 @@ for path in files:
             continue
         seen[key] = value
         if key == "ExecStart" and not (re.match(r"/usr/bin/python3 -I " + re.escape(home) + "/", value)
-                                       or re.match(r"/usr/bin/php -d pcre\.jit=0 " + re.escape(home) + "/", value)
+                                       or re.match(r"/usr/bin/php -d pcre\.jit=0 -d opcache\.jit=disable " + re.escape(home) + "/", value)
                                        or value.startswith(home + "/")):
             bad.append(f"{path}:{n}: runs something outside the box user's home: {line}")
         # Only these settings, with plain values: no LD_PRELOAD, PATH or the like.

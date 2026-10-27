@@ -284,7 +284,7 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 | `mail-clear <N>` | every mail the environment's login sent |
 | `bucket-create <N> <disk> [public]` | a bucket on the box's Garage (D14) for one of the app's file disks, and a new key that reaches that bucket alone; `public` turns on its website access. Prints `BUCKET`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `REGION`, `ENDPOINT`, `PATH_STYLE`, and `URL` for a public disk |
 | `bucket-drop <N>` | every bucket the environment has, whatever its disks: their keys deleted, and each bucket emptied and deleted |
-| `reverb-app-add <N>` | an app of its own on mroom's Reverb host (D16), which reads its apps from a file on every lookup, so nothing restarts; prints `REVERB_APP_ID`, `REVERB_APP_KEY`, a new `REVERB_APP_SECRET`, `REVERB_HOST`, `REVERB_PORT` and `REVERB_SCHEME` |
+| `reverb-app-add <N>` | an app of its own on mroom's Reverb host (D16), which reads its apps from a file on every lookup, so nothing restarts; prints `REVERB_APP_ID`, `REVERB_APP_KEY`, `REVERB_APP_SECRET` (new for a new app, the same while it has one), `REVERB_HOST`, `REVERB_PORT` and `REVERB_SCHEME` |
 | `reverb-app-remove <N>` | the environment's app; its sockets already open stay until they close |
 
 The client sends only N, and the few words some operations also take, each of a fixed form. The
@@ -406,17 +406,23 @@ WebSockets go to mroom's Reverb host (D16), one Reverb for every environment, ea
 - **No restart.** The host reads its apps from a file on every lookup, so `reverb-app-add` and
   `reverb-app-remove` need none, and no environment's sockets drop when another's app comes or goes. The
   gate replaces the file whole, by renaming, so the host reads the old apps or the new ones, never half.
-- **An app per environment.** Its id and key come from the PR; its secret is new on every `reverb-app-add`,
-  and only the gate, the host and the environment's `.env` hold it. A browser may open its sockets only from
-  the environment's two sites, at most 100 at once, and only members of a presence channel may send client
-  events.
+- **An app per environment.** Its id and key come from the PR. Its secret is new when the app is, and only
+  the gate, the host and the environment's `.env` hold it. A later `reverb-app-add` keeps it, since Reverb
+  keeps the app each socket opened with: a new secret would fail the private channels of every socket already
+  open. To change it, remove the app, then add it.
+- **Its limits.** A browser may open its sockets only from the environment's two sites, at most 100
+  subscribed at once, and only a socket subscribed to a channel may send client events on it. The host closes
+  a socket it refuses; Reverb itself only sends the error. It also gives each client event to its own app:
+  Reverb 1.12.0 looks the channel up in whichever app it served last, so with more than one app a valid one
+  is refused at random (fixed upstream after 1.12.0).
 - **One host.** Browsers and apps reach it through nginx on `ws.<zone>`: the frontend opens its sockets
   there, and the backend sends its events there, signed with its secret.
 - **No port to take.** It listens only on a Unix socket in a folder only the box user can open, so no site
   user can take its place, not even while it restarts. Confined like Garage, it sees only its build and its
   apps folder, and has no network of its own.
 - **Removing.** A removed app's open sockets stay until they close: the host looks an app up only when a
-  socket opens or an event arrives. A new socket with its key is refused.
+  socket opens or an event arrives, and no longer pings them, so nginx closes a dead one after its 180 s read
+  timeout. A new socket with its key is refused.
 
 **Set up once,** for an app named `shop`, on Postgres 16 or later and Redis 7 or later. Before Postgres 16,
 a role that may create roles may also grant itself the administrator ones, so the gate refuses older
@@ -453,7 +459,7 @@ and runs it, which installs the `parts` named:
 ```bash
 set -euo pipefail
 v=v0.4.0
-sum=d69fe4b10b2dd938683f93deb1d5638c9293bf315297cb6e8f9579b1271fc8c7
+sum=16d658f61a8ff9aba258fd3d7845cffacf94ece2f0a1478ad7c71537c2c7de1c
 user=forge
 parts=(site-op mailpit garage reverb)
 smtp_port=1025

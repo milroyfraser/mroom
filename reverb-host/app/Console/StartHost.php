@@ -39,14 +39,21 @@ class StartHost extends StartServer
             throw new RuntimeException('reverb-host:start needs the absolute path of its socket (REVERB_HOST_SOCKET)');
         }
 
-        // A socket left by a run that stopped short would refuse the new one; anything else in its place stays.
+        // A socket left by a run that stopped short would refuse the new one. One a running host answers on stays,
+        // and so does anything that is not a socket.
         if (@filetype($socket) === 'socket') {
+            $live = @stream_socket_client("unix://{$socket}", $errno, $error, 1);
+            if ($live !== false) {
+                fclose($live);
+                throw new RuntimeException("another host listens on {$socket}");
+            }
             unlink($socket);
         }
 
         $loop = Loop::get();
         $server = new Server(
-            new SocketServer("unix://{$socket}", [], $loop),
+            // After a restart every environment's sockets come back at once: room for them to queue, not PHP's 32.
+            new SocketServer("unix://{$socket}", ['unix' => ['backlog' => 511]], $loop),
             Factory::makePusherRouter($config['path'] ?? ''),
             $config['max_request_size'] ?? 10_000,
             $loop

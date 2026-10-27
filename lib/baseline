@@ -460,7 +460,7 @@ reverb_build_id() {
 }
 
 setup_reverb() {
-  local base="$SERVICES/reverb" zone user id build old apps answers php=/usr/bin/php
+  local base="$SERVICES/reverb" zone user id build old apps answers count previous php="$PHP"
   need composer jq sha256sum curl
   load_box || die "box.env could not be read"
   zone="${BOX[MROOM_QA_ZONE]:-}" user="$(id -un)"
@@ -506,7 +506,8 @@ setup_reverb() {
   fi
   # current names the build, switched in one rename. A running host keeps the build it started from, since
   # PHP resolves the link once, at start.
-  if [ "$(readlink "$base/current" 2>/dev/null)" != "builds/$id" ]; then
+  previous="$(readlink "$base/current" 2>/dev/null || true)"
+  if [ "$previous" != "builds/$id" ]; then
     ln -sfn "builds/$id" "$base/.current.new"
     mv -Tf "$base/.current.new" "$base/current"
     CHANGED=1
@@ -515,9 +516,10 @@ setup_reverb() {
     if restart_unit mroom-reverb.service "$base/"; then echo "Reverb host: restarted to run its build"
     else echo "Reverb host: runs its build from its next start (mroom-reverb.service)"; fi
   fi
-  # Every other build goes, once nothing runs from it.
+  # Older builds go. The one current named before this run stays until the next, since a host started earlier,
+  # or one systemd did not restart in time, may still run from it.
   for old in "$base"/builds/*; do
-    if [ "$old" != "$build" ]; then rm -rf "$old"; fi
+    if [ "$old" != "$build" ] && [ "builds/${old##*/}" != "$previous" ]; then rm -rf "$old"; fi
   done
 
   units_section reverb "" "One systemd unit runs mroom's Reverb host, as $user: it listens only on a Unix socket in
@@ -532,8 +534,14 @@ $(home_short "$base/run"), and reads its apps from $(home_short "$apps")." "${RE
     [ -n "$CHANGED" ] || break
     sleep 0.25
   done
-  if [ -n "$answers" ]; then echo "Reverb host answers, with $(jq '.apps | length' "$apps") apps."
-  else echo "Reverb host does not answer yet: install its unit (the root recipe), then run mroom baseline reverb again."; fi
+  count="$(jq '.apps | length' "$apps" 2>/dev/null)" || count=""
+  if [ -z "$answers" ]; then
+    echo "Reverb host does not answer yet: install its unit (the root recipe), then run mroom baseline reverb again."
+  elif [ -z "$count" ]; then
+    echo "Reverb host answers, but $(home_short "$apps") is not {\"apps\": [...]} in JSON, so it serves no apps."
+  else
+    echo "Reverb host answers; its apps file holds $count."
+  fi
 
   # Browsers and the QA apps reach it through nginx, on one host of the QA zone, with TLS.
   if [ -z "$zone" ]; then
@@ -546,7 +554,8 @@ Browsers and QA apps reach the Reverb host through nginx, on ws.$zone: each envi
 sockets there, and its backend sends its events there. Create it as a site in Forge, with its certificate,
 and put this in place of the site's location blocks (Forge's nginx runs as $user, who alone can open the
 socket). Its ^~ keeps any of Forge's "location ~" blocks left in place from taking a path. A socket stays
-open while either side speaks within its timeout: Reverb pings a quiet one every minute.
+open while either side speaks within its timeout: Reverb pings a quiet one every minute. Cookies stay out:
+Reverb reads none, and every environment's would count toward its limit on a request's size.
 
 ws.$zone, WebSockets and Reverb's HTTP API for every QA environment:
 
@@ -557,6 +566,7 @@ ws.$zone, WebSockets and Reverb's HTTP API for every QA environment:
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "Upgrade";
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header Cookie "";
         proxy_read_timeout 180s;
         proxy_send_timeout 180s;
         proxy_buffering off;

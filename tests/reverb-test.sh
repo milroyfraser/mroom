@@ -98,17 +98,31 @@ REVERB_SCHEME=https"
   expect_true "the gate log holds the secret" eval '[[ "$out" != *"$secret"* ]]'
 }
 
-t_add_again_gives_a_new_secret_and_replaces_the_file_whole() {
+t_add_again_keeps_the_secret_and_replaces_the_file_whole() {
   world; host_up
   local first second inode
   gate "reverb-app-add 12"; first="$(field REVERB_APP_SECRET "$out")"
   inode="$(stat -c %i "$(apps_file)")"
+  # Reverb keeps the app each socket opened with: a new secret would fail the open sockets' private channels.
   gate "reverb-app-add 12"; expect_rc 0; second="$(field REVERB_APP_SECRET "$out")"
-  expect_true "the secret stayed the same" [ "$first" != "$second" ]
+  expect_true "the secret changed while the app stayed" [ "$first" = "$second" ]
   run jq -c '[.apps[] | .app_id]' "$(apps_file)"; expect_out '["shop-qa-12"]'
-  run jq -r '.apps[0].secret' "$(apps_file)"; expect_out "$second"
+  run jq -r '.apps[0].secret' "$(apps_file)"; expect_out "$first"
   expect_true "the apps file was written in place, not replaced" [ "$(stat -c %i "$(apps_file)")" != "$inode" ]
   run ls -A "$(reverb_dir)/apps"; expect_out apps.json
+}
+
+t_remove_then_add_gives_a_new_secret() {
+  world; host_up
+  local first
+  gate "reverb-app-add 12"; first="$(field REVERB_APP_SECRET "$out")"
+  gate "reverb-app-remove 12"; expect_rc 0
+  gate "reverb-app-add 12"; expect_rc 0
+  expect_true "the secret stayed the same" [ "$(field REVERB_APP_SECRET "$out")" != "$first" ]
+  # An entry the gate did not write, with a secret that is not one of its own, gets a new one.
+  jq '.apps[0].secret = "short"' "$(apps_file)" >"$T/apps" && cat "$T/apps" >"$(apps_file)"
+  gate "reverb-app-add 12"; expect_rc 0
+  expect_true "a strange secret was kept: $out" eval '[[ "$(field REVERB_APP_SECRET "$out")" =~ ^[0-9a-f]{48}$ ]]'
 }
 
 t_remove_takes_only_its_own_app() {
@@ -171,7 +185,7 @@ EOF
   chmod 600 "$(apps_file)"
 
   printf 'not json\n' >"$(apps_file)"
-  gate "reverb-app-add 12"; expect_rc 1; expect_err_has 'apps.json could not be changed: it is not {"apps": [...]} in JSON'
+  gate "reverb-app-add 12"; expect_rc 1; expect_err_has 'apps.json is not {"apps": [...]} in JSON'
   run cat "$(apps_file)"; expect_out "not json"
   gate "reverb-app-remove 12"; expect_rc 1; expect_err_has 'apps.json is not {"apps": [...]} in JSON'
   run ls -A "$(reverb_dir)/apps"; expect_out apps.json
@@ -185,7 +199,8 @@ EOF
 }
 
 test_case add t_add_gives_an_environment_an_app_of_its_own
-test_case add-again t_add_again_gives_a_new_secret_and_replaces_the_file_whole
+test_case add-again t_add_again_keeps_the_secret_and_replaces_the_file_whole
+test_case remove-add t_remove_then_add_gives_a_new_secret
 test_case remove t_remove_takes_only_its_own_app
 test_case remove-host-down t_remove_works_while_the_host_is_down
 test_case adds-at-once t_adds_at_once_keep_every_app

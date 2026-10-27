@@ -1,8 +1,15 @@
 """A Pusher-protocol client for tests/reverb/gate-real-test.sh, from Python's standard library alone.
 
-  client.py open   <where> <key> <origin>                        prints the first message the host sends
+  client.py open   <where> <key> <origin>                        prints the first message the host sends, then
+                                                                 "closed" if the host closes the socket within
+                                                                 two seconds, or "open"
   client.py listen <where> <key> <origin> <channel> <seconds>    subscribes, prints "ready", then the first event
                                                                  that arrives, as "event <name> <data>"
+  client.py whisper <where> <key> <origin> <channel> <event> <data> [<go file>]
+                                                                 subscribes, then sends a client event; prints
+                                                                 "sent", or the error the host answers with.
+                                                                 With a go file, it prints "ready" once
+                                                                 subscribed, and sends once the file exists
   client.py send   <where> <app id> <key> <secret> <channel> <event> <data>
                                                                  sends the event through Reverb's HTTP API,
                                                                  signed with the secret; prints the HTTP status
@@ -94,6 +101,58 @@ def cmd_open(where, key, origin):
     sock = connect(where)
     handshake(sock, key, origin)
     print(recv_text(sock))
+    # Whether the host keeps the socket: it closes one it refuses at once.
+    sock.settimeout(2)
+    try:
+        while recv_text(sock) is not None:
+            pass
+        print("closed")
+    except (EOFError, ConnectionError):
+        print("closed")
+    except socket.timeout:
+        print("open")
+
+
+def subscribed(sock, key, origin, channel):
+    """Connects and subscribes; None once subscribed, else the message the host answered with."""
+    handshake(sock, key, origin)
+    first = json.loads(recv_text(sock) or "{}")
+    if first.get("event") != "pusher:connection_established":
+        return first
+    send_text(sock, json.dumps({"event": "pusher:subscribe", "data": {"channel": channel}}))
+    while True:
+        message = json.loads(recv_text(sock) or '{"event": "closed"}')
+        if message.get("event") == "pusher_internal:subscription_succeeded":
+            return None
+        if message.get("event") in ("pusher:error", "closed"):
+            return message
+
+
+def cmd_whisper(where, key, origin, channel, event, data, go=None):
+    sock = connect(where)
+    refused = subscribed(sock, key, origin, channel)
+    if refused is not None:
+        print(json.dumps(refused))
+        return 1
+    if go:
+        # The test serves another app here, between this socket's subscribe and its event.
+        print("ready", flush=True)
+        deadline = time.monotonic() + 15
+        while not os.path.exists(go):
+            if time.monotonic() > deadline:
+                print("no go")
+                return 1
+            time.sleep(0.05)
+    send_text(sock, json.dumps({"event": event, "channel": channel, "data": json.loads(data)}))
+    # A refusal comes back at once; silence means the host took the event.
+    sock.settimeout(2)
+    try:
+        text = recv_text(sock)
+        print(text if text is not None else "closed")
+        return 1
+    except socket.timeout:
+        print("sent")
+        return 0
 
 
 def cmd_listen(where, key, origin, channel, seconds):
@@ -117,7 +176,10 @@ def cmd_listen(where, key, origin, channel, seconds):
         elif name == "pusher:ping":
             send_text(sock, json.dumps({"event": "pusher:pong", "data": {}}))
         elif not name.startswith("pusher"):
-            print(f"event {name} {message.get('data')}", flush=True)
+            # A server's event carries its data as a string, a client's as an object.
+            data = message.get("data")
+            text = data if isinstance(data, str) else json.dumps(data, separators=(",", ":"))
+            print(f"event {name} {text}", flush=True)
             return 0
     print("no event")
     return 1
@@ -159,6 +221,8 @@ def main(argv):
         return cmd_listen(*args)
     if command == "send" and len(args) == 7:
         return cmd_send(*args) or 0
+    if command == "whisper" and len(args) in (6, 7):
+        return cmd_whisper(*args)
     print(__doc__, file=sys.stderr)
     return 2
 

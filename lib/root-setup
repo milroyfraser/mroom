@@ -185,7 +185,8 @@ EOF
 # D16): it listens only on a Unix socket in a folder only $user can open, which nginx passes the QA zone's
 # WebSocket host to, reads its apps from a file the gate replaces whole, and sees nothing else of the home.
 # Its apps live in a folder, not a file bound on its own, which would keep the file it found at start. PHP's
-# PCRE JIT needs memory both written and run, which this unit refuses.
+# JITs need memory both written and run, which this unit refuses, so both are off. LOG_LEVEL lets Reverb's errors
+# reach the journal, but not its info lines, which hold whole messages.
 [Unit]
 Description=mroom's Reverb host: WebSockets for every QA environment
 After=network.target
@@ -194,8 +195,8 @@ StartLimitIntervalSec=0
 [Service]
 User=$user
 Group=$group
-ExecStart=$PHP -d pcre.jit=0 $base/current/artisan reverb-host:start
-Environment=APP_ENV=production APP_DEBUG=false LOG_CHANNEL=stderr CACHE_STORE=array QUEUE_CONNECTION=sync
+ExecStart=$PHP -d pcre.jit=0 -d opcache.jit=disable $base/current/artisan reverb-host:start
+Environment=APP_ENV=production APP_DEBUG=false LOG_CHANNEL=stderr LOG_LEVEL=error CACHE_STORE=array QUEUE_CONNECTION=sync
 Environment=REVERB_HOST_SOCKET=$base/run/reverb.sock REVERB_HOST_APPS=$base/apps/apps.json
 Restart=always
 RestartSec=1

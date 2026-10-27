@@ -4,15 +4,18 @@
 # show. mroom baseline reverb installs this release's reverb-host with the packages its composer.lock pins, its
 # unit is installed by this release's lib/root-setup, run as root, from a home under /home as on a box, and
 # systemd runs it confined. The test then checks:
-# - an app reverb-app-add gives connects from its environment's two sites and from no other, and an app no one
-#   added does not exist;
+# - an app reverb-app-add gives connects from its environment's two sites and stays open; from any other site
+#   it is refused and closed, and an app no one added does not exist;
 # - an event its backend sends through Reverb's HTTP API, signed with its secret, reaches its sockets, and one
 #   signed with another environment's secret is refused;
-# - a new secret replaces the old one at once, and the host never restarts for any of it;
+# - a client event between two of an app's sockets arrives, though another app was served just before;
+# - adding again keeps the secret, removing and adding makes a new one, and the host never restarts for any of
+#   it;
 # - through an nginx made from the config baseline prints, with Forge's own blocks left in place, sockets open
 #   and events arrive;
 # - a removed app opens no socket, and the other environment's app keeps working;
-# - the host comes back with its apps when systemd starts it again.
+# - the host comes back with its apps when systemd starts it again, and its errors reach the journal;
+# - a new build: baseline switches to it and restarts the host, keeps the old one for a run, then removes it.
 # CI only: it installs a systemd unit as root, replacing a box's own, so it refuses to run anywhere but GitHub
 # Actions, and tests/run.sh does not pick it up.
 set -euo pipefail
@@ -26,13 +29,16 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
 CI_HOME=""
 LISTEN_PID=""
+WHISPER_PID=""
 cleanup() {
   local f
   if [ -n "$LISTEN_PID" ]; then kill "$LISTEN_PID" 2>/dev/null || true; fi
+  if [ -n "$WHISPER_PID" ]; then kill "$WHISPER_PID" 2>/dev/null || true; fi
   for f in "$TOP"/*/nginx/nginx.pid; do if [ -s "$f" ]; then kill "$(cat "$f")" 2>/dev/null || true; fi; done
   sudo systemctl disable --now mroom-reverb.service >/dev/null 2>&1 || true
   sudo rm -f /etc/systemd/system/mroom-reverb.service
   sudo systemctl daemon-reload || true
+  rm -f "$ROOT/reverb-host/.ci-build"
   [ -z "$CI_HOME" ] || rm -rf "$CI_HOME"
   rm -rf "$TOP"
 }
@@ -108,11 +114,15 @@ t_the_reverb_operations_against_the_real_host() {
   key13="$(field REVERB_APP_KEY "$app13")" secret13="$(field REVERB_APP_SECRET "$app13")"
   expect_true "the key is not the PR's: $key12" [ "$key12" = shop-qa-12 ]
 
-  # From its two sites only; an app no one added does not exist.
+  # From its two sites only, where its sockets stay open; from another site the host refuses and closes one, and
+  # an app no one added does not exist.
   run client open "$(sock)" "$key12" https://go-12.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
+  expect_true "its own site's socket was closed: $out" eval '[ "$(tail -n1 <<<"$out")" = open ]'
   run client open "$(sock)" "$key12" https://api-12.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
   run client open "$(sock)" "$key12" https://go-13.qa.example.test; expect_out_has 'Origin not allowed'
+  expect_true "a refused socket stayed open: $out" eval '[ "$(tail -n1 <<<"$out")" = closed ]'
   run client open "$(sock)" shop-qa-14 https://go-14.qa.example.test; expect_out_has 'Application does not exist'
+  expect_true "an unknown app's socket stayed open: $out" eval '[ "$(tail -n1 <<<"$out")" = closed ]'
 
   # An event its backend sends, signed with its secret, reaches its sockets; another's secret is refused.
   listen_for "$(sock)" "$key12" https://go-12.qa.example.test orders
@@ -120,9 +130,27 @@ t_the_reverb_operations_against_the_real_host() {
   run heard; expect_out_has 'event shipped {"id":7}'
   run client send "$(sock)" shop-qa-12 "$key12" "$secret13" orders shipped '{}'; expect_out 401
 
-  # A new secret replaces the old one at once, with no restart.
+  # A client event between two of app 12's sockets arrives, though app 13 was served between the sender's
+  # subscribe and its event: Reverb 1.12.0 alone would look the channel up in app 13's.
+  listen_for "$(sock)" "$key12" https://go-12.qa.example.test chat
+  client whisper "$(sock)" "$key12" https://go-12.qa.example.test chat client-typing '{"x":1}' "$T/whisper.go" \
+    >"$T/whisper.out" 2>&1 &
+  WHISPER_PID=$!
+  for _ in $(seq 1 100); do if grep -qx ready "$T/whisper.out"; then break; fi; sleep 0.1; done
+  run client send "$(sock)" shop-qa-13 "$key13" "$secret13" orders shipped '{}'; expect_out 200
+  : >"$T/whisper.go"
+  wait "$WHISPER_PID" || true; WHISPER_PID=""
+  run cat "$T/whisper.out"; expect_out "$(printf 'ready\nsent')"
+  run heard; expect_out_has 'event client-typing {"x":1}'
+
+  # Adding again keeps the secret, so open sockets keep their private channels; removing, then adding, makes a
+  # new one, which works at once. Nothing restarted.
+  gate "reverb-app-add 12"; expect_rc 0
+  expect_true "adding again changed the secret" [ "$(field REVERB_APP_SECRET "$out")" = "$secret12" ]
   old12="$secret12"
+  gate "reverb-app-remove 12"; expect_rc 0
   gate "reverb-app-add 12"; expect_rc 0; secret12="$(field REVERB_APP_SECRET "$out")"
+  expect_true "removing and adding kept the secret" [ "$secret12" != "$old12" ]
   run client send "$(sock)" shop-qa-12 "$key12" "$old12" orders shipped '{}'; expect_out 401
   run client send "$(sock)" shop-qa-12 "$key12" "$secret12" orders shipped '{}'; expect_out 200
   expect_true "the host restarted" [ "$(main_pid)" = "$pid" ]
@@ -151,6 +179,7 @@ t_the_reverb_operations_against_the_real_host() {
   gate "reverb-app-remove 12"; expect_rc 0
   run client open "$(sock)" "$key12" https://go-12.qa.example.test; expect_out_has 'Application does not exist'
   run client open "$(sock)" "$key13" https://go-13.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
+  expect_out_has open
   expect_true "the host restarted" [ "$(main_pid)" = "$pid" ]
 
   # systemd starts it again, with its apps.
@@ -162,8 +191,24 @@ t_the_reverb_operations_against_the_real_host() {
   listen_for "$(sock)" "$key13" https://go-13.qa.example.test orders
   run client send "$(sock)" shop-qa-13 "$key13" "$secret13" orders shipped '{"id":8}'; expect_out 200
   run heard; expect_out_has 'event shipped {"id":8}'
+  # Reverb's errors reach the journal: the refused origin above is one. Nothing else went wrong.
   run sudo journalctl -u mroom-reverb.service --no-pager
-  expect_true "the host logged an error: $out" eval '! grep -q -i -E "exception|PHP (Warning|Fatal)" <<<"$out"'
+  expect_out_has "resulted in a pusher error"
+  expect_true "the host logged an error: $out" eval '! grep -q -i -E "unknown error|exception|PHP (Warning|Fatal|Deprecated)" <<<"$out"'
+
+  # A new build: baseline switches to it and restarts the host, which keeps its apps; the build it ran from
+  # stays for one run, in case a host still runs from it, and goes on the next.
+  pid="$(main_pid)"
+  echo "a change" >"$ROOT/reverb-host/.ci-build"
+  run "$MROOM" baseline reverb
+  expect_rc 0; expect_out_has "installed (Reverb v1.12.0)"; expect_out_has "Reverb host: restarted to run its build"
+  expect_out_has "Reverb host answers; its apps file holds 1."
+  expect_true "the host did not restart" [ "$(main_pid)" != "$pid" ]
+  run bash -c 'ls "$1" | wc -l' _ "$(reverb_dir)/builds"; expect_out 2
+  run client open "$(sock)" "$key13" https://go-13.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
+  run "$MROOM" baseline reverb
+  expect_rc 0; expect_out_has "matches this mroom"
+  run bash -c 'ls "$1" | wc -l' _ "$(reverb_dir)/builds"; expect_out 1
 }
 
 test_case real-reverb t_the_reverb_operations_against_the_real_host
