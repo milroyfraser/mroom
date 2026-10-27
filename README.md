@@ -644,8 +644,9 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
   s3 env names with the disk's prefix in place of `AWS_` (`files = "AWS_"` gives `AWS_BUCKET`,
   `AWS_ACCESS_KEY_ID` and the rest; a disk in `qa.public_disks` also gets `<prefix>URL`), or
   `FILESYSTEM_DISK=local`; and `BROADCAST_CONNECTION=log`. `broadcast = "same"`, the default, waits for mroom's
-  Reverb host: until it is wired in, qa-up refuses it and says so, so set `broadcast = "log"`. Each value the
-  gate gives is masked in the run's log.
+  Reverb host: until it is wired in, qa-up refuses it and says so, so set `broadcast = "log"`. The passwords and
+  secret keys the gate gives, and the app key, are masked in the run's log. Since nothing keeps them between
+  runs, each deploy gives the environment new ones, which signs its users out.
 - **What the plan builds.** `app.frontend_dir` is a folder for a frontend of its own (it gets the go site),
   `.` for Vite inside the Laravel app, or empty for no frontend; `app.build.frontend` is the command, and
   without one nothing is built; `app.build.frontend_dist` is where it writes (`dist`, or `public/build` for
