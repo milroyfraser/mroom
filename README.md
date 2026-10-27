@@ -594,6 +594,140 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
     box user, who alone can open Garage's sockets. The S3 host streams each body to Garage, so an unsigned
     upload is refused before nginx stores any of it.
 
+## QA environments
+
+Each pull request can have a QA environment of its own on the box: `api-<N>.<zone>` for the Laravel app and,
+for a frontend of its own, `go-<N>.<zone>`, with the services the QA gate gives it (design 8.2). Reusable
+workflows run it; the app calls each from a workflow of its own, pinned to the mroom release the box runs:
+
+| Workflow | Runs on | What it does |
+|---|---|---|
+| `qa-plan.yml` | a push to a pull request, or by hand | sorts the changed paths (could a user notice the change?), then builds the frontend from the pull request's code with public values only; it holds no secret |
+| `qa-down.yml` | the pull request closing, its `qa` label coming off, or by hand | tears the environment down: its daemons, its site user's processes and files, its sites, then its database, Redis user and keys, mail and buckets, through the gate |
+| `qa-reap.yml` | a schedule, or by hand | tears down every environment older than `qa.ttl_days` (5) |
+
+- **Who holds what.** Only jobs in the GitHub environment `qa` hold the Forge token and the box's SSH key,
+  which reach root (design D20). `qa` admits the default branch alone, and those jobs check out only the
+  default branch's `mroom.toml`, and mroom at the commit of the workflow file, so a pull request is only a
+  number to them. Its code runs only in `qa-plan`, with no secret, and on the box, in its own isolated sites.
+- **Forge is the source of truth.** An environment exists while Forge has its `api-<N>` or `go-<N>` site, a
+  site being removed not counting. A Forge read that fails is retried and then fails the run, so it never
+  reads as "no environment". Forge can accept a delete and never run it, so a site still removing after 30
+  minutes gets the delete again, and the reaper warns about it: the same one two nights running needs a
+  person in Forge.
+- **The order of a teardown.** Daemons first, since supervisor starts again what is stopped, then
+  `user-clean`, then the sites right after (design 8.9). A `user-clean` that fails keeps the sites, so the
+  next teardown tries again. Each step skips what is already gone, so a teardown finishes a half-built or
+  half-removed environment.
+- **The comment.** A pull request with an environment has one `### QA environment` comment, edited in place,
+  that says whether it is ready, waits for a slot, failed or was removed, and why. It is for people; the
+  waiting state also says which pull request gets a freed slot: the one that has waited longest, whose QA
+  plan qa-down and qa-reap start again.
+- **What the plan builds.** `app.frontend_dir` is a folder for a frontend of its own (it gets the go site),
+  `.` for Vite inside the Laravel app, or empty for no frontend; `app.build.frontend` is the command, and
+  without one nothing is built; `app.build.frontend_dist` is where it writes (`dist`, or `public/build` for
+  Vite inside Laravel). In `app.build.frontend_env`, `env:<KEY>` is the environment's own value of a key it
+  does not keep secret (`APP_URL`, `CLIENT_URL`, `SESSION_DOMAIN`, `SESSION_COOKIE`, `XSRF_COOKIE_NAME`, and
+  for a frontend of its own `CORS_ALLOWED_ORIGINS` and `SANCTUM_STATEFUL_DOMAINS`), and any other `env:<KEY>`
+  is empty, since the build runs the pull request's code. Each environment's cookies have names of their
+  own, `<app>_qa_<N>_session` and `<app>_qa_<N>_xsrf`, since every environment shares the zone.
+- **The path rules.** The plan is `none` when every changed path is one no user can see: tests, docs, CI,
+  agent and developer tooling; any other path, a path outside the app's folders included, makes it `maybe`.
+  `qa.hidden_paths` adds paths no user can see (such as the app's console commands) and `qa.visible_paths`
+  paths a user can, whatever the rules say (Markdown a page shows); each is a list of shell patterns in which
+  `*` also matches `/`, and the visible ones are checked first.
+
+**Set up once**, in the app's repository, besides the QA gate above:
+
+1. A GitHub environment `qa`, deploying from the default branch only, with the secrets `MROOM_FORGE_TOKEN`
+   (from a Forge account whose only team holds the box; teardowns need `server:view`, `site:delete` and
+   `server:delete-daemons`) and `MROOM_QA_SSH_KEY` (the private half of the key the box forces to
+   `mroom gate provision`), and the variables `MROOM_FORGE_ORG`, `MROOM_FORGE_SERVER`, `MROOM_QA_SSH_HOST`,
+   `MROOM_QA_SSH_KNOWN_HOSTS` (the box's host key line, as `ssh-keyscan -t ed25519 <host>` prints it, checked
+   against the box's own `/etc/ssh/ssh_host_ed25519_key.pub`) and, when the box user is not `forge`,
+   `MROOM_QA_SSH_USER`. Every name and host the workflows build comes from the default branch's `mroom.toml`
+   (`app.name`, `qa.zone`, the app's folders), and must match the box's `box.env`.
+2. The label: `gh label create qa --description "Forces a QA environment on; taking it off tears it down"`.
+3. The app's own workflows, which name a run after its pull request so that qa-up can tell which one it was:
+
+```yaml
+# .github/workflows/qa-plan.yml
+name: QA plan
+run-name: "${{ github.event_name == 'workflow_dispatch' && format('PR #{0}', inputs.pr_number) || format('QA plan · PR #{0}', github.event.pull_request.number) }}"
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+  workflow_dispatch:
+    inputs:
+      pr_number: { description: The pull request to plan, required: true, type: string }
+permissions:
+  contents: read
+jobs:
+  qa:
+    # No fork's and no Dependabot's pull request, and no label but qa.
+    if: >-
+      github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]' && (github.event.action != 'labeled' || github.event.label.name == 'qa'))
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: milroyfraser/mroom/.github/workflows/qa-plan.yml@v0.4.0
+    with:
+      pr: ${{ inputs.pr_number || github.event.pull_request.number }}
+```
+
+```yaml
+# .github/workflows/qa-down.yml
+name: QA environment down
+on:
+  pull_request_target:
+    types: [closed, unlabeled]
+  workflow_dispatch:
+    inputs:
+      pr_number: { description: The pull request whose environment to tear down, required: true, type: string }
+permissions:
+  contents: read
+jobs:
+  qa:
+    if: github.event_name == 'workflow_dispatch' || github.event.action == 'closed' || github.event.label.name == 'qa'
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: write
+    uses: milroyfraser/mroom/.github/workflows/qa-down.yml@v0.4.0
+    with:
+      pr: ${{ inputs.pr_number || github.event.pull_request.number }}
+    secrets:
+      MROOM_FORGE_TOKEN: ${{ secrets.MROOM_FORGE_TOKEN }}
+      MROOM_QA_SSH_KEY: ${{ secrets.MROOM_QA_SSH_KEY }}
+```
+
+```yaml
+# .github/workflows/qa-reap.yml
+name: QA environment reap
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  qa:
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: write
+    uses: milroyfraser/mroom/.github/workflows/qa-reap.yml@v0.4.0
+    secrets:
+      MROOM_FORGE_TOKEN: ${{ secrets.MROOM_FORGE_TOKEN }}
+      MROOM_QA_SSH_KEY: ${{ secrets.MROOM_QA_SSH_KEY }}
+```
+
+A caller passes the secrets by name, since `secrets: inherit` reaches only a workflow of the same
+organisation, and the secrets resolve from the `qa` environment that the called job names. A pull request
+based on another branch than the default one runs under that branch, which `qa` refuses: its environment goes
+with the reaper, or a teardown run by hand (`gh workflow run qa-down.yml -f pr_number=<N>`).
+
 ## Regression label
 
 A pull request that fixes a problem a release caused in production carries the `regression` label and

@@ -59,6 +59,9 @@ SCHEMA = {
     "app.build.frontend": ("str", False, 'frontend = "npm run build"', "frontend build command"),
     "app.build.frontend_env": ("map", False, 'frontend_env = { VITE_APP_KEY = "env:APP_KEY" }',
                                "environment for the frontend build"),
+    "app.build.frontend_dist": ("str", False, 'frontend_dist = "dist"',
+                                "where the frontend build writes, inside its folder: dist, or public/build "
+                                "for Vite inside the Laravel app"),
     "app.build.after_deploy": ("list", False, 'after_deploy = ["config:clear"]',
                                "artisan commands after a deploy"),
     "app.build.daemons": ("list", False, 'daemons = ["horizon"]', "daemons restarted after a deploy"),
@@ -82,6 +85,10 @@ SCHEMA = {
                           "sign-in codes are only ever read for these addresses"),
     "qa.db_read_allowlist": ("list", False, 'db_read_allowlist = ["users.email"]',
                              "tables and columns browser QA may read; required once browser QA exists"),
+    "qa.visible_paths": ("list", False, 'visible_paths = ["web/src/content/*"]',
+                         "paths a user can see, whatever the QA plan's own rules say; shell patterns"),
+    "qa.hidden_paths": ("list", False, 'hidden_paths = ["app/Console/*"]',
+                        "paths no user can see, for the QA plan; shell patterns"),
     "qa.parity.database": (("seeded", "snapshot"), False, 'database = "seeded"',
                            "seeded (factories) | snapshot (opt-in masked copy)"),
     "qa.parity.mail": (("catcher", "log"), False, 'mail = "catcher"',
@@ -178,6 +185,14 @@ def rule_error(key: str, value) -> str | None:
             re.compile(value)
         except re.error as exc:
             return f"{key} is not a valid regular expression: {exc}"
+    # QA builds host names, Forge paths and folders inside the PR's tree from these (design 8.2, D17).
+    if key == "qa.zone" and not DNS_ZONE.fullmatch(value):
+        return f"{key} must be a lowercase DNS zone, such as qa.example.dev (got {json.dumps(value)})"
+    if key in ("app.backend_dir", "app.frontend_dir") and not (REPO_DIR.fullmatch(value) or (
+            key == "app.frontend_dir" and value == "")):
+        return f"{key} must be . or a folder inside the repository, with no . or .. part (got {json.dumps(value)})"
+    if key == "app.build.frontend_dist" and (value == "." or not REPO_DIR.fullmatch(value)):
+        return f"{key} must be a folder inside the frontend's, with no . or .. part (got {json.dumps(value)})"
     return None
 
 

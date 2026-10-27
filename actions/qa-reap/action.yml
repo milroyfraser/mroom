@@ -1,0 +1,60 @@
+name: QA environment reap
+description: >-
+  Tears down every QA environment older than qa.ttl_days, with or without the qa label, and hands each slot it
+  frees to a pull request that waits for one (design 8.2). A site Forge has been removing for half an hour gets
+  the delete again, with a warning. Run it only from a job in the qa environment that checks out the default
+  branch alone (.github/workflows/qa-reap.yml).
+inputs:
+  config:
+    description: The app's mroom.toml, checked out from the default branch
+    default: mroom.toml
+  plan-workflow:
+    description: The app's QA plan workflow file, started for a pull request that waits for a slot
+    default: qa-plan.yml
+  forge-org:
+    description: The Forge organisation
+    required: true
+  forge-server:
+    description: The Forge server id of the box; empty while the qa environment is not set up, which reaps nothing
+    default: ""
+  forge-token:
+    description: The qa environment's Forge token
+    required: true
+  ssh-host:
+    description: The box's host name
+    required: true
+  ssh-user:
+    description: The box user whose authorized_keys forces the gate on the key
+    default: forge
+  ssh-key:
+    description: The private key the box forces to mroom gate provision
+    required: true
+  ssh-known-hosts:
+    description: The box's host key line
+    required: true
+  github-token:
+    description: A token that may write pull request comments and start workflows
+    default: ${{ github.token }}
+outputs:
+  reaped:
+    description: How many environments came down
+    value: ${{ steps.reap.outputs.reaped }}
+runs:
+  using: composite
+  steps:
+    - id: reap
+      name: Reap the QA environments past their time
+      shell: bash
+      env:
+        MROOM_CONFIG: ${{ inputs.config }}
+        MROOM_QA_PLAN_WORKFLOW: ${{ inputs.plan-workflow }}
+        MROOM_QA_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        MROOM_FORGE_ORG: ${{ inputs.forge-org }}
+        MROOM_FORGE_SERVER: ${{ inputs.forge-server }}
+        MROOM_FORGE_TOKEN: ${{ inputs.forge-token }}
+        MROOM_QA_SSH_HOST: ${{ inputs.ssh-host }}
+        MROOM_QA_SSH_USER: ${{ inputs.ssh-user }}
+        MROOM_QA_SSH_KEY: ${{ inputs.ssh-key }}
+        MROOM_QA_SSH_KNOWN_HOSTS: ${{ inputs.ssh-known-hosts }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: '"$GITHUB_ACTION_PATH/reap.sh"'

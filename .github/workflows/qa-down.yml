@@ -1,0 +1,112 @@
+name: QA environment down
+
+# A pull request's QA environment goes when the pull request closes, when its qa label comes off, or by hand
+# (design 8.2, 8.9). The app calls this workflow from one of its own on pull_request_target (closed, unlabeled)
+# and workflow_dispatch (README, QA environments). Under pull_request_target GitHub runs the base branch's copy
+# of that workflow, never the pull request's, and the qa environment admits the default branch alone; this one
+# checks out only the default branch's mroom.toml, and mroom at the commit of this file, so the pull request is
+# only a number. Forge says whether there is anything to tear down, so a pull request that never had an
+# environment gets no comment and wakes no other.
+on:
+  workflow_call:
+    inputs:
+      pr:
+        description: The pull request's number
+        type: string
+        required: true
+      label:
+        description: The label that forces a QA environment on; taking it off tears the environment down
+        type: string
+        default: qa
+      plan-workflow:
+        description: The app's QA plan workflow file, started for a pull request that waits for a slot
+        type: string
+        default: qa-plan.yml
+    secrets:
+      MROOM_FORGE_TOKEN:
+        required: true
+      MROOM_QA_SSH_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+# bash with pipefail, so a script piped into tee fails its step when it fails.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # A pull request into another branch (a stacked one) runs under that branch, which the qa environment refuses.
+  # qa-reap removes its environment within qa.ttl_days, or a run by hand on the default branch does.
+  other-base:
+    name: QA down (another base)
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.base.ref != github.event.repository.default_branch &&
+      (github.event.action == 'closed' || github.event.label.name == inputs.label)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Say how its environment goes
+        env:
+          PR: ${{ inputs.pr }}
+        run: |
+          [[ "$PR" =~ ^[1-9][0-9]{0,8}$ ]] || exit 0
+          echo "::notice::Pull request $PR is not based on the default branch, so its teardown cannot use the qa environment. qa-reap removes any environment it has, or run this workflow by hand on the default branch for it."
+
+  down:
+    name: QA down
+    if: >-
+      github.event_name == 'workflow_dispatch' || (
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
+      (github.event.action == 'closed' || (github.event.action == 'unlabeled' && github.event.label.name == inputs.label)))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: qa
+      deployment: false
+    # qa-up's deploy of the same pull request takes the same group, so a teardown never runs beside a deploy.
+    concurrency:
+      group: mroom-qa-${{ inputs.pr }}
+      cancel-in-progress: false
+    permissions:
+      actions: write # to start the QA plan of a pull request that waits for a slot
+      contents: read
+      pull-requests: write # the QA environment comment
+    steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
+      - name: Check out the app's mroom.toml
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: app
+          persist-credentials: false
+          sparse-checkout: /mroom.toml
+          sparse-checkout-cone-mode: false
+      - name: Tear down
+        uses: ./mroom/actions/qa-down
+        with:
+          pr: ${{ inputs.pr }}
+          why: >-
+            ${{ github.event.action == 'closed' && 'the pull request closed' ||
+            github.event.action == 'unlabeled' && format('the {0} label came off; the next push that needs one brings it back', inputs.label) ||
+            'torn down by hand' }}
+          always: ${{ github.event_name == 'workflow_dispatch' }}
+          config: app/mroom.toml
+          plan-workflow: ${{ inputs.plan-workflow }}
+          forge-org: ${{ vars.MROOM_FORGE_ORG }}
+          forge-server: ${{ vars.MROOM_FORGE_SERVER }}
+          forge-token: ${{ secrets.MROOM_FORGE_TOKEN }}
+          ssh-host: ${{ vars.MROOM_QA_SSH_HOST }}
+          ssh-user: ${{ vars.MROOM_QA_SSH_USER }}
+          ssh-key: ${{ secrets.MROOM_QA_SSH_KEY }}
+          ssh-known-hosts: ${{ vars.MROOM_QA_SSH_KNOWN_HOSTS }}

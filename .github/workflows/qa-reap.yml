@@ -1,0 +1,69 @@
+name: QA environment reap
+
+# Every QA environment older than qa.ttl_days goes, with or without the qa label, since someone always forgets
+# to close a pull request (design 8.2). The app calls this workflow from one of its own on a schedule and
+# workflow_dispatch (README, QA environments), which run under the default branch, the only one the qa
+# environment admits. It checks out only the default branch's mroom.toml, and mroom at the commit of this file.
+# The next push that needs an environment brings it back, and each slot freed goes to a pull request that waits
+# for one. Until the qa environment has MROOM_FORGE_SERVER, there is nothing to reap.
+on:
+  workflow_call:
+    inputs:
+      plan-workflow:
+        description: The app's QA plan workflow file, started for a pull request that waits for a slot
+        type: string
+        default: qa-plan.yml
+    secrets:
+      MROOM_FORGE_TOKEN:
+        required: true
+      MROOM_QA_SSH_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+# bash with pipefail, so a script piped into tee fails its step when it fails.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  reap:
+    name: QA reap
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment:
+      name: qa
+      deployment: false
+    permissions:
+      actions: write # to start the QA plan of a pull request that waits for a slot
+      contents: read
+      pull-requests: write # the QA environment comments
+    steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
+      - name: Check out the app's mroom.toml
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: app
+          persist-credentials: false
+          sparse-checkout: /mroom.toml
+          sparse-checkout-cone-mode: false
+      - name: Reap
+        uses: ./mroom/actions/qa-reap
+        with:
+          config: app/mroom.toml
+          plan-workflow: ${{ inputs.plan-workflow }}
+          forge-org: ${{ vars.MROOM_FORGE_ORG }}
+          forge-server: ${{ vars.MROOM_FORGE_SERVER }}
+          forge-token: ${{ secrets.MROOM_FORGE_TOKEN }}
+          ssh-host: ${{ vars.MROOM_QA_SSH_HOST }}
+          ssh-user: ${{ vars.MROOM_QA_SSH_USER }}
+          ssh-key: ${{ secrets.MROOM_QA_SSH_KEY }}
+          ssh-known-hosts: ${{ vars.MROOM_QA_SSH_KNOWN_HOSTS }}

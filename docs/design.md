@@ -216,6 +216,7 @@ version_path = "/version"          # returns {"release": "<tag>", "commit": "<sh
 [app.build]
 frontend = "pnpm build"
 frontend_env = { VITE_REVERB_APP_KEY = "env:REVERB_APP_KEY" }   # in QA, mroom sets the key from the PR (D16)
+frontend_dist = "dist"             # where the build writes, inside frontend_dir; public/build for Vite in Laravel
 after_deploy = ["config:clear", "route:cache"]   # artisan commands
 daemons = ["horizon", "reverb"]          # QA skips reverb: mroom's Reverb host serves it (D16)
 queues = ["default", "mail"]
@@ -240,6 +241,8 @@ ttl_days = 5
 template_database = "qa_template"
 persona_domain = ".test"           # sign-in codes are only ever read for these addresses
 db_read_allowlist = []             # REQUIRED when browser QA is on: tables and columns the agent may read
+hidden_paths = []                  # the plan's path rules: paths no user can see, beyond mroom's own rules
+visible_paths = []                 # paths a user can see, whatever the rules say (shell patterns, * matches /)
 
 [qa.parity]                        # how QA runs each production service (section 9); defaults shown
 database = "seeded"                # seeded (factories) | snapshot (opt-in masked copy, section 9)

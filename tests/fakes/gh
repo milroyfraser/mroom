@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# A stand-in for the GitHub CLI, for the QA action tests (tests/qa-*-test.sh). It answers from files in $GH_FAKE
+# and logs each call that changes something to $GH_FAKE/gh.log, one line each:
+#
+#   gh api --paginate repos/<repo>/issues/<N>/comments --jq <filter>   comments-<N>.json (a list), filtered
+#   gh api -X PATCH repos/<repo>/issues/comments/<id> --input -        "PATCH <id> <body>"; edits the comment
+#   gh api -X POST repos/<repo>/issues/<N>/comments --input -          "POST <N> <body>"; adds the comment
+#   gh pr list --repo <repo> ... --json ... --jq <filter>              prs.json, filtered
+#   gh workflow run <file> --repo <repo> [--ref <branch>] -f pr_number=<N>    "dispatch <file> <branch> <N>"
+#
+# A body is logged with its newlines as \n. With $GH_FAKE/down, every call fails as GitHub being unreachable.
+set -euo pipefail
+shopt -s nullglob
+log() { printf '%s\n' "$*" >>"$GH_FAKE/gh.log"; }
+if [ -f "$GH_FAKE/down" ]; then echo "error connecting to api.github.com" >&2; exit 1; fi
+
+# filter <file> <jq filter>: the file's list through the filter, as gh --jq prints it.
+filter() { jq -r "$2" "$1"; }
+jqf="" method=GET path="" args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --jq) jqf="$2"; shift 2 ;;
+    -X) method="$2"; shift 2 ;;
+    --paginate) shift ;;
+    --input) shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+
+case "${args[0]} ${args[1]:-}" in
+  "api repos/"*)
+    path="${args[1]}"
+    case "$method $path" in
+      GET\ repos/*/issues/*/comments)
+        n="${path%/comments}"; n="${n##*/}"
+        file="$GH_FAKE/comments-$n.json"
+        [ -f "$file" ] || echo '[]' >"$file"
+        filter "$file" "${jqf:-.}"
+        ;;
+      PATCH\ repos/*/issues/comments/*)
+        id="${path##*/}" body="$(jq -r .body)"
+        log "PATCH $id ${body//$'\n'/\\n}"
+        for file in "$GH_FAKE"/comments-*.json; do
+          jq --argjson id "$id" --arg b "$body" 'map(if .id == $id then .body = $b | .updated_at = "2026-10-27T12:00:00Z" else . end)' \
+            "$file" >"$file.new" && mv "$file.new" "$file"
+        done
+        ;;
+      POST\ repos/*/issues/*/comments)
+        n="${path%/comments}"; n="${n##*/}" body="$(jq -r .body)"
+        log "POST $n ${body//$'\n'/\\n}"
+        file="$GH_FAKE/comments-$n.json"
+        [ -f "$file" ] || echo '[]' >"$file"
+        jq --arg b "$body" '. + [{id: (900 + length), user: {login: "github-actions[bot]"}, body: $b,
+          updated_at: "2026-10-27T12:00:00Z"}]' "$file" >"$file.new" && mv "$file.new" "$file"
+        ;;
+      *) echo "fake gh: unexpected $method $path" >&2; exit 1 ;;
+    esac
+    ;;
+  "pr list") filter "$GH_FAKE/prs.json" "${jqf:-.}" ;;
+  "workflow run")
+    file="${args[2]}" ref="(default)" n=""
+    for ((i = 3; i < ${#args[@]}; i++)); do
+      case "${args[i]}" in
+        --ref) ref="${args[i + 1]}" ;;
+        pr_number=*) n="${args[i]#pr_number=}" ;;
+      esac
+    done
+    log "dispatch $file $ref $n"
+    ;;
+  *) echo "fake gh: unexpected ${args[*]}" >&2; exit 1 ;;
+esac
