@@ -94,7 +94,8 @@ redis_world() {
 # auth=yes when REDISCLI_AUTH held the gate's password. An EVAL's script is logged as <script> and kept
 # in $T/redis.script. Answers from $T/redis/*: version, no-aclfile, default-on, no-modules (MODULE LIST is
 # empty), module-leak (json.mget is also in @string), databases, save-fails, save-fails-later (every ACL
-# SAVE after the first fails), setuser-fails, keys-<db> (one key per line, for EVAL to count), two-steps
+# SAVE after the first fails), setuser-fails, users/<name> (the users ACL SETUSER made, as ACL LIST shows them;
+# ACL DELUSER removes one), keys-<db> (one key per line, for EVAL to count), two-steps
 # (database 0's first step returns cursor 17), noise (a warning on stderr for every call) and old-cli
 # (error replies on stdout, where an older redis-cli prints them).
 printf '%s\n' "$*" >>"$T/redis.argv"
@@ -120,7 +121,8 @@ case "${cmd[*]}" in
   "ACL LIST")
     if [ -f "$T/redis/default-on" ]; then echo 'user default on nopass sanitize-payload ~* &* +@all'
     else echo 'user default off sanitize-payload resetchannels -@all'; fi
-    echo 'user mroom-gate on sanitize-payload #6b1c ~* &* +@all' ;;
+    echo 'user mroom-gate on sanitize-payload #6b1c ~* &* +@all'
+    cat "$T/redis/users/"* 2>/dev/null || true ;;
   "MODULE LIST")
     if [ ! -f "$T/redis/no-modules" ]; then
       printf 'name\nReJSON\nver\n20808\npath\n/usr/lib/redis/modules/rejson.so\nargs\n'
@@ -138,8 +140,12 @@ case "${cmd[*]}" in
       : >"$T/redis/saved-once"
     fi
     echo OK ;;
-  "ACL SETUSER "*) if [ -f "$T/redis/setuser-fails" ]; then err "ERR Error in ACL SETUSER modifier '-pubsub|shardnumsub': Unknown command"; fi; echo OK ;;
-  "ACL DELUSER "*) echo 1 ;;
+  "ACL SETUSER "*)
+    if [ -f "$T/redis/setuser-fails" ]; then err "ERR Error in ACL SETUSER modifier '-pubsub|shardnumsub': Unknown command"; fi
+    mkdir -p "$T/redis/users"
+    echo "user ${cmd[2]} ${cmd[*]:4}" >"$T/redis/users/${cmd[2]}"
+    echo OK ;;
+  "ACL DELUSER "*) rm -f "$T/redis/users/${cmd[2]}"; echo 1 ;;
   "CLIENT KILL USER "*) echo 0 ;;
   "EVAL <script> 0 "*)
     n=0
@@ -190,8 +196,10 @@ t_characters_are_judged_in_the_c_locale() {
 t_only_the_roles_operations_with_their_arguments_run() {
   world
   gate provision "shell"; expect_rc 1; expect_err_has "provision may not run 'shell'"
-  gate provision "db-create"; expect_rc 1; expect_err_has "db-create takes 1 argument(s), got 0"
-  gate provision "db-create 1 2"; expect_rc 1; expect_err_has "db-create takes 1 argument(s), got 2"
+  gate provision "db-create"; expect_rc 1; expect_err_has "db-create takes 1 argument and an optional --rotate, got 0 argument(s)"
+  gate provision "db-create 1 2"; expect_rc 1; expect_err_has "db-create takes 1 argument and an optional --rotate, got 2 argument(s)"
+  gate provision "app-key 1 --rotate 2"; expect_rc 1; expect_err_has "app-key takes 1 argument and an optional --rotate, got 3 argument(s)"
+  gate provision "db-drop 1 --rotate"; expect_rc 1; expect_err_has "db-drop takes 1 argument(s), got 2"
   local n
   for n in 0 01 -1 abc 1x 1234567890 shop_qa_1 ../1; do
     gate provision "db-create $n"; expect_rc 1; expect_err_has "is not an environment number"
@@ -238,6 +246,50 @@ t_db_create_on_an_existing_environment_rejoins_the_group_and_stays_out_of_its_da
   expect_true "the role is not put back in its group" has "$log" 'GRANT "shop_qa_envs" TO "shop_qa_12";'
   expect_true "PUBLIC keeps CONNECT" has "$log" 'db=postgres service=mroom-gate REVOKE CONNECT, TEMPORARY ON DATABASE "shop_qa_12" FROM PUBLIC;'
   expect_true "the gate connected to the PR's own database" lacks "$log" "db=shop_qa_12 "
+}
+
+# kept <N>: what the gate keeps of environment N's secrets.
+kept() { cat "$HOME/.local/state/mroom/qa/shop_qa_$1.secrets" 2>/dev/null || true; }
+
+t_db_create_keeps_its_password_until_it_is_rotated_or_dropped() {
+  world
+  local first second third
+  gate provision "db-create 12"; expect_rc 0
+  first="$(password_of "$out")"
+  : >"$T/pg/db-exists"; : >"$T/pg/role-exists"
+  gate provision "db-create 12"; expect_rc 0
+  second="$(password_of "$out")"
+  expect_true "a second db-create changed the password" [ "$first" = "$second" ]
+  # Set again with a verifier of its own salt, so nothing the app holds stops working.
+  run grep -c "ALTER ROLE \"shop_qa_12\" LOGIN NOINHERIT CONNECTION LIMIT 30 PASSWORD 'SCRAM-SHA-256" "$T/psql.log"; expect_out 1
+  run stat -c %a "$HOME/.local/state/mroom/qa/shop_qa_12.secrets"; expect_out 600
+  run kept 12; expect_out "DB_PASSWORD=$first"
+  gate provision "db-create 12 --rotate"; expect_rc 0
+  third="$(password_of "$out")"
+  expect_true "--rotate kept the password" [ "$third" != "$first" ]
+  run kept 12; expect_out "DB_PASSWORD=$third"
+  gate provision "db-drop 12"; expect_rc 0
+  expect_no_file "$HOME/.local/state/mroom/qa/shop_qa_12.secrets"
+  # A kept value that is not a password the gate makes is replaced, never used.
+  printf 'DB_PASSWORD=short\n' >"$HOME/.local/state/mroom/qa/shop_qa_12.secrets"
+  gate provision "db-create 12"; expect_rc 0
+  expect_true "a malformed kept password was used" eval '[[ "$(password_of "$out")" =~ ^[0-9a-f]{48}$ ]]'
+}
+
+t_app_key_is_kept_until_it_is_rotated() {
+  world
+  local first
+  gate provision "app-key 12"; expect_rc 0
+  first="$(sed -n 's/^APP_KEY=//p' <<<"$out")"
+  expect_true "the app key is not base64 of 32 bytes: $first" eval '[[ "$first" =~ ^base64:[A-Za-z0-9+/]{43}=$ ]]'
+  [ "$(printf '%s' "${first#base64:}" | base64 -d | wc -c)" = 32 ] || fail "the app key is not 32 bytes"
+  gate provision "app-key 12"; expect_rc 0; expect_out "APP_KEY=$first"
+  gate provision "app-key 13"; expect_rc 0
+  expect_true "two environments share an app key" lacks "$out" "$first"
+  gate provision "app-key 12 --rotate"; expect_rc 0
+  expect_true "--rotate kept the app key" lacks "$out" "$first"
+  expect_true "the app key reached the gate log" lacks "$(gate_log_text)" "base64:"
+  run kept 12; expect_out_has "APP_KEY=base64:"
 }
 
 t_server_warnings_are_never_read_as_values() {
@@ -416,6 +468,44 @@ t_redis_user_add_limits_the_user_to_its_prefix() {
   expect_true "the password reached syslog" lacks "$(cat "$T/syslog")" "$pw"
 }
 
+t_an_unchanged_redis_user_is_left_alone() {
+  redis_world
+  local first line
+  gate provision "redis-user-add 12"; expect_rc 0
+  expect_out_has $'REDIS_HOST=127.0.0.1\nREDIS_PORT=6379'
+  first="$(sed -n 's/^REDIS_PASSWORD=//p' <<<"$out")"
+  # The same user again: the same password, and no reset, no closed connections, nothing to save.
+  : >"$T/redis.log"
+  gate provision "redis-user-add 12"; expect_rc 0
+  expect_out_has "REDIS_PASSWORD=$first"
+  run redis_log
+  expect_true "an unchanged user was reset" lacks "$out" "ACL SETUSER"
+  expect_true "an unchanged user's connections were closed" lacks "$out" "CLIENT KILL"
+  # A user someone changed is set back, with the same password, and its connections closed.
+  line="$(cat "$T/redis/users/shop_qa_12")"
+  echo "${line/ ~shop:qa12:\*/ ~*}" >"$T/redis/users/shop_qa_12"
+  : >"$T/redis.log"
+  gate provision "redis-user-add 12"; expect_rc 0; expect_out_has "REDIS_PASSWORD=$first"
+  run redis_log
+  expect_out_has "ACL SETUSER shop_qa_12 reset on #$(printf '%s' "$first" | sha256sum | cut -d' ' -f1) ~shop:qa12:*"
+  expect_out_has "CLIENT KILL USER shop_qa_12"
+  # --rotate gives a new password.
+  gate provision "redis-user-add 12 --rotate"; expect_rc 0
+  expect_true "--rotate kept the password" lacks "$out" "$first"
+  run kept 12; expect_out_has "REDIS_ACL="
+  gate provision "redis-user-remove 12"; expect_rc 0
+  expect_true "the teardown kept the password" lacks "$(kept 12)" "REDIS_"
+}
+
+t_a_user_that_was_not_saved_is_set_again() {
+  redis_world; : >"$T/redis/save-fails-later"
+  gate provision "redis-user-add 12"; expect_rc 1
+  rm "$T/redis/save-fails-later" "$T/redis/saved-once"
+  : >"$T/redis.log"
+  gate provision "redis-user-add 12"; expect_rc 0
+  run redis_log; expect_out_has "ACL SETUSER shop_qa_12 reset"
+}
+
 t_without_modules_there_is_nothing_to_check() {
   redis_world; : >"$T/redis/no-modules"
   gate provision "redis-user-add 3"
@@ -561,6 +651,8 @@ test_case c-locale t_characters_are_judged_in_the_c_locale
 test_case role-operations-and-arguments t_only_the_roles_operations_with_their_arguments_run
 test_case db-create-own-role-and-database t_db_create_makes_a_role_and_a_database_of_their_own
 test_case db-create-existing t_db_create_on_an_existing_environment_rejoins_the_group_and_stays_out_of_its_database
+test_case db-password-kept t_db_create_keeps_its_password_until_it_is_rotated_or_dropped
+test_case app-key-kept t_app_key_is_kept_until_it_is_rotated
 test_case warnings-not-values t_server_warnings_are_never_read_as_values
 test_case objects-owning-database t_an_objects_role_that_owns_a_database_stops_everything
 test_case role-statement-fails t_a_failing_role_statement_prints_no_credentials
@@ -577,6 +669,8 @@ test_case one-request-per-environment t_one_request_at_a_time_per_environment
 test_case logged t_requests_and_refusals_are_logged
 test_case scram-rfc-7677 t_the_password_verifier_matches_rfc_7677
 test_case redis-user-add t_redis_user_add_limits_the_user_to_its_prefix
+test_case redis-user-unchanged t_an_unchanged_redis_user_is_left_alone
+test_case redis-user-unsaved t_a_user_that_was_not_saved_is_set_again
 test_case redis-without-modules t_without_modules_there_is_nothing_to_check
 test_case redis-module-leak t_a_module_command_in_a_granted_category_is_refused
 test_case redis-aclfile-and-version t_redis_without_an_aclfile_or_older_than_7_is_refused

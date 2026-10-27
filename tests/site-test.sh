@@ -404,8 +404,11 @@ t_user_clean_runs_only_as_a_qa_sites_user() {
   gate provision "user-clean 12"; expect_rc 1; expect_err_has "is not a QA site's isolated user"
   gate provision "user-clean 99"; expect_rc 0; expect_out "no user shop_qa_99, so nothing to clean"
   echo "$COMMIT" >"$HOME/.local/state/mroom/qa/shop_qa_99.commit"
+  printf 'DB_PASSWORD=%048d\nAPP_KEY=base64:kept\n' 0 >"$HOME/.local/state/mroom/qa/shop_qa_99.secrets"
   gate provision "user-clean 99"; expect_rc 0
   expect_no_file "$HOME/.local/state/mroom/qa/shop_qa_99.commit"
+  # The app key goes with the site user; the database's password goes with the database.
+  run cat "$HOME/.local/state/mroom/qa/shop_qa_99.secrets"; expect_out "DB_PASSWORD=$(printf '%048d' 0)"
 }
 
 t_the_gate_checks_the_site_user_and_the_installed_helper() {

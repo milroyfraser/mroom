@@ -267,9 +267,9 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 
 | Operation | What it does |
 |---|---|
-| `db-create <N>` | a Postgres role and a database of their own for QA environment N, cloned from the template (D18); prints `DB_DATABASE`, `DB_USERNAME` and a new `DB_PASSWORD` for the environment's `.env` |
+| `db-create <N> [--rotate]` | a Postgres role and a database of their own for QA environment N, cloned from the template (D18); prints `DB_DATABASE`, `DB_USERNAME` and `DB_PASSWORD` for the environment's `.env` |
 | `db-drop <N>` | the environment's database and role |
-| `redis-user-add <N>` | a Redis user of its own, limited to its prefix `<app>:qa<N>:` (D15); prints `REDIS_USERNAME`, a new `REDIS_PASSWORD`, `REDIS_PREFIX` and `HORIZON_PREFIX` |
+| `redis-user-add <N> [--rotate]` | a Redis user of its own, limited to its prefix `<app>:qa<N>:` (D15); prints `REDIS_USERNAME`, `REDIS_PASSWORD`, `REDIS_PREFIX`, `HORIZON_PREFIX`, `REDIS_HOST` and `REDIS_PORT`. A user already as the gate left it is left alone, so its connections stay open |
 | `redis-user-remove <N>` | the environment's Redis user, which also closes its connections |
 | `redis-clear <N>` | every key under the environment's prefix, in every Redis database |
 | `code-put <N> <commit>` | the PR's tree, GitHub's tarball of that commit on stdin, into the environment's API site (D17); the gate records the commit |
@@ -277,8 +277,9 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 | `env-put <N>` | the API site's `.env`, on stdin, written as the site user (mode 600), replacing rather than following any link the PR's code left there; prints `env=` its SHA-256 |
 | `env-sha <N>` | `env=` the SHA-256 of the API site's `.env` (or `missing`), and `commit=` the commit `code-put` recorded (or `none`) |
 | `signin-code <N> <email>` | a sign-in code for a persona address, from the app's `php artisan mroom:signin-code <email>` or its `qa-signin` hook |
+| `app-key <N> [--rotate]` | `APP_KEY`, the environment's Laravel app key |
 | `user-clean <N>` | stops the site user's processes (PHP-FPM's pool workers once: their master starts fresh ones, which end with the site) and deletes its files in `/tmp`, `/var/tmp`, `/dev/shm`, `/var/crash`, `/run/lock` and `/dev/mqueue`, its IPC objects and its crontab, before qa-down deletes the sites |
-| `mail-user-add <N>` | an SMTP login of its own on the box's Mailpit (D19), given only while systemd's socket for mroom's mail relay holds the SMTP port; prints `MAIL_MAILER`, `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME` and a new `MAIL_PASSWORD` |
+| `mail-user-add <N> [--rotate]` | an SMTP login of its own on the box's Mailpit (D19), given only while systemd's socket for mroom's mail relay holds the SMTP port; prints `MAIL_MAILER`, `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME` and `MAIL_PASSWORD`. Mailpit restarts only when its logins changed |
 | `mail-user-remove <N>` | the environment's SMTP login |
 | `mail-read <N> <email>` | as JSON, the newest five mails the environment's login sent to a persona address (To, Cc or Bcc), and only to personas: sender, recipients, subject and text |
 | `mail-clear <N>` | every mail the environment's login sent |
@@ -296,6 +297,13 @@ no disk's bucket is another environment's or another disk's. Its Reverb app's id
 PR is ever given an id whose sockets may still be open. A password reaches
 Postgres only as a SCRAM verifier, through stdin, and Redis only as its SHA-256. Each request and refusal
 is logged, never a secret, to `~/.local/state/mroom/gate.log` and to syslog.
+
+The gate makes an environment's passwords and its app key once, and keeps them in
+`~/.local/state/mroom/qa/<app>_qa_<N>.secrets` (mode 600, beside the commit `code-put` records), so every
+later request gives the same ones and a deploy changes nothing under the running app: its users stay signed
+in, and its connections stay up. `--rotate` makes a new one. `db-drop`, `redis-user-remove` and
+`mail-user-remove` delete those of their own service, and `user-clean` the app key. A bucket's key is new on
+every `bucket-create`, as D14 has it, since no user notices it.
 
 A Redis user gets Redis's own data types and the functions an app needs (`@keyspace`, `@string`, `@hash`,
 `@list`, `@set`, `@sortedset`, `@stream`, `@bitmap`, `@hyperloglog`, `@geo`, `@pubsub`, `@scripting`,
