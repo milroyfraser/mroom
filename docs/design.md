@@ -530,7 +530,14 @@ for 6 s of e2e tests); backend shards split by suite name rather than time (one 
 |---|---|---|
 | Slowest backend shard | mean 301 s, p50 324 s (48 runs) | mean 242 s (4 runs) |
 | e2e | mean 298 s, p90 565 s, max 921 s (47 runs) | mean 204 s, max 226 s |
-| First push of a PR (cold) | backend p50 273 s, e2e p50 245 s, max 469 s | measured by `tools/ci-first-push.sh` |
+| First push of a PR (cold) | backend p50 273 s, e2e p50 245 s, max 469 s (6 and 7 PRs) | backend p50 262 s, e2e p50 151 s, max 210 s (12 and 15 PRs) |
+
+First pushes after the change were measured on 27 Oct 2026 with `tools/ci-first-push.sh`, over every PR opened
+since cache warming merged on 23 Oct whose first push ran tests: the slowest backend shard mean 250 s, p90
+275 s, max 285 s (before: mean 283 s, p90 325 s, max 339 s); e2e mean 165 s, p90 209 s, max 210 s (before:
+mean 267 s, p90 293 s, max 469 s). Every e2e first push restored its four dependency caches (`vendor`,
+`pnpm-store`, `playwright`, `playwright-debs`), and the apt step took 13 to 30 s. The 8 in 15 that left the
+frontend alone also restored the e2e build (pattern 7) and took 123 to 151 s; the others took 178 to 210 s.
 
 **Patterns the CI templates ship:**
 
