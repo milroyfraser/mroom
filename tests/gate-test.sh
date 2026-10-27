@@ -200,11 +200,37 @@ t_only_the_roles_operations_with_their_arguments_run() {
   gate provision "db-create 1 2"; expect_rc 1; expect_err_has "db-create takes 1 argument and an optional --rotate, got 2 argument(s)"
   gate provision "app-key 1 --rotate 2"; expect_rc 1; expect_err_has "app-key takes 1 argument and an optional --rotate, got 3 argument(s)"
   gate provision "db-drop 1 --rotate"; expect_rc 1; expect_err_has "db-drop takes 1 argument(s), got 2"
+  gate provision "probe-link 1"; expect_rc 1; expect_err_has "probe-link takes 2 argument(s), got 1"
+  local kind
+  for kind in both API Web go ../api api/x; do
+    gate provision "probe-link 1 $kind"; expect_rc 1; expect_err_has "probe-link: its second argument is api or web"
+  done
   local n
   for n in 0 01 -1 abc 1x 1234567890 shop_qa_1 ../1; do
     gate provision "db-create $n"; expect_rc 1; expect_err_has "is not an environment number"
   done
   expect_true "psql ran for a refused request" no_psql_calls
+}
+
+t_probe_link_passes_on_only_a_file_and_its_sha256() {
+  world
+  # A release whose site-op answers anything but "<SHA-256> <path>", installed as the gate wants it: owned as
+  # MROOM_GATE_SITE_OP_OWNER says, in a folder the box user cannot change, the same as the release's own.
+  mkdir -p "$T/release" "$T/libexec"
+  cp -R "$ROOT/bin" "$ROOT/lib" "$T/release/"
+  printf '#!/bin/sh\necho "linked it; the box user is in /etc/passwd"\n' >"$T/release/lib/site-op"
+  cp "$T/release/lib/site-op" "$T/libexec/site-op"
+  chmod 555 "$T/libexec/site-op" "$T/libexec"
+  printf 'MROOM_QA_ZONE=qa.example.test\n' >>"$HOME/.config/mroom/box.env"
+  # sudo -n -u <user> -- <site-op> ...: runs it as the test's user; id knows the site user, in the isolated group.
+  printf '#!/bin/sh\nshift 4\nexec "$@"\n' >"$T/bin/sudo"
+  printf '#!/bin/sh\ncase "$*" in\n  "-u shop_qa_12") echo 2000 ;;\n  "-nG shop_qa_12") echo "shop_qa_12 isolated" ;;\n  *) exec /usr/bin/id "$@" ;;\nesac\n' >"$T/bin/id"
+  chmod +x "$T/bin/sudo" "$T/bin/id"
+  run env SSH_ORIGINAL_COMMAND="probe-link 12 web" MROOM_GATE_SITE_OP="$T/libexec/site-op" \
+    MROOM_GATE_SITE_OP_OWNER="$(id -u)" "$T/release/bin/mroom" gate provision
+  expect_rc 1; expect_err_has "probe-link 12: site-op named no file and SHA-256"
+  expect_true "the gate passed site-op's answer on" lacks "$out$err" "passwd"
+  chmod u+w "$T/libexec"
 }
 
 t_db_create_makes_a_role_and_a_database_of_their_own() {
@@ -711,6 +737,7 @@ test_case plain-words-only t_anything_but_plain_words_is_refused_and_stays_out_o
 test_case line-length t_a_request_may_be_4096_characters_long_and_no_longer
 test_case c-locale t_characters_are_judged_in_the_c_locale
 test_case role-operations-and-arguments t_only_the_roles_operations_with_their_arguments_run
+test_case probe-link-answer t_probe_link_passes_on_only_a_file_and_its_sha256
 test_case db-create-own-role-and-database t_db_create_makes_a_role_and_a_database_of_their_own
 test_case db-create-existing t_db_create_on_an_existing_environment_rejoins_the_group_and_stays_out_of_its_database
 test_case db-password-kept t_db_create_keeps_its_password_until_it_is_rotated_or_dropped
