@@ -59,8 +59,13 @@ Commits do not show a person's work, because agents make almost all of them.
   agents (D22); a dev site served from
   a pushed branch under a lock; resume after a restart; nightly Claude Code updates and worktree clean-up; box
   health (`mroom status`, `mroom doctor`) and a watchdog that reports the box's own failures to chat.
-- **An agent workflow**: `/refine` → `/deliver` → `/implement` → stop at a PR in review; `/release` on a person's
-  say-so. Principle skills named at the step that needs them.
+- **An agent workflow**: `/refine`, `/deliver`, `/implement` and `/fix-issue` stop at a PR in review; `/release` on a
+  person's say-so. `/fix-issue <error id>` takes one error-tracker issue the same way: it reads the error and its
+  latest event, finds the tracker issue the persona filed for it (by its marker, confirmed against the description),
+  works in a worktree whose branch names both ids, and reproduces the error with a failing test before it fixes it.
+  It links the error issue to the PR through the repository's SCM integration: a `Fixes <id>` line on the fixing
+  commit, which reaches the default branch through squash merges that keep the commits' messages. Principle skills
+  named at the step that needs them.
 - **Guardrails**: agents never merge, approve, deploy, release or read secrets; enforced by a command parser,
   not only prefix rules, and gated by GitHub, where only people's approvals count and a person approves each
   deploy (D22).
@@ -71,7 +76,9 @@ Commits do not show a person's work, because agents make almost all of them.
 - **CI/CD defaults**: CI templates with the measured patterns of section 10, and a deploy step that ships the
   release tag, checks that the new release is live, and rolls back by tag.
 - **A bot persona** (name configurable) that keeps one status note per PR on the issue, pings a person only when
-  needed, and triages alerts into issues.
+  needed, and triages alerts into issues. It keeps that backlog current against the error tracker (fixed in a
+  release, recurring, regressed, duplicate), and works error issues with `/fix-issue` from a box profile of its own
+  (D23), stopping at a PR in review like any agent.
 
 Not goals: hosts other than Forge or trackers other than Linear in v1, non-Laravel stacks, macOS boxes. mroom
 starts the host's deploy and checks that the new release is live; the host (Forge) still runs the deploy.
@@ -102,6 +109,7 @@ starts the host's deploy and checks that the new release is live; the host (Forg
 | D20 | A Forge token that can add SSH keys, run commands or recipes, read the sudo or database password, edit nginx or deploy scripts, or create daemons or scheduled jobs reaches `forge` or root. Only the `qa` environment holds such a token. The box's token has none of those scopes except nginx, which gives nothing beyond what its users already have as `forge` | Forge's API spec lets a daemon run as `root`; a scheduled job, a recipe and an SSH key take a user of the caller's choice; a deploy script runs as its site's user, which for the dev site is `forge`; and scopes cover the whole account, not one site. qa-up creates workers, so its token reaches root and is guarded by who holds it (sections 8.1, 8.8). Every developer on the box can read the box's token and every agent can use it through `forge-api`, so it keeps reads and site settings, and a person sets up daemons and scheduled jobs with a short-lived token |
 | D21 | What root installs comes from a release, never from the box: mroom's root recipe, saved in Forge and run as root, downloads `lib/root-setup` at a release tag, checks it against the SHA-256 that release's README names, and runs it with the box's values. `mroom baseline` only says whether the installed units are that release's | The box user runs agents that may be compromised (8.1), so whatever the box prints may have been changed, and a checklist of unit lines to refuse always misses one that grants root (`AmbientCapabilities=`, `LoadCredential=`, `StandardOutput=file:`, `RuntimeDirectory=`). A Forge recipe runs as root over Forge's own SSH connection, outside the box user's shell, and the box's token holds no recipe scope (D20; even `recipe:view` runs saved recipes). A tag, never a commit, because GitHub serves a fork's commits under the repository's address; the SHA-256 pins the file. `root-setup` reads no file the box user can write and checks `site-op` against the SHA-256 it holds; CI runs it as root in the mail, files and site jobs, and `tests/root-test.sh` checks every unit line against an allowlist. What it trusts is this repository's tags and README, so nothing on the box may write to the repository. One limit stays: systemd, as root, resolves the units' bind paths in the box user's home whenever a service starts (open question 8) |
 | D22 | Every session on the box works on GitHub as one account of the agents' own (`github.agent_login`): Write on the app's repository, never maintain or admin, never a developer's account, and the box's only GitHub credential, with no Forge server key on any GitHub account and no developer's login, token or forwarded SSH agent on the box. On GitHub, only people can give an approval that counts or let a deploy run: review from code owners, who are all people (the default branch's `CODEOWNERS`), approval of the most recent push, no ruleset bypass the agents' account holds, and `production` deploying only release tags, each approved by a person (8.8). A profile commits under its developer's name and any other session as the agents' account; chat pings for an agent's pull request go to the author of its first commit | Agents can use every credential their OS user can read, which on a box where every developer works as `forge` is every login there. A developer's login can approve pull requests, so a required approval could be given from the box, and an admin's could lift the branch rules. Write alone is not enough either: GitHub counts the approval of any Write account that did not open the pull request or push to it last, lets an Actions workflow approve one while Actions may approve pull requests, and lets Write publish a release on any commit; code-owner review counts only the people `CODEOWNERS` names, read from the default branch. Forge puts the server's own key on the GitHub account connected to Forge unless "Add server's SSH key to source control providers" is unticked, which gives the box every repository that account reaches. The developer whose session opened a pull request may approve it; whether another developer must is a separate rule. The `gh` login downloads mroom's releases, but nothing on the box may write to mroom's repository (D21) |
+| D23 | The persona works as a box profile of its own, with its own Claude login and tracker identity, never a developer's. Its tracker writes are limited to issues it filed: their status, priority and comments, and it assigns no one. Every fix it makes still stops at a PR a person reviews | A profile of its own keeps its work apart from every developer's: its commits, its Claude use and its tracker changes are its own, and taking it away takes nothing of a person's. Writing only to issues it filed keeps it out of the work people plan and hand out. Its fixes are code like any agent's, so they meet the same review (D22) |
 
 ## 3. Host requirements
 
@@ -170,8 +178,8 @@ mroom/
                                 records, the watchdog's probes, util, the QA services' pinned builds (pins.txt)
   plugin/                       the Claude Code plugin
     .claude-plugin/plugin.json
-    skills/                     refine, deliver, implement, release, forge, blast-radius, correct, verify-app,
-                                principle-*, typescript-best-practices (vendored, with LICENSE)
+    skills/                     refine, deliver, implement, fix-issue, release, forge, blast-radius, correct,
+                                verify-app, principle-*, typescript-best-practices (vendored, with LICENSE)
     agents/qa-engineer.md
     commands/clean-review.md, crap.md
     hooks/hooks.json            SessionStart banner, PreToolUse guard, WorktreeCreate/Remove
@@ -234,6 +242,11 @@ tracker = "linear"                 # linear | none
 id_pattern = "SHOP-[0-9]+"         # worktree slugs, PR title scopes, issue links
 url = "https://linear.app/<workspace>/issue/{id}"
 
+[errors]
+provider = "sentry"                # leave the table out for no error tracker
+org = "<org>"
+id_pattern = "[A-Z]+-[A-Z0-9]+"    # an error issue's id, as APP-1A2; names a worktree with no tracker id
+
 [pr]
 required_checks = ["test", "lint", "e2e", "check-title"]
 
@@ -258,6 +271,9 @@ name = "Agent"                     # the name people see on notes and pings
 agent_login = "<agents-account>"   # the box's one GitHub account (D22); `mroom user setup` refuses any other
 ```
 
+`mroom wt new` names a worktree's slug after the tracker id in its branch's name (`issues.id_pattern`), or, when the
+branch has none, after its error id (`errors.id_pattern`).
+
 **Required keys and defaults, by phase.** A key becomes required in the phase whose command cannot run without it;
 until then a reader passes its own fallback (`mroom config get <key> --default <value>`).
 
@@ -268,6 +284,7 @@ until then a reader passes its own fallback (`mroom config get <key> --default <
 | `app.version_path` | phase 2 decides | `/version` |
 | `qa.*` (`qa.db_read_allowlist` has no default, ever; section 8.6) | phase 2 decides | phase 2 decides; `qa.parity.*` defaults to the values above |
 | `issues.*` | phase 3 decides | phase 3 decides |
+| `errors.*` | phase 3 decides | none: without the table there is no error tracker |
 | `pr.required_checks` | phase 4 decides | phase 4 decides |
 | `persona.name` | phase 5 decides | phase 5 decides |
 
@@ -276,14 +293,14 @@ until then a reader passes its own fallback (`mroom config get <key> --default <
 - A missing required key fails with its name and an example line; a wrong type fails with the key's name. Types:
   string, whole number ≥ 1 (`qa.max_envs`, `qa.ttl_days`), list of strings, table of strings
   (`app.build.frontend_env`), or one of a fixed set (`app.package_manager`: npm | pnpm; `issues.tracker`:
-  linear | none; each `qa.parity.*` key: the values listed above).
+  linear | none; `errors.provider`: sentry; each `qa.parity.*` key: the values listed above).
 - `app.name` matches `[a-z][a-z0-9_]{0,31}`, since it is built into database names and Redis prefixes. A Redis
   prefix puts `:` after each part (`shop:`, `shop:qa12:`), a character no name contains, so no app's or
   environment's ACL pattern matches another's keys.
 - `tests.database_pattern` contains `{slug}`, so each worktree gets its own database.
 - `issues.url` contains `{id}`.
-- `issues.id_pattern` compiles as a **Python** regular expression (`re`), not POSIX ERE; patterns used by shell
-  tools later must stay in the common subset.
+- `issues.id_pattern` and `errors.id_pattern` compile as **Python** regular expressions (`re`), not POSIX ERE;
+  patterns used by shell tools later must stay in the common subset.
 - An unknown key warns (with a close match, if any) and is ignored; it never fails.
 
 ### 5.2 Box config (`~/.config/mroom/`)
@@ -338,8 +355,13 @@ Shell function interfaces in `lib/core/`, chosen by config. v1 implements the fi
 |---|---|---|---|
 | tracker | `issue_get`, `issue_set_state`, `issue_comment_upsert`, `issue_create`, `issue_find_by_marker`, `issue_owned_by_bot`, `attach_image` | Linear; `none` (notes on the PR, images as artifact links) | GitHub Issues (search over hidden markers must be verified first) |
 | chat | `chat_post`, `chat_update`, `chat_mention <github-login or commit email>` | Slack (bot token, `chat:write`) | Discord or Teams webhooks |
-| errors | `errors_new_since`, `errors_count_for_release`, `errors_crons_failing` | Sentry (org, region from config), optional | |
+| errors | `errors_new_since`, `errors_count_for_release`, `errors_crons_failing`, `errors_issue_get` | Sentry (org, region from config), optional | |
 | host | `host_sites`, `host_site_create`, `host_daemon_*`, `host_jobs_*`, `host_cert_*`, `host_deploy` | Forge v2 (one client: retries, 429, pagination) | |
+
+`errors_issue_get` gives an error issue with its latest event, its counts and its first release. Linking an error
+issue to its fix needs no write key: it goes through the SCM integration's commit reference, the `Fixes <id>` line on
+the fixing commit. An explicit link call, if one is ever needed, goes through the gate, never as a key every box
+session can read.
 
 The agent-facing `forge-api` keeps its guards (writes need `--write`, secret paths need `--secret`, paths pinned to
 the configured server) and uses the same client.
@@ -653,9 +675,9 @@ Phase 2 comes in two steps, so environments work before browser QA depends on th
 | 1. Box | `mroom` and `lib/*` generalised (config instead of hard-coded names, slug rules and paths), `forge-api`, Forge client, hooks with defaults, settings fragments, `mroom guard`, plugin hooks (banner, guard, worktree), `mroom init`, box job records (`mroom job run`); a box watchdog (an MCP probe, processes killed for lack of memory, failed box jobs and scheduled workflows, each posted to chat); the `regression` label (a PR that fixes a production problem names the release that caused it, `Breaks: v1.2.3`), so later phases have a baseline | **Works:** a new box is set up from the README, `box.env` and `mroom.toml` alone; no app's name appears in mroom's code. **Moves (4):** fewer box or pipeline failures are noticed by a person before mroom reports them |
 | 2a. QA environments | qa-plan (path rules), qa-up, qa-down, qa-reap, the gate and its operations, Forge site isolation with code delivered as data (D17), a Redis user (D15), a Postgres role (D18) and an app key per environment, the app contract, `mroom doctor --app`, the template database (seeded, or the opt-in snapshot), the QA services of `[qa.parity]` (section 8.9; D14, D16, D19) with pinned checksums (section 3), `app.version_path`; slots sized from box memory (a memory budget per environment sets `qa.max_envs`) | **Works:** an example app gets `go-<PR>`/`api-<PR>` with its own database and role, app key, Redis user, buckets, Reverb app and mail login, and the section 8 invariants are tested. **Moves (3):** fewer production problems per release |
 | 2b. Browser QA | the runner sandbox (8.5); the plan's Claude step with `blast-radius` (vendored from pstack); the `verify-app` harness (pluggable sign-in) and `qa-engineer` | **Works:** an example app gets a browser QA check on each PR's last commit. **Moves (4):** fewer product PRs reach a person without a needed browser test passing |
-| 3. Agent workflow | skills generalised over the tracker adapter and `mroom.toml`; principles vendored; `mroom check size` (a file over 500 lines may not grow, and a static-analysis baseline may not grow), run by the pre-push hook and CI | **Works:** `/implement` takes an issue to a PR on the example app with tracker `none` and with Linear. **Moves (1):** files over 500 lines stop growing, in number and in lines |
+| 3. Agent workflow | skills generalised over the tracker adapter and `mroom.toml`; principles vendored; `mroom check size` (a file over 500 lines may not grow, and a static-analysis baseline may not grow), run by the pre-push hook and CI | **Works:** `/implement` and `/fix-issue` reach a PR on the example app with tracker `none` and with Linear. **Moves (1):** files over 500 lines stop growing, in number and in lines |
 | 4. PR checks and CI/CD | conventional title, type labels + release notes, Claude review, review findings, auto-tag (optional); CI templates with the section 10 defaults (cache warming, apt cache, vendor cache, measured shards) and `tools/ci-first-push.sh`; the deploy template (the `release` branch), `deploy-verify` and the `production` environment (section 10, patterns 8 to 10) | **Works:** a repo calling the reusable workflows gets the checks, and a deploy in tests (with a fake host) waits until the live commit matches the tag. **Moves (2):** every release confirms its live commit. First-push CI time stays under 4 minutes (the pilot app already has the section 10 patterns) |
-| 5. Persona | PR notes and pings (`pr-status`), alert triage, alarm and guard | **Works:** the example repo gets one note per PR and deduplicated pings; triage files one issue per alert key. **Moves (2):** the time from a release to the first report of a problem it caused falls |
+| 5. Persona | PR notes and pings (`pr-status`), alert triage, alarm and guard | **Works:** the example repo gets one note per PR and deduplicated pings; triage files one issue per alert key; the persona re-checks its open issues against the error tracker and works one with `/fix-issue`. **Moves (2):** the time from a release to the first report of a problem it caused falls |
 
 ## 12. Where each part comes from
 
