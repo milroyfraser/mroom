@@ -30,6 +30,10 @@ t_the_server_block_must_include_the_site_config_itself() {
   conf includes 'include forge-conf/101/site.conf;'; expect_rc 1
   # In a server block inside another block, which is not the domain's own.
   conf includes $'http {\n    server {\n        include forge-conf/101/site.conf;\n    }\n}'; expect_rc 1
+  # Every server block at the top includes it: one that does not would serve the site without the guard.
+  conf includes "$(domain "$SITE_CONF")"$'\nserver {\n    listen 8080;\n    root /home/shop_qa_7/api-7.qa.example.dev/public;\n}'
+  expect_rc 1; expect_err_has "does not include the site's site.conf"
+  conf includes "$(domain "$SITE_CONF")"$'\nserver {\n    listen 8080;\n'"$SITE_CONF"$'\n}'; expect_rc 0
   # Another file, a comment, or a file that only ends like it.
   conf includes "$(domain '    include forge-conf/101/server/*;')"; expect_rc 1
   conf includes "$(domain '    # include forge-conf/101/site.conf;')"; expect_rc 1

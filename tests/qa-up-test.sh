@@ -128,7 +128,7 @@ t_a_guard_in_a_comment_or_a_block_does_not_count() {
   fragment $'# disable_symlinks if_not_owner;\nlocation /x {\n    disable_symlinks if_not_owner;\n}\nlocation / {\n    try_files $uri $uri/ /index.php?$query_string;\n}\n'
   up
   expect_rc 1; expect_err_has "site 50's nginx config cannot be guarded as it is (no disable_symlinks if_not_owner at the top of the site's config, alone), so no code goes in"
-  run gate_log; expect_out ""
+  run gate_log; expect_out "env-sha 7"
   # In a comment alone: the guard goes on top.
   fragment $'# disable_symlinks if_not_owner;\nlocation / {\n    try_files $uri $uri/ /index.php?$query_string;\n}\n'
   rm -f "$FORGE_LOG"
@@ -151,7 +151,7 @@ t_a_server_block_that_overrides_the_fragment_keeps_the_code_out() {
   forge_set '.fail["GET /sites/50/domains/500/nginx"] = 500'
   up
   expect_rc 1; expect_err_has "site 50's nginx server block does not take its site config as it is"
-  run gate_log; expect_out ""
+  run gate_log; expect_out "env-sha 7"
 }
 
 t_a_link_nginx_still_serves_stops_the_deploy() {
@@ -356,9 +356,10 @@ t_an_existing_environment_is_refreshed() {
   : >"$ORDER_LOG"
   up
   expect_rc 0
-  # No second site, certificate, nginx edit or worker: only the proof, the code, the services, the .env and a deploy.
+  # No second site, certificate, nginx edit or worker: the gate's word that its code went in, then only the proof, the
+  # code, the services, the .env and a deploy.
   run order
-  expect_out $'gate probe-link 7 api\ngate probe-link 7 web\ngate code-put 7 '"$SHA"$'\ngate dist-put 7\ngate db-create 7\ngate redis-user-add 7\ngate mail-user-add 7
+  expect_out $'gate env-sha 7\ngate probe-link 7 api\ngate probe-link 7 web\ngate code-put 7 '"$SHA"$'\ngate dist-put 7\ngate db-create 7\ngate redis-user-add 7\ngate mail-user-add 7
 gate bucket-create 7 files\ngate bucket-create 7 media public\ngate app-key 7\ngate env-put 7
 forge PUT /sites/101/deployments/script\nforge POST /sites/101/deployments'
   run state '.sites | length'; expect_out 2
@@ -387,7 +388,7 @@ t_a_site_made_with_another_php_is_refused() {
   up
   expect_rc 1
   expect_err_has "$API runs PHP 8.3, and app.php is 8.4. A site's PHP version is set when it is made: tear the environment down (gh workflow run qa-down.yml -f pr_number=7)"
-  run gate_log; expect_out ""
+  run gate_log; expect_out "env-sha 7"
 }
 
 t_a_site_whose_web_root_is_elsewhere_is_refused() {
@@ -395,7 +396,7 @@ t_a_site_whose_web_root_is_elsewhere_is_refused() {
   made_site 50 7 api /public 8.4
   up
   expect_rc 1; expect_err_has "$API's web root is /home/shop_qa_7/$API/public, not /home/shop_qa_7/$API/api/public"
-  run gate_log; expect_out ""
+  run gate_log; expect_out "env-sha 7"
 }
 
 t_a_new_environment_waits_for_a_slot() {
@@ -410,11 +411,105 @@ t_a_new_environment_waits_for_a_slot() {
   run gate_log; expect_out ""
   run sed -n 's/^refused=//p' "$GITHUB_OUTPUT"; expect_out_has "All 3 QA environments are in use"
   run gh_log; expect_out_has 'POST 7 ### QA environment\n<!-- mroom-qa: waiting since=2026-10-27T12:00:00Z -->'
-  # An environment that exists is refreshed, however many there are.
+  # An environment whose code went in is refreshed, however many there are.
   made_site 5 7 api /api/public 8.4
+  code_went_in 7
   up
   expect_rc 0
-  run gate_log; expect_out_has "code-put 7 $SHA"
+  run gate_log; expect_out_has $'env-sha 7\nprobe-link 7 api\nprobe-link 7 web\ncode-put 7 '"$SHA"
+  # One whose code never went in, such as the site a first deploy that stopped left, is new still: past qa.max_envs,
+  # it gives way, its site deleted and waited for until Forge has it gone.
+  app "$TWO" api/artisan=php
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  site 3 "$(web_host 3)" installed
+  made_site 5 7 api /api/public 8.4
+  up
+  expect_rc 0; expect_out_has "site 5 gave way, past qa.max_envs"
+  expect_out_has "::warning::All 3 QA environments are in use, so this pull request waits for a slot."
+  run gate_log; expect_out "env-sha 7"
+  run forge_writes; expect_out "DELETE /sites/5"
+  run state '[.sites[].id] | map(tostring) | join(",")'; expect_out "1,2,3"
+  # A new one that has a site already counts only the others, and comes up beside two.
+  app "$TWO" api/artisan=php
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  made_site 5 7 api /api/public 8.4
+  up
+  expect_rc 0; expect_out_has "environment 7: up at https://$WEB"
+}
+
+t_a_site_forge_is_still_making_is_new() {
+  app "$TWO" api/artisan=php
+  made_site 5 7 api /api/public 8.4
+  forge_set '.sites[-1] += {status: "installing", install_reads: 5}'
+  up
+  expect_rc 0; expect_out_has "environment 7: up at https://$WEB"
+  # Nothing is asked of the gate about it: before Forge has made a site, the gate may know no site user.
+  run gate_log; expect_true "env-sha ran for a site Forge was still making" lacks "$out" "env-sha"
+}
+
+# other_site <N>: a site of environment N, as another run's first deploy asks Forge for it (sites_made_first/after).
+other_site() {
+  jq -nc --arg name "$(api_host "$1")" --arg user "$(site_user "$1")" \
+    '{name: $name, type: "php", is_isolated: true, isolated_user: $user, web_directory: "/api/public", php_version: "php84"}'
+}
+
+t_a_site_that_could_not_give_way_gives_way_on_the_next_run() {
+  app "$TWO" api/artisan=php
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  # Environment 8 made its first site just before this one's, and Forge refuses this one's delete.
+  forge_set ".sites_made_first = [$(other_site 8)] | .fail[\"DELETE /sites/102\"] = 500"
+  up
+  expect_rc 1
+  expect_err_has "Forge did not remove site 102, made past qa.max_envs, though its delete went twice; the next run gives way again"
+  run grep -c '^DELETE /sites/102$' "$FORGE_LOG"; expect_out 2
+  run gate_log; expect_out ""
+  # The next run finds site 102, but its code never went in, so it is new still, and gives way again: it never comes
+  # up beside three others.
+  up
+  expect_rc 1; expect_err_has "Forge did not remove site 102"
+  expect_true "a fourth environment came up past qa.max_envs" lacks "$out" "environment 7: up"
+  run gate_log; expect_out "env-sha 7"
+  # Once Forge takes the delete, the run waits for a slot, and three environments are left.
+  forge_set 'del(.fail)'
+  up
+  expect_rc 0; expect_out_has "site 102 gave way, past qa.max_envs"
+  expect_out_has "::warning::All 3 QA environments are in use, so this pull request waits for a slot."
+  run state '[.sites[] | select(.status != "removing") | .name] | length'; expect_out 3
+  run state '[.sites[].id] | map(tostring) | join(",")'; expect_out "1,2,101"
+}
+
+t_giving_way_outlasts_a_delete_forge_drops() {
+  app "$TWO" api/artisan=php
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  # Forge accepts the first delete and never runs it: the delete goes again, and the site goes.
+  forge_set ".sites_made_first = [$(other_site 8)] | .site_deletes_dropped = 1"
+  export MROOM_QA_GIVE_WAY_WAIT=10
+  up
+  expect_rc 0
+  expect_out_has "site 102 is still there; its delete goes again"
+  expect_out_has "site 102 gave way, past qa.max_envs"
+  run grep -c '^DELETE /sites/102$' "$FORGE_LOG"; expect_out 2
+  run state '[.sites[].id] | map(tostring) | join(",")'; expect_out "1,2,101"
+  # A delete sent while Forge is still making the site may never run, so it is sent once Forge has made it.
+  app "$TWO" api/artisan=php
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  forge_set ".sites_made_first = [$(other_site 8)] | .installing_delete_dropped = true | .install_reads = 3"
+  up
+  expect_rc 0; expect_out_has "site 102 gave way, past qa.max_envs"
+  run grep -c '^DELETE /sites/102$' "$FORGE_LOG"; expect_out 1
+  # A site that never goes fails the run.
+  app "$TWO" api/artisan=php
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  forge_set ".sites_made_first = [$(other_site 8)] | .site_deletes_dropped = 2"
+  up
+  expect_rc 1; expect_err_has "Forge did not remove site 102, made past qa.max_envs, though its delete went twice"
+  run gate_log; expect_out ""
 }
 
 t_a_site_that_is_not_isolated_or_of_another_user_is_refused() {
@@ -482,29 +577,37 @@ t_daemons_and_scheduled_jobs_found_by_their_command_go_too() {
   made_site 40 7 api /api/public 8.4
   made_site 41 7 web /
   # forge's own daemon, from forge's home, that runs the site's artisan; a scheduled job of the server's, as root,
-  # that names the site; one of the api site's own, as forge, that names no path at all. Kept: environment 17's,
+  # that runs it too; one of the api site's own, as forge, that names no path at all. Kept: environment 17's,
   # which name its own home and site, and the site user's own.
   process 50 forge /home/forge running "php8.4 /home/shop_qa_7/$API/api/artisan horizon"
   process 51 forge /home/forge running "php8.4 /home/shop_qa_17/$(api_host 17)/api/artisan horizon"
-  job 60 root "curl -s https://$API/cron"
+  job 60 root "php8.4 /home/shop_qa_7/$API/api/artisan schedule:run"
   job 61 forge "php8.4 /home/shop_qa_17/$(api_host 17)/api/artisan schedule:run"
   job 62 shop_qa_7 "php8.4 /home/shop_qa_7/$API/api/artisan schedule:run"
   job 63 forge "php artisan schedule:run" 40
   job 64 shop_qa_7 "php artisan schedule:run" 41
+  # Forge's list of the server's scheduled jobs may hold the sites' own too, which a delete through the server's path
+  # misses: they go through their site's. A job or daemon that only asks a site for a page names no folder of it, and
+  # stays; one that runs from a folder named after a site is that site's.
+  forge_set '.server_lists_site_jobs = true'
+  job 65 forge "curl -fsS https://$API/up"
+  process 52 forge "/var/www/$WEB" running "php artisan inspire"
+  process 53 forge /home/forge running "curl -s https://$WEB/"
   up
   expect_rc 0
+  expect_out_has "deleted daemon 52, which ran as forge"
   expect_out_has "deleted daemon 50, which ran as forge"
   expect_out_has "deleted scheduled job 60, which ran as root"
   expect_out_has "deleted scheduled job 63, which ran as forge"
   run order
-  expect_out_has $'forge DELETE /background-processes/50\nforge DELETE /scheduled-jobs/60\nforge DELETE /sites/40/scheduled-jobs/63'
+  expect_out_has $'forge DELETE /background-processes/50\nforge DELETE /background-processes/52\nforge DELETE /scheduled-jobs/60\nforge DELETE /sites/40/scheduled-jobs/63'
   expect_out_has $'forge DELETE /sites/40/scheduled-jobs/63\ngate probe-link 7 api'
-  run state '[.processes[].id] | map(tostring) | join(",")'; expect_out "51,104"
-  run state '[.jobs[].id] | map(tostring) | join(",")'; expect_out "61,62"
+  run state '[.processes[].id] | map(tostring) | join(",")'; expect_out "51,53,104"
+  run state '[.jobs[].id] | map(tostring) | join(",")'; expect_out "61,62,65"
   run state '[.sites[] | .jobs // [] | .[].id] | map(tostring) | join(",")'; expect_out "64"
   # One Forge never finishes deleting keeps the code out, and one it will not delete is said as it is.
   app "$TWO" api/artisan=php
-  job 60 root "curl -s https://$API/cron"
+  job 60 root "php8.4 /home/shop_qa_7/$API/api/artisan schedule:run"
   forge_set '.job_remove_reads = -1'
   export MROOM_QA_DAEMON_WAIT=10
   up
@@ -512,7 +615,7 @@ t_daemons_and_scheduled_jobs_found_by_their_command_go_too() {
   run gate_log; expect_out ""
   run grep -c '^DELETE /scheduled-jobs/60$' "$FORGE_LOG"; expect_out 1
   app "$TWO" api/artisan=php
-  job 60 root "curl -s https://$API/cron"
+  job 60 root "php8.4 /home/shop_qa_7/$API/api/artisan schedule:run"
   forge_set '.fail["DELETE /scheduled-jobs/60"] = 500'
   up
   expect_rc 1; expect_err_has "Forge would not delete scheduled job 60, which runs as root, so no code goes in"
@@ -541,10 +644,11 @@ t_two_first_deploys_at_once_never_pass_max_envs() {
   forge_set ".sites_made_first = [$other]"
   up
   expect_rc 0
-  expect_out_has "another environment took the last slot first, so site 102 is deleted again"
+  expect_out_has "site 102 gave way, past qa.max_envs"
   expect_out_has "::warning::All 3 QA environments are in use, so this pull request waits for a slot."
   run forge_writes; expect_out_has $'\nDELETE /sites/102'
-  run state '[.sites[] | "\(.id) \(.status)"] | join(",")'; expect_out "1 installed,2 installed,101 installing,102 removing"
+  # Its site is gone, waited for until Forge had it gone.
+  run state '[.sites[].id] | map(tostring) | join(",")'; expect_out "1,2,101"
   run gate_log; expect_out ""
   run output_of sha; expect_out ""
   run gh_log; expect_out_has 'mroom-qa: waiting since=2026-10-27T12:00:00Z'
@@ -741,6 +845,9 @@ test_case daemons-before-code t_daemons_of_another_user_go_before_the_code
 test_case jobs-by-command t_daemons_and_scheduled_jobs_found_by_their_command_go_too
 test_case daemon-during-deploy t_a_daemon_that_turns_up_during_the_deploy_keeps_the_worker_out
 test_case slots-at-once t_two_first_deploys_at_once_never_pass_max_envs
+test_case give-way-next-run t_a_site_that_could_not_give_way_gives_way_on_the_next_run
+test_case give-way-dropped t_giving_way_outlasts_a_delete_forge_drops
+test_case still-making t_a_site_forge_is_still_making_is_new
 test_case worker-as-another-user t_a_worker_forge_runs_as_another_user_is_deleted
 test_case failed-deploy-output t_a_failed_deploy_shows_its_output_but_runs_no_command
 test_case up-asked-again t_up_is_asked_again_after_a_502_and_fails_when_it_stays_down

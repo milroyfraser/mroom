@@ -13,8 +13,11 @@ as "forge <METHOD> <path>" to $ORDER_LOG, when it is set, which the gate's stand
 As Forge does, it answers JSON:API resources, and lists at most 30 items at a time, whatever page[size] asks, with
 a cursor to the next page ("page_size" in the state lowers the most). A site it deletes turns removing, with
 updated_at now (MROOM_NOW, when set), and goes after "remove_reads" (1) more reads of the site list; -1 keeps it
-removing. A process it deletes goes at once, or turns removing and goes after "process_remove_reads" reads of the
-list; a scheduled job goes at once, or turns deleting for "job_remove_reads" reads (-1 keeps it). "fail":
+removing. As Forge can, it accepts the next "site_deletes_dropped" (0) site deletes and never runs them, the site
+removing for good until a later delete, and with "installing_delete_dropped" one sent while a site is installing. A process it deletes goes at once, or turns removing and goes after "process_remove_reads" reads of the
+list; a scheduled job goes at once, or turns deleting for "job_remove_reads" reads (-1 keeps it). With
+"server_lists_site_jobs", the server's list of scheduled jobs holds the sites' own too, which only their site's path
+deletes. "fail":
 {"<METHOD> <path>": code} answers that code to every such call, and {"code": code, "times": n} to the next n only.
 
 What qa-up makes, it makes as Forge does, as Forge's own answers show it:
@@ -304,7 +307,10 @@ def jobs_route(state: dict, method: str, owner: dict, rest: list, query: dict) -
     """The scheduled jobs of the server (owner is the state) or of one site."""
     if rest == ["scheduled-jobs"] and method == "GET":
         owner["jobs"] = settle(owner.get("jobs", []), "remove_reads")
-        return 200, page(state, owner["jobs"], "scheduledJobs", query)
+        listed = owner["jobs"]
+        if owner is state and state.get("server_lists_site_jobs"):
+            listed = listed + [job for site in state.get("sites", []) for job in site.get("jobs", [])]
+        return 200, page(state, listed, "scheduledJobs", query)
     if len(rest) == 2 and rest[0] == "scheduled-jobs" and method == "DELETE":
         for job in owner.get("jobs", []):
             if str(job["id"]) == rest[1]:
@@ -350,6 +356,12 @@ def route(state: dict, method: str, path: str, query: dict, body: dict | None) -
     if len(parts) == 2 and parts[0] == "sites" and method == "DELETE":
         for site in state.get("sites", []):
             if str(site["id"]) == parts[1]:
+                if site.get("status") == "installing" and state.get("installing_delete_dropped"):
+                    return 202, None
+                if state.get("site_deletes_dropped", 0) > 0:
+                    state["site_deletes_dropped"] -= 1
+                    site.update(status="removing", updated_at=now(), remove_reads=-1)
+                    return 202, None
                 site.update(status="removing", updated_at=now(), remove_reads=state.get("remove_reads", 1))
                 return 202, None
         return 404, {"message": "Not Found."}

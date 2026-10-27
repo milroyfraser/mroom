@@ -84,6 +84,9 @@ pr_toml() {
   if [ "$#" -ge 2 ]; then printf '%s\n' "$2" >"$GH_FAKE/contents-$1/mroom.toml"; else cp "$MROOM_CONFIG" "$GH_FAKE/contents-$1/mroom.toml"; fi
 }
 
+# code_went_in <N> [<commit>]: environment N's code went in earlier, as the gate records it (tests/fakes/ssh).
+code_went_in() { printf '%s\n' "${2:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" >"$GATE/commit-$1"; }
+
 # process <id> <user> <directory> [<status> [<command>]]: a background process on the fake Forge.
 process() {
   local item

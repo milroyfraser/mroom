@@ -171,16 +171,20 @@ qa_redelete_stuck() {
 }
 
 # qa_jobs <path> [all]: environment N's Forge daemons (/background-processes) or scheduled jobs (/scheduled-jobs),
-# one JSON object a line, {id, user, status, command}: those run as its site user, from a folder in its home, or with
-# a command that names its home or one of its sites, wherever they run from and as whomever, such as a daemon of
-# forge's that runs the site's artisan. With all, every one in the list, which is then one of the environment's own
-# sites' (/sites/<id>/scheduled-jobs).
+# one JSON object a line, {id, user, status, command}: those run as its site user, and those that run from one of its
+# folders or whose command names one by its path, wherever they run from and as whomever, such as a daemon of
+# forge's that runs the site's artisan. One of its folders is its home or anything in it, or a path with one of its
+# sites' domains as a whole part; a URL is no path, so a job that only asks a site for a page is not the
+# environment's. With all, every one in the list, which is then one of the environment's own sites'
+# (/sites/<id>/scheduled-jobs).
 qa_jobs() {
   local items
   items="$(forge_list "$1")" || return 1
-  jq -c --arg user "$QA_USER" --arg home "/home/$QA_USER/" --arg api "$QA_API" --arg web "$QA_WEB" --arg all "${2:-}" '
-    select($all == "all" or .attributes.user == $user or ((.attributes.directory // "") | startswith($home))
-      or ((.attributes.command // "") | contains($home) or contains($api) or contains($web)))
+  jq -c --arg user "$QA_USER" --arg home "/home/$QA_USER" --arg api "$QA_API" --arg web "$QA_WEB" --arg all "${2:-}" '
+    def ours: . == $home or startswith($home + "/") or (split("/") | any(.[]; . == $api or . == $web));
+    def names_ours: [scan("[^\\s\"\u0027`;|&()<>=]+") | select(startswith("/"))] | any(.[]; ours);
+    select($all == "all" or .attributes.user == $user or ((.attributes.directory // "") | startswith("/") and ours)
+      or ((.attributes.command // "") | names_ours))
     | (.id | tostring) as $id | select($id | test("\\A[0-9]+\\z"))
     | {id: $id, user: (.attributes.user // "unknown"), status: (.attributes.status // "unknown"),
        command: (.attributes.command // "")}' <<<"$items"

@@ -6,8 +6,9 @@
 # its own resource, so a run that stopped halfway is repaired by the next. In order:
 #   1. refuses what it cannot do yet, and a build that holds anything but files and folders, before anything is made
 #   2. waits for a site of the environment that Forge is still removing, sending the delete again when it is stuck;
-#      then, for a new environment, counts the others: from qa.max_envs (5) on, it waits for a slot, and it counts
-#      again once its site is made, giving way to one that made its first site before it
+#      then, for a new environment (one whose code never went in, by the gate's record), counts the others: from
+#      qa.max_envs (5) on, it waits for a slot, and it counts again once its site is made, giving way to one that
+#      made its first site before it: its sites deleted, and waited for until Forge has them gone
 #   3. the api site, and the go site for a frontend of its own: Forge isolated sites in the home of the user
 #      <app>_qa_<N>, each with a certificate (one that failed is deleted and asked for again, once; one installed but
 #      not active is enabled), and nginx's disable_symlinks if_not_owner at the top of its config, which each of its
@@ -176,14 +177,74 @@ wait_for_a_slot() {
   qa_status waiting "$refused"
   exit 0
 }
-api_id="$(site_id "$QA_API")" || die "Forge's site $QA_API could not be read"
+# site_gone <domain> <id>: whether Forge no longer lists that site.
+site_gone() {
+  local site
+  site="$(forge_site "$1")" || die "Forge's site $1 could not be read"
+  [ "$(jq -r '.id // ""' <<<"${site:-null}")" != "$2" ]
+}
+# give_way: deletes the sites of this environment, a new one past qa.max_envs, waits until Forge has them gone, and
+# then waits for a slot. Forge can refuse a site's delete, or accept one and never run it (as it does a delete queued
+# right behind the delete of the site's daemon, which a later delete always gets past). So each site is first waited
+# for until Forge has made it, then deleted and waited for until its id is gone, and one still there gets the delete
+# once more. One that still does not go fails the run; the environment's code never went in, so the next run gives
+# way again.
+give_way() {
+  local domain site id try waited limit="${MROOM_QA_SITE_WAIT:-300}" gone_wait="${MROOM_QA_GIVE_WAY_WAIT:-120}"
+  for domain in "$QA_API" "$QA_WEB"; do
+    site="$(forge_site "$domain")" || die "Forge's site $domain could not be read"
+    id="$(jq -r '.id // ""' <<<"${site:-null}")"
+    [ -n "$id" ] || continue
+    [[ "$id" =~ ^[0-9]+$ ]] || die "Forge gave $domain no id"
+    # A delete sent while Forge is still making the site may never run.
+    waited=0
+    while [ "$(jq -r '.attributes.status // ""' <<<"${site:-null}")" = installing ]; do
+      ((waited < limit)) || die "site $id was still installing after ${waited}s, so it could not give way"
+      sleep "$pause"
+      waited=$((waited + pause))
+      site="$(forge_site "$domain")" || die "Forge's site $domain could not be read"
+    done
+    for try in 1 2; do
+      if qa_delete "/sites/$id"; then
+        waited=0
+        until site_gone "$domain" "$id" || ((waited >= gone_wait)); do
+          sleep "$pause"
+          waited=$((waited + pause))
+        done
+        if site_gone "$domain" "$id"; then
+          echo "    site $id gave way, past qa.max_envs"
+          continue 2
+        fi
+      fi
+      if ((try == 1)); then
+        echo "    site $id is still there; its delete goes again"
+        sleep "$pause"
+      fi
+    done
+    die "Forge did not remove site $id, made past qa.max_envs, though its delete went twice; the next run gives way again"
+  done
+  wait_for_a_slot
+}
+api_site="$(forge_site "$QA_API")" || die "Forge's site $QA_API could not be read"
+api_id="$(jq -r 'select(.attributes.status != "removing") | .id // empty' <<<"${api_site:-null}")"
+# An environment is new until its code has gone in: one with no api site, and one whose api site a first deploy left
+# before the code went in, as a run that stopped early leaves one, or a site that gave way past qa.max_envs and whose
+# delete Forge never ran. The gate's record of the commit code-put put in says which (env-sha), but a site Forge is
+# still making has had no code yet. An environment whose code went in is always refreshed; a new one counts the
+# others now, and again once its site is made (step 3).
 new_env=""
-if [ -z "$api_id" ]; then
-  # An existing environment is always refreshed; only a new one waits.
+if [ -z "$api_id" ] || [ "$(jq -r '.attributes.status // ""' <<<"$api_site")" = installing ]; then
   new_env=1
+else
+  jq -e --arg user "$QA_USER" '.attributes.isolated == true and .attributes.user == $user' <<<"$api_site" >/dev/null \
+    || die "$QA_API is not a Forge isolated site of the user $QA_USER; delete it in Forge and run again"
+  out="$(qa_gate env-sha "$n")" || die "the gate could not say whether environment $n's code ever went in (env-sha)"
+  [[ "$(sed -n 's/^commit=//p' <<<"$out")" =~ ^[0-9a-f]{40}$ ]] || new_env=1
+fi
+if [ -n "$new_env" ]; then
   envs="$(qa_envs)"
-  running="$(awk '$2 != "removing"' <<<"$envs" | grep -c . || true)"
-  ((running < max)) || wait_for_a_slot
+  running="$(awk -v n="$n" '$1 != n && $2 != "removing"' <<<"$envs" | grep -c . || true)"
+  ((running < max)) || give_way
 fi
 
 # 3. The sites.
@@ -334,14 +395,10 @@ make_site "$QA_API" php "$web_root"
 api_id="$SITE_ID"
 # Two first deploys at once each count under qa.max_envs before either has made its site, since each counts inside
 # its own pull request's group. So a new environment, once its site is made, counts again: by the order Forge made
-# the environments' first sites in, which its ids give, the ones past qa.max_envs give way, their site deleted.
+# the environments' first sites in, which its ids give, the ones past qa.max_envs give way.
 if [ -n "$new_env" ]; then
   rank="$(qa_env_rank "$n")" || die "Forge's sites could not be read to count the environments again"
-  if [[ "$rank" =~ ^[0-9]+$ ]] && ((rank > max)); then
-    qa_delete "/sites/$api_id" || die "Forge would not delete the site $api_id this environment made past qa.max_envs"
-    echo "    another environment took the last slot first, so site $api_id is deleted again"
-    wait_for_a_slot
-  fi
+  if [[ "$rank" =~ ^[0-9]+$ ]] && ((rank > max)); then give_way; fi
 fi
 site_ready "$QA_API" "$web_root"
 api_domain="$(primary_domain "$api_id")"
@@ -362,12 +419,15 @@ fi
 # until Forge has them gone: they would run the pull request's code as that user, forge or root (D20). Forge lists
 # the server's daemons and scheduled jobs, and each site's own scheduled jobs (lib/core/qa.sh, qa_jobs).
 env_daemons() { qa_jobs /background-processes; }
-# away <path> <what> [all]: deletes those of the environment's daemons or scheduled jobs in the list that run as
-# another user, and waits until Forge lists none; a delete Forge refuses, or one that never ends, keeps the code out.
+# away <path> <what> [all] [<ids to leave>]: deletes those of the environment's daemons or scheduled jobs in the list
+# that run as another user, and waits until Forge lists none; a delete Forge refuses, or one that never ends, keeps
+# the code out. The ids to leave are the sites' own jobs, which the server's list may hold too: a delete through the
+# server's path would miss them, and they go through their site's.
 away() {
   local others job id user waited=0
   while :; do
-    others="$(qa_jobs "$1" "${3:-}" | jq -c --arg user "$QA_USER" 'select(.user != $user)')" || die "Forge's ${2}s could not be read"
+    others="$(qa_jobs "$1" "${3:-}" | jq -c --arg user "$QA_USER" --arg leave " ${4:-} " \
+      '.id as $id | select(.user != $user and ($leave | contains(" \($id) ") | not))')" || die "Forge's ${2}s could not be read"
     [ -n "$others" ] || return 0
     while IFS= read -r job; do
       id="$(jq -r .id <<<"$job")" user="$(jq -r .user <<<"$job" | cut -c1-32)"
@@ -383,7 +443,13 @@ away() {
 }
 echo "==> Daemons and scheduled jobs"
 away /background-processes daemon
-away /scheduled-jobs "scheduled job"
+own=""
+for id in "$api_id" "$web_id"; do
+  [ -n "$id" ] || continue
+  jobs="$(forge_list "/sites/$id/scheduled-jobs")" || die "Forge's scheduled jobs of site $id could not be read"
+  own+=" $(jq -r '.id | tostring' <<<"$jobs" | tr '\n' ' ')"
+done
+away /scheduled-jobs "scheduled job" "" "$own"
 away "/sites/$api_id/scheduled-jobs" "scheduled job" all
 if [ -n "$web_id" ]; then away "/sites/$web_id/scheduled-jobs" "scheduled job" all; fi
 

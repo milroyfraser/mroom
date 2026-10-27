@@ -10,7 +10,8 @@
 # and dropped, so a caller in a loop that forgets -n loses the rest of its loop's input. It answers as the gate does
 # for app "shop" (lib/gate), or from $GATE/<operation>.out and $GATE/<operation>.rc when the test wrote them; its
 # probe-link links $SITE_OP_INSTALLED, the box's root-owned site-op, which the Forge stand-in serves when nginx
-# follows that link.
+# follows that link. As the gate does, it records the commit a code-put put in ($GATE/commit-<N>), which env-sha
+# reports and user-clean forgets.
 set -euo pipefail
 printf '%s\n' "$@" >>"$GATE/ssh.argv"
 echo "--" >>"$GATE/ssh.argv"
@@ -69,10 +70,17 @@ case "$op" in
       "$n" "${words[2]}" "${words[2]}" "${words[2]}"
     if [ "${words[3]:-}" = public ]; then printf 'URL=https://files.qa.example.dev/shop-qa-%s-%s\n' "$n" "${words[2]}"; fi ;;
   probe-link) printf 'sha256=%s\ntarget=/usr/local/libexec/mroom/site-op\n' "$(sha256sum <"$SITE_OP_INSTALLED" | cut -d' ' -f1)" ;;
-  code-put) echo "$api: 12 entries unpacked, 0 .env skipped" ;;
+  code-put) printf '%s\n' "${words[2]}" >"$GATE/commit-$n"; echo "$api: 12 entries unpacked, 0 .env skipped" ;;
+  env-sha)
+    # As the gate, which runs site-op as the site user: before Forge has made the site there may be no such user.
+    if jq -e --arg name "$api" 'any(.sites[]?; .name == $name and .status == "installing")' "$FORGE_STATE" >/dev/null 2>&1; then
+      echo "mroom gate: env-sha $n: there is no user $user; qa-up creates the site first" >&2
+      exit 1
+    fi
+    printf 'env=missing\ncommit=%s\n' "$(cat "$GATE/commit-$n" 2>/dev/null || echo none)" ;;
   dist-put) echo "$web: 3 entries unpacked, 0 .env skipped" ;;
   env-put) printf 'env=%s\n' "$(printf '%s' "$(cat "$GATE/env-put.in")" | sha256sum | cut -d' ' -f1)" ;;
-  user-clean) echo "$user: 2 processes stopped, 1 files and IPC objects removed outside its home" ;;
+  user-clean) rm -f "$GATE/commit-$n"; echo "$user: 2 processes stopped, 1 files and IPC objects removed outside its home" ;;
   db-drop) echo "database $user: dropped" ;;
   redis-user-remove) echo "redis user $user: removed" ;;
   redis-clear) echo "redis shop:qa$n: 3 keys deleted" ;;

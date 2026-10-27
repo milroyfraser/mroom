@@ -12,8 +12,10 @@ site cannot link to another user's file and have nginx serve it.
   check     exits 0 when the fragment has disable_symlinks if_not_owner at its top level, outside any comment and
             block, and no other disable_symlinks anywhere; with --spa, also a try_files that ends in /index.html in
             location /. Says what is missing on stderr otherwise
-  includes  for a domain's server block: exits 0 when it includes the site's site.conf inside its server block and
-            sets no disable_symlinks of its own, which would override the fragment's or clash with it
+  includes  for a domain's server block: exits 0 when every server block at its top level includes the site's
+            site.conf, right inside it, and none sets a disable_symlinks of its own, which would override the
+            fragment's or clash with it; a server block that served the site without the fragment would have no
+            guard
 
 It parses the config as nginx does, word by word: a # starts a comment outside quotes, and braces open and close
 blocks, so a directive in a comment, or one inside a location, never counts as the server's.
@@ -112,10 +114,16 @@ def main(argv: list[str]) -> int:
                 return 1
             return 0
         parsed = statements(text)
-        # Right inside a server block at the top: inside a location or an if it would not be the server's own.
-        included = any(len(w) == 2 and w[0] == "include" and w[1].endswith("/site.conf") and blocks == ["server"]
-                       for _, w, blocks in parsed)
-        if not included:
+        # Each server block at the top, and whether it includes site.conf right inside it: inside a location or an if
+        # it would not be the server's own.
+        servers: list[bool] = []
+        for depth, w, blocks in parsed:
+            if depth == 0 and w == ["server", "{"]:
+                servers.append(False)
+            elif (servers and blocks == ["server"] and len(w) == 2 and w[0] == "include"
+                  and w[1].endswith("/site.conf")):
+                servers[-1] = True
+        if not servers or not all(servers):
             print("the domain's server block does not include the site's site.conf", file=sys.stderr)
             return 1
         if any(w[:1] == ["disable_symlinks"] for _, w, _ in parsed):
