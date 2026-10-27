@@ -700,36 +700,40 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
   the one open pull request of the repository at its commit; for one started by hand or by a wake, the
   default branch's run named `PR #<N>`, at the commit its build job is named after. It deploys only the pull
   request's head: a run that waited its turn behind a newer push stops, and that push's own run deploys it.
-- **What qa-up makes.** A Forge isolated site, and a second for a frontend of its own, in the home of one user
-  of the environment's own, `<app>_qa_<N>` (design D17), each with a certificate (one that fails is deleted,
-  waited for until Forge has it gone, and asked for again, once; failing again, it needs a person; one Forge
-  installed but did not enable is enabled), and nginx set to follow a link only when the link and its target
-  have one owner: `disable_symlinks if_not_owner` at the top of the site's config, the fragment each of its
-  domains includes in its server block. Forge applies a new config later, so qa-up reads it back until it has
-  the guard, and lets no code in before. Then the proof that it works on the box, before any code too: the
-  gate's `probe-link` links the box's `site-op`, a root-owned file, into each site's web root, and the run
-  stops if asking for that link still brings back that file, by the SHA-256 the gate gives, after as many
-  tries as `/up` gets (nginx takes a config Forge has just written a moment later). The body is compared, not
-  the status: with the guard, the request goes on to the app or the single-page fallback, which may well
-  answer 200. A site's PHP version is set when it is made: a site that runs another than `app.php` is refused,
-  with how to make it again. Any daemon or scheduled job of the environment that runs as another user is
-  deleted before any code goes in, since it would run the pull request's code as that user: one that runs from
-  a folder in the site user's home, or whose command names that home or one of the sites, and any scheduled
-  job of the sites' own. Then the code, as data: GitHub's tarball of the commit through the gate's
-  `code-put`, with Vite's build put into it when Vite runs inside the Laravel app, and a frontend of its own
-  through `dist-put`. Then the environment's services through the gate, as `[qa.parity]` says, its `.env`
-  through `env-put`, and Forge's deploy, whose script runs as the site user or not at all, pulls nothing, then
-  runs the tree's `.mroom/hooks/qa-deploy` (or composer install, `migrate --force` and
-  `app.build.after_deploy`), then `.mroom/hooks/qa-fixtures` (or `php artisan mroom:qa-fixtures` when the app
-  has it), then `queue:restart`. Then one queue worker for `app.build.queues`, which also runs as the site
-  user or not at all, kept only when Forge's record of it names the site user, and made again when its
-  command changed (other queues, another PHP). Then `/up`, asked up to 6 times 5 seconds apart, since a new
-  site, or any site while PHP-FPM or nginx reloads, answers 502 for a moment; only once it answers 200 is the
-  commit said to be deployed. Each step checks its own resource, so the next run repairs one that stopped
-  halfway. From `qa.max_envs` (5) environments on, a new one waits for a slot; one that exists is always
-  refreshed. Two first deploys at once each count the others inside their own pull request's turn, so a new
-  environment counts again once its site is made, by the order Forge made the environments' first sites in:
-  one past `qa.max_envs` deletes its site again and waits.
+- **What qa-up makes.** A Forge isolated site, and a second for a frontend of its own, in the home of one user of
+  the environment's own, `<app>_qa_<N>` (design D17), each with a certificate (one that fails is deleted, waited
+  for until Forge has it gone, and asked for again, once; failing again, it needs a person; one Forge installed
+  but did not enable is enabled), and nginx set to follow a link only when the link and its target have one
+  owner: `disable_symlinks if_not_owner` at the top of the site's config, the fragment each of its domains
+  includes in each of its server blocks. Forge applies a new config later, so qa-up reads it back until it has
+  the guard, and lets no code in before. Then the proof that it works on the box, before any code too: the gate's
+  `probe-link` links the box's `site-op`, a root-owned file, into each site's web root, and the run stops if
+  asking for that link still brings back that file, by the SHA-256 the gate gives, after as many tries as `/up`
+  gets (nginx takes a config Forge has just written a moment later). The body is compared, not the status: with
+  the guard, the request goes on to the app or the single-page fallback, which may well answer 200. A site's PHP
+  version is set when it is made: a site that runs another than `app.php` is refused, with how to make it again.
+  Any daemon or scheduled job of the environment that runs as another user is deleted before any code goes in,
+  since it would run the pull request's code as that user: one that runs from one of the environment's folders,
+  or whose command names one by its path (the site user's home and anything in it, or a path with one of the
+  sites' domains as a whole part; a URL is no path, so a job that only asks a site for a page stays), and any
+  scheduled job of the sites' own, which goes through its site's path. Then the code, as data: GitHub's tarball
+  of the commit through the gate's `code-put`, with Vite's build put into it when Vite runs inside the Laravel
+  app, and a frontend of its own through `dist-put`. Then the environment's services through the gate, as
+  `[qa.parity]` says, its `.env` through `env-put`, and Forge's deploy, whose script runs as the site user or not
+  at all, pulls nothing, then runs the tree's `.mroom/hooks/qa-deploy` (or composer install, `migrate --force`
+  and `app.build.after_deploy`), then `.mroom/hooks/qa-fixtures` (or `php artisan mroom:qa-fixtures` when the app
+  has it), then `queue:restart`. Then one queue worker for `app.build.queues`, which also runs as the site user
+  or not at all, kept only when Forge's record of it names the site user, and made again when its command changed
+  (other queues, another PHP). Then `/up`, asked up to 6 times 5 seconds apart, since a new site, or any site
+  while PHP-FPM or nginx reloads, answers 502 for a moment; only once it answers 200 is the commit said to be
+  deployed. Each step checks its own resource, so the next run repairs one that stopped halfway. From
+  `qa.max_envs` (5) environments on, a new one waits for a slot; one whose code went in, by the gate's record
+  (`env-sha`), is always refreshed. Two first deploys at once each count the others inside their own pull
+  request's turn, so a new environment counts again once its site is made, by the order Forge made the
+  environments' first sites in, and one past `qa.max_envs` gives way: its sites are deleted once Forge has made
+  them, waited for until Forge has them gone, and deleted again once if they stay, since Forge can refuse a
+  delete, or take one and never run it. One that will not go fails the run, and the next gives way again, since
+  the environment's code never went in.
 - **No required checks.** None of the QA workflows' checks can be a required one: the plan's build job is
   named after the commit it builds (`QA build <sha>`), so its name changes with every push, and a required
   check is matched by its name. The QA environment comment says how each deploy went; require the app's own
@@ -975,8 +979,9 @@ tools/regressions.sh example/shop 2026-07-01
 ## Development
 
 ```bash
-tests/run.sh             # every test: offline, each in a temp HOME
-tests/run.sh config box  # only tests/config-test.sh and tests/box-test.sh
+tests/run.sh               # every test: offline, each in a temp HOME
+tests/run.sh config box    # only tests/config-test.sh and tests/box-test.sh
+tests/run.sh --skip qa-up  # all but tests/qa-up-test.sh, which CI runs in a job of its own
 ```
 
 The tests need what the box needs (bash 5, python3 3.11+); on a host without them the TOML and install
