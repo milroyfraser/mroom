@@ -35,7 +35,9 @@ triage_tokens() {
 }
 
 # The run's folder: the guard's state (counts, markers-lost, actions.jsonl) and triage's own files.
-MROOM_PERSONA_STATE="${MROOM_PERSONA_STATE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/mroom-persona}"
+if [ -z "${MROOM_PERSONA_STATE:-}" ]; then
+  if [ -n "${RUNNER_TEMP:-}" ]; then MROOM_PERSONA_STATE="$RUNNER_TEMP/mroom-persona"; else MROOM_PERSONA_STATE="$(mktemp -d)"; fi
+fi
 export MROOM_PERSONA_STATE
 mkdir -p "$MROOM_PERSONA_STATE"
 WORK="$MROOM_PERSONA_STATE"

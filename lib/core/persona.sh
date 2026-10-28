@@ -19,8 +19,10 @@ persona_base_key() { local rest="${1#*:}"; printf '%s:%s' "${1%%:*}" "${rest%%:*
 
 persona_marker() { printf '<!-- mroom-alert key=%s -->' "$1"; }
 
-# persona_unmarked: stdin to stdout, without any mroom marker, so only the guard writes them.
-persona_unmarked() { sed -E 's/<!--[[:space:]]*mroom-[^>]*-->//g'; }
+# persona_unmarked: stdin to stdout, with every HTML comment's opening escaped (&lt;!--), so no text the
+# guard is given can hold a marker, however it nests one: only the guard writes them. Deleting matches
+# instead would not do: one pass over <!-<!-- x -->- ... leaves a marker behind.
+persona_unmarked() { sed 's/<!--/\&lt;!--/g'; }
 
 # persona_text <mode> [<arg>...]: lib/core/text.py (redact | no-token | defang <host>...), isolated.
 persona_text() { python3 -I "$MROOM_ROOT/lib/core/text.py" "$@"; }

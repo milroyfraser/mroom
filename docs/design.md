@@ -424,8 +424,8 @@ back, and when a marker is missing it writes nothing more in that run, and the t
 switch-off job turns the workflow off and asks a person once. Without that stop, every run would file
 the same alerts again. The guard also writes only what D23 allows: it files an issue only for an
 alert key of the run, assigns no one, comments only on issues the persona filed, and has no command
-to edit, close, label or delete; it strips markers from the text it is given, refuses text shaped
-like a token and defangs links to other hosts. Triage redacts the error's data before it reaches an
+to edit, close, label or delete; it escapes every HTML comment's opening in the text it is given, so
+no alert text can forge a marker, refuses text shaped like a token and defangs links to other hosts. Triage redacts the error's data before it reaches an
 issue (tokens, email addresses, phone numbers, IBANs). Its alarm pings at most once a UTC day when a
 live run fails, keyed `triage:<yyyymmdd>` on an issue it files before the ping, so a ping it could not
 record is never sent.

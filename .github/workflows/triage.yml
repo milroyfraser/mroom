@@ -67,7 +67,7 @@ jobs:
       - name: Check out the app's mroom.toml
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.event.repository.default_branch || github.ref }}
           path: app
           persist-credentials: false
           sparse-checkout: /mroom.toml
@@ -85,17 +85,22 @@ jobs:
   alarm:
     name: Alarm
     needs: triage
-    if: >-
-      always() && inputs.live && needs.triage.result != 'success' && needs.triage.result != 'skipped'
-      && needs.triage.outputs.markers-lost == ''
+    # A failure only: a run GitHub cancelled, such as a pending one a newer run replaced, is no alarm.
+    if: always() && inputs.live && needs.triage.result == 'failure' && needs.triage.outputs.markers-lost == ''
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment:
       name: persona
       deployment: false
+    # One alarm at a time, so two never both miss the day's issue and both ping.
+    concurrency:
+      group: mroom-triage-alarm
+      cancel-in-progress: false
     permissions:
       actions: read # to name the step that failed
       contents: read
+    outputs:
+      markers-lost: ${{ steps.alarm.outputs.markers-lost }}
     steps:
       - name: Check out mroom
         uses: actions/checkout@v4
@@ -107,12 +112,13 @@ jobs:
       - name: Check out the app's mroom.toml
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.event.repository.default_branch || github.ref }}
           path: app
           persist-credentials: false
           sparse-checkout: /mroom.toml
           sparse-checkout-cone-mode: false
-      - uses: ./mroom/actions/triage
+      - id: alarm
+        uses: ./mroom/actions/triage
         with:
           mode: alarm
           config: app/mroom.toml
@@ -122,8 +128,8 @@ jobs:
 
   switch-off:
     name: Switch off
-    needs: triage
-    if: always() && needs.triage.outputs.markers-lost != ''
+    needs: [triage, alarm]
+    if: always() && (needs.triage.outputs.markers-lost != '' || needs.alarm.outputs.markers-lost != '')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment:
@@ -143,7 +149,7 @@ jobs:
       - name: Check out the app's mroom.toml
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.event.repository.default_branch || github.ref }}
           path: app
           persist-credentials: false
           sparse-checkout: /mroom.toml
@@ -152,5 +158,5 @@ jobs:
         with:
           mode: switch-off
           config: app/mroom.toml
-          markers-lost: ${{ needs.triage.outputs.markers-lost }}
+          markers-lost: ${{ needs.triage.outputs.markers-lost || needs.alarm.outputs.markers-lost }}
           chat-token: ${{ secrets.MROOM_CHAT_TOKEN }}

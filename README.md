@@ -443,20 +443,28 @@ channel = "C0123456789"            # the chat channel it pings when triage canno
 - **Alerts.** Every 15 minutes it reads the error issues that are new, regressed or escalating in the
   last 40 minutes (`mroom errors new`), since GitHub often starts a scheduled run late. An alert's key is
   `sentry:<id>` for a new issue, and `sentry:<id>:regressed:<day>` or `sentry:<id>:escalating:<day>`
-  for a later alert of it. At most 10 alerts a run, the most urgent first; the rest wait for the next run.
+  for a later alert of it. Every alert of the window is looked up, the most urgent first, but at most 10
+  issues are filed a run; the rest wait for the next run, which files them while they are still in its
+  window. Each of the three searches takes at most 100 issues, and the summary says when one was full:
+  alerts past that, or past a longer gap, are missed, so look at the error tracker then.
 - **One issue per alert key.** The issue holding an alert carries its hidden marker,
   `<!-- mroom-alert key=sentry:1001 -->`. Triage looks for the key with `mroom tracker find` and files
   an issue only when no issue in any state holds it, archived ones too, so a second run files nothing
   new, and a cancelled issue is not filed again. A later alert of an error is a new issue that links the
-  earlier ones, and a comment on the newest earlier one when the persona filed it.
+  earlier ones, and a comment on the newest earlier one when the persona filed it. While an issue of the
+  same kind for that error is still open, a later alert counts as filed, so a regression that goes on for
+  days is one issue; once that issue is done or cancelled, the next one is filed.
 - **What an issue holds.** The error, its counts, releases and culprit, and the latest event's
-  exception and in-app frames, all redacted first (`lib/core/text.py`): anything shaped like a token or
-  key, email addresses, phone numbers and IBANs. The run's summary is redacted the same way.
+  exception and in-app frames, all redacted first (`lib/core/text.py`): known token and key shapes,
+  bearer tokens, `password=`, `secret=`, `token=` and `api_key=` values, a URL's password, email
+  addresses, phone numbers and IBANs. It knows shapes, so a secret of no known shape can still pass.
+  The run's summary is redacted the same way.
 - **The guard** (`mroom persona`) is the persona's only way to write. It files issues only for an alert
   key of this run, in `issues.team`, `persona.state` and with `persona.label`, and assigns no one. It
   comments only on an issue the tracker says the persona's token filed (`mroom tracker owned`), and has
-  no command to edit, close, assign, label or delete. The markers are its own: it strips any from a body
-  and writes one per key. It refuses text holding a token, defangs links to hosts other than GitHub's,
+  no command to edit, close, assign, label or delete. An issue filed by an app rather than a user has
+  no creator, so it never counts as the persona's. The markers are its own: it escapes every `<!--` in
+  a body, so no text, however it nests one, can hold a marker, and it writes one per key. It refuses text holding a token, defangs links to hosts other than GitHub's,
   the trackers' and the app's, and caps a run at 10 issues and 30 comments. A dispatch is a dry run
   unless `live` is ticked: it prints what it would file, and writes nothing.
 - **When the tracker drops the markers.** After each issue it files, the guard reads the issue back.
@@ -465,18 +473,25 @@ channel = "C0123456789"            # the chat channel it pings when triage canno
   workflow off (`gh workflow disable`) and pings `persona.channel` once. To recover, read the issue's
   description through the tracker's API and check the `<!-- mroom-alert ... -->` lines; if the tracker
   strips HTML comments, the marker's format must change before triage runs again. Merge any duplicates,
-  then turn the workflow on again (`gh workflow enable alerts.yml`).
+  then turn the workflow on again (`gh workflow enable alerts.yml`). If the workflow cannot be turned
+  off, the ping asks a person to do it by hand, and repeats every run until someone does. A failed read
+  of the issue is not a lost marker: the run fails, and the alarm says so.
 - **The alarm.** When a live run's triage job fails (the error tracker or the tracker could not be read
   or written, or a step failed), the alarm job pings `persona.channel` with the failed step and the run,
   at most once a UTC day. Its dedupe is the tracker's: before the ping it files the day's issue, keyed
   `triage:<yyyymmdd>`, and a day whose issue exists sends nothing. When that issue cannot be filed,
   nothing is sent: a missed ping, never one every 15 minutes.
 - **Without a tracker** (`issues.tracker = "none"`), nothing is filed: the run's summary lists the
-  window's alerts. The alarm then has nowhere to record its ping, and sends none. Without an `[errors]`
+  window's alerts. The alarm then has nowhere to record its ping, and sends none; nor does it without a
+  chat token or `persona.channel`. A run GitHub cancelled, such as a waiting one a newer run replaced,
+  raises no alarm. Without an `[errors]`
   table there is nothing to triage.
 - **Secrets** are the `persona` environment's (design 8.8; default branch only): the persona's own
   tracker token (D23, never a developer's), a read-only error-tracker token, and the chat bot's token
-  (`chat:write`, invited to the channel). Each job checks out only the default branch's `mroom.toml`
+  (`chat:write`, invited to the channel). Keep them in the `persona` environment only, never as
+  repository or organisation secrets: the called jobs read the environment's own, but where the
+  environment has none, the caller's would be used, and a repository secret is readable from any
+  branch. Each job checks out only the default branch's `mroom.toml`
   and mroom at the commit of the workflow; the triage job's token reads nothing but the repository,
   and only the switch-off job may turn workflows off.
 

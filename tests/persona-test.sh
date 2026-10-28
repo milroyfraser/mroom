@@ -115,13 +115,37 @@ t_text_is_checked_marked_only_by_the_guard_and_defanged() {
   expect_rc 0
   local d
   d="$(issue ENG-1 | jq -r .description)"
-  expect_true "a marker from the body survived" lacks "$d" "sentry:9999"
+  expect_true "a marker from the body survived" lacks "$d" "<!-- mroom-alert key=sentry:9999"
   expect_true "a link to another host is live: $d" has "$d" "hxxps://evil[.]example/x"
   expect_true "an allowed link was defanged: $d" has "$d" "https://example-org.sentry.io/issues/1001/"
   expect_true "the app's link was defanged" has "$d" "https://shop.example.dev/cart"
   expect_true "GitHub's link was defanged" has "$d" "https://github.com/example/shop"
+  # A nested marker: deleting the inner one would leave the outer one whole.
+  body '<!-<!-- mroom-x -->- mroom-alert key=sentry:8888 --> and <!--mroom-alert key=sentry:7777-->'
+  create --key sentry:1003 --title "t"
+  expect_rc 0
+  d="$(issue ENG-2 | jq -r .description)"
+  expect_true "a nested marker survived: $d" lacks "$d" "<!-- mroom-alert key=sentry:8888"
+  expect_true "a tight marker survived: $d" lacks "$d" "<!--mroom-alert"
+  run "$MROOM" tracker find sentry:8888
+  expect_true "find sees a forged marker: $out" [ "$out" = "[]" ]
+  body 'See https://evil.example#.github.com/, HTTPS://evil.example/a, https://evil.example\.github.com/x and www.evil.example/x.'
+  create --key sentry:1004 --title "t"
+  expect_rc 0
+  d="$(issue ENG-3 | jq -r .description)"
+  expect_true "a link got past the defang: $d" lacks "$d" "evil.example"
   body "$(head -c 30001 /dev/zero | tr '\0' a)"
   create --key sentry:1002 --title t; expect_rc 4; expect_err_has "the limit is 30000"
+}
+
+t_a_failed_read_back_is_not_a_lost_marker() {
+  pworld
+  body "x"
+  # The fake answers the create, then the tracker goes down for the read-back.
+  world_set '.down_after_create = true'
+  create --key sentry:1001 --title t
+  expect_rc 1; expect_err_has "could not be read back"
+  expect_no_file "$T/state/markers-lost"
 }
 
 t_a_run_is_capped() {
@@ -163,6 +187,7 @@ test_case create-run-alerts t_create_only_for_this_runs_alerts
 test_case comment-own-only t_comment_only_on_the_personas_own_issues
 test_case markers-lost t_markers_lost_stops_every_write
 test_case text-checked t_text_is_checked_marked_only_by_the_guard_and_defanged
+test_case read-back-fails t_a_failed_read_back_is_not_a_lost_marker
 test_case run-capped t_a_run_is_capped
 test_case dry-run t_a_dry_run_writes_nothing
 test_case no-tracker t_no_tracker_exits_3

@@ -41,7 +41,6 @@ a_window() {
 <!-- mroom-alert key=sentry:1002 -->"
   add_issue ENG-91 u-person "Filed by a person, who copied the marker.
 <!-- mroom-alert key=sentry:1003 -->"
-  world_set '.next = 1'
 }
 
 t_errors_new_reads_the_three_searches_in_the_window() {
@@ -95,11 +94,43 @@ t_a_second_run_files_nothing_new() {
   expect_true "the second run wrote ($before, then $(count_ops linear issueCreate) $(count_ops linear commentCreate))" \
     [ "$(count_ops linear issueCreate) $(count_ops linear commentCreate)" = "$before" ]
   expect_true "the summary does not say they are filed" grep -q "3 already filed, 0 filed now" "$T/summary.md"
-  # A new regression of an error already filed, another day, is a new alert.
+  # The same regression the next day, while its issue is open: one issue, not one a day.
   world_set '.sentry.regressed[0].lastSeen = "2026-10-29T11:45:00Z"'
   export MROOM_NOW=$((NOW_EPOCH + 86400))
   triage; expect_rc 0
-  expect_true "the next day's regression was not filed" [ "$(count_ops linear issueCreate)" = 4 ]
+  expect_true "an open regression was filed again" [ "$(count_ops linear issueCreate)" = 3 ]
+  # Once that issue is done, a regression is a new alert.
+  world_set '(.issues[] | select(.description | contains("key=sentry:1002:regressed")) | .state) = "s-done"'
+  triage; expect_rc 0
+  expect_true "the regression after the fix was not filed" [ "$(count_ops linear issueCreate)" = 4 ]
+}
+
+t_filed_alerts_never_crowd_out_a_new_one() {
+  pworld
+  local i
+  # Twelve escalating errors already filed, the most urgent of the window, and one new error.
+  for i in $(seq 10 21); do
+    add_alert escalating "20$i" 2026-10-28T11:55:00Z
+    add_issue "ENG-$i" u-persona "<!-- mroom-alert key=sentry:20$i:escalating:2026-10-28 -->"
+  done
+  add_alert new 3001 2026-10-28T11:20:30Z
+  world_set '.next = 100'
+  triage
+  expect_rc 0
+  expect_true "the new error was not filed: $(cat "$T/summary.md")" [ "$(count_ops linear issueCreate)" = 1 ]
+  expect_true "the summary" grep -q "13 alert(s) in the window: 12 already filed, 1 filed now" "$T/summary.md"
+}
+
+t_at_most_ten_filed_and_the_rest_wait() {
+  pworld
+  local i
+  for i in $(seq 10 21); do add_alert new "40$i" 2026-10-28T11:50:00Z; done
+  triage
+  expect_rc 0
+  expect_true "not 10 filed" [ "$(count_ops linear issueCreate)" = 10 ]
+  expect_true "the summary does not say 2 wait" grep -q "0 already filed, 10 filed now, 0 comment(s) on earlier issues, 2 waiting for the next run." "$T/summary.md"
+  triage
+  expect_true "the next run did not file the 2" [ "$(count_ops linear issueCreate)" = 12 ]
 }
 
 t_no_write_to_an_issue_the_persona_did_not_file() {
@@ -208,6 +239,21 @@ t_the_alarm_sends_nothing_it_cannot_record() {
   expect_true "a refused ping was sent again" [ "$(count_ops slack)" = 1 ]
 }
 
+t_the_alarm_needs_a_chat_token_and_hands_over_lost_markers() {
+  pworld
+  jobs_with_a_failed_step
+  alarm
+  expect_rc 0; expect_err_has "no chat token"
+  expect_true "the alarm filed or pinged with no chat token" [ "$(count_ops linear issueCreate) $(count_ops slack)" = "0 0" ]
+  export SLACK_BOT_TOKEN="$CHAT_TOKEN"
+  world_set '.strip_markers = true'
+  : >"$T/output"
+  alarm
+  expect_rc 0
+  expect_true "markers_lost: $(cat "$T/output")" [ "$(output_of markers_lost)" = ENG-1 ]
+  expect_true "it pinged though the marker was lost" [ "$(count_ops slack)" = 0 ]
+}
+
 t_without_a_tracker_nothing_is_filed() {
   pworld
   add_alert new 1001 2026-10-28T11:50:00Z "TypeError: for pat@example.com"
@@ -215,7 +261,7 @@ t_without_a_tracker_nothing_is_filed() {
   triage
   expect_rc 0
   expect_true "the tracker was called" [ "$(count_ops linear)" = 0 ]
-  expect_true "the summary does not list the alert: $(cat "$T/summary.md")" grep -q '^- `sentry:1001`: SHOP-1001 (new) TypeError: for \[redacted\]' "$T/summary.md"
+  expect_true "the summary does not list the alert: $(cat "$T/summary.md")" grep -q '^- `sentry:1001`: SHOP-1001 (new) `TypeError: for \[redacted\]`$' "$T/summary.md"
   expect_true "the summary does not say why" grep -q 'issues.tracker = "none", so nothing was filed' "$T/summary.md"
   jobs_with_a_failed_step
   export SLACK_BOT_TOKEN="$CHAT_TOKEN"
@@ -263,6 +309,9 @@ test_case redacted t_event_data_is_redacted_before_it_reaches_an_issue
 test_case markers-lost t_the_stop_when_markers_are_lost_and_the_switch_off
 test_case alarm-once-a-day t_the_alarm_pings_once_a_utc_day
 test_case alarm-records-first t_the_alarm_sends_nothing_it_cannot_record
+test_case alarm-token-and-lost t_the_alarm_needs_a_chat_token_and_hands_over_lost_markers
+test_case filed-never-crowd-out t_filed_alerts_never_crowd_out_a_new_one
+test_case ten-a-run t_at_most_ten_filed_and_the_rest_wait
 test_case no-tracker t_without_a_tracker_nothing_is_filed
 test_case dry-run t_a_dry_run_files_nothing
 test_case tracker-down t_a_tracker_that_cannot_be_read_fails_the_run

@@ -15,7 +15,7 @@
 #     priority come with the persona's own backlog work;
 #   - it files an issue only for an alert key, and, when MROOM_PERSONA_ALERTS names a file (a JSON list of
 #     keys), only for one of this run's alerts, so nothing it is told can silence an alert to come;
-#   - the markers are its own: any marker in a body is removed, and create writes one for each key. After
+#   - the markers are its own: every "<!--" in a body is escaped, and create writes one marker a key. After
 #     a create it reads the issue back. When the tracker did not keep a marker, the next run could not find
 #     the issue and would file it again, so it writes nothing more in this run (exit 5) and leaves the
 #     issue's id in markers-lost, for the workflow's switch-off job (actions/triage, switch-off.sh);
@@ -56,7 +56,11 @@ usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' 
 
 LIVE=false
 [ "${MROOM_PERSONA_LIVE:-}" = 1 ] && LIVE=true
-STATE="${MROOM_PERSONA_STATE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/mroom-persona}"
+# The run's folder. On a runner, RUNNER_TEMP is the run's own; anywhere else, without MROOM_PERSONA_STATE,
+# a fresh folder each call, never a shared fixed path another user could make first.
+if [ -n "${MROOM_PERSONA_STATE:-}" ]; then STATE="$MROOM_PERSONA_STATE"
+elif [ -n "${RUNNER_TEMP:-}" ]; then STATE="$RUNNER_TEMP/mroom-persona"
+else STATE="$(mktemp -d)"; fi
 
 # log <result> <detail>: one line in the run's actions.jsonl, for its summary (ids and keys, never a body).
 log() {
@@ -201,7 +205,9 @@ cmd_create() {
   [ -n "$id" ] || { say "the tracker did not say which issue it created"; exit 1; }
   log created "$id for ${keys[*]}"
   # The dedupe rests on the markers: read the issue back.
-  desc="$(tracker get "$id" | jq -r '.description // ""')" || desc=""
+  # A read that fails is not a lost marker: exit 1, and the alarm says so, rather than turning triage off.
+  desc="$(tracker get "$id")" || { say "$id was filed, but it could not be read back"; exit 1; }
+  desc="$(jq -r '.description // ""' <<<"$desc")"
   for k in "${keys[@]}"; do
     if [[ "$desc" != *"$(persona_marker "$k")"* ]]; then
       printf '%s\n' "$id" >"$STATE/markers-lost"

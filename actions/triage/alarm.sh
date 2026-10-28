@@ -12,6 +12,9 @@
 # every 15 minutes. Without a tracker (mroom tracker exits 3) there is nowhere to record the ping, and
 # without persona.channel nowhere to send it: the alarm says so in the job's log and sends nothing.
 #
+# When the tracker drops the day's issue's marker, the alarm writes markers_lost=<issue> to its outputs,
+# for the switch-off job, and sends nothing.
+#
 # Environment: MROOM_CONFIG, GH_TOKEN (actions: read), GITHUB_REPOSITORY, GITHUB_RUN_ID, MROOM_PERSONA_LIVE
 # (1: it acts; otherwise it prints the message), MROOM_PERSONA_RUN_URL, MROOM_TRIAGE_TRACKER_TOKEN,
 # SLACK_BOT_TOKEN, MROOM_TRIAGE_JOB (the triage job's name, "Alert triage"), MROOM_NOW (tests: the time).
@@ -52,6 +55,10 @@ if [ -z "$channel" ]; then
   echo "::warning::mroom.toml sets no persona.channel, so the alarm has nowhere to ping" >&2
   exit 0
 fi
+if [ "${MROOM_PERSONA_LIVE:-}" = 1 ] && [ -z "${SLACK_BOT_TOKEN:-}" ]; then
+  echo "::warning::the persona environment has no chat token, so the alarm cannot ping (and files nothing)" >&2
+  exit 0
+fi
 tracker="$("$MROOM" tracker backend)" || exit 1
 if [ "$tracker" = none ]; then
   echo "::warning::there is no tracker (issues.tracker = \"none\"), so the alarm cannot record that it pinged today, and does not ping" >&2
@@ -73,8 +80,17 @@ fi
   echo
   echo "This issue records that $persona pinged about it today, so it pings once a day at most."
 } >"$WORK/alarm.md"
-answer="$("$MROOM" persona create --key "$key" --title "Alert triage could not run ($day)" <"$WORK/alarm.md")" \
-  || { triage_say "the day's issue could not be filed, so the alarm does not ping (a missed ping, never a repeated one)"; exit 1; }
+rc=0
+answer="$("$MROOM" persona create --key "$key" --title "Alert triage could not run ($day)" <"$WORK/alarm.md")" || rc=$?
+if [ "$rc" = 5 ]; then
+  # The tracker dropped the marker: every run would file the day's issue again. The switch-off job turns
+  # the workflow off, as it does for triage's own issues.
+  lost="$(head -n1 "$WORK/markers-lost" 2>/dev/null || true)"
+  [ -z "$lost" ] || output "markers_lost=$lost"
+  triage_say "the tracker did not keep the hidden marker on the day's issue ${lost:-}; the switch-off job turns triage off"
+  exit 0
+fi
+[ "$rc" = 0 ] || { triage_say "the day's issue could not be filed, so the alarm does not ping (a missed ping, never a repeated one)"; exit 1; }
 
 issue="$(jq -r '.created // empty' <<<"$answer")"
 url="$(jq -r '.url // empty' <<<"$answer")"

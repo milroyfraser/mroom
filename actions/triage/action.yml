@@ -42,8 +42,8 @@ outputs:
     description: How many issues it filed (triage)
     value: ${{ steps.triage.outputs.filed }}
   markers-lost:
-    description: The issue whose hidden markers the tracker did not keep, if any (triage)
-    value: ${{ steps.triage.outputs.markers_lost }}
+    description: The issue whose hidden markers the tracker did not keep, if any (triage, alarm)
+    value: ${{ steps.triage.outputs.markers_lost || steps.alarm.outputs.markers_lost }}
 runs:
   using: composite
   steps:
@@ -59,7 +59,8 @@ runs:
         MROOM_TRIAGE_TRACKER_TOKEN: ${{ inputs.tracker-token }}
         MROOM_TRIAGE_ERRORS_TOKEN: ${{ inputs.errors-token }}
       run: '"$GITHUB_ACTION_PATH/triage.sh"'
-    - if: inputs.mode == 'alarm'
+    - id: alarm
+      if: inputs.mode == 'alarm'
       name: Ping when triage could not run
       shell: bash
       env:

@@ -15,6 +15,7 @@ the calls change there, so a second run sees what the first one filed:
   sentry          {projects, new, regressed, escalating: [<Sentry issue>], events: {<id>: <event>}}
   slack_error     an error Slack answers every post with (channel_not_found, say)
   down            ["linear" | "sentry" | "slack"]: that service answers 503
+  down_after_create  true: the tracker goes down right after the next create
 
 Each call is logged to $PERSONA_LOG as one JSON line: {service, op, vars} for Linear (op being the GraphQL
 operation's first field), {service, method, path} for Sentry and {service, body} for Slack, with "auth", the
@@ -154,6 +155,8 @@ def linear(req, auth):
             "url": f"https://tracker.example.dev/issue/{ident}", "createdAt": f"2026-10-28T10:{n:02d}:00Z",
             "creator": viewer, "assignee": i.get("assigneeId"), "state": i.get("stateId"),
             "labels": i.get("labelIds", []), "comments": []})
+        if state.get("down_after_create"):
+            state.setdefault("down", []).append("linear")
         save(state)
         return answer(req, 200, {"data": {"issueCreate": {"success": True, "issue": {
             "identifier": ident, "url": f"https://tracker.example.dev/issue/{ident}"}}}})
