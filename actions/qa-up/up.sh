@@ -595,14 +595,14 @@ fi
 if [ "$broadcast" = same ]; then
   # An app of its own on the box's Reverb host, which takes sockets from the environment's own hosts alone. Its id,
   # key, host, port and scheme are public, and qa-plan builds the frontend with them, from mroom.toml and the pull
-  # request's number (lib/core/qa.sh, qa_public_env): the gate's must be the ones derived here, or the frontend would
-  # open its sockets for another app or on another host.
+  # request's number (lib/core/qa.sh, qa_public_env): the gate's must be the ones derived here, from the default
+  # branch's mroom.toml, or the frontend would open its sockets for another app or on another host.
   # Each deploy asks for the app again, and never removes it first: the gate keeps its secret while it exists, since
   # each open socket holds the app it opened with, and a new secret would fail their private channels.
   service "Reverb app" reverb-app-add "$n"
   for key in REVERB_APP_ID REVERB_APP_KEY REVERB_HOST REVERB_PORT REVERB_SCHEME; do
     [ "$(gate_value "$key")" = "$(public_value "$key")" ] \
-      || die "the gate's Reverb app has another $key than $(public_value "$key"), which qa-plan builds the frontend with: box.env's MROOM_APP_NAME and MROOM_QA_ZONE must be mroom.toml's app.name and qa.zone, and the box must run the mroom release the workflows pin"
+      || die "the gate's Reverb app has another $key than $(public_value "$key"), which mroom.toml gives for the frontend: box.env's MROOM_APP_NAME and MROOM_QA_ZONE must be mroom.toml's app.name and qa.zone, and the box must run the mroom release the workflows pin"
   done
   keep REVERB_APP_SECRET
   set_env BROADCAST_CONNECTION reverb
@@ -621,9 +621,9 @@ set_env APP_DEBUG false
 # The hosts answer over https alone, so the cookies never go over http, not even to Forge's redirect on port 80.
 set_env SESSION_SECURE_COOKIE true
 while IFS= read -r line; do set_env "${line%%=*}" "${line#*=}"; done <<<"$public_env"
-# For an app with a frontend, the build values Reverb's installer puts in a Laravel app's .env, as the frontend was
-# built with them. A template's own would stay otherwise, and one such as VITE_REVERB_HOST="${REVERB_HOST}" reads a
-# key that comes later in this file, which makes it empty.
+# For an app with a frontend, the build values Reverb's installer puts in a Laravel app's .env, set as a frontend
+# that maps them (README, sockets in the frontend) is built. A template's own would stay otherwise, and one such as
+# VITE_REVERB_HOST="${REVERB_HOST}" names a key that comes later in this file, so Laravel keeps that text as it is.
 if [ "$broadcast" = same ] && [ -n "$QA_FRONTEND" ]; then
   for key in APP_KEY HOST PORT SCHEME; do set_env "VITE_REVERB_$key" "$(public_value "REVERB_$key")"; done
 fi

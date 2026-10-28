@@ -531,6 +531,9 @@ What a Laravel app must have or add, documented in `docs/app-contract.md` and ch
   file, `version.json` in the backend with `"release": null`, since a tarball has no git history.
 - Honours the isolation keys in section 8.7; with a separate SPA, also `CLIENT_URL`, `CORS_ALLOWED_ORIGINS` and
   `SANCTUM_STATEFUL_DOMAINS`.
+- With `qa.parity.broadcast = "same"`, broadcasts through `BROADCAST_CONNECTION` and the `REVERB_*` keys, and a
+  frontend that opens sockets takes its Reverb app's key and host through `app.build.frontend_env` (the four
+  `VITE_REVERB_*` values Laravel Echo reads, section 5.1), since qa-plan sets nothing else in the build.
 - Runs with `APP_ENV=qa`, which Laravel counts as not production: `App::isProduction()` is false, and the
   commands that ask for confirmation in production, `migrate` among them, run without asking. Code that takes
   another path in production takes the other one in QA, a known gap from production (D12) that `[qa.parity]`

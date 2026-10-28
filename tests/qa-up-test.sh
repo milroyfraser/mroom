@@ -657,7 +657,7 @@ REVERB_SCHEME=https"
     expect_err_has "the gate's Reverb app has another ${pair%%=*} than"
     expect_no_file "$GATE/env-put.in"
   done
-  expect_err_has "than https, which qa-plan builds the frontend with: box.env's MROOM_APP_NAME and MROOM_QA_ZONE must be mroom.toml's app.name and qa.zone, and the box must run the mroom release the workflows pin"
+  expect_err_has "than https, which mroom.toml gives for the frontend: box.env's MROOM_APP_NAME and MROOM_QA_ZONE must be mroom.toml's app.name and qa.zone, and the box must run the mroom release the workflows pin"
   # One the gate cannot give fails the deploy too, and one with no secret.
   app "$TWO" api/artisan=php
   echo 1 >"$GATE/reverb-app-add.rc"

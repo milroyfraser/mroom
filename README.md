@@ -771,9 +771,9 @@ differently):
   the file gets `BROADCAST_CONNECTION=reverb` (and `BROADCAST_DRIVER`, its name before Laravel 11), the app's
   public values (below) and the secret the gate gives. An app with a frontend also gets `VITE_REVERB_APP_KEY`,
   `VITE_REVERB_HOST`, `VITE_REVERB_PORT` and `VITE_REVERB_SCHEME`, the build values Reverb's installer puts in a
-  Laravel app's `.env`, as the frontend was built with them. qa-up stops before the `.env` when the gate's id,
-  key, host, port or scheme is not the public one, since the frontend would open its sockets for another app or
-  on another host. The file goes through the gate's `env-put` alone, never through Forge's API for a site's
+  Laravel app's `.env`, set as a frontend that maps them (below) is built. qa-up stops before the `.env` when the
+  gate's id, key, host, port or scheme is not the public one, since the frontend would open its sockets for another
+  app or on another host. The file goes through the gate's `env-put` alone, never through Forge's API for a site's
   environment. The passwords and secret keys the gate gives, the Reverb app's secret among them, and the app key,
   are masked in the run's log, and a line of the gate's answer that could hold a value is never shown. The gate
   keeps the passwords, the bucket keys, the Reverb app's secret and the app key (QA gate, above), so every deploy

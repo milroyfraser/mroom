@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317,SC2016  # t_* run through test_case; a $ in single quotes is for eval, later
 # Tests for the gate's Reverb operations (design D16): reverb-app-add gives an environment an app of its own on
-# mroom's Reverb host, with an id and key built from box.env and the PR alone, a new secret each time, and
-# origins of its own two sites; reverb-app-remove takes it away; both replace the apps file whole, keep every
-# other environment's app, never log a secret, and refuse what is not theirs to do; and what qa-plan derives
-# for the frontend is what the gate gives. Offline: a small Python server on the host's socket answers its
-# health check. tests/reverb/gate-real-test.sh runs the same gate against the real Reverb host in CI, with
+# mroom's Reverb host, with an id and key built from box.env and the PR alone, a secret it keeps while the app
+# exists, and origins of its own two hosts; reverb-app-remove takes it away; both replace the apps file whole,
+# keep every other environment's app, never log a secret, and refuse what is not theirs to do; and what qa-plan
+# derives for the frontend is what the gate gives. Offline: a small Python server on the host's socket answers
+# its health check. tests/reverb/gate-real-test.sh runs the same gate against the real Reverb host in CI, with
 # sockets that connect and events that arrive.
 set -euo pipefail
 SUITE=reverb
