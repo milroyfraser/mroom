@@ -173,18 +173,22 @@ mroom/
   bin/mroom                     front door (today scripts/dev-box/mroom)
   bin/forge-api                 agent-facing Forge CLI (guards: --write, --secret, path pinning)
   lib/                          box commands: wt, site, site-pull, user, keys, baseline, agent-env, memory-preflight,
-                                job, watchdog, gate (the forced command CI reaches the box through, 8.2),
+                                job, watchdog, guard (the PreToolUse command parser, 8.3),
+                                gate (the forced command CI reaches the box through, 8.2),
                                 site-op (the gate's work inside a QA site, as its user, D17), mail-relay (holds
                                 the SMTP port for Mailpit, D19)
   lib/core/                     config reader, forge client, chat adapter (Slack), tracker/errors adapters, job
-                                records, the watchdog's probes, util, the QA services' pinned builds (pins.txt)
+                                records, the watchdog's probes, the guard's tokeniser, util, the QA services'
+                                pinned builds (pins.txt)
   plugin/                       the Claude Code plugin
     .claude-plugin/plugin.json
     skills/                     refine, deliver, implement, fix-issue, release, forge, blast-radius, correct,
                                 verify-app, principle-*, typescript-best-practices (vendored, with LICENSE)
     agents/qa-engineer.md
     commands/clean-review.md, crap.md
-    hooks/hooks.json            SessionStart banner, PreToolUse guard, WorktreeCreate/Remove
+    hooks/hooks.json            SessionStart banner, PreToolUse guard, WorktreeCreate/Remove; each hook runs the
+                                installed `mroom`, since Claude Code copies only plugin/ into its cache
+  .claude-plugin/marketplace.json   lists plugin/, so the repository is its own marketplace
   actions/                      composite actions: qa-up, qa-down, qa-reap, qa-browser, pr-status, triage,
                                 deploy-verify, regression-label, ...
   reverb-host/                  a small Laravel app that runs one Reverb for every QA environment, with an app
@@ -425,9 +429,11 @@ Invariants, each with a test:
      as `forge`.
 3. **Agents never merge, approve, deploy, release, or read secrets.** Settings fragments plus a `PreToolUse`
    `mroom guard` that parses each Bash command and refuses, among others, `gh api` writes to `/merge`, `/reviews`
-   with approve, and `/releases`; `gh pr merge`, `gh pr review --approve`, force-push in any form, reading
-   `.env*`, `~/.ssh`, `~/.config/gh`, `~/.config/mroom/secrets` through any command. Prefix rules stay as a second
-   layer. Release still goes through `gh release create`, which always asks. These are best effort, and GitHub
+   with approve, `/releases` and `/git/refs`; `gh pr merge`, `gh pr review --approve`, force-push in any form,
+   pushing tags or to `main`, `master` or `release`, reading `.env*`, `~/.ssh`, `~/.config/gh`,
+   `~/.config/mroom/secrets` through any command. It checks each command in a chain, inside `bash -c` and inside
+   `$(...)`, but a command built from variables or a script file gets past it: it is a speed bump. Prefix rules
+   stay as a second layer. Release still goes through `gh release create`, which always asks. These are best effort, and GitHub
    is the gate: the box holds one GitHub identity, the agents' own, which may write the app's repository and
    nothing else, never administers it, and cannot approve its own pull requests; review from code owners, who
    are people, makes every approval that counts a person's; and `production` waits for a person to approve each
@@ -788,7 +794,10 @@ What the pilot's scripts learned after this table was drawn, which their ports k
    workflows check out `job.workflow_repository` at `job.workflow_sha` and run their composite actions from that
    checkout, so the caller pins mroom once. Neither property exists on GitHub Enterprise Server.
 2. Plugins cannot set permissions (to verify): if so, `mroom init` merges the settings fragments into
-   `.claude/settings.json`, and `mroom update` re-merges the parts it owns between markers.
+   `.claude/settings.json`, and `mroom update` re-merges the parts it owns between markers. **Answered:** they
+   cannot. Claude Code's plugin reference says a plugin's `settings.json` keeps only `agent` and
+   `subagentStatusLine`, and drops every other key. So `mroom init` merges `settings/*.json`, joining the lists;
+   Claude Code checks deny, then ask, then allow, so no fragment's `allow` can undo another's `ask` or `deny`.
 3. Forge site isolation for QA sites: confirm it works with per-PR sites, the queue worker and the box gate.
    **Partly answered (D17):** a site created with `is_isolated` and `isolated_user` gets its own user and PHP pool,
    its worker, created through the API, runs as that user, and the user cannot enter `forge`'s home. Still to test:

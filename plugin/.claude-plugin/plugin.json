@@ -1,0 +1,17 @@
+{
+  "name": "mroom",
+  "version": "0.4.0",
+  "description": "mroom's Claude Code plugin: the PreToolUse guard on Bash (mroom guard). Skills and the other hooks come in later phases.",
+  "author": {
+    "name": "mroom contributors"
+  },
+  "homepage": "https://github.com/milroyfraser/mroom",
+  "repository": "https://github.com/milroyfraser/mroom",
+  "license": "MIT",
+  "keywords": [
+    "guard",
+    "hooks",
+    "laravel",
+    "forge"
+  ]
+}
