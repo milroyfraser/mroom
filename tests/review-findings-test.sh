@@ -15,7 +15,7 @@ OLD="bbbbbbb2$(printf '2%.0s' {1..32})"
 
 # evaluate <comments as a JSON array> [reviewer]: what evaluate.jq makes of them, in $out.
 evaluate() {
-  out="$(jq -n --arg head "$HEAD" --argjson c "$1" '{head_sha: $head, comments: $c}' |
+  out="$(jq -n --arg head "$HEAD" --argjson c "$1" '{head_sha: $head, pr_author: "author", comments: $c}' |
     jq -L "$A" --arg reviewer "${2:-claude[bot]}" -f "$A/evaluate.jq")"
 }
 # verdict <what it means> <jq expression that must hold for $out>
@@ -24,7 +24,11 @@ verdict() {
 }
 
 # A comment as the API gives it; created_at orders them.
-comment() { jq -n --arg login "$1" --arg at "$2" --arg body "$3" '{login: $login, created_at: $at, body: $body, html_url: "https://gh/c/\($at)"}'; }
+# Comments by dev, dev2 and the reviewer come from collaborators; anyone else's from no one in particular.
+comment() {
+  jq -n --arg login "$1" --arg at "$2" --arg body "$3" '{login: $login, created_at: $at, body: $body, html_url: "https://gh/c/\($at)",
+    association: (if $login == "dev" or $login == "dev2" then "COLLABORATOR" else "NONE" end)}'
+}
 review() { comment "${4:-claude[bot]}" "$1" "$2"$'\n\n'"<!-- claude-review sha=$3 -->"; }
 list() { jq -s . "$@"; }
 
@@ -90,10 +94,30 @@ t_tables() {
   verdict "another heading is not the findings table" '.conclusion == "neutral" and (.summary | test("no \"Review findings and how"))'
 }
 
+t_only_trusted_tables_count() {
+  local open=$'\n| 1 | a | open |' done=$'\n| 1 | a | ✅ fixed |'
+  evaluate "$(list <(comment dev 2026-01-01T00:00:00Z "$TABLE_HEAD$open") <(comment stranger 2026-01-02T00:00:00Z "$TABLE_HEAD$done"))"
+  verdict "a stranger's table hides an open row" '.conclusion == "failure" and (.summary | test("2026-01-01"))'
+  evaluate "$(list <(comment stranger 2026-01-02T00:00:00Z "$TABLE_HEAD$open"))"
+  verdict "a stranger's table counts" '.conclusion == "neutral"'
+  evaluate "$(list <(comment author 2026-01-02T00:00:00Z "$TABLE_HEAD$open"))"
+  verdict "the pull request author's table does not count" '.conclusion == "failure"'
+  local who
+  for who in OWNER MEMBER; do
+    evaluate "$(list <(comment stranger 2026-01-02T00:00:00Z "$TABLE_HEAD$open" | jq --arg a "$who" '.association = $a'))"
+    verdict "a table by an $who does not count" '.conclusion == "failure"'
+  done
+  evaluate "$(list <(comment stranger 2026-01-02T00:00:00Z "$TABLE_HEAD$open" | jq '.association = "CONTRIBUTOR"'))"
+  verdict "a contributor's table counts" '.conclusion == "neutral"'
+}
+
 t_summary_is_safe_and_bounded() {
   evaluate "$(list <(comment dev 2026-01-02T00:00:00Z "$TABLE_HEAD"$'\n| 1 | ping @someone and @org/team <script>alert(1)</script> & co | open |'))"
   verdict "mentions and HTML" '(.summary | test("@[a-z]") | not) and (.summary | test("@​someone")) and (.summary | test("@​org/team"))
     and (.summary | test("<script") | not) and (.summary | test("&lt;script&gt;alert\\(1\\)&lt;/script&gt; &amp; co"))'
+  evaluate "$(list <(comment dev 2026-01-02T00:00:00Z "$TABLE_HEAD"$'\n| 1 | see ![x](https://t.example/p.gif) and [here](https://e.example) | open |'))"
+  verdict "links and images" '(.summary | test("!\\[x\\]\\(") | not) and (.summary | test("\\[here\\]\\(") | not)
+    and (.summary | test("!\\\\\\[x\\\\\\]"))'
   local rows
   rows="$(for i in $(seq 1 30); do printf '\n| %s | finding %s | open |' "$i" "$i"; done)"
   evaluate "$(list <(review 2026-01-01T00:00:00Z "$FULL_RED" "$HEAD") <(comment dev 2026-01-02T00:00:00Z "$TABLE_HEAD$rows"))"
@@ -110,7 +134,8 @@ world() {
     {state: "open", head: {sha: "'"$HEAD"'"}, number: 7}]' >"$FAKE/pulls.json"
   cat >"$T/bin/gh" <<'EOF'
 #!/usr/bin/env bash
-# fake gh: logs each call to $FAKE/gh.log. pulls/<N> answers the head from $FAKE/head (null without it),
+# fake gh: logs each call to $FAKE/gh.log. pulls/<N> answers the head from $FAKE/head (none without it) and the
+# author "author",
 # issues/<N>/comments from $FAKE/comments.json (the API's shape), commits/<sha>/pulls from $FAKE/pulls.json, and
 # a POST to check-runs keeps its input in $FAKE/posted. With $FAKE/down every call fails.
 printf '%s\n' "$*" >>"$FAKE/gh.log"
@@ -129,9 +154,10 @@ done
 answer() { jq -r "($jqf) | if type == \"string\" then . else tojson end"; }
 case "$method $path" in
   "GET repos/example/shop/pulls/"*)
-    if [ -f "$FAKE/head" ]; then jq -n --arg s "$(cat "$FAKE/head")" '{head: {sha: $s}}' | answer; else echo null; fi ;;
+    if [ -f "$FAKE/head" ]; then jq -n --arg s "$(cat "$FAKE/head")" '{head: {sha: $s}, user: {login: "author"}}' | answer
+    else echo '{}' | answer; fi ;;
   "GET repos/example/shop/issues/"*/comments\?per_page=100)
-    jq '[.[] | {user: {login: .login}, body, html_url, created_at}]' "$FAKE/comments.json" | answer ;;
+    jq '[.[] | {user: {login: .login}, author_association: (.association // "NONE"), body, html_url, created_at}]' "$FAKE/comments.json" | answer ;;
   "GET repos/example/shop/commits/"*/pulls) answer <"$FAKE/pulls.json" ;;
   "POST repos/example/shop/check-runs") cat >"$FAKE/posted"; jq -r .conclusion "$FAKE/posted" | sed 's|$|: https://gh/run|' ;;
   *) echo "fake gh: unexpected: $method $path" >&2; exit 1 ;;
@@ -152,7 +178,12 @@ t_dry_run_and_post() {
   script 7; expect_rc 0; expect_out "failure: https://gh/run"
   out="$(cat "$FAKE/posted")"
   verdict "the posted check run" ".name == \"Review findings\" and .head_sha == \"$HEAD\" and .conclusion == \"failure\""
-  expect_true "did not read the head from the pull request" grep -qx "api repos/example/shop/pulls/7 --jq .head.sha" "$FAKE/gh.log"
+  expect_true "did not read the head from the pull request" grep -qxF 'api repos/example/shop/pulls/7 --jq "\(.head.sha) \(.user.login)"' "$FAKE/gh.log"
+  # The pull request's author counts for the table, read from the pull request.
+  list <(comment author 2026-01-02T00:00:00Z "$TABLE_HEAD"$'\n| 1 | a | open |') >"$FAKE/comments.json"
+  REVIEW_FINDINGS_DRY_RUN=1 script 7
+  verdict "the author's table is not read" '.conclusion == "failure" and (.output.title | test("1 unresolved row"))'
+  list <(review 2026-01-01T00:00:00Z "$FULL_RED" "$HEAD") >"$FAKE/comments.json"
   # Another reviewer and another check name.
   MROOM_REVIEWER='review-bot[bot]' MROOM_CHECK_NAME="Open findings" REVIEW_FINDINGS_DRY_RUN=1 script 7
   verdict "the inputs are not read" '.name == "Open findings" and .conclusion == "neutral"'
@@ -177,7 +208,7 @@ t_events() {
   echo '{"workflow_run": {"head_sha": "'"$HEAD"'", "pull_requests": []}}' >"$T/event.json"
   REVIEW_FINDINGS_DRY_RUN=1 script --event "$T/event.json"; expect_rc 0
   verdict "a review run found by its commit" ".head_sha == \"$HEAD\""
-  expect_true "did not check pull request 7" grep -qx "api repos/example/shop/pulls/7 --jq .head.sha" "$FAKE/gh.log"
+  expect_true "did not check pull request 7" grep -qF "api repos/example/shop/pulls/7 --jq" "$FAKE/gh.log"
   expect_true "checked a closed or another pull request" eval '! grep -qE "pulls/(6|8) " "$FAKE/gh.log"'
   echo '{"workflow_run": {"head_sha": "not-a-sha", "pull_requests": []}}' >"$T/event.json"
   script --event "$T/event.json"; expect_rc 0; expect_out_has "nothing to check"
@@ -256,6 +287,7 @@ t_workflow_shape() {
 test_case reviews t_reviews
 test_case another-reviewer t_another_reviewer
 test_case tables t_tables
+test_case trusted-tables t_only_trusted_tables_count
 test_case summary-safe t_summary_is_safe_and_bounded
 test_case dry-run-and-post t_dry_run_and_post
 test_case events t_events

@@ -1,7 +1,7 @@
 # evaluate.jq — the review findings check (actions/review-findings), from a pull request's comments. Pure jq,
 # no API calls; review-findings.sh collects the input.
 #
-#   input:  {head_sha, comments: [{login, body, html_url, created_at}]}
+#   input:  {head_sha, pr_author, comments: [{login, association, body, html_url, created_at}]}
 #   args:   --arg reviewer <login>, the GitHub login that posts the Claude review (claude[bot] by default)
 #   output: {conclusion: success|failure|neutral, title, summary}
 #
@@ -9,8 +9,9 @@
 # - the latest Claude review comment ($reviewer's, ending with `<!-- claude-review sha=... -->`, of any
 #   commit: a push outside the review's paths gets no new review, so the last one still stands) has open 🔴
 #   blocking findings, counted by findings.jq's blocking_count;
-# - the latest comment with a "Review findings and how each was resolved" table (posted by the author's
-#   session, any author) has a row that is not resolved. A row is resolved when ANY of its cells has ✅ or
+# - the latest comment with a "Review findings and how each was resolved" table has a row that is not
+#   resolved. Only the pull request's author and the repository's owners, members and collaborators
+#   (the comment's author_association) count: on a public repository anyone may comment. A row is resolved when ANY of its cells has ✅ or
 #   ➖: the table's columns vary between sessions, so the status column is not looked up by name.
 # A review whose format blocking_count doesn't recognise gives neutral (unknown, not red), unless the
 # table alone already makes it red. No review and no table at all is neutral too, "Not reviewed yet":
@@ -21,7 +22,7 @@ include "findings";
 # Comment text shown in the check's summary is untrusted: no @mentions (a zero-width space after the
 # @ stops the ping), no HTML, one line, bounded.
 def safe:
-  gsub("[\r\n]+"; " ") | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("@"; "@\u200b")
+  gsub("[\r\n]+"; " ") | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("@"; "@\u200b") | gsub("\\["; "\\[") | gsub("\\]"; "\\]")
   | if length > 140 then .[0:140] + "…" else . end;
 def sha7: if . == null then "?" else .[0:7] end;
 def plural($n; $word): "\($n) \($word)\(if $n == 1 then "" else "s" end)";
@@ -62,11 +63,13 @@ def table_rows:
 def resolved: any(.[]; test("✅|➖"));
 
 .head_sha as $head
+| (.pr_author // "") as $author
 | (.comments // [] | sort_by(.created_at // "")) as $comments
 | ([$comments[] | select(.login == $reviewer)
     | . + {sha: (first(.body // "" | capture("<!-- claude-review sha=(?<s>[0-9a-f]{40})").s) // null)}
     | select(.sha != null)] | last) as $review
-| ([$comments[] | select(.body // "" | split("\n") | any(.[]; table_heading))] | last) as $table
+| ([$comments[] | select(.login == $author or (.association | IN("OWNER", "MEMBER", "COLLABORATOR")))
+    | select(.body // "" | split("\n") | any(.[]; table_heading))] | last) as $table
 | (if $review then $review.body | blocking_count else 0 end) as $n
 | (if $table then $table.body | table_rows else [] end) as $rows
 | [$rows[] | select(resolved | not)] as $open

@@ -77,6 +77,7 @@ Then report, in this order:
 Raise no new 🟡 or 🟣 findings and don't repeat earlier ones. If nothing blocks, start with
 "No blocking findings."
 
-Post the result with \`gh pr comment $PR\`. End the comment with this exact line:
+Post the result with \`gh pr comment $PR --body "<the review>"\`. End the comment with this exact
+line:
 <!-- claude-review sha=$HEAD_SHA -->
 EOF

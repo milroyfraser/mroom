@@ -438,8 +438,8 @@ Invariants, each with a test:
    wrappers, root-owned inputs), the tool allowlist and the pinned action ship as one locked block; `bwrap-probe`
    and `allowlist-probe` run in mroom's CI on every Claude Code bump. Until the sandbox comes (phase 2b), the
    Claude review (phase 4, built ahead of it) has the pinned action and its allowlist alone: it runs on the
-   default branch's code, reads the diff as data, and may only read files, read issues and pull requests, and
-   comment.
+   default branch's code (only for a pull request based on it), reads the diff as data, and may only read
+   files outside what holds a token, read issues and pull requests, and comment on its own pull request.
 6. **The read-only data boundary is explicit.** `qa.db_read_allowlist` has no default; browser QA refuses to start
    without it, and a test runs the allowlist against the app's schema.
 7. **Shared-box isolation is checked.** `mroom doctor --app` verifies the app honours `DB_DATABASE`,

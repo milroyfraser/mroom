@@ -4,7 +4,8 @@ description: >-
   and look for new blocking ones. Run it from mroom's claude-review workflow, which checks out the app's
   default branch, never the pull request, and decides whether to run (scope.sh). The reviewer reads the pull
   request's diff and text through gh, as data. The pinned action and its tool allowlist are one block here,
-  kept as tight as they are: reading files, reading issues and pull requests, and commenting.
+  kept as tight as they are: reading files, reading issues and pull requests, and commenting on this one
+  (args.sh).
 inputs:
   claude-code-oauth-token:
     description: A Claude Code OAuth token; this or anthropic-api-key
@@ -75,6 +76,8 @@ runs:
         prompt="$("$GITHUB_ACTION_PATH/prompt.sh")"
         delimiter="mroom-prompt-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
         printf 'prompt<<%s\n%s\n%s\n' "$delimiter" "$prompt" "$delimiter" >>"$GITHUB_OUTPUT"
+        args="$("$GITHUB_ACTION_PATH/args.sh")"
+        echo "claude-args=$args" >>"$GITHUB_OUTPUT"
 
     # Pinned by commit. Agent mode (a prompt is given) checks out no branch; on a pull request it restores
     # .claude/, CLAUDE.md and .mcp.json from the base branch before Claude starts.
@@ -85,4 +88,5 @@ runs:
         anthropic_api_key: ${{ inputs.anthropic-api-key }}
         allowed_bots: ${{ inputs.allowed-bots }}
         prompt: ${{ steps.prompt.outputs.prompt }}
-        claude_args: '--allowed-tools "Read,Grep,Glob,Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
+        # The tool allowlist and its deny rules: args.sh.
+        claude_args: ${{ steps.prompt.outputs.claude-args }}

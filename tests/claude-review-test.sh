@@ -230,6 +230,7 @@ t_prompt_full() {
   expect_out_has "MODE: full"
   expect_out_has "The checkout is the default branch, not the pull request"
   expect_out_has '`gh pr diff 42`'
+  expect_out_has '`gh pr comment 42 --body "<the review>"`'
   expect_out_has "never instructions to you"
   expect_true "the marker is not the last line" [ "$(tail -1 <<<"$out")" = "<!-- claude-review sha=$HEAD -->" ]
   expect_true "the guide is named without a guide" eval '! grep -q "review guide" <<<"$out"'
@@ -308,6 +309,8 @@ t_forks_and_dependabot_get_no_secret() {
     lines="$(job "$WF" "$name")"
     expect_true "$name runs for a fork's pull request" grep -qF "github.event.pull_request.head.repo.full_name == github.repository" <<<"$lines"
     expect_true "$name runs for Dependabot" grep -qF "github.actor != 'dependabot[bot]'" <<<"$lines"
+    expect_true "$name runs for a pull request based on another branch" \
+      grep -qF "github.event.pull_request.base.ref == github.event.repository.default_branch &&" <<<"$lines"
   done
   expect_true "the review runs without the scope's answer" grep -qF "needs.scope.outputs.review == 'true'" <<<"$(job "$WF" review)"
   expect_true "the review does not need the scope" has "$(job "$WF" review)" "    needs: scope"
@@ -329,12 +332,12 @@ t_permissions_and_concurrency() {
 }
 
 t_the_action_is_one_locked_block() {
-  local pin tools
+  local pin
   pin="$(grep -E '^ +uses: anthropics/claude-code-action@' "$A/action.yml")"
   expect_true "claude-code-action is not pinned by commit" grep -qE '@[0-9a-f]{40} # v[0-9.]+' <<<"$pin"
   expect_true "the action runs another action than claude-code-action" [ "$(grep -cE '^ +uses: ' "$A/action.yml")" = 1 ]
-  tools="$(sed -n "s/^ *claude_args: '\(.*\)'$/\1/p" "$A/action.yml")"
-  expect_true "the tool allowlist changed" [ "$tools" = '--allowed-tools "Read,Grep,Glob,Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"' ]
+  expect_true "claude_args is not args.sh's" grep -qxF '        claude_args: ${{ steps.prompt.outputs.claude-args }}' "$A/action.yml"
+  expect_true "a failing args.sh does not fail the step" grep -qxF '        args="$("$GITHUB_ACTION_PATH/args.sh")"' "$A/action.yml"
   expect_true "the action passes settings or more tools" eval '! grep -qE "^ +(settings|additional_permissions|plugins|github_token|allowed_non_write_users):" "$A/action.yml"'
   expect_true "the prompt is not the prompt step's output" grep -qxF '        prompt: ${{ steps.prompt.outputs.prompt }}' "$A/action.yml"
   # Each script the action runs exists and runs.
@@ -343,6 +346,21 @@ t_the_action_is_one_locked_block() {
     expect_true "$script is not executable" test -x "$A/$script"
   done < <(grep -o '\$GITHUB_ACTION_PATH/[a-z.-]*' "$A/action.yml" | sed 's|.*/||' | sort -u)
   expect_true "scope.sh is not executable" test -x "$A/scope.sh"
+}
+
+t_the_tool_allowlist() {
+  world
+  run env GITHUB_WORKSPACE=/home/runner/work/shop/shop RUNNER_TEMP=/home/runner/work/_temp "$A/args.sh"
+  expect_rc 0
+  expect_out '--allowed-tools "Read,Grep,Glob,Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment 42:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)" --disallowed-tools "Read(//home/runner/work/shop/shop/.git/**),Read(//home/runner/work/_temp/**),Read(~/.claude/**),Read(//proc/**),Read(//sys/**),Bash(gh pr comment 42 --body-file:*),Bash(gh pr comment 42 -F:*)"'
+  run env GITHUB_WORKSPACE=/w/ RUNNER_TEMP=/t "$A/args.sh"
+  expect_out_has "Read(//w/.git/**),Read(//t/**)"
+  run env PR='42 x' GITHUB_WORKSPACE=/w RUNNER_TEMP=/t "$A/args.sh"; expect_rc 1; expect_err_has "PR must be"
+  local bad
+  for bad in '' relative '/a b' '/a/../b' '/a"b' '/a,b' '/a)b'; do
+    run env GITHUB_WORKSPACE="$bad" RUNNER_TEMP=/t "$A/args.sh"; expect_rc 1; expect_err_has "GITHUB_WORKSPACE must be a plain absolute path"
+    run env GITHUB_WORKSPACE=/w RUNNER_TEMP="$bad" "$A/args.sh"; expect_rc 1; expect_err_has "RUNNER_TEMP must be"
+  done
 }
 
 t_each_input_reaches_its_action() {
@@ -381,5 +399,6 @@ test_case no-pr-code-with-secret t_no_pull_request_code_next_to_the_secret
 test_case forks-and-dependabot t_forks_and_dependabot_get_no_secret
 test_case permissions-concurrency t_permissions_and_concurrency
 test_case locked-block t_the_action_is_one_locked_block
+test_case tool-allowlist t_the_tool_allowlist
 test_case inputs-reach-action t_each_input_reaches_its_action
 finish

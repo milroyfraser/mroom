@@ -1030,20 +1030,28 @@ How it keeps the secret away from pull request code (design 8.1 and 8.5):
 - The `review` job holds the secret. It checks out the app's default branch, for its `CLAUDE.md`, the
   review guide and the code around the change, and mroom at the commit of the called workflow. It never
   checks out the pull request. Claude reads the diff and the conversation through `gh`, as data.
-- A fork's pull request and Dependabot's get no review, whatever the caller's trigger.
+- A fork's pull request and Dependabot's get no review, whatever the caller's trigger. Nor does one based on
+  another branch than the default: the action restores `.claude/`, `CLAUDE.md` and `.mcp.json` from the base
+  branch, and their hooks would run next to the secret.
 - The pinned `anthropics/claude-code-action` and its tool allowlist live in one composite action
-  (`actions/claude-review`). Claude may read files, read issues and pull requests, and comment; nothing else.
+  (`actions/claude-review`). Claude may read files, read issues and pull requests, and comment on this pull
+  request; nothing else. Deny rules keep its reading tools out of the checkout's `.git` (where the action
+  puts its token), the runner's temp folder, `~/.claude`, `/proc` and `/sys`.
 - One review per pull request runs at a time: a newer push cancels the older review.
 
 The Claude GitHub app must be installed on the repository (`/install-github-app` in Claude Code sets it up and
 stores the token). The runner sandbox comes in phase 2b; until then the allowlist and the default-branch
-checkout are the box.
+checkout are the box. Text in the diff and the comments can still try to steer Claude. The deny rules on
+`gh pr comment` (no `--body-file`, no `-F`) match a command's start only, so they are best effort: an
+injected prompt that gets `gh` to read a file could still post it. The sandbox's clean environment closes
+that.
 
 ## Review findings
 
 A check run on the pull request's head commit, `Review findings`, that is red while the latest Claude review
 has an open 🔴 blocking finding. It also reads a table the author's session may post, headed
-**Review findings and how each was resolved**: a row with neither ✅ nor ➖ in any cell keeps it red. With
+**Review findings and how each was resolved**: a row with neither ✅ nor ➖ in any cell keeps it red. Only a
+table by the pull request's author or the repository's owners, members and collaborators counts. With
 no review and no table it is neutral, "Not reviewed yet". A review whose format it cannot read is neutral too,
 unless the table is red.
 
@@ -1077,10 +1085,12 @@ Every run rereads the pull request's comments, so any of these events gives the 
 request's comments that are, or were, a review or a findings table wake it. `workflow_run` is a backstop for
 a review comment whose own event started nothing. The triggers all run the default branch's copy of this
 workflow, so a pull request cannot change what checks it. It reads the pull request through the API, checks
-out only mroom and holds no secret. Text from a comment in the summary is escaped: no mentions, no HTML.
+out only mroom and holds no secret. Text from a comment in the summary is escaped: no mentions, no HTML, no
+links.
 
-A ruleset may require the `Review findings` check run (not the `findings / check` job, which passes once it has
-posted). GitHub counts a neutral check as passing, so the rule stops a merge only while a finding is open.
+The check is a signal for the person who reviews, not a gate. GitHub counts a neutral check as passing, and
+any workflow with `checks: write`, one a pull request adds among them, can post a check run of the same name.
+The gate is a person's approval of the latest push, which shows such a change.
 
 ## Development
 

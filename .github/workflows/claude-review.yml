@@ -48,9 +48,12 @@ defaults:
 jobs:
   scope:
     name: scope
-    # A fork's pull request never gets the secret, whatever the caller's trigger; neither does Dependabot's.
+    # A fork's pull request never gets the secret, whatever the caller's trigger; neither does Dependabot's. Nor
+    # does one based on another branch: the action restores .claude/, CLAUDE.md and .mcp.json from the base
+    # branch, and their hooks and servers would run next to the secret.
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
       github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -84,6 +87,7 @@ jobs:
     if: >-
       needs.scope.outputs.review == 'true' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
       github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 30

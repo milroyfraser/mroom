@@ -33,15 +33,17 @@ prs_for_sha() {
 
 # check <pr>: evaluates one pull request and posts (or prints) its check run.
 check() {
-  local pr="$1" head_sha result payload
+  local pr="$1" pull head_sha author result payload
   # The head is read now, not taken from the event: issue_comment events carry none, and after a push since the
-  # event the check belongs on the newer commit.
-  head_sha="$(gh api "repos/$REPO/pulls/$pr" --jq .head.sha)" || fail "Could not read pull request $pr; run the check again."
+  # event the check belongs on the newer commit. The author's findings table counts (evaluate.jq).
+  pull="$(gh api "repos/$REPO/pulls/$pr" --jq '"\(.head.sha) \(.user.login)"')" ||
+    fail "Could not read pull request $pr; run the check again."
+  head_sha="${pull%% *}" author="${pull#* }"
   [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || fail "No head commit for pull request $pr."
   # Through stdin and pipes, never argv: a pull request's comments can be larger than one argument may be.
   result="$(gh api --paginate "repos/$REPO/issues/$pr/comments?per_page=100" \
-    --jq '.[] | {login: .user.login, body, html_url, created_at}' |
-    jq -s --arg head "$head_sha" '{head_sha: $head, comments: .}' |
+    --jq '.[] | {login: .user.login, association: .author_association, body, html_url, created_at}' |
+    jq -s --arg head "$head_sha" --arg author "${author:-}" '{head_sha: $head, pr_author: $author, comments: .}' |
     jq -L "$HERE" --arg reviewer "$REVIEWER" -f "$HERE/evaluate.jq")" ||
     fail "Could not read the comments of pull request $pr; run the check again."
   payload="$(jq --arg name "$NAME" --arg sha "$head_sha" '{
