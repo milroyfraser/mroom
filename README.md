@@ -23,8 +23,9 @@ The full design, including how each requirement is measured, is in [docs/design.
 **Pre-alpha, phase 1 of 6 under way.** What exists today: the skeleton (the `mroom` front door,
 `mroom config`, the one reader of `mroom.toml` and `box.env`, `install.sh`, tests and CI) and the first
 part of phase 1: the [box watchdog](#box-watchdog) with its job records, and the
-[regression label](#regression-label) check with its measures. Every other command prints
-`not yet: phase N`. The phases and what each delivers are in
+[regression label](#regression-label) check with its measures. Ahead of its phase, part of phase 4:
+the [Claude review](#claude-review) and its [review findings](#review-findings) check. Every other command
+prints `not yet: phase N`. The phases and what each delivers are in
 [section 11 of the design](docs/design.md#11-phases). Expect breaking changes in every `0.x` release.
 
 ## Host requirements
@@ -975,6 +976,121 @@ tools/regressions.sh example/shop 2026-07-01
 # Production problems per release: 0.07 (6 over 85)
 # Time from a release to the first report of a problem: median 21h, longest 6d 2h (6 problems)
 ```
+
+## Claude review
+
+A reusable workflow gives each pull request one full Claude review, then follow-ups. The full review marks
+each finding 🔴 blocking, 🟡 optional or 🟣 pre-existing, with at most 5 optional ones. A later push gets a
+follow-up that only re-checks the earlier blocking findings (✅ fixed, ❌ still open, or 💬 settled by a
+reply) and looks for new blocking ones in what changed since. It raises no new nits. Each review ends with
+a hidden line naming the commit it reviewed, and the earlier reviews are folded as outdated.
+
+The app calls it on `pull_request`, pinned to a mroom release (`v0.5.0` below stands for the first release
+that has it), and passes its Claude Code OAuth token or Anthropic API key under the name the workflow
+expects:
+
+```yaml
+# .github/workflows/claude-review.yml
+name: Claude review
+on:
+  pull_request:
+    types: [opened, synchronize]
+permissions:
+  contents: read
+jobs:
+  claude:
+    permissions:
+      contents: read
+      pull-requests: write # to post the review and fold the earlier ones
+      issues: read
+      id-token: write # the Claude GitHub app's token
+    uses: milroyfraser/mroom/.github/workflows/claude-review.yml@v0.5.0
+    with:
+      paths: |                      # review only a change that touches these (empty: every change)
+        backend/**
+        frontend/**
+      review-guide: .claude/commands/review.md   # the app's review standard (empty: none)
+      review-guide-paths: |         # the code the guide covers (empty: every reviewed path)
+        backend/app/**
+        backend/tests/**
+      # reviewer: claude[bot]                        the login that posts the review, the default
+      # allowed-bots: claude[bot],github-actions[bot]  bots whose pull requests are reviewed too
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # or ANTHROPIC_API_KEY
+```
+
+Patterns match as a workflow's own `paths` do: `*` and `?` stay inside one folder, `**` crosses folders. A
+rename counts by both names. The review guide is any Markdown file on the default branch: a review command,
+a style guide or a checklist. In a full review that touches the guide's paths, Claude checks the changed code
+against it. A rule the guide marks blocking is 🔴 only at a line the pull request adds or changes.
+
+How it keeps the secret away from pull request code (design 8.1 and 8.5):
+
+- A `scope` job, with no secret, reads the event and the changed files and decides whether to review.
+- The `review` job holds the secret. It checks out the app's default branch, for its `CLAUDE.md`, the
+  review guide and the code around the change, and mroom at the commit of the called workflow. It never
+  checks out the pull request. Claude reads the diff and the conversation through `gh`, as data.
+- A fork's pull request and Dependabot's get no review, whatever the caller's trigger. Nor does one based on
+  another branch than the default: the action restores `.claude/`, `CLAUDE.md` and `.mcp.json` from the base
+  branch, and their hooks would run next to the secret.
+- The pinned `anthropics/claude-code-action` and its tool allowlist live in one composite action
+  (`actions/claude-review`). Claude may read files, read issues and pull requests, and comment on this pull
+  request; nothing else. Deny rules keep its reading tools out of the checkout's `.git` (where the action
+  puts its token), the runner's temp folder, `~/.claude`, `/proc` and `/sys`.
+- One review per pull request runs at a time: a newer push cancels the older review.
+
+The Claude GitHub app must be installed on the repository (`/install-github-app` in Claude Code sets it up and
+stores the token). The runner sandbox comes in phase 2b; until then the allowlist and the default-branch
+checkout are the box. Text in the diff and the comments can still try to steer Claude. The deny rules on
+`gh pr comment` (no `--body-file`, no `-F`) match a command's start only, so they are best effort: an
+injected prompt that gets `gh` to read a file could still post it. The sandbox's clean environment closes
+that.
+
+## Review findings
+
+A check run on the pull request's head commit, `Review findings`, that is red while the latest Claude review
+has an open 🔴 blocking finding. It also reads a table the author's session may post, headed
+**Review findings and how each was resolved**: a row with neither ✅ nor ➖ in any cell keeps it red. Only a
+table by the pull request's author or the repository's owners, members and collaborators counts. With
+no review and no table it is neutral, "Not reviewed yet". A review whose format it cannot read is neutral too,
+unless the table is red.
+
+```yaml
+# .github/workflows/review-findings.yml
+name: Review findings
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  issue_comment:
+    types: [created, edited, deleted]
+  workflow_run:
+    workflows: [Claude review] # the review workflow's name
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  findings:
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      checks: write # to post the check run
+    uses: milroyfraser/mroom/.github/workflows/review-findings.yml@v0.5.0
+    # with:
+    #   reviewer: claude[bot]          # the login that posts the review, the default
+    #   check-name: Review findings    # the default
+```
+
+Every run rereads the pull request's comments, so any of these events gives the same answer. Only a pull
+request's comments that are, or were, a review or a findings table wake it. `workflow_run` is a backstop for
+a review comment whose own event started nothing. The triggers all run the default branch's copy of this
+workflow, so a pull request cannot change what checks it. It reads the pull request through the API, checks
+out only mroom and holds no secret. Text from a comment in the summary is escaped: no mentions, no HTML, no
+links.
+
+The check is a signal for the person who reviews, not a gate. GitHub counts a neutral check as passing, and
+any workflow with `checks: write`, one a pull request adds among them, can post a check run of the same name.
+The gate is a person's approval of the latest push, which shows such a change.
 
 ## Development
 

@@ -186,7 +186,7 @@ mroom/
     commands/clean-review.md, crap.md
     hooks/hooks.json            SessionStart banner, PreToolUse guard, WorktreeCreate/Remove
   actions/                      composite actions: qa-up, qa-down, qa-reap, qa-browser, pr-status, triage,
-                                deploy-verify, regression-label, ...
+                                deploy-verify, regression-label, claude-review, review-findings, ...
   reverb-host/                  a small Laravel app that runs one Reverb for every QA environment, with an app
                                 provider that reads its apps from a file (D16)
   .github/workflows/            reusable workflows (on: workflow_call) that check out mroom at job.workflow_sha
@@ -436,7 +436,10 @@ Invariants, each with a test:
    summary; payloads go through stdin or files, never argv.
 5. **Claude on a runner is boxed.** The sandbox (dedicated users, `env -i`, sudoers allowing exactly the
    wrappers, root-owned inputs), the tool allowlist and the pinned action ship as one locked block; `bwrap-probe`
-   and `allowlist-probe` run in mroom's CI on every Claude Code bump.
+   and `allowlist-probe` run in mroom's CI on every Claude Code bump. Until the sandbox comes (phase 2b), the
+   Claude review (phase 4, built ahead of it) has the pinned action and its allowlist alone: it runs on the
+   default branch's code (only for a pull request based on it), reads the diff as data, and may only read
+   files outside what holds a token, read issues and pull requests, and comment on its own pull request.
 6. **The read-only data boundary is explicit.** `qa.db_read_allowlist` has no default; browser QA refuses to start
    without it, and a test runs the allowlist against the app's schema.
 7. **Shared-box isolation is checked.** `mroom doctor --app` verifies the app honours `DB_DATABASE`,
@@ -719,7 +722,8 @@ turned into config:
 | `actions/qa-*`, workflows | the QA environment scripts and workflows | the provisioning of section 8.2 |
 | `reverb-host/` | the dev site's Reverb daemon | one Reverb for every QA environment, its apps read from a file (D16) |
 | `mroom baseline` (QA services) | Garage and Mailpit as run in the phase 2a spikes | pinned binaries with committed checksums; each service's secrets under `forge`'s home |
-| `actions/pr-status`, `review-findings`, `triage` | the PR status notes, review findings and alert triage | persona name, adapters, constants into config |
+| `actions/claude-review`, `review-findings` | the Claude review and review findings workflows | the review job checks out the default branch, never the pull request, and the reviewer reads the diff through gh (8.1); the paths, the review guide and the paths it covers, the reviewer's login and the secret are workflow inputs; a fork's or Dependabot's pull request gets no review |
+| `actions/pr-status`, `triage` | the PR status notes and alert triage | persona name, adapters, constants into config |
 | `templates/ci-*`, `deploy-production` | the backend, frontend and end-to-end CI, and the production deploy | placeholders; the deploy points the `release` branch at the tag |
 | `actions/deploy-verify` | the deploy's fixed sleep and health ping | waits until `app.version_path` reports the tag's commit |
 | pstack sync | the weekly upstream check | keeps mroom's vendored skills current |
@@ -752,6 +756,11 @@ What the pilot's scripts learned after this table was drawn, which their ports k
   finds uncommitted changes there, or cannot fetch or switch to the branch) gives back a lock it took, never one
   the pull's owner held before it started. An owner's expired lock is taken anew, not renewed, so such a pull
   gives it back too. A failure after the switch keeps the lock, since the site may be half switched.
+- **Reviews (`claude-review`, phase 4).** A pull request gets one full review, which marks each finding
+  blocking or optional, and then follow-ups that only re-check the earlier blocking findings and look for new
+  blocking ones in what changed since. Reviewing every push from scratch gave a fresh set of nits each round and
+  kept pull requests in review for 4 or 5 rounds. A reply that gives a reason settles a finding unless the reason
+  is wrong, and the review findings check stays red while a blocking one is open.
 - **Caches under a trusted trigger (`qa-plan`, phase 2a).** A job that runs a pull request's code under a trigger
   that may write the default branch's caches (`workflow_dispatch`, `push`, `schedule` and the like) sets
   `cache-mode: read`, or the pull request's code can save a cache the default branch's own builds restore.
