@@ -474,7 +474,7 @@ and runs it, which installs the `parts` named:
 ```bash
 set -euo pipefail
 v=v0.5.0
-sum=baf4de10ef7dd45a048332e1c5ad537833a350d0337a50132b3cb32bf18f0310
+sum=8c56e94b5501601b4e8ae2175308eededaca97bda19ae7b0149bc8495881ca7c
 user=forge
 parts=(site-op mailpit garage reverb)
 smtp_port=1025
@@ -649,7 +649,10 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
     its certificate, and put the printed block in place of its `location` blocks.
 
 **A box whose services ran before 0.5.0** keeps them in `~/.local/share/mroom-services`, and their logins
-and Garage's secrets in `~/.config/mroom/secrets`. To move them, for each part it runs:
+and Garage's secrets in `~/.config/mroom/secrets`. Move them in one sitting, with no QA environment coming up
+or going down meanwhile: from step 1 to step 3 the gate looks for the services' files in their new folders,
+so it refuses mail logins, buckets and Reverb apps, and a teardown in that time would leave them behind. Do
+this for each part the box runs:
 
 1. Upgrade the box to the release.
 2. *As root*, the root recipe with the same parts. It makes the folders in `/var/lib/mroom/services` and
@@ -659,8 +662,10 @@ and Garage's secrets in `~/.config/mroom/secrets`. To move them, for each part i
    folder any more, then moves the data into the new folders before it installs a build, so the service
    cannot start while its data moves: Mailpit's mail and SMTP logins, Garage's metadata, data and secrets
    (its node, layout, buckets and keys stay), and the Reverb host's apps. Then it installs the builds again.
-   A name in both places that is not the same file stops it, with neither changed. Run again, it moves
-   nothing.
+   It checks every move of a part before it makes any: a name in both places that is not the same file
+   stops it, with nothing moved. When `/home` and `/var` are separate filesystems, each move is a copy,
+   which needs room for the data twice over; one cut short stays under a hidden `.<name>.moving` and
+   stops the next run until a person has looked. Run again, it moves nothing.
 4. Put the nginx blocks baseline prints in place of the old ones on `s3.<zone>`, `files.<zone>` and
    `ws.<zone>`: the sockets moved.
 5. Remove `~/.local/share/mroom-services`, which holds only old builds and sockets now.

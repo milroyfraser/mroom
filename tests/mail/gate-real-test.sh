@@ -132,6 +132,14 @@ t_the_mail_operations_against_the_real_mailpit() {
   run "$MROOM" baseline mailpit
   expect_rc 0; expect_out_has "mailpit v1.32.0: installed, SHA-256"
   wait_ready
+  # Each service, in its own mount namespace, sees only its own folders, and no home.
+  run sudo nsenter -t "$(main_pid mroom-mailpit.service)" -m ls -A /var/lib/mroom/services; expect_out mailpit
+  run sudo nsenter -t "$(main_pid mroom-mailpit.service)" -m ls -A /var/lib/mroom/services/mailpit
+  expect_out $'builds\ndata\netc\nrun'
+  for _ in $(seq 1 40); do active mroom-mail-relay.service && break; sleep 0.25; done
+  run sudo nsenter -t "$(main_pid mroom-mail-relay.service)" -m env LC_ALL=C ls -A /var/lib/mroom/services
+  expect_out $'mail-relay\nmailpit'
+  run sudo nsenter -t "$(main_pid mroom-mailpit.service)" -m ls -A "$HOME"; expect_rc 2
   local run_dir="/var/lib/mroom/services/mailpit/run" pw12 pw13 pw25 n pids=() relay_pid started
   run port_owner; expect_out 0
   run "$MROOM" baseline mailpit

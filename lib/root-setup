@@ -256,8 +256,9 @@ root_owned() {
   (( (8#$(cut -d' ' -f2 <<<"$got") & 8#022) == 0 )) || root_die "$1 can be changed by others than root (mode $(cut -d' ' -f2 <<<"$got")): nothing changed"
 }
 
-# root_chain: every folder above SERVICES_DIR that exists is root's alone (not under MROOM_ROOT_SETUP_TEST,
-# whose folders sit in a temporary folder anyone may write to).
+# root_chain: every folder above SERVICES_DIR that exists is root's alone, and anyone may pass through it, as
+# the box user's services and nginx must (not under MROOM_ROOT_SETUP_TEST, whose folders sit in a temporary
+# folder anyone may write to).
 root_chain() {
   local dir="" part parts
   [ -z "${MROOM_ROOT_SETUP_TEST:-}" ] || return 0
@@ -266,7 +267,10 @@ root_chain() {
   for part in "${parts[@]}"; do
     [ -n "$part" ] || continue
     dir+="/$part"
-    if [ -e "$dir" ] || [ -L "$dir" ]; then root_owned "$dir"; fi
+    if [ -e "$dir" ] || [ -L "$dir" ]; then
+      root_owned "$dir"
+      [ -n "$(find "$dir" -maxdepth 0 -perm -001)" ] || root_die "$dir is closed to other users, so the box user's services could not reach their folders: chmod o+x it; nothing changed"
+    fi
   done
 }
 

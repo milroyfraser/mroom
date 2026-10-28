@@ -108,6 +108,10 @@ t_the_reverb_operations_against_the_real_host() {
   expect_out_has "Reverb host: its data moved from ~/.local/share/mroom-services/reverb to /var/lib/mroom/services"
   expect_no_file "$HOME/.local/share/mroom-services/reverb/apps/apps.json"
   wait_ready
+  # In its own mount namespace, the host sees only its own folders, and no home.
+  run sudo nsenter -t "$(main_pid)" -m ls -A /var/lib/mroom/services; expect_out reverb
+  run sudo nsenter -t "$(main_pid)" -m ls -A /var/lib/mroom/services/reverb; expect_out $'apps\nbuilds\nrun'
+  run sudo nsenter -t "$(main_pid)" -m ls -A "$HOME"; expect_rc 2
   run "$MROOM" baseline reverb
   expect_rc 0; expect_out_has "matches this mroom"; expect_out_has "Reverb host answers; its apps file holds 0."
   expect_out_has "systemd units: installed as this mroom writes them (mroom-reverb.service active)."

@@ -532,17 +532,27 @@ t_a_file_in_both_places_stops_the_move() {
   printf 'new mail\n' >"$(services)/mailpit/data/mailpit.db"
   run "$MROOM" baseline mailpit
   expect_rc 1
-  expect_err_has "both ~/.local/share/mroom-services/mailpit/data/mailpit.db and $(services)/mailpit/data/mailpit.db exist: keep the one that holds the service's data, remove the other, then run this again"
+  expect_err_has "both ~/.local/share/mroom-services/mailpit/data/mailpit.db and $(services)/mailpit/data/mailpit.db exist: keep the one that holds the service's data, remove the other, then run this again; nothing changed"
   run cat "$(services)/mailpit/data/mailpit.db"; expect_out "new mail"
-  expect_file "$(old)/mailpit/data/mailpit.db"
+  # Nothing of the part moved: not the old database's other files, nor its logins.
+  expect_file "$(old)/mailpit/data/mailpit.db"; expect_file "$(old)/mailpit/data/mailpit.db-wal"
+  expect_no_file "$(services)/mailpit/data/mailpit.db-wal"
+  expect_file "$(secrets)/mailpit-smtp.passwd"; expect_no_file "$(etc mailpit)/mailpit-smtp.passwd"
   expect_no_file "$(services)/mailpit/builds/v9.9.9"
   # The same file in both, as a move that stopped halfway leaves it: the old copy goes.
   cp "$(secrets)/mailpit-ui.passwd" "$(etc mailpit)/mailpit-ui.passwd"
   rm "$(services)/mailpit/data/mailpit.db"
+  # A move an earlier run left halfway, under its hidden name: nothing changes until a person looks.
+  mkdir "$(services)/mailpit/data/.mailpit.db-wal.moving"
+  run "$MROOM" baseline mailpit
+  expect_rc 1; expect_err_has "$(services)/mailpit/data/.mailpit.db-wal.moving is what an earlier move left halfway"
+  expect_file "$(old)/mailpit/data/mailpit.db"
+  rmdir "$(services)/mailpit/data/.mailpit.db-wal.moving"
   run "$MROOM" baseline mailpit
   expect_rc 0
   expect_no_file "$(secrets)/mailpit-ui.passwd"
-  run cat "$(services)/mailpit/data/mailpit.db"; expect_out mail
+  run cat "$(services)/mailpit/data/mailpit.db" "$(services)/mailpit/data/mailpit.db-wal"; expect_out $'mail\nwal'
+  run bash -c 'compgen -G "$1/.*.moving" || true' _ "$(services)/mailpit/data"; expect_out ""
 }
 
 t_usage_and_unknown_parts() {
