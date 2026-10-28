@@ -56,7 +56,7 @@ token_nowhere() {
   lacks "$out$err" "$TOKEN" && lacks "$(cat "$T/api/argv" 2>/dev/null)" "$TOKEN"
 }
 
-ISSUE='{"data":{"issue":{"id":"uuid-issue-1","identifier":"ENG-12","title":"Checkout fails","description":"It breaks.","url":"https://tracker.example.dev/issue/ENG-12","priority":2,"priorityLabel":"High","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z","state":{"id":"uuid-state-todo","name":"Todo","type":"unstarted"},"team":{"id":"uuid-team-1","key":"ENG"},"creator":{"name":"Sam Example"},"assignee":null,"labels":{"nodes":[{"name":"bug"}]}}}}'
+ISSUE='{"data":{"issue":{"id":"uuid-issue-1","identifier":"ENG-12","title":"Checkout fails","description":"It breaks.","url":"https://tracker.example.dev/issue/ENG-12","branchName":"sam/eng-12-checkout-fails","priority":2,"priorityLabel":"High","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z","state":{"id":"uuid-state-todo","name":"Todo","type":"unstarted"},"team":{"id":"uuid-team-1","key":"ENG"},"creator":{"name":"Sam Example"},"assignee":null,"labels":{"nodes":[{"name":"bug"}]}}}}'
 STATES_1='{"data":{"team":{"states":{"nodes":[{"id":"uuid-state-todo","name":"Todo","type":"unstarted"},{"id":"uuid-state-prog","name":"In Progress","type":"started"}],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-states-2"}}}}}'
 STATES_2='{"data":{"team":{"states":{"nodes":[{"id":"uuid-state-review","name":"In Review","type":"started"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}'
 
@@ -77,7 +77,8 @@ t_get_reads_the_issue_and_every_page_of_comments() {
   expect_true "the second comments page lost the cursor" [ "$(vars 3)" = '{"id":"ENG-12","after":"cursor-c-2"}' ]
   expect_true "the issue was not read right" json_is "$out" '.identifier == "ENG-12" and .title == "Checkout fails"
     and .state == "Todo" and .state_type == "unstarted" and .team == "ENG" and .priority == 2 and .labels == ["bug"]
-    and .description == "It breaks." and .assignee == null and .creator == "Sam Example"'
+    and .description == "It breaks." and .assignee == null and .creator == "Sam Example"
+    and .branch == "sam/eng-12-checkout-fails"'
   expect_true "the comments were not read right" json_is "$out" '.comments == [
     {by: "Sam Example", at: "2026-01-01T01:00:00Z", body: "first"},
     {by: "an integration", at: "2026-01-01T02:00:00Z", body: "second"}]'
@@ -371,6 +372,69 @@ t_an_id_must_match_the_pattern() {
   expect_true "Linear was called" [ "$(calls)" = 0 ]
 }
 
+# list_node <id> <priority> <updated> [<label>]: one issue as the list query answers it.
+list_node() {
+  local label=""
+  [ -z "${4:-}" ] || label="{\"name\":\"$4\"}"
+  printf '{"identifier":"%s","title":"Issue %s","url":"https://tracker.example.dev/issue/%s","branchName":"b/%s","priority":%s,"updatedAt":"%s","state":{"name":"Todo","type":"unstarted"},"assignee":{"name":"Sam Example"},"labels":{"nodes":[%s]}}' \
+    "$1" "$1" "$1" "$1" "$2" "$3" "$label"
+}
+list_page() { printf '{"data":{"issues":{"nodes":[%s],"pageInfo":{"hasNextPage":%s,"endCursor":%s}}}}' "$1" "$2" "$3"; }
+
+t_list_mine_reads_every_page_and_sorts_by_priority() {
+  world
+  answer 200 "$(list_page "$(list_node ENG-1 0 2026-01-05T00:00:00Z),$(list_node ENG-2 3 2026-01-01T00:00:00Z)" true '"cursor-l-2"')"
+  answer 200 "$(list_page "$(list_node ENG-3 1 2026-01-02T00:00:00Z),$(list_node ENG-4 3 2026-01-03T00:00:00Z bug)" false null)"
+  run "$MROOM" tracker list --mine --open
+  expect_rc 0; expect_err_empty
+  expect_true "expected 2 calls, got $(calls)" [ "$(calls)" = 2 ]
+  expect_true "the list query" has "$(query 1)" 'issues(first: 50, after: $after, filter: $f, orderBy: updatedAt)'
+  expect_true "the filter" [ "$(vars 1)" = '{"f":{"team":{"key":{"eq":"ENG"}},"assignee":{"isMe":{"eq":true}},"state":{"type":{"nin":["completed","canceled"]}}}}' ]
+  expect_true "the second page lost the cursor" [ "$(vars 2 | jq -r .after)" = cursor-l-2 ]
+  expect_true "not urgent first, newest first within a priority, none last" \
+    json_is "$out" '[.[].identifier] == ["ENG-3", "ENG-4", "ENG-2", "ENG-1"]'
+  expect_true "the fields" json_is "$out" '.[1] == {identifier: "ENG-4", title: "Issue ENG-4",
+    url: "https://tracker.example.dev/issue/ENG-4", branch: "b/ENG-4", state: "Todo", state_type: "unstarted",
+    priority: 3, assignee: "Sam Example", labels: ["bug"], updated_at: "2026-01-03T00:00:00Z"}'
+  expect_true "the token leaked" token_nowhere
+}
+
+t_list_by_label_stops_at_its_limit() {
+  world $'tracker = "linear"'
+  answer 200 "$(list_page "$(list_node ENG-1 2 2026-01-05T00:00:00Z lesson),$(list_node ENG-2 2 2026-01-04T00:00:00Z lesson)" true '"cursor-l-2"')"
+  answer 200 "$(list_page "$(list_node ENG-3 2 2026-01-03T00:00:00Z lesson)" false null)"
+  run "$MROOM" tracker list --label Lesson --limit 2
+  expect_rc 0
+  expect_true "a page past the limit was read ($(calls) calls)" [ "$(calls)" = 1 ]
+  expect_true "no team without issues.team, and the label in any case" \
+    [ "$(vars 1)" = '{"f":{"labels":{"some":{"name":{"eqIgnoreCase":"Lesson"}}}}}' ]
+  expect_true "the limit" json_is "$out" '[.[].identifier] == ["ENG-1", "ENG-2"]'
+  reset; world
+  answer 200 "$(list_page "$(list_node ENG-1 2 2026-01-05T00:00:00Z),$(list_node ENG-2 2 2026-01-04T00:00:00Z)" true '"cursor-l-2"')"
+  answer 200 "$(list_page "$(list_node ENG-3 2 2026-01-03T00:00:00Z),$(list_node ENG-4 2 2026-01-02T00:00:00Z)" true '"cursor-l-3"')"
+  run "$MROOM" tracker list --mine --limit 3
+  expect_rc 0
+  expect_true "the limit across pages" json_is "$out" '[.[].identifier] == ["ENG-1", "ENG-2", "ENG-3"]'
+  expect_true "a page past the limit was read ($(calls) calls)" [ "$(calls)" = 2 ]
+  reset; world
+  answer 200 '{"data":{"issues":null}}'
+  run "$MROOM" tracker list --mine
+  expect_rc 1; expect_out ""; expect_err_has "the answer holds no list at .data.issues"
+}
+
+t_list_refuses_an_unbounded_or_bad_request() {
+  world
+  run "$MROOM" tracker list; expect_rc 2; expect_err_has "list needs --mine or --label"
+  run "$MROOM" tracker list --open; expect_rc 2; expect_err_has "list needs --mine or --label"
+  run "$MROOM" tracker list --mine --limit 0; expect_rc 2; expect_err_has "--limit is 1 to 250"
+  run "$MROOM" tracker list --mine --limit 251; expect_rc 2; expect_err_has "--limit is 1 to 250"
+  run "$MROOM" tracker list --mine --limit 1x; expect_rc 2
+  run "$MROOM" tracker list --label; expect_rc 2; expect_err_has "--label takes a value"
+  run "$MROOM" tracker list --label $'a\tb'; expect_rc 2; expect_err_has "control character"
+  run "$MROOM" tracker list --mine --all; expect_rc 2; expect_err_has "unknown option '--all'"
+  expect_true "Linear was called" [ "$(calls)" = 0 ]
+}
+
 t_the_backend_comes_from_config_and_none_calls_nothing() {
   world; answer 200 "$ISSUE"
   run "$MROOM" tracker backend; expect_rc 0; expect_out linear
@@ -380,6 +444,7 @@ t_the_backend_comes_from_config_and_none_calls_nothing() {
   expect_rc 3; expect_err_has "issues.tracker is none, so there is no tracker to read an issue"
   run bash -c 'echo hi | "$0" tracker comment ENG-12' "$MROOM"; expect_rc 3
   run "$MROOM" tracker state ENG-12 Done; expect_rc 3
+  run "$MROOM" tracker list --mine; expect_rc 3; expect_err_has "no tracker to list issues in"
   run bash -c 'echo hi | "$0" tracker create --allow-create --title t' "$MROOM"; expect_rc 3
   printf '[app]\nname = "shop"\n' >"$T/mroom.toml"
   run "$MROOM" tracker backend; expect_out none
@@ -428,6 +493,9 @@ test_case missing-or-empty-token t_a_missing_or_empty_token_fails_clearly_and_ca
 test_case token-env-from-config t_the_token_env_name_comes_from_config
 test_case token-never-shows t_the_token_never_shows_even_when_echoed_or_traced
 test_case id-must-match t_an_id_must_match_the_pattern
+test_case list-mine-sorted t_list_mine_reads_every_page_and_sorts_by_priority
+test_case list-label-limit t_list_by_label_stops_at_its_limit
+test_case list-refuses t_list_refuses_an_unbounded_or_bad_request
 test_case backend-from-config t_the_backend_comes_from_config_and_none_calls_nothing
 test_case usage-errors t_usage_errors
 finish

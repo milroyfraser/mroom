@@ -25,6 +25,12 @@ suites_glob = "app/*/Tests"
 tracker = "linear"
 id_pattern = "BK-[0-9]+"
 url = "https://linear.app/example/issue/{id}"
+state_started = "In Progress"
+state_review = "In Review"
+
+[release]
+production_url = "https://app.example.dev"
+tag_prefix = "release-"
 
 [pr]
 required_checks = ["test", "lint", "e2e", "check-title"]

@@ -5,7 +5,7 @@
     {
       "name": "mroom",
       "source": "./plugin",
-      "description": "The PreToolUse guard on Bash (mroom guard); skills and more hooks in later phases"
+      "description": "The workflow skills and commands, and the PreToolUse guard on Bash (mroom guard); more in later phases"
     }
   ]
 }

@@ -79,6 +79,10 @@ SCHEMA = {
     "issues.team": ("str", False, 'team = "SHOP"', "the team new issues are filed in (Linear: the team's key)"),
     "issues.token_env": ("str", False, 'token_env = "LINEAR_API_KEY"',
                          "the environment variable that holds the tracker's token (default LINEAR_API_KEY)"),
+    "issues.state_started": ("str", False, 'state_started = "In Progress"',
+                             "the state an issue moves to when work starts (default In Progress)"),
+    "issues.state_review": ("str", False, 'state_review = "In Review"',
+                            "the state an issue moves to when its pull request is ready (default In Review)"),
     "errors.provider": (("sentry",), False, 'provider = "sentry"',
                         "sentry; leave the [errors] table out for no error tracker"),
     "errors.org": ("str", False, 'org = "example-org"', "the error tracker's organisation (Sentry: its slug)"),
@@ -87,6 +91,10 @@ SCHEMA = {
                           "an error issue's short id, as a regular expression"),
     "errors.token_env": ("str", False, 'token_env = "SENTRY_AUTH_TOKEN"',
                          "the environment variable that holds the error tracker's token (default SENTRY_AUTH_TOKEN)"),
+    "release.production_url": ("str", False, 'production_url = "https://app.example.dev"',
+                               "the production app's https origin, read after a release to check its version"),
+    "release.tag_prefix": ("str", False, 'tag_prefix = "release-"',
+                           "put before the version in a release's tag (default none: v1.2.3)"),
     "pr.required_checks": ("list", False, 'required_checks = ["test"]', "check names the ruleset requires"),
     "qa.zone": ("str", False, 'zone = "qa.example.dev"', "QA hosts are api-<PR>.<zone>, go-<PR>.<zone>"),
     "qa.max_envs": ("int", False, "max_envs = 5", "QA environments at once"),
@@ -199,6 +207,13 @@ def rule_error(key: str, value) -> str | None:
         return f"{key} must be a team key of capitals, digits and _ (got {json.dumps(value)})"
     if key == "errors.org" and not ORG_SLUG.fullmatch(value):
         return f"{key} must be an organisation slug: lowercase letters, digits, _ and - (got {json.dumps(value)})"
+    if key in ("issues.state_started", "issues.state_review") and not STATE_NAME.fullmatch(value):
+        return f"{key} must be a state's name: letters, digits, spaces, - and _, at most 40 (got {json.dumps(value)})"
+    # The release skill reads this origin's version path, so it is an https origin and nothing more.
+    if key == "release.production_url" and not HTTPS_ORIGIN.fullmatch(value):
+        return f"{key} must be an https origin such as https://app.example.dev, with no path (got {json.dumps(value)})"
+    if key == "release.tag_prefix" and not TAG_PREFIX.fullmatch(value):
+        return f"{key} must be empty or lowercase letters, digits and -, such as release- (got {json.dumps(value)})"
     if key in TOKEN_ENV_DEFAULTS and (not TOKEN_ENV.fullmatch(value) or value.startswith(TOKEN_ENV_DENIED)
                                       or "SECRET" in value or "PASSWORD" in value):
         return (f"{key} must be an environment variable's name in capitals ending in _TOKEN or _API_KEY, and not "
@@ -349,6 +364,9 @@ PHP_BINARY = re.compile(r"php(?:[0-9]+(?:\.[0-9]+)?)?")
 DISK = re.compile(r"[a-z][a-z0-9]{0,15}")
 TEAM_KEY = re.compile(r"[A-Z0-9][A-Z0-9_]{0,31}")
 ORG_SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,49}")
+STATE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _-]{0,39}")
+HTTPS_ORIGIN = re.compile(r"https://(?=[^/]{1,200}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?::[0-9]{1,5})?")
+TAG_PREFIX = re.compile(r"(?:[a-z][a-z0-9-]{0,15})?")
 # A token's variable ends in _TOKEN or _API_KEY, and is none of the box's, GitHub's, a cloud's or a host's,
 # so a changed mroom.toml cannot send another secret (APP_KEY, AWS_SECRET_ACCESS_KEY) to the tracker.
 TOKEN_ENV = re.compile(r"[A-Z][A-Z0-9_]{0,63}(?:_TOKEN|_API_KEY)")

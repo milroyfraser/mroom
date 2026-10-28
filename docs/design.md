@@ -251,6 +251,8 @@ id_pattern = "SHOP-[0-9]+"         # worktree slugs, PR title scopes, issue link
 url = "https://linear.app/<workspace>/issue/{id}"
 team = "SHOP"                      # where the tracker adapter files new issues (Linear: the team's key)
 token_env = "LINEAR_API_KEY"       # the environment variable with the tracker's token (the default)
+state_started = "In Progress"      # the state /implement moves an issue to when work starts (the default)
+state_review = "In Review"         # the state it moves the issue to when the PR is ready (the default)
 
 [errors]
 provider = "sentry"                # leave the table out for no error tracker
@@ -261,6 +263,10 @@ token_env = "SENTRY_AUTH_TOKEN"    # the environment variable with the error tra
 
 [pr]
 required_checks = ["test", "lint", "e2e", "check-title"]
+
+[release]
+production_url = "https://app.example.dev"   # /release reads app.version_path here after a deploy, read-only
+tag_prefix = ""                    # before the version in a release's tag ("release-" gives release-v1.2.3)
 
 [qa]
 zone = "<qa-zone>"                 # api-<PR>.<zone>, go-<PR>.<zone>
@@ -299,8 +305,9 @@ until then a reader passes its own fallback (`mroom config get <key> --default <
 | `app.backend_dir`, `app.frontend_dir`, `app.package_manager`, `app.php`, `app.build.*`, `tests.*` | phase 1 decides | phase 1 decides |
 | `app.version_path` | phase 2 decides | `/version` |
 | `qa.*` (`qa.db_read_allowlist` has no default, ever; section 8.6) | phase 2 decides | phase 2 decides; `qa.parity.*` defaults to the values above |
-| `issues.*` | none (phase 3) | `issues.tracker`: none; `issues.token_env`: `LINEAR_API_KEY`; `issues.team` has no default, and only `create` needs it |
+| `issues.*` | none (phase 3) | `issues.tracker`: none; `issues.token_env`: `LINEAR_API_KEY`; `issues.state_started`: In Progress; `issues.state_review`: In Review; `issues.team` has no default, and only `create` needs it |
 | `errors.*` | none (phase 3) | none: without the table there is no error tracker; `errors.region`: us; `errors.token_env`: `SENTRY_AUTH_TOKEN`; `errors.org` has no default, and every call needs it |
+| `release.*` | none (phase 3) | `release.tag_prefix`: none; without `release.production_url`, `/release` skips its version check |
 | `pr.required_checks` | phase 4 decides | phase 4 decides |
 | `persona.name` | phase 5 decides | phase 5 decides |
 
@@ -315,6 +322,9 @@ until then a reader passes its own fallback (`mroom config get <key> --default <
   environment's ACL pattern matches another's keys.
 - `tests.database_pattern` contains `{slug}`, so each worktree gets its own database.
 - `issues.url` contains `{id}`.
+- `issues.state_started` and `issues.state_review` are a state's name (letters, digits, spaces, `-` and `_`).
+  `release.production_url` is an `https://` origin with no path, `release.tag_prefix` empty or lowercase
+  letters, digits and `-`.
 - `issues.team` and `errors.org` are plain words (a team key, an organisation slug). Each `token_env` names a
   variable ending in `_TOKEN` or `_API_KEY`, never one of mroom's, GitHub's, a cloud's or a host's (`MROOM_*`,
   `GH_*`, `GITHUB_*`, `AWS_*`, `FORGE_*`, `SSH_*`), and the two differ.
@@ -372,7 +382,7 @@ Shell function interfaces in `lib/core/`, chosen by config. v1 implements the fi
 
 | Adapter | Functions | v1 | Later |
 |---|---|---|---|
-| tracker | `issue_get`, `issue_comment`, `issue_set_state`, `issue_create` (only with `--allow-create`); with the skills that need them: `issue_comment_upsert`, `issue_find_by_marker`, `issue_owned_by_bot`, `attach_image` | Linear; `none` (notes on the PR, images as artifact links) | GitHub Issues (search over hidden markers must be verified first) |
+| tracker | `issue_get`, `issue_list` (`--mine` or `--label`), `issue_comment`, `issue_set_state`, `issue_create` (only with `--allow-create`); with the skills that need them: `issue_comment_upsert`, `issue_find_by_marker`, `issue_owned_by_bot`, `attach_image` | Linear; `none` (notes on the PR, images as artifact links) | GitHub Issues (search over hidden markers must be verified first) |
 | chat | `chat_post`, `chat_update`, `chat_mention <github-login or commit email>` | Slack (bot token, `chat:write`) | Discord or Teams webhooks |
 | errors | `errors_issue_get`, `errors_search`, `errors_issue_resolve`; with the persona (phase 5): `errors_new_since`, `errors_count_for_release`, `errors_crons_failing` | Sentry (org, region from config), optional | |
 | host | `host_sites`, `host_site_create`, `host_daemon_*`, `host_jobs_*`, `host_cert_*`, `host_deploy` | Forge v2 (one client: retries, 429, pagination) | |
@@ -384,6 +394,12 @@ write that does the same thing twice, never another 4xx). Each token comes from 
 environment variable its `token_env` names, never from a file, and each host is fixed (`api.linear.app`,
 `<region>.sentry.io`). With `issues.tracker = "none"` or no `[errors]` table, every function returns 3, so a
 skill falls back to the pull request.
+
+The workflow skills (`plugin/skills/`: refine, deliver, implement, release, correct, forge) reach the
+trackers only through these two commands, never an API or an MCP server of their own. Each writes to the
+tracker only the state of the issue it works and comments on it, and asks a person before it files an
+issue. A design waiting for approval is a comment (`Design for review: <link>`, then
+`Design approved: <link>`), not a label. `tests/skills-test.sh` checks each skill against this contract.
 
 `errors_issue_get` gives an error issue with its latest event, its counts and its first release.
 `errors_issue_resolve` needs a token with write access, which only the persona's own profile or a person holds
