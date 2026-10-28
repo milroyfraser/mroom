@@ -1,9 +1,9 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2016  # GraphQL variables ($id) are not the shell's
 # tracker.sh — the tracker adapter (design section 7): read an issue, list issues, find the issues
-# that hold an alert's marker, comment on one, set its state, and create one, on the tracker
-# mroom.toml names (issues.tracker). Sourced after api.sh by lib/tracker, never run on its own; needs
-# bash 5, curl, jq and python3 3.11. The caller sets MROOM_ROOT.
+# that hold an alert's marker, tell whether the token's user filed one, comment on one, set its state,
+# and create one, on the tracker mroom.toml names (issues.tracker). Sourced after api.sh by lib/tracker,
+# never run on its own; needs bash 5, curl, jq and python3 3.11. The caller sets MROOM_ROOT.
 #
 # v1 backends: linear, and none (no tracker: every operation returns 3, so a skill leaves its note on the
 # pull request instead). Each function takes the command line's words and prints JSON on stdout.
@@ -253,7 +253,8 @@ linear_issue_list() {
     || { tracker_say "Linear: the issues could not be read"; return 1; }
 }
 
-# linear_issue_find <marker>: the issues, in issues.team when it is set, whose description holds the marker.
+# linear_issue_find <marker> <key>: the issues, in issues.team when it is set, whose description holds the
+# marker, each with the alert keys of its markers that are this key or a later alert of it (keys).
 # Linear's search is a plain substring match, so the marker for sentry:10 also finds sentry:1001's issues:
 # each description is checked again here, and kept only when the marker ends there (" -->"), or goes on
 # with a later alert's ":". One JSON list, the issue filed first at the top. Every page is read, archived
@@ -266,12 +267,27 @@ linear_issue_find() {
     + (if $team == "" then {} else {team: {key: {eq: $team}}} end)')" || return 1
   nodes="$(linear_nodes 'query($f: IssueFilter, $after: String) { issues(first: 50, after: $after, filter: $f, orderBy: createdAt, includeArchived: true) { nodes { identifier title url branchName description createdAt state { name type } creator { name } labels(first: 50) { nodes { name } } } pageInfo { hasNextPage endCursor } } }' \
     "$(jq -nc --argjson f "$filter" '{f: $f}')" .data.issues)" || return 1
-  printf '%s\n' "$nodes" | jq -sc --arg m "$marker" '[.[] | select(. != null)
-    | select((.description // "") as $d | ($d | contains($m + " -->")) or ($d | contains($m + ":")))
+  printf '%s\n' "$nodes" | jq -sc --arg m "$marker" --arg k "$2" '[.[] | select(. != null)
+    | (.description // "") as $d
+    | select(($d | contains($m + " -->")) or ($d | contains($m + ":")))
     | {identifier, title, url, branch: .branchName, state: .state.name, state_type: .state.type,
-       creator: .creator.name, labels: [.labels.nodes[].name], created_at: .createdAt}]
+       creator: .creator.name, labels: [.labels.nodes[].name], created_at: .createdAt,
+       keys: ([$d | scan("<!-- mroom-alert key=([A-Za-z0-9._:-]+) -->") | .[0]
+         | select(. == $k or startswith($k + ":"))] | unique)}]
     | sort_by(.created_at)' \
     || { tracker_say "Linear: the issues could not be read"; return 1; }
+}
+
+# linear_issue_owned <id>: whether the token's user filed the issue (it is the issue's creator).
+linear_issue_owned() {
+  local answer
+  linear_auth || return 1
+  answer="$(linear_gql safe 'query($id: String!) { viewer { id } issue(id: $id) { identifier creator { id } } }' \
+    "$(jq -nc --arg id "$1" '{id: $id}')")" || return 1
+  jq -e '.data.issue != null' <<<"$answer" >/dev/null || { tracker_say "Linear has no issue $1"; return 1; }
+  jq -e '(.data.viewer.id | type) == "string" and .data.viewer.id != ""' <<<"$answer" >/dev/null \
+    || { tracker_say "Linear did not say who the token's user is"; return 1; }
+  jq -c '{identifier: .data.issue.identifier, owned: (.data.issue.creator.id? == .data.viewer.id)}' <<<"$answer"
 }
 
 # linear_issue_create <title> <state name or ""> <priority or ""> <label...>: a new issue in issues.team.
@@ -368,7 +384,8 @@ issue_list() {
 # issue_find_by_marker <key>: the issues whose description holds the persona's hidden marker for an alert
 # key, `<!-- mroom-alert key=<key> -->` (a later alert adds `:<kind>:...` after the key). The key is the
 # error tracker's name and the error issue's numeric id, such as sentry:1001. Every state, archived too,
-# the oldest first; an empty list when none holds it.
+# the oldest first; an empty list when none holds it. Each issue lists its keys: the key, or a later
+# alert's, for each of its markers.
 issue_find_by_marker() {
   [ "$#" = 1 ] || { tracker_say "usage: find <alert key, such as sentry:1001>"; return 2; }
   [[ "$1" =~ ^[a-z][a-z0-9_-]{0,31}:[0-9]{1,20}$ ]] || {
@@ -379,7 +396,19 @@ issue_find_by_marker() {
   backend="$(tracker_backend)" || return 1
   case "$backend" in
     none) tracker_none "find an issue in" ;;
-    linear) linear_issue_find "<!-- mroom-alert key=$1" ;;
+    linear) linear_issue_find "<!-- mroom-alert key=$1" "$1" ;;
+  esac
+}
+
+# issue_owned_by_bot <id>: {identifier, owned}: owned is true when the token's user filed the issue. With
+# the persona's token, that tells the issues it may write to (D23) from everyone else's.
+issue_owned_by_bot() {
+  [ "$#" = 1 ] || { tracker_say "usage: owned <id>"; return 2; }
+  local backend
+  backend="$(tracker_backend)" || return 1
+  case "$backend" in
+    none) tracker_none "read an issue from" ;;
+    linear) tracker_id_ok "$1" || return; linear_issue_owned "$1" ;;
   esac
 }
 

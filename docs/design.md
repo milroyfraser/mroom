@@ -177,7 +177,8 @@ mroom/
                                 job, watchdog, guard (the PreToolUse command parser, 8.3),
                                 gate (the forced command CI reaches the box through, 8.2),
                                 site-op (the gate's work inside a QA site, as its user, D17), mail-relay (holds
-                                the SMTP port for Mailpit, D19), tracker and errors (the adapters' command lines)
+                                the SMTP port for Mailpit, D19), tracker and errors (the adapters' command lines),
+                                persona (the guard: the persona's only way to write to the tracker, D23)
   lib/core/                     config reader, forge client, chat adapter (Slack), tracker/errors adapters, job
                                 records, the watchdog's probes, the guard's tokeniser, util, the QA services'
                                 pinned builds (pins.txt)
@@ -289,6 +290,10 @@ files = "same"                     # same (a bucket per environment and file dis
 
 [persona]
 name = "Agent"                     # the name people see on notes and pings
+label = "found-by-agent"           # on every issue alert triage files (it must exist)
+state = "Triage"                   # the state alert triage files issues in (default: the team's)
+environment = "production"         # the error tracker's environment alert triage reads
+channel = "C0123456789"            # where the persona pings when triage cannot run (a Slack channel id)
 
 [github]
 agent_login = "<agents-account>"   # the box's one GitHub account (D22); `mroom user setup` refuses any other
@@ -310,7 +315,7 @@ until then a reader passes its own fallback (`mroom config get <key> --default <
 | `errors.*` | none (phase 3) | none: without the table there is no error tracker; `errors.region`: us; `errors.token_env`: `SENTRY_AUTH_TOKEN`; `errors.org` has no default, and every call needs it |
 | `release.*` | none (phase 3) | `release.tag_prefix`: none; without `release.production_url`, `/release` skips its version check |
 | `pr.required_checks` | phase 4 decides | phase 4 decides |
-| `persona.name` | phase 5 decides | phase 5 decides |
+| `persona.*` | none (phase 5) | `persona.name`: Agent; `persona.environment`: production; `persona.label`, `persona.state` and `persona.channel`: none (no label, the team's default state, no ping) |
 
 **Validation** (`mroom config validate`, and before every `get`):
 
@@ -383,9 +388,9 @@ Shell function interfaces in `lib/core/`, chosen by config. v1 implements the fi
 
 | Adapter | Functions | v1 | Later |
 |---|---|---|---|
-| tracker | `issue_get`, `issue_list` (`--mine` or `--label`), `issue_comment`, `issue_set_state`, `issue_create` (only with `--allow-create`); with the skills that need them: `issue_comment_upsert`, `issue_find_by_marker`, `issue_owned_by_bot`, `attach_image` | Linear; `none` (notes on the PR, images as artifact links) | GitHub Issues (search over hidden markers must be verified first) |
+| tracker | `issue_get`, `issue_list` (`--mine` or `--label`), `issue_comment`, `issue_set_state`, `issue_create` (only with `--allow-create`), `issue_find_by_marker`, `issue_owned_by_bot`; with the skills that need them: `issue_comment_upsert`, `attach_image` | Linear; `none` (notes on the PR, images as artifact links) | GitHub Issues (search over hidden markers must be verified first) |
 | chat | `chat_post`, `chat_update`, `chat_mention <github-login or commit email>` | Slack (bot token, `chat:write`) | Discord or Teams webhooks |
-| errors | `errors_issue_get`, `errors_search`, `errors_issue_resolve`; with the persona (phase 5): `errors_new_since`, `errors_count_for_release`, `errors_crons_failing` | Sentry (org, region from config), optional | |
+| errors | `errors_issue_get`, `errors_search`, `errors_issue_resolve`, `errors_new_since` (alert triage); with the persona's later work (phase 5): `errors_count_for_release`, `errors_crons_failing` | Sentry (org, region from config), optional | |
 | host | `host_sites`, `host_site_create`, `host_daemon_*`, `host_jobs_*`, `host_cert_*`, `host_deploy` | Forge v2 (one client: retries, 429, pagination) | |
 
 The tracker and errors adapters are `lib/core/tracker.sh` and `lib/core/errors.sh`, on the command line as
@@ -405,12 +410,25 @@ contract.
 
 `issue_find_by_marker` (`mroom tracker find <key>`) lists the issues whose description holds the
 persona's hidden marker for an alert, `<!-- mroom-alert key=<provider>:<numeric id> -->`, with
-`:<kind>:...` after the id for a later alert (phase 5 writes it). The tracker's search is a substring
-match, so the adapter checks each description again and keeps an issue only when the marker ends there
-or goes on with `:`. It reads archived issues too. Phase 5 must check that the tracker keeps the marker
-in a description it stores, the way GitHub Issues must be checked first. `/fix-issue` reads it, and
-makes no tracker write beyond the state and comments of that issue. `issue_comment_upsert`,
-`issue_owned_by_bot` and `attach_image` wait for the persona (phase 5) and browser QA (phase 2b).
+`:<kind>:...` after the id for a later alert (alert triage writes `:regressed:<day>` and
+`:escalating:<day>`). The tracker's search is a substring match, so the adapter checks each description
+again and keeps an issue only when the marker ends there or goes on with `:`, and lists each issue's
+keys of that error. It reads archived issues too. `/fix-issue` reads it, and makes no tracker write
+beyond the state and comments of that issue. `issue_owned_by_bot` (`mroom tracker owned`) says
+whether the token's user filed an issue: with the persona's token, which issues are its own (D23).
+`issue_comment_upsert` and `attach_image` wait for the PR notes (phase 5) and browser QA (phase 2b).
+
+Whether the tracker keeps an HTML-comment marker in a description it stores is not taken on trust:
+the persona's guard (`mroom persona`, the only way alert triage writes) reads every issue it files
+back, and when a marker is missing it writes nothing more in that run, and the triage workflow's
+switch-off job turns the workflow off and asks a person once. Without that stop, every run would file
+the same alerts again. The guard also writes only what D23 allows: it files an issue only for an
+alert key of the run, assigns no one, comments only on issues the persona filed, and has no command
+to edit, close, label or delete; it escapes every HTML comment's opening in the text it is given, so
+no alert text can forge a marker, refuses text shaped like a token and defangs links to other hosts. Triage redacts the error's data before it reaches an
+issue (tokens, email addresses, phone numbers, IBANs). Its alarm pings at most once a UTC day when a
+live run fails, keyed `triage:<yyyymmdd>` on an issue it files before the ping, so a ping it could not
+record is never sent.
 The tracker's own SCM integration may read a `Fixes` line too, so an error tracker's project prefix
 should not be a tracker team's key.
 
@@ -495,7 +513,7 @@ Invariants, each with a test:
    cookie name, since environments share one box. `HORIZON_PREFIX` must start with the environment's Redis prefix,
    because Horizon replaces the connection's prefix with its own.
 8. **Secrets per GitHub environment.** `qa` (default branch only) holds the box and Forge credentials, which reach root (D20); `persona` (default branch only)
-   holds the tracker and chat tokens; `production` (release tags only, each deploy approved by a person other
+   holds the tracker and chat tokens, and alert triage's read-only error-tracker token; `production` (release tags only, each deploy approved by a person other
    than the one who started it) holds the deploy credential, since Write can tag any commit (D22). None is
    readable from a `pull_request` job.
 9. **Each QA environment's services are its own.** Its database and the role that owns it (D18), its app key, its

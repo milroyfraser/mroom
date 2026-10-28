@@ -5,6 +5,9 @@
 #                                           tags) and its latest event (message, release, in-app frames)
 #   mroom errors search <query> [--environment <name>] [--period 14d] [--limit 25]
 #                                           issues for a search, in the error tracker's own syntax
+#   mroom errors new <minutes> [--environment production] [--limit 25]
+#                                           the issues new, regressed or escalating in the last <minutes>,
+#                                           each with its kind and when (alert triage)
 #   mroom errors resolve <id>               marks the issue resolved (the token needs write access)
 #   mroom errors backend                    the error tracker mroom.toml names: sentry or none
 #
@@ -39,9 +42,10 @@ rc=0
 case "$cmd" in
   get) errors_issue_get "$@" || rc=$? ;;
   search) errors_search "$@" || rc=$? ;;
+  new) errors_new_since "$@" || rc=$? ;;
   resolve) errors_issue_resolve "$@" || rc=$? ;;
   backend) [ "$#" = 0 ] || { echo "mroom errors: backend takes no arguments" >&2; exit 2; }; errors_backend || rc=$? ;;
   help | -h | --help) usage ;;
-  *) echo "mroom errors: unknown command '$cmd' (get, search, resolve, backend)" >&2; rc=2 ;;
+  *) echo "mroom errors: unknown command '$cmd' (get, search, new, resolve, backend)" >&2; rc=2 ;;
 esac
 exit "$rc"

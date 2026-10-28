@@ -25,7 +25,8 @@ The full design, including how each requirement is measured, is in [docs/design.
 part of phase 1: the [box watchdog](#box-watchdog) with its job records, the
 [regression label](#regression-label) check with its measures, and the
 [guard, the plugin's skeleton and the settings fragments](#guard-and-settings), and, from phase 3, the
-[tracker and error-tracker adapters](#tracker-and-error-tracker) and the [workflow skills](#workflow-skills). Every other command prints
+[tracker and error-tracker adapters](#tracker-and-error-tracker) and the [workflow skills](#workflow-skills),
+and, from phase 5, [alert triage](#alert-triage) with its alarm and its guard. Every other command prints
 `not yet: phase N`. The phases and what each delivers are in
 [section 11 of the design](docs/design.md#11-phases). Expect breaking changes in every `0.x` release.
 
@@ -329,11 +330,13 @@ The workflow skills of phase 3 reach the issue tracker and the error tracker thr
 mroom tracker get SHOP-12                    # title, state, labels, branch, description, every comment
 mroom tracker list --mine --open             # my 50 latest open issues, by priority; or --label lesson
 mroom tracker find sentry:1001               # the issues whose description holds the marker for an alert
+mroom tracker owned SHOP-12                  # whether the token's user filed the issue
 mroom tracker comment SHOP-12 < note.md      # adds a comment; the body comes on stdin
 mroom tracker state SHOP-12 "In Review"      # the team's state of that name, in any case
 mroom tracker create --allow-create --title "Checkout fails" --state Triage --label bug < body.md
 mroom errors get SHOP-1A2                    # the error issue and its latest event
 mroom errors search 'is:unresolved' --environment production --period 24h --limit 50
+mroom errors new 40 --environment production # new, regressed and escalating issues of the last 40 minutes
 mroom errors resolve SHOP-1A2
 ```
 
@@ -368,7 +371,8 @@ token_env = "SENTRY_AUTH_TOKEN"    # the default
   substring match, so `find` checks each description again and keeps an issue only when the marker
   ends there or goes on with `:`; the marker for `sentry:100` never finds `sentry:1001`'s issue. It
   reads every page, in `issues.team` when that is set, and lists the issues in every state,
-  archived ones too, the first filed at the top.
+  archived ones too, the first filed at the top, each with its `keys`: the keys of its markers that
+  are this error's.
 - **Creating an issue** needs `--allow-create`; without it, nothing is sent. It files in `issues.team`
   and uses labels that already exist, of that team or the whole workspace (not a parent team's); mroom
   never creates a label.
@@ -391,6 +395,113 @@ token_env = "SENTRY_AUTH_TOKEN"    # the default
 Sentry needs a user or internal integration token; an organisation auth token cannot read issues. It
 needs Issue & Event: read, and Organization: read for `search`, which first checks that the token sees
 a project. `resolve` also needs Issue & Event: write.
+
+## Alert triage
+
+The persona (design D23) files the error tracker's alerts into the tracker, one issue per alert key,
+and pings a person only when triage itself cannot run. It is a reusable workflow,
+`.github/workflows/triage.yml`, with the composite action `actions/triage`, which the app calls from a
+workflow of its own:
+
+```yaml
+# .github/workflows/alerts.yml
+name: Alert triage
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      live:
+        description: Write to the tracker (unticked, a dry run prints what it would file)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  triage:
+    permissions:
+      actions: write # the switch-off job turns this workflow off when the tracker drops the markers
+      contents: read
+    uses: milroyfraser/mroom/.github/workflows/triage.yml@v0.5.0 # the first release with alert triage
+    with:
+      live: ${{ github.event_name == 'schedule' || inputs.live }}
+    secrets:
+      MROOM_TRACKER_TOKEN: ${{ secrets.MROOM_TRACKER_TOKEN }}
+      MROOM_ERRORS_TOKEN: ${{ secrets.MROOM_ERRORS_TOKEN }}
+      MROOM_CHAT_TOKEN: ${{ secrets.MROOM_CHAT_TOKEN }}
+```
+
+```toml
+[persona]
+name = "Agent"                     # the name on every issue, comment and ping it writes
+label = "found-by-agent"           # on every issue it files; it must exist, mroom never creates labels
+state = "Triage"                   # the state it files issues in (default: the team's)
+environment = "production"         # the error tracker's environment it reads (the default)
+channel = "C0123456789"            # the chat channel it pings when triage cannot run (a Slack channel id)
+```
+
+- **Alerts.** Every 15 minutes it reads the error issues that are new, regressed or escalating in the
+  last 40 minutes (`mroom errors new`), since GitHub often starts a scheduled run late. An alert's key is
+  `sentry:<id>` for a new issue, and `sentry:<id>:regressed:<day>` or `sentry:<id>:escalating:<day>`
+  for a later alert of it. Every alert of the window is looked up, the most urgent first, but at most 10
+  issues are filed a run; the rest wait for the next run, which files them while they are still in its
+  window. Each of the three searches takes at most 100 issues, and the summary says when one was full:
+  alerts past that, or past a longer gap, are missed, so look at the error tracker then.
+- **One issue per alert key.** The issue holding an alert carries its hidden marker, `<!-- mroom-alert
+  key=sentry:1001 -->`. Triage looks for the key with `mroom tracker find` and files an issue only when
+  no issue in any state holds it, archived ones too, so a second run files nothing new, and a cancelled
+  issue is not filed again. A later alert of an error is a new issue that links the 20 newest of the
+  earlier ones, and a comment on the newest earlier one when the persona filed it. The alerts of one
+  error in one run go on one issue. Until an issue of the same kind for that error is done, a later
+  alert counts as filed, so a regression that goes on for days, or one a person cancelled, is one issue;
+  once that issue is done, the next regression is filed.
+- **What an issue holds.** The error, its counts, releases and culprit, and the latest event's exception
+  and in-app frames, all redacted first (`lib/core/text.py`): known token and key shapes, bearer tokens,
+  `password=`, `secret=`, `token=` and `api_key=` values, a URL's password, email addresses, phone
+  numbers and IBANs. It knows shapes, so a secret of no known shape can still pass. The run's summary is
+  redacted the same way. An issue shows the last 3 chained exceptions with 8 in-app frames each, takes
+  out control and text-direction characters, and is cut at 28000 bytes.
+- **The guard** (`mroom persona`) is the persona's only way to write. It files issues only for an alert
+  key of this run, in `issues.team`, `persona.state` and with `persona.label`, and assigns no one. It
+  comments only on an issue the tracker says the persona's token filed (`mroom tracker owned`), and has
+  no command to edit, close, assign, label or delete. An issue filed by an app rather than a user has no
+  creator, so it never counts as the persona's. The markers are its own: it escapes every `<!--` in a
+  body, so no text, however it nests one, can hold a marker, and it writes one per key; reading an issue
+  back, it stops as for a lost marker when it finds one it did not write. It refuses text holding a
+  token, defangs links to hosts other than GitHub's, the trackers' and the app's, and caps a run at 10
+  issues and 30 comments. A dispatch is a dry run unless `live` is ticked: it prints what it would file,
+  and writes nothing.
+- **When the tracker drops the markers.** After each issue it files, the guard reads the issue back.
+  When a marker is missing, the next run could not find the issue and would file it again, every 15
+  minutes. It also searches for each issue as the next run will, three times, since a tracker's search
+  may read another form of the description than the one it stores; an issue the search cannot find
+  counts as lost too. So nothing more is written in that run, and the workflow's switch-off job turns
+  the app's workflow off (`gh workflow disable`) and pings `persona.channel` once. To recover, read the
+  issue's description through the tracker's API and check the `<!-- mroom-alert ... -->` lines; if the
+  tracker strips HTML comments, or stores them but leaves them out of its search (check how its
+  description filter reads the text), the marker's format must change before triage runs again. Merge
+  any duplicates, then turn the workflow on again (`gh workflow enable alerts.yml`). If the workflow
+  cannot be turned off, the ping asks a person to do it by hand, and repeats every run until someone
+  does. A failed read of the issue is not a lost marker: the run fails, and the alarm says so.
+- **The alarm.** When a live run's triage job fails (the error tracker or the tracker could not be read
+  or written, the guard refused an alert, or a step failed or ran past its 11-minute limit), the alarm
+  job pings `persona.channel` with the failed step and the run, at most once a UTC day. Its dedupe is
+  the tracker's: before the ping it files the day's issue, keyed `triage:<yyyymmdd>`, and a day whose
+  issue exists sends nothing. When that issue cannot be filed, nothing is sent: a missed ping, never one
+  every 15 minutes.
+- **Without a tracker** (`issues.tracker = "none"`), nothing is filed: the run's summary lists the
+  window's alerts. The alarm then has nowhere to record its ping, and sends none; nor does it without a
+  chat token or `persona.channel`. A run GitHub cancelled, such as a waiting one a newer run replaced,
+  raises no alarm. Without an `[errors]`
+  table there is nothing to triage.
+- **Secrets** are the `persona` environment's (design 8.8; default branch only): the persona's own
+  tracker token (D23, never a developer's), a read-only error-tracker token, and the chat bot's token
+  (`chat:write`, invited to the channel). Keep them in the `persona` environment only, never as
+  repository or organisation secrets: the called jobs read the environment's own, but where the
+  environment has none, the caller's would be used, and a repository secret is readable from any
+  branch. Each job checks out only the default branch's `mroom.toml`
+  and mroom at the commit of the workflow; the triage job's token reads nothing but the repository,
+  and only the switch-off job may turn workflows off.
 
 ## Workflow skills
 
@@ -433,8 +544,9 @@ tag_prefix = ""                              # "release-" gives release-v1.2.3
 ```
 
 The settings fragment `base.json` allows the adapters' reads (`mroom tracker get`, `list`,
-`find`, `backend`; `mroom errors get`, `search`, `backend`) and asks before `mroom tracker create` and
-`mroom errors resolve`. `tests/skills-test.sh` checks the skills as a contract: their frontmatter,
+`find`, `owned`, `backend`; `mroom errors get`, `search`, `new`, `backend`; `mroom persona find`,
+`owned`) and asks before `mroom tracker create`, `mroom errors resolve` and the guard's writes
+(`mroom persona create`, `comment`). `tests/skills-test.sh` checks the skills as a contract: their frontmatter,
 that every `mroom` command, skill and key they name exists, the rules above, the release's draft and
 question, that no skill resolves an error issue, and that none names a host, an IP address, an id or
 an email address. For `fix-issue` it also checks that the branch names both ids, that a failing test
