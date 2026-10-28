@@ -276,9 +276,39 @@ t_a_body_is_refused_whole_never_cut() {
   expect_true "a 60000-byte body was not sent whole (sent $sent characters)" [ "$sent" = 30000 ]
 }
 
+t_rate_limits_and_lost_requests_are_retried_for_every_call() {
+  world
+  answer 200 "$ISSUE"; answer 200 '{"data":null,"errors":[{"extensions":{"code":"RATELIMITED"}}]}'
+  answer 200 '{"data":{"commentCreate":{"success":true,"comment":{"url":"u"}}}}'
+  run bash -c 'echo hello | "$0" tracker comment ENG-12' "$MROOM"
+  expect_rc 0; expect_true "a rate-limited comment was not retried ($(calls) calls)" [ "$(calls)" = 3 ]
+  reset; world
+  answer 006 x; answer 200 "$ISSUE"; answer 200 '{"data":{"issue":{"comments":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}'
+  run "$MROOM" tracker get ENG-12
+  expect_rc 0; expect_true "a read that never left was not retried ($(calls) calls)" [ "$(calls)" = 3 ]
+}
+
+t_a_cursor_that_does_not_move_fails() {
+  world
+  answer 200 "$ISSUE"
+  answer 200 '{"data":{"issue":{"comments":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-same"}}}}}'
+  run "$MROOM" tracker get ENG-12
+  expect_rc 1; expect_err_has "the next page's cursor did not move"
+  expect_true "a stuck cursor looped ($(calls) calls)" [ "$(calls)" = 3 ]
+}
+
+t_a_title_with_the_token_is_refused() {
+  world
+  run bash -c 'echo body | "$0" tracker create --allow-create --title "key $LINEAR_API_KEY"' "$MROOM"
+  expect_rc 1; expect_err_has "the title holds the tracker's token; not sent"
+  expect_true "the token leaked" token_nowhere
+  expect_true "Linear was called" [ "$(calls)" = 0 ]
+}
+
 t_a_rate_limit_waits_for_linears_reset_header_up_to_two_minutes() {
   world; export MROOM_NOW=1700000000
-  answer 400 '{"errors":[{"extensions":{"code":"RATELIMITED"}}]}' 'X-RateLimit-Requests-Reset: 1700000042500'
+  printf 'X-RateLimit-Requests-Reset: 1700000002000\r\nX-RateLimit-Complexity-Reset: 1700000042500\r\n' >"$T/api/h1"
+  answer 400 '{"errors":[{"extensions":{"code":"RATELIMITED"}}]}'; cp "$T/api/h1" "$T/api/answer1.headers"
   answer 429 '{}' 'Retry-After: 500'
   answer 200 "$ISSUE"; answer 200 '{"data":{"issue":{"comments":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}'
   run "$MROOM" tracker get ENG-12
@@ -390,6 +420,9 @@ test_case comment-never-sent-twice t_a_comment_is_never_sent_twice_after_a_gatew
 test_case create-never-sent-twice t_a_create_is_never_sent_twice_unless_it_never_left
 test_case body-refused-whole t_a_body_is_refused_whole_never_cut
 test_case linear-reset-header t_a_rate_limit_waits_for_linears_reset_header_up_to_two_minutes
+test_case more-retries t_rate_limits_and_lost_requests_are_retried_for_every_call
+test_case stuck-cursor t_a_cursor_that_does_not_move_fails
+test_case title-with-token t_a_title_with_the_token_is_refused
 test_case graphql-error t_a_graphql_error_fails_with_its_message
 test_case missing-or-empty-token t_a_missing_or_empty_token_fails_clearly_and_calls_nothing
 test_case token-env-from-config t_the_token_env_name_comes_from_config

@@ -127,7 +127,7 @@ linear_gql() {
 # is where the connection is in the answer, such as .data.issue.comments. Fails on a page with no
 # connection, and after TRACKER_MAX_PAGES pages, so an API blip never reads as a shorter list.
 linear_nodes() {
-  local query="$1" vars="$2" path="$3" after="" page pages=0 conn v
+  local query="$1" vars="$2" path="$3" after="" page pages=0 conn v next
   while :; do
     pages=$((pages + 1))
     ((pages <= TRACKER_MAX_PAGES)) || { tracker_say "more than $TRACKER_MAX_PAGES pages at $path"; return 1; }
@@ -140,8 +140,10 @@ linear_nodes() {
     fi
     jq -c '.nodes[]' <<<"$conn"
     jq -e '.pageInfo.hasNextPage == true' <<<"$conn" >/dev/null || return 0
-    after="$(jq -r '.pageInfo.endCursor // empty' <<<"$conn")"
-    [ -n "$after" ] || { tracker_say "Linear: a next page with no cursor at $path"; return 1; }
+    next="$(jq -r '.pageInfo.endCursor // empty' <<<"$conn")"
+    [ -n "$next" ] || { tracker_say "Linear: a next page with no cursor at $path"; return 1; }
+    [ "$next" != "$after" ] || { tracker_say "Linear: the next page's cursor did not move at $path"; return 1; }
+    after="$next"
   done
 }
 
@@ -187,7 +189,7 @@ linear_issue_get() {
      team: $i.team.key, priority: $i.priority, creator: $i.creator.name, assignee: $i.assignee.name,
      labels: [$i.labels.nodes[].name], created_at: $i.createdAt, updated_at: $i.updatedAt,
      description: ($i.description // ""),
-     comments: [.[] | select(. != null) | {by: (.user.name // "an integration"), at: .createdAt, body}]}' \
+     comments: ([.[] | select(. != null) | {by: (.user.name // "an integration"), at: .createdAt, body}] | sort_by(.at))}' \
     || { tracker_say "Linear: the issue could not be read"; return 1; }
 }
 
@@ -229,6 +231,9 @@ linear_issue_create() {
   team_key="$(tracker_config issues.team --optional)" || return 1
   [ -n "$team_key" ] || { tracker_say "issues.team is not set, so there is no team to create the issue in"; return 1; }
   linear_auth || return 1
+  case "$title" in
+    *"$(linear_token)"*) tracker_say "the title holds the tracker's token; not sent"; return 1 ;;
+  esac
   tracker_body "$(linear_token)" || return
   team="$(linear_gql safe 'query($k: String!) { teams(filter: {key: {eq: $k}}) { nodes { id key } } }' \
     "$(jq -nc --arg k "$team_key" '{k: $k}')" | jq -r '.data.teams.nodes[0].id // empty')" || return 1

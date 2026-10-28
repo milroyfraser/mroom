@@ -241,6 +241,8 @@ token_env = "GH_TOKEN"'
     printf '[app]\nname = "shop"\n[issues]\ntoken_env = "%s"\n' "$bad" >"$T/mroom.toml"
     run "$MROOM" config validate; expect_rc 1; expect_err_has "issues.token_env"
   done
+  printf '[app]\nname = "shop"\n[issues]\ntoken_env = ["SHOP_LINEAR_API_KEY"]\n' >"$T/mroom.toml"
+  run "$MROOM" config validate; expect_rc 1; expect_err_has "issues.token_env must be a string"; expect_err_lacks "Traceback"
   printf '[app]\nname = "shop"\n[errors]\ntoken_env = "LINEAR_API_KEY"\n' >"$T/mroom.toml"
   run "$MROOM" config validate; expect_rc 1; expect_err_has "must name different variables"
   run "$MROOM" config get errors.token_env; expect_rc 1; expect_err_has "must name different variables"

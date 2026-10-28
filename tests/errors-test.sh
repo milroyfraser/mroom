@@ -69,7 +69,7 @@ t_get_reads_the_issue_and_its_latest_event() {
     and .user_count == 7 and .first_release == "v1.2.0" and .last_release == "v1.3.0" and .project == "web"
     and .tags == [{key: "browser", top: [{value: "Firefox", count: 5}, {value: "Chrome", count: 2}]}]'
   expect_true "the event was not read right" json_is "$out" '.latest_event == {id: "ev-abc", at: "2026-01-02T00:00:00Z",
-    message: "", release: "v1.3.0", environment: "production",
+    message: "TypeError: x is undefined", release: "v1.3.0", environment: "production",
     tags: [{key: "environment", value: "production"}, {key: "url", value: "https://shop.example.dev/cart"}],
     exception: [{type: "TypeError", value: "x is undefined", frames: [{filename: "src/cart.ts", function: "total", line: 12}]}]}'
   expect_true "the token leaked" token_nowhere
@@ -152,6 +152,13 @@ t_resolve_is_retried_after_a_502_and_a_403_scope_check_explains() {
   expect_rc 1; expect_err_has "GET $BASE/projects/ -> HTTP 403"
 }
 
+t_a_429_waits_for_sentrys_reset_header() {
+  world; export MROOM_NOW=1700000000
+  answer 429 '{"detail":"slow"}' 'X-Sentry-Rate-Limit-Reset: 1700000030'; answer 200 "$ISSUE"; answer 200 "$EVENT"
+  run "$MROOM" errors get 1001
+  expect_rc 0; run cat "$T/api/sleep.log"; expect_out 30
+}
+
 t_a_merged_issue_says_where_it_moved() {
   world; answer 302 '' "Location: $BASE/issues/2002/"
   run "$MROOM" errors get 1001
@@ -215,7 +222,7 @@ t_the_backend_comes_from_config() {
   run "$MROOM" errors backend; expect_rc 0; expect_out sentry
   world -
   run "$MROOM" errors backend; expect_out none
-  run "$MROOM" errors get 1001; expect_rc 3; expect_err_has "mroom.toml has no [errors] table"
+  run "$MROOM" errors get 1001; expect_rc 3; expect_err_has "mroom.toml sets no errors.provider"
   run "$MROOM" errors search x; expect_rc 3
   run "$MROOM" errors resolve 1001; expect_rc 3
   world $'provider = "sentry"'
@@ -247,6 +254,7 @@ test_case resolve-puts-the-status t_resolve_puts_the_status
 test_case search-empty-page-or-stuck-cursor t_search_stops_at_an_empty_page_and_fails_on_a_stuck_cursor
 test_case resolve-retried-and-scope-403 t_resolve_is_retried_after_a_502_and_a_403_scope_check_explains
 test_case merged-issue-redirect t_a_merged_issue_says_where_it_moved
+test_case sentry-reset-header t_a_429_waits_for_sentrys_reset_header
 test_case curl-safe-options t_curl_reads_no_curlrc_and_follows_no_redirect
 test_case retries t_a_429_or_5xx_is_retried_and_a_4xx_is_not
 test_case token t_a_missing_token_fails_clearly_and_an_echoed_one_is_cut

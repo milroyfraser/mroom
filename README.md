@@ -358,12 +358,13 @@ token_env = "SENTRY_AUTH_TOKEN"    # the default
 - **Hosts are fixed**: `api.linear.app`, and `<region>.sentry.io` for the organisation in `errors.org`.
   No URL comes from config, so a changed `mroom.toml` cannot send a token elsewhere.
 - **Creating an issue** needs `--allow-create`; without it, nothing is sent. It files in `issues.team`
-  and uses labels that already exist; mroom never creates a label.
+  and uses labels that already exist, of that team or the whole workspace (not a parent team's); mroom
+  never creates a label.
 - **Bodies** come on stdin, so the guard sees the file a body is read from, and are sent as they are,
   up to 64 KiB. A longer one, one with a NUL byte, or one that holds the tracker's token is refused,
-  never cut short.
-- **Retries**: a 429 (or Linear's `RATELIMITED`) waits for `Retry-After`, or Linear's
-  `X-RateLimit-Requests-Reset`, from 1 to 120 seconds (20 when neither is sent). A request that never
+  never cut short. A title that holds the token is refused too.
+- **Retries**: a 429 (or Linear's `RATELIMITED`) waits for `Retry-After`, or the latest rate-limit
+  reset header Linear or Sentry sends, from 1 to 120 seconds (20 when there is none). A request that never
   left (no host, no connection) is retried too. A read, or a write that does the same thing twice (a
   state, a resolve), is also retried after a 5xx or no answer. A comment or a create never is, since it
   may have gone through. No other 4xx is retried, and no redirect is followed (a merged Sentry issue

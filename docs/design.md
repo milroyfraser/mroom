@@ -379,8 +379,8 @@ Shell function interfaces in `lib/core/`, chosen by config. v1 implements the fi
 
 The tracker and errors adapters are `lib/core/tracker.sh` and `lib/core/errors.sh`, on the command line as
 `mroom tracker` and `mroom errors`, over one HTTP client (`lib/core/api.sh`: the token on stdin, no redirects
-followed, retries on 429 and on 5xx, never on another 4xx, and a write that adds something never repeated
-after a 5xx or a timeout). Each token comes from the
+followed; a 429 and a request that never left retried for every call, a 5xx or a timeout only for a read or a
+write that does the same thing twice, never another 4xx). Each token comes from the
 environment variable its `token_env` names, never from a file, and each host is fixed (`api.linear.app`,
 `<region>.sentry.io`). With `issues.tracker = "none"` or no `[errors]` table, every function returns 3, so a
 skill falls back to the pull request.

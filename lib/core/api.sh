@@ -51,20 +51,28 @@ api_header() {
 }
 
 # api_retry_after <headers file> <default>: seconds to wait after a rate limit, from 1 to 120: the
-# answer's Retry-After (seconds), or Linear's X-RateLimit-Requests-Reset (the epoch, in milliseconds, when
-# the limit resets), else the default.
+# answer's Retry-After (seconds); else the latest reset it names: Linear's X-RateLimit-Requests-Reset and
+# X-RateLimit-Complexity-Reset (epoch milliseconds), Sentry's X-Sentry-Rate-Limit-Reset (epoch seconds);
+# else the default.
 api_retry_after() {
-  local secs reset now
+  local secs reset now h latest=0
   secs="$(api_header "$1" retry-after)"
   if ! [[ "$secs" =~ ^[0-9]{1,9}$ ]]; then
     secs=""
-    reset="$(api_header "$1" x-ratelimit-requests-reset)"
-    if [[ "$reset" =~ ^[0-9]{10,16}$ ]]; then
-      now="${MROOM_NOW:-$(date +%s)}"
-      secs=$(((reset + 999) / 1000 - now))
+    for h in x-ratelimit-requests-reset x-ratelimit-complexity-reset x-sentry-rate-limit-reset; do
+      reset="$(api_header "$1" "$h")"
+      if [[ "$reset" =~ ^[0-9]{13,16}$ ]]; then reset=$(((10#$reset + 999) / 1000))
+      elif ! [[ "$reset" =~ ^[0-9]{10,12}$ ]]; then continue; fi
+      ((10#$reset <= latest)) || latest=$((10#$reset))
+    done
+    if ((latest > 0)); then
+      now="${MROOM_NOW:-}"
+      [[ "$now" =~ ^[0-9]{1,12}$ ]] || now="$(date +%s)"
+      secs=$((latest - 10#$now))
     fi
   fi
   [ -n "$secs" ] || secs="$2"
+  [[ "$secs" =~ ^-?[0-9]{1,12}$ ]] || secs=20
   ((secs >= 1)) || secs=1
   ((secs <= 120)) || secs=120
   printf '%s\n' "$secs"

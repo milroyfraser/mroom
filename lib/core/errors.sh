@@ -43,7 +43,7 @@ errors_backend() {
 }
 
 errors_none() {
-  errors_say "mroom.toml has no [errors] table (errors.provider), so there is no error tracker to $1"
+  errors_say "mroom.toml sets no errors.provider (no [errors] table), so there is no error tracker to $1"
   return 3
 }
 
@@ -101,7 +101,7 @@ SENTRY_ISSUE_JQ='{id, short_id: .shortId, title, culprit, permalink, level, stat
   first_seen: .firstSeen, last_seen: .lastSeen, first_release: .firstRelease.version?, last_release: .lastRelease.version?,
   project: .project.slug?, tags: [.tags[]? | {key, top: [.topValues[]? | {value, count}][0:3]}]}'
 
-SENTRY_EVENT_JQ='{id: .eventID, at: .dateCreated, message: (.message // .title), release: (.release.version? // .release),
+SENTRY_EVENT_JQ='{id: .eventID, at: .dateCreated, message: (if (.message // "") == "" then .title else .message end), release: (.release.version? // .release),
   environment: ([.tags[]? | select(.key == "environment") | .value][0]),
   tags: [.tags[]? | select(.key | IN("environment", "release", "url", "transaction", "server_name", "level")) | {key, value}],
   exception: [.entries[]? | select(.type == "exception") | .data.values[]? | {type, value,

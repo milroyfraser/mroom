@@ -254,7 +254,8 @@ def check(path: str, data: dict) -> tuple[list[tuple[str, str]], list[str]]:
             errors.append((key, problem))
     # One token for each service: the tracker's must never go to the error tracker, or the other way round.
     names = {k: flat.get(k, default) for k, default in TOKEN_ENV_DEFAULTS.items()}
-    if len(set(names.values())) < len(names) and isinstance(names["issues.token_env"], str):
+    first, second = names.values()
+    if isinstance(first, str) and isinstance(second, str) and first == second:
         for k in names:
             errors.append((k, "issues.token_env and errors.token_env must name different variables"))
     for key, (_, required, _, _) in SCHEMA.items():
