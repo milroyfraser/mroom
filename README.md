@@ -24,7 +24,8 @@ The full design, including how each requirement is measured, is in [docs/design.
 `mroom config`, the one reader of `mroom.toml` and `box.env`, `install.sh`, tests and CI) and the first
 part of phase 1: the [box watchdog](#box-watchdog) with its job records, the
 [regression label](#regression-label) check with its measures, and the
-[guard, the plugin's skeleton and the settings fragments](#guard-and-settings). Every other command prints
+[guard, the plugin's skeleton and the settings fragments](#guard-and-settings), and, from phase 3, the
+[tracker and error-tracker adapters](#tracker-and-error-tracker). Every other command prints
 `not yet: phase N`. The phases and what each delivers are in
 [section 11 of the design](docs/design.md#11-phases). Expect breaking changes in every `0.x` release.
 
@@ -101,6 +102,7 @@ mroom config get app.build.daemons         # one item per line
 mroom config get app.build.daemons --json  # ["horizon", "reverb"]
 mroom config get app.build --json          # a whole table, as JSON
 mroom config get app.php --default 8.4     # a fallback when the key is not set
+mroom config get errors.org --optional     # nothing when the key is not set
 mroom config validate                      # check the whole file
 mroom config path                          # which mroom.toml was found
 mroom config keys                          # every key the schema knows
@@ -108,7 +110,8 @@ mroom config keys                          # every key the schema knows
 
 Strings print raw, lists one item per line, tables of strings as `KEY=value` lines, and `--json` prints
 JSON. `--default` takes the key's type: a number for a number, JSON for a list or table
-(`--default '[]'`). A missing required key fails with its name and an example line; a wrong type fails
+(`--default '[]'`). `--optional` prints nothing (`null` with `--json`) and exits 0 for a key that is
+not set, for a key with no default. A missing required key fails with its name and an example line; a wrong type fails
 with the key's name (`get` reports only errors that concern the key it reads, `validate` reports all).
 An unknown key is ignored, and `validate` warns about it, with a suggestion when it looks like a typo.
 Exit codes: `0` success, `1` a config error or a key that is not set, `2` a usage error.
@@ -316,6 +319,59 @@ will merge them into the app's settings:
 The merge joins every list. Claude Code checks deny first, then ask, then allow, so an `allow` rule
 never overrides an `ask` or a `deny`. `tests/settings-test.sh` checks each fragment and what the
 merged set decides for common commands.
+
+## Tracker and error tracker
+
+The workflow skills of phase 3 reach the issue tracker and the error tracker through two adapters
+(design section 7). Each picks its backend from `mroom.toml` and prints JSON.
+
+```bash
+mroom tracker get SHOP-12                    # title, state, labels, description, every comment
+mroom tracker comment SHOP-12 < note.md      # adds a comment; the body comes on stdin
+mroom tracker state SHOP-12 "In Review"      # the team's state of that name, in any case
+mroom tracker create --allow-create --title "Checkout fails" --state Triage --label bug < body.md
+mroom errors get SHOP-1A2                    # the error issue and its latest event
+mroom errors search 'is:unresolved' --environment production --period 24h --limit 50
+mroom errors resolve SHOP-1A2
+```
+
+```toml
+[issues]
+tracker = "linear"                 # linear | none
+id_pattern = "SHOP-[0-9]+"
+team = "SHOP"                      # where `create` files issues (Linear: the team's key)
+token_env = "LINEAR_API_KEY"       # the default
+
+[errors]                           # leave the table out for no error tracker
+provider = "sentry"
+org = "example-org"
+region = "us"                      # us | de: where the organisation's data is
+id_pattern = "SHOP-[A-Z0-9]+"
+token_env = "SENTRY_AUTH_TOKEN"    # the default
+```
+
+- **Tokens** come only from the environment variable `token_env` names, never from a file. A missing or
+  empty one fails with the variable's name, never its value. The token reaches curl on stdin, never a
+  command line, and an answer that echoes it has it cut out of the message.
+- **Hosts are fixed**: `api.linear.app`, and `<region>.sentry.io` for the organisation in `errors.org`.
+  No URL comes from config, so a changed `mroom.toml` cannot send a token elsewhere.
+- **Creating an issue** needs `--allow-create`; without it, nothing is sent. It files in `issues.team`
+  and uses labels that already exist; mroom never creates a label.
+- **Bodies** come on stdin, so the guard sees the file a body is read from. A body that holds the
+  tracker's token is refused.
+- **Retries**: a 429 (or Linear's `RATELIMITED`) waits for `Retry-After` (up to 120 seconds, else 20),
+  and a 503 is retried. A read, or a write that does the same thing twice (a state, a resolve), is also
+  retried after any other 5xx or no answer. A comment or a create never is, since it may have gone
+  through. No 4xx is retried. At most 4 calls.
+- **Lists are read to the end**: a Linear connection page by page, a Sentry search by its `Link`
+  cursor up to `--limit`. A page that cannot be read fails the call, so a blip never reads as a short
+  list. A search fails, too, when the token sees no project, since Sentry then answers `[]` for anything.
+- **Exit codes**: `0` done, `1` the tracker or the config failed, `2` a usage error, `3` no tracker
+  (`issues.tracker = "none"`) or no `[errors]` table, so a skill can leave its note on the pull request
+  instead.
+
+A token for reading Sentry needs Issue & Event: read and Project: read; `resolve` also needs Issue &
+Event: write.
 
 ## QA gate
 

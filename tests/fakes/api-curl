@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# A stand-in for curl, for the tracker and error-tracker adapter tests (tests/tracker-test.sh,
+# tests/errors-test.sh). It never touches the network. It answers from $API_FAKE/answers, one
+# "<code> <body file>" line per call in order (the last line repeats); a <body file>.headers file adds
+# response headers. Code 000 fails as a timeout.
+#
+# For call N it writes $API_FAKE/call.N: the method, the URL, "auth=<the Authorization value it got on
+# stdin>" and, with --data-binary @file, the request body after a "body=" line. It appends every argument
+# to $API_FAKE/argv, so a test can check the token was never on the command line.
+set -euo pipefail
+printf '%s\n' --call-- "$@" >>"$API_FAKE/argv"
+out="" headers="" method=GET url="" auth="" request=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --dump-header) headers="$2"; shift 2 ;;
+    --request) method="$2"; shift 2 ;;
+    --header)
+      if [ "$2" = @- ]; then auth="$(sed -n 's/^Authorization: //p')"; fi
+      shift 2 ;;
+    --data-binary) request="$(cat "${2#@}")"; shift 2 ;;
+    --write-out | --max-time) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+n=$(($(cat "$API_FAKE/n" 2>/dev/null || echo 0) + 1))
+echo "$n" >"$API_FAKE/n"
+{ echo "$method"; echo "$url"; echo "auth=$auth"; if [ -n "$request" ]; then echo "body=$request"; fi; } >"$API_FAKE/call.$n"
+line="$(sed -n "${n}p" "$API_FAKE/answers")"
+[ -n "$line" ] || line="$(tail -n 1 "$API_FAKE/answers")"
+code="${line%% *}" file="$API_FAKE/${line#* }"
+if [ "$code" = 000 ]; then echo "curl: (28) Operation timed out after 30000 milliseconds" >&2; exit 28; fi
+{ printf 'HTTP/2 %s\r\n' "$code"; if [ -f "$file.headers" ]; then cat "$file.headers"; fi; } >"$headers"
+cat "$file" >"$out"
+printf '%s' "$code"

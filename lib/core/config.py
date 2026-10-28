@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """mroom config: the one reader of an app's mroom.toml and a box's box.env.
 
-    mroom config get <dotted.key> [--json] [--default <value>]
+    mroom config get <dotted.key> [--json] [--default <value> | --optional]
     mroom config validate
     mroom config path [--box]
     mroom config keys
@@ -76,6 +76,17 @@ SCHEMA = {
     "issues.id_pattern": ("str", False, 'id_pattern = "SHOP-[0-9]+"', "issue ids, as a regular expression"),
     "issues.url": ("str", False, 'url = "https://tracker.example.dev/issue/{id}"',
                    "issue link; must contain {id}"),
+    "issues.team": ("str", False, 'team = "SHOP"', "the team new issues are filed in (Linear: the team's key)"),
+    "issues.token_env": ("str", False, 'token_env = "LINEAR_API_KEY"',
+                         "the environment variable that holds the tracker's token (default LINEAR_API_KEY)"),
+    "errors.provider": (("sentry",), False, 'provider = "sentry"',
+                        "sentry; leave the [errors] table out for no error tracker"),
+    "errors.org": ("str", False, 'org = "example-org"', "the error tracker's organisation (Sentry: its slug)"),
+    "errors.region": (("us", "de"), False, 'region = "us"', "the Sentry region the organisation's data is in: us | de"),
+    "errors.id_pattern": ("str", False, 'id_pattern = "[A-Z]+-[A-Z0-9]+"',
+                          "an error issue's short id, as a regular expression"),
+    "errors.token_env": ("str", False, 'token_env = "SENTRY_AUTH_TOKEN"',
+                         "the environment variable that holds the error tracker's token (default SENTRY_AUTH_TOKEN)"),
     "pr.required_checks": ("list", False, 'required_checks = ["test"]', "check names the ruleset requires"),
     "qa.zone": ("str", False, 'zone = "qa.example.dev"', "QA hosts are api-<PR>.<zone>, go-<PR>.<zone>"),
     "qa.max_envs": ("int", False, "max_envs = 5", "QA environments at once"),
@@ -183,7 +194,16 @@ def rule_error(key: str, value) -> str | None:
         return f"{key} must contain {{slug}}, so each worktree gets its own database"
     if key == "issues.url" and "{id}" not in value:
         return f"{key} must contain {{id}}"
-    if key == "issues.id_pattern":
+    # The adapters send these to a fixed host (lib/core/tracker.sh, errors.sh): keep them plain words.
+    if key == "issues.team" and not TEAM_KEY.fullmatch(value):
+        return f"{key} must be a team key of letters, digits, _ and - (got {json.dumps(value)})"
+    if key == "errors.org" and not ORG_SLUG.fullmatch(value):
+        return f"{key} must be an organisation slug: lowercase letters, digits, _ and - (got {json.dumps(value)})"
+    if key in ("issues.token_env", "errors.token_env") and (
+            not TOKEN_ENV.fullmatch(value) or value.startswith(("MROOM_", "GH_", "GITHUB_"))):
+        return (f"{key} must be an environment variable's name in capitals, not one of mroom's or GitHub's "
+                f"(got {json.dumps(value)})")
+    if key in ("issues.id_pattern", "errors.id_pattern"):
         try:
             re.compile(value)
         except re.error as exc:
@@ -321,6 +341,9 @@ DNS_ZONE = re.compile(r"(?=.{1,200}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a
 REPO_DIR = re.compile(r"\.|(?=.{1,200}$)[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*")
 PHP_BINARY = re.compile(r"php(?:[0-9]+(?:\.[0-9]+)?)?")
 DISK = re.compile(r"[a-z][a-z0-9]{0,15}")
+TEAM_KEY = re.compile(r"[A-Za-z0-9_-]{1,32}")
+ORG_SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,49}")
+TOKEN_ENV = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 ENV_PREFIX = re.compile(r"[A-Z][A-Z0-9_]{0,40}")
 PERSONA_DOMAIN = re.compile(r"(?=.{2,200}$)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
 # A persona domain is made up: under a name reserved for that (RFC 2606, 6761), or a subdomain of a domain of
@@ -490,7 +513,7 @@ def coerce_default(key: str, raw: str):
 
 
 def cmd_get(args: list[str]) -> int:
-    as_json, default, key = False, None, None
+    as_json, default, key, optional = False, None, None, False
     i = 0
     while i < len(args):
         arg = args[i]
@@ -501,6 +524,8 @@ def cmd_get(args: list[str]) -> int:
                 raise UsageError("--default needs a value")
             default = args[i + 1]
             i += 1
+        elif arg == "--optional":
+            optional = True
         elif arg.startswith("-"):
             raise UsageError(f"unknown option {arg}")
         elif key is None:
@@ -510,6 +535,8 @@ def cmd_get(args: list[str]) -> int:
         i += 1
     if key is None:
         raise UsageError("get needs a key, for example: mroom config get app.name")
+    if optional and default is not None:
+        raise UsageError("--optional and --default do not go together")
     if key not in SCHEMA and key not in SECTIONS:
         hint = difflib.get_close_matches(key, list(SCHEMA) + sorted(SECTIONS), n=1)
         tip = f"; did you mean {hint[0]}?" if hint else " (mroom config keys lists them)"
@@ -519,6 +546,11 @@ def cmd_get(args: list[str]) -> int:
     try:
         value = lookup(data, key)
     except KeyError:
+        if optional:
+            # Unset is an answer here, not an error: nothing (null with --json), for a key with no default.
+            if as_json:
+                sys.stdout.write("null\n")
+            return 0
         if default is None:
             print(f"{PROG}: {key} is not set in {path}", file=sys.stderr)
             return 1
