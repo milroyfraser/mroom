@@ -56,8 +56,8 @@ def code(text):
     rest = re.sub(r"^ *```[a-z]*\n.*?^ *```$", "", text, flags=re.S | re.M)
     return blocks + re.findall(r"`([^`\n]+)`", rest)
 
-RELEASE_CREATE = r"gh\s+release\s+create\s+\S"
-RELEASE_EDIT = r"gh\s+release\s+edit\s+\S"
+RELEASE_CREATE = r"(?:^|[\s{=])gh\s+release\s+create\s+\S"
+RELEASE_EDIT = r"(?:^|[\s{=])gh\s+release\s+edit\s+\S"
 
 def split_commands(spans):
     """Every command in the spans: line continuations joined, then split at newlines, ;, &&, || and |,
@@ -157,10 +157,10 @@ for label, (name, kind, meta, body, text) in sorted(docs.items()):
         hits = [m.group(0) for m in re.finditer(pattern, text)]
         say(not hits, f"{label} runs no {what} ({hits[:3]})")
     cmds = split_commands(spans)
-    bad_edits = [c for c in cmds if re.match(RELEASE_EDIT, c)
+    bad_edits = [c for c in cmds if re.search(RELEASE_EDIT, c)
                  and re.search(r"--(draft|latest|prerelease|tag|target)\b", c)]
     say(not bad_edits, f"{label}: gh release edit changes only the notes ({bad_edits[:2]})")
-    undrafted = [c for c in cmds if re.match(RELEASE_CREATE, c) and not re.search(r"\s--draft\b(?!=)", c)]
+    undrafted = [c for c in cmds if re.search(RELEASE_CREATE, c) and not re.search(r"\s--draft\b(?!=)", c)]
     say(not undrafted, f"{label}: every gh release create has --draft ({undrafted[:2]})")
     # gh api: a field makes it a POST unless this command says GET; graphql writes by a mutation, or a query
     # read from a file, which the test cannot see.
@@ -218,8 +218,8 @@ if release:
     _, _, meta, body, _ = release
     say(meta.get("disable-model-invocation") == "true", "release runs only when a person asks (disable-model-invocation)")
     cmds = split_commands(code(body))
-    creates = [c for c in cmds if re.match(RELEASE_CREATE, c)]
-    edits = [c for c in cmds if re.match(RELEASE_EDIT, c)]
+    creates = [c for c in cmds if re.search(RELEASE_CREATE, c)]
+    edits = [c for c in cmds if re.search(RELEASE_EDIT, c)]
     say(bool(creates) and all(re.search(r"\s--draft\b(?!=)", c) for c in creates),
         f"release always creates the release with --draft ({[c for c in creates if '--draft' not in c][:2]})")
     say(all(re.search(r"--(draft|latest|prerelease|tag|target)\b", c) is None for c in edits),
@@ -227,7 +227,7 @@ if release:
     # A step before the one that drafts asks the person, not only the rules.
     sections = re.split(r"^## ", body, flags=re.M)
     draft_at = next((i for i, sec in enumerate(sections)
-                     if any(re.match(RELEASE_CREATE, c) for c in split_commands(code(sec)))), -1)
+                     if any(re.search(RELEASE_CREATE, c) for c in split_commands(code(sec)))), -1)
     asked = [sec for sec in sections[:max(draft_at, 0)] if not sec.startswith("Rules")
              and re.search(r"AskUserQuestion`?:?\s*\*\*release now\*\*", sec)]
     say(draft_at > 0 and bool(asked), "release asks the person (AskUserQuestion: release now) in a step before it drafts")
