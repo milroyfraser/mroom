@@ -54,6 +54,9 @@
 #                                      REVERB_APP_ID, REVERB_APP_KEY, REVERB_APP_SECRET (new for a new app,
 #                                      the same while it has one), REVERB_HOST, REVERB_PORT and REVERB_SCHEME
 #               reverb-app-remove <N>  the environment's app; its sockets already open stay until they close
+#               memory                 the box's memory, in MB: total_mb, available_mb and swap_free_mb from
+#                                      /proc/meminfo, and reserve_mb, what the box keeps for all but QA
+#                                      (MROOM_QA_RESERVE_MB, 4096 by default); qa-up sizes its slots from them
 #
 # A password or the app key is made once and kept (secrets_file), so every later request gives the same one and a
 # deploy changes nothing under the running app: its users stay signed in and its connections stay up. --rotate
@@ -135,6 +138,7 @@ case "$role:$op" in
   provision:mail-user-add | provision:mail-user-remove | provision:mail-read | provision:mail-clear) ;;
   provision:bucket-create | provision:bucket-drop) ;;
   provision:reverb-app-add | provision:reverb-app-remove) ;;
+  provision:memory) ;;
   *) refuse "$role may not run '${op:0:24}'" ;;
 esac
 
@@ -1321,6 +1325,16 @@ cmd_reverb_app_remove() {
   echo "Reverb app $id: removed; its sockets already open stay until they close"
 }
 
+# memory: the box's memory as qa-up sizes QA slots from it (lib/memory-preflight). Reads only /proc.
+cmd_memory() {
+  words_are 1
+  # shellcheck source=lib/memory-preflight
+  . "$MROOM_ROOT/lib/memory-preflight"
+  memory_read || fail "memory: cannot read MemTotal, MemAvailable and SwapFree from ${MROOM_PROC:-/proc}/meminfo"
+  printf 'total_mb=%s\navailable_mb=%s\nswap_free_mb=%s\nreserve_mb=%s\n' \
+    "$MEM_TOTAL" "$MEM_AVAILABLE" "$MEM_SWAP_FREE" "${BOX[MROOM_QA_RESERVE_MB]:-4096}"
+}
+
 # The operation and its environment only: each operation logs what it did, and an argument it refuses, such
 # as an address that is no persona's, never reaches the log.
 first="${words[1]:-}"
@@ -1348,4 +1362,5 @@ case "$op" in
   bucket-drop) cmd_bucket_drop ;;
   reverb-app-add) cmd_reverb_app_add ;;
   reverb-app-remove) cmd_reverb_app_remove ;;
+  memory) cmd_memory ;;
 esac
