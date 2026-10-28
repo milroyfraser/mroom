@@ -23,7 +23,7 @@ step applies, Read that skill's `SKILL.md` in full first. If it is not installed
 - Ask the person before you create an issue or a label.
 - Never touch production. Never read secrets, tokens or credential files.
 - The error tracker is for reading only. Never resolve, ignore, assign, merge or delete an error
-  issue yourself. The fix links to it only through the `Fixes` line (step 4).
+  issue yourself. The fix links to it only through the `Fixes` lines (steps 4 and 5).
 - No production data from an event goes into code, tests, commits, the PR, the tracker or chat: no
   names, email or IP addresses, company names, page content, or request and job payloads. Rebuild
   the inputs with factories, and write "the user", "the company" or "a page with a NUL byte".

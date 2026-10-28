@@ -368,8 +368,7 @@ issue_list() {
 # issue_find_by_marker <key>: the issues whose description holds the persona's hidden marker for an alert
 # key, `<!-- mroom-alert key=<key> -->` (a later alert adds `:<kind>:...` after the key). The key is the
 # error tracker's name and the error issue's numeric id, such as sentry:1001. Every state, archived too,
-# the oldest first;
-# an empty list when none holds it.
+# the oldest first; an empty list when none holds it.
 issue_find_by_marker() {
   [ "$#" = 1 ] || { tracker_say "usage: find <alert key, such as sentry:1001>"; return 2; }
   [[ "$1" =~ ^[a-z][a-z0-9_-]{0,31}:[0-9]{1,20}$ ]] || {

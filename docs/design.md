@@ -411,6 +411,8 @@ or goes on with `:`. It reads archived issues too. Phase 5 must check that the t
 in a description it stores, the way GitHub Issues must be checked first. `/fix-issue` reads it, and
 makes no tracker write beyond the state and comments of that issue. `issue_comment_upsert`,
 `issue_owned_by_bot` and `attach_image` wait for the persona (phase 5) and browser QA (phase 2b).
+The tracker's own SCM integration may read a `Fixes` line too, so an error tracker's project prefix
+should not be a tracker team's key.
 
 `errors_issue_get` gives an error issue with its latest event, its counts and its first release.
 `errors_issue_resolve` needs a token with write access, which only the persona's own profile or a person holds

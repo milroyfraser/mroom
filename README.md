@@ -438,9 +438,9 @@ The settings fragment `base.json` allows the adapters' reads (`mroom tracker get
 that every `mroom` command, skill and key they name exists, the rules above, the release's draft and
 question, that no skill resolves an error issue, and that none names a host, an IP address, an id or
 an email address. For `fix-issue` it also checks that the branch names both ids, that a failing test
-comes before the fix, that the only link is the `Fixes` lines, and that it stops at a PR in review.
-Names of people and
-projects come from `$MROOM_PRIVATE_WORDS`, a file of patterns kept outside the repository.
+comes before the fix, that the only links are the `Fixes` lines, and that it stops at a PR in review.
+Names of people and projects come from `$MROOM_PRIVATE_WORDS`, a file of patterns kept outside the
+repository.
 
 Not here yet: `blast-radius` (later in phase 3), the principle skills (named in the
 skills, read when installed), and `verify-app` with `qa-engineer` (phase 2b).
