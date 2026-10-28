@@ -12,7 +12,9 @@
 #
 # It is a speed bump, not a boundary. A command built from variables (`$CMD`) or from another command's output
 # (`cat $(echo x)`), a script file, an alias already in a config file, `ssh host 'cmd'`, GraphQL split across
-# quotes (`'merge''PullRequest'`), a payload built by jq, sed's `e` command, a recursive search of the project
+# quotes (`'merge''PullRequest'`), a payload built by jq, sed's `e`, `r` and `w` commands, a command run in a
+# container (`docker compose exec app cat .env`), a relative path after `cd` to a folder above the secrets
+# (`cd ~/.config && cat gh/hosts.yml`), a recursive search of the project
 # (`grep -r KEY .` reads its .env too), the environment (`echo $TOKEN`), or re-running a deploy's workflow run
 # (`gh run rerun`, which the `production` environment still gates) gets past it. GitHub is the gate: the ruleset on the default branch, people's reviews and the
 # `production` environment (design D22). The settings fragments' prefix rules are a second layer.
@@ -54,8 +56,9 @@
 #     `gh auth token`, `gh auth status -t`, `gh config get ...token`.
 #
 # Refused on purpose, though they can be harmless: setting a git key that runs a command (`git config
-# core.editor vim`; `git -c` checks the value instead, since it lasts one command), opening a secret in an
-# editor, and httpie to api.github.com without an explicit GET or HEAD (it sends its stdin as the body).
+# core.editor vim`; `git -c` checks the value instead, since it lasts one command), opening or editing a secret
+# (`vim .env`, `sed -i ... .env`), loading one (`node --env-file=.env`), and httpie to api.github.com without
+# an explicit GET or HEAD (it sends its stdin as the body).
 #
 # Allowed on purpose: reading code, every `gh api` GET (including GET .../pulls/N/merge, which only
 # asks "is it merged?"), gh pr view/list/checks/create/edit/comment, `gh release create/edit` (an
@@ -225,7 +228,8 @@ mentions_secret() {
 # mentions_forbidden TEXT: does code in another language run a merge, approval, release, force-push or deploy?
 mentions_forbidden() {
   local t
-  t=$(lc "$1")
+  # Quotes, commas and brackets become spaces, so a list of arguments (["gh","pr","merge"]) reads as words.
+  t=$(lc "$1" | tr -cs 'a-z0-9/._+=:-' ' ')
   [[ $t =~ gh[[:space:]]+(pr[[:space:]]+merge|release[[:space:]]+delete|auth[[:space:]]+token|alias[[:space:]]+set) ]] && return 0
   [[ $t =~ gh[[:space:]]+pr[[:space:]]+review.*(--approve|[[:space:]]-a([[:space:]]|$)) ]] && return 0
   [[ $t =~ gh[[:space:]]+workflow[[:space:]]+run.*deploy- ]] && return 0
@@ -305,8 +309,14 @@ check_secrets() {
   case "$COPIERS" in
     *" $cmd "*)
       for ((i = 0; i < n; i++)); do
-        case "${args[$i]}" in -*) ;; *) last_pos=$i ;; esac
+        case "${args[$i]}" in
+          # -t DIR names the destination, so every other word is a source.
+          -t | -t* | --target-directory*) last_pos=-2; break ;;
+          -*) ;;
+          *) last_pos=$i ;;
+        esac
       done
+      [ "$last_pos" = -2 ] && last_pos=-1
       ;;
   esac
 
@@ -314,8 +324,29 @@ check_secrets() {
     a=${args[$i]}
     case "$prev" in
       -e | --regexp | --expression) prev=$a; continue ;; # a pattern, not a file
+      --exclude | --exclude-from | --exclude-dir) prev=$a; continue ;; # a name left out, not read
+      -x) [ "$cmd" = zip ] && { prev=$a; continue; } ;;
     esac
     prev=$a
+    case "$a" in
+      --exclude=* | --exclude-from=* | --exclude-dir=*) continue ;;
+    esac
+    # curl, wget and httpie read a file named in a form or data value: name=@path, name=<path, @path;type=...,
+    # name@path (curl --data-urlencode, httpie's file items).
+    case "$cmd" in
+      curl | wget | http | https)
+        local v=$a
+        [ "${#v}" -le 4096 ] || v=""
+        case "$v" in -*=*) v=${v#*=} ;; esac
+        case "$v" in *=[@\<]*) v=${v#*=} ;; esac
+        case "$v" in [@\<]*) v=${v:1} ;; *@*) v=${v#*@} ;; esac
+        v=${v%%;*}
+        if [ -n "$v" ] && [ "$v" != "$a" ] && is_secret_path "$v"; then
+          block "$cmd would send a secret file ($v)"
+          return
+        fi
+        ;;
+    esac
     case "$a" in
       -*@*) # a flag glued to a file (`curl -d@.env`, `--data-binary@...`)
         if [ "${#a}" -le 4096 ] && is_secret_path "${a#*@}"; then
@@ -834,8 +865,10 @@ is_git_push_key() {
     # Configuration loaded from another file can set any key above, out of sight.
     include.path | includeif.*.path) return 0 ;;
     remote.*.push | remote.*.mirror | push.followtags | push.pushoption) return 0 ;;
-    # matching pushes every branch that exists on both sides, the default branch too.
-    push.default) case "$(lc "$2")" in matching) return 0 ;; esac ;;
+    # matching pushes every branch that exists on both sides, the default branch too; upstream (tracking)
+    # pushes to whatever branch the current one tracks, which can be main.
+    push.default) case "$(lc "$2")" in matching | upstream | tracking) return 0 ;; esac ;;
+    branch.*.merge | branch.*.pushremote | remote.pushdefault) return 0 ;;
   esac
   return 1
 }
@@ -1316,6 +1349,14 @@ check_segment() {
       done
       ;;
     find) check_find "$meta" "$depth" "$@" ;;
+    cd | pushd)
+      # Into a secret folder, a file there is read by its bare name (`cd ~/.ssh && cat id_rsa`).
+      for a in "$@"; do
+        case "$a" in -*) continue ;; esac
+        is_secret_path "$a/x" && { block "$cmd into a folder of secret files ($a)"; return; }
+        break
+      done
+      ;;
     source | .)
       for a in "$@"; do
         [ "$a" = "${MK}PS" ] && block "$cmd of a process substitution cannot be checked"
@@ -1339,6 +1380,8 @@ check_segment() {
         esac
         case "$a" in
           *system* | *'|'*) check_code "$cmd's program" "$a" ;;
+          # getline < "file" reads a file the program names.
+          *) mentions_secret "$a" && block "$cmd's program names a secret file" ;;
         esac
         break
       done
@@ -1428,18 +1471,17 @@ check_shell() {
 check_interpreter() {
   local cmd=$1 stdin_kind=$2 stdin=$3
   shift 3
-  local a inline=0 positional=0
+  local a inline=0
   for a in "$@"; do
     case "$a" in
       -c | -e | -E | -r | -p | --eval | --print | --eval=* | --print=* | -m | -f | eval | run) inline=1 ;;
-      -) ;;
       -*) ;;
-      *) positional=1 ;;
     esac
     check_code "inline $cmd code" "$a"
     [ -n "$BLOCKED" ] && return
   done
-  if [ "$inline" = 0 ] && [ "$positional" = 0 ] && [ "$stdin_kind" = static ]; then
+  # Code on stdin is checked whether or not a script is named too (`php artisan tinker <<EOF`).
+  if [ "$inline" = 0 ] && [ "$stdin_kind" = static ]; then
     check_code "$cmd code on stdin" "$stdin"
   fi
 }
