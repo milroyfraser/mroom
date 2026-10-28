@@ -542,7 +542,9 @@ What a Laravel app must have or add, documented in `docs/app-contract.md` and ch
   for the box's RAM, and holds as many environments as fit in it once the box keeps its reserve
   (`MROOM_QA_RESERVE_MB` in `box.env`, 4096 by default, for the dev site, sessions and builds), never more than
   `qa.max_envs`. Swap does not count there: an environment lives for days. A new environment also waits while RAM
-  available and free swap hold less than one environment, as `mroom memory-preflight` checks before a build.
+  available and free swap hold less than one environment, as `mroom memory-preflight` checks before a build, and
+  is tried again when an environment goes down or on a later push. The box is upgraded before the app's workflow
+  pins, since a gate without `memory` fails every new environment.
 - Honours the isolation keys in section 8.7; with a separate SPA, also `CLIENT_URL`, `CORS_ALLOWED_ORIGINS` and
   `SANCTUM_STATEFUL_DOMAINS`.
 - With `qa.parity.broadcast = "same"`, broadcasts through `BROADCAST_CONNECTION` and the `REVERB_*` keys, and a

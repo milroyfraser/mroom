@@ -864,7 +864,7 @@ t_a_new_environment_the_memory_cannot_hold_waits() {
   memory 65536 500 200
   up
   expect_rc 0
-  expect_out_has "::warning::The box has 500 MB of RAM available and 200 MB of free swap, less than the 1024 MB a QA environment needs (qa.env_memory_mb), so this pull request waits for a slot."
+  expect_out_has "::warning::The box has 500 MB of RAM available and 200 MB of free swap, less than the 1024 MB a QA environment needs (qa.env_memory_mb), so this pull request waits until the box has the memory."
   run sed -n 's/^refused=//p' "$GITHUB_OUTPUT"; expect_out_has "less than the 1024 MB a QA environment needs"
   run forge_writes; expect_out ""
   run gate_asked; expect_out "memory"
@@ -896,7 +896,7 @@ t_a_box_whose_memory_holds_none_fails() {
   app "$TWO" api/artisan=php
   echo 1 >"$GATE/memory.rc"
   up
-  expect_rc 1; expect_err_has "the gate could not say how much memory the box has (memory)"
+  expect_rc 1; expect_err_has "the gate could not say how much memory the box has (memory); a box whose mroom is older than this one's has no memory operation, so upgrade the box first"
   run forge_writes; expect_out ""
   app "$TWO" api/artisan=php
   printf 'total_mb=8192\navailable_mb=lots\nswap_free_mb=0\nreserve_mb=4096\n' >"$GATE/memory.out"
@@ -905,7 +905,7 @@ t_a_box_whose_memory_holds_none_fails() {
   app "${TWO/max_envs = 3/max_envs = 3
 env_memory_mb = 99999999}" api/artisan=php
   up
-  expect_rc 1; expect_err_has "qa.max_envs and qa.env_memory_mb must be whole numbers"
+  expect_rc 1; expect_err_has "qa.env_memory_mb must be a whole number of MB, of at most 7 digits"
 }
 
 t_two_first_deploys_count_again_under_the_memory() {

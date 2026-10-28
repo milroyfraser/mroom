@@ -106,7 +106,8 @@ SCHEMA = {
     "persona.name": ("str", False, 'name = "Agent"', "the bot persona's name"),
 }
 
-# What get gives for a key the file leaves out, before any --default: only keys mroom has decided.
+# What get gives for a single key the file leaves out, before any --default: only keys mroom has decided. A whole
+# table (get qa --json) shows only what the file holds.
 DEFAULTS = {
     "app.version_path": "/version",
     "qa.max_envs": 5,
@@ -224,7 +225,7 @@ def rule_error(key: str, value) -> str | None:
 
 
 def version_path_ok(value: str) -> bool:
-    """A path deploy-verify and /release add to a host's address, and add a query of their own to (design 9)."""
+    """A path deploy-verify and /release add to a host's address, and add a query of their own to (design 10)."""
     if not 2 <= len(value) <= 200 or not value.startswith("/"):
         return False
     parts = value[1:].split("/")

@@ -226,7 +226,8 @@ an expired login.
 
 `mroom memory-preflight <MB> [<what>]` stops work the box cannot hold before it starts, since the kernel ends a
 build that runs out of memory half way, with whatever it had done left as it was. It exits 1, saying why, when
-the box's RAM available and free swap (`/proc/meminfo`) hold less than `<MB>` more, and 0 otherwise;
+the box's RAM available and free swap (`/proc/meminfo`) hold less than `<MB>` more, 0 otherwise, and 2 for a
+usage error;
 `MROOM_SKIP_MEMORY_CHECK=1` skips it, and a host without a readable `/proc/meminfo` skips it with a note.
 
 ```bash
@@ -349,8 +350,8 @@ site's user, and only on that environment's own two sites:
   tree except the backend's `.env` and `storage/`. Any `.env` in the tarball is skipped, a link at `.env`,
   `storage` or `bootstrap/cache` refuses the tarball, and the gate writes `version.json`
   (`{"release": null, "commit": "<sha>"}`) into the backend, since a tarball has no git history, in place of
-  any the tree holds. The app serves it at `app.version_path`; checks ask the gate instead (`env-sha`), since
-  the PR's code could write the file afterwards. `lib/core/version.sh` is the one reader they share.
+  any the tree holds. The app's `app.version_path` endpoint reports it; checks ask the gate instead
+  (`env-sha`), since the PR's code could write the file afterwards. `lib/core/version.sh` is the one reader they share.
 - **The swap** builds the new tree beside the live one, then exchanges the two entry by entry, each in one
   atomic step (`renameat2`), so the site never lacks an entry, even while its own code writes. A failed step
   undoes the steps done. A killed put's kept items go back live with the next put; if the site made its own
@@ -624,9 +625,9 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
 11. In `box.env`: `MROOM_APP_NAME=shop`, `MROOM_QA_TEMPLATE=shop_qa_template` and
     `MROOM_QA_ZONE=qa.example.dev`, and when they differ from the defaults, `MROOM_QA_BACKEND_DIR` (the
     Laravel app's folder in the repository, `.`), `MROOM_QA_PHP` (`php`), `MROOM_QA_PERSONA_DOMAIN`
-    (`.test`) and `MROOM_QA_RESERVE_MB` (`4096`: the memory, in MB, the box keeps for the dev site, sessions and
-    builds, which no QA environment may count on). A site user's name is at most 32 characters, so an app name of 19 characters or fewer always
-    fits.
+    (`.test`) and `MROOM_QA_RESERVE_MB` (`4096`: the memory, in MB, the box keeps for the dev site, sessions
+    and builds, which no QA environment may count on). A site user's name is at most 32 characters, so an app
+    name of 19 characters or fewer always fits.
 
 12. The mail catcher, when `qa.parity.mail` is `catcher` (the default): `mroom baseline mailpit`, then,
     *as root*, the root recipe with `mailpit` in its parts, then `mroom baseline mailpit` again. Baseline
@@ -762,8 +763,12 @@ differently):
 - **Slots.** The box holds as many environments as its memory does: its RAM, less `MROOM_QA_RESERVE_MB` (4096),
   in environments of `qa.env_memory_mb` (1024) each, and never more than `qa.max_envs` (5). qa-up asks the gate
   (`memory`) for a new environment, and the run's log says how many fit. Once they are all in use, a new one
-  waits for a slot, and so it does while the box has less RAM available and free swap than one environment
-  needs; the comment says which. A box whose memory holds none fails the deploy, saying so. One whose code went
+  waits for a slot. While the box has less RAM available and free swap than one environment needs, it waits for
+  the memory, and is tried again when an environment goes down or on a later push; the comment says which. A box
+  whose memory holds none fails the deploy, saying so. Linux reports a little less RAM than the box was sold
+  with, so an 8 GB box holds 3 environments by default, not `qa.max_envs` (5), and a 4 GB one none: on a small
+  box, lower `MROOM_QA_RESERVE_MB` or `qa.env_memory_mb`. Upgrade the box before the app's workflow pins, since
+  a gate older than qa-up has no `memory` and every new environment fails until it does. One whose code went
   in, by the gate's record (`env-sha`), is always refreshed. Two first deploys at once each count the others
   inside their own pull request's turn, so a new environment counts again once its site is made, by the order
   Forge made the environments' first sites in, and one past the slots gives way: its sites are deleted once

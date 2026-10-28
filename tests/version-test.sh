@@ -56,6 +56,7 @@ t_the_answer_is_read_strictly() {
   for bad in "" "not json" "[]" "{}" "{\"release\": \"v1\"}" "{\"release\": \"v1\", \"commit\": \"${SHA:0:12}\"}" \
     "{\"release\": \"v1\", \"commit\": \"${SHA^^}\"}" "{\"release\": \"v1\", \"commit\": \"$SHA\\n\"}" \
     "{\"release\": \"v1 2\", \"commit\": \"$SHA\"}" "{\"release\": \"v1\\nrelease=v9\", \"commit\": \"$SHA\"}" \
+    "{\"commit\": \"$SHA\"}{\"release\": \"v9\", \"commit\": \"$SHA\"}" "{\"release\": \"none\", \"commit\": \"$SHA\"}" \
     "{\"release\": 3, \"commit\": \"$SHA\"}" "{\"release\": \"v1\", \"commit\": 7}" "<html>502</html>"; do
     parse "$bad"; expect_rc 1; expect_out ""
   done

@@ -1325,7 +1325,8 @@ cmd_reverb_app_remove() {
   echo "Reverb app $id: removed; its sockets already open stay until they close"
 }
 
-# memory: the box's memory as qa-up sizes QA slots from it (lib/memory-preflight). Reads only /proc.
+# memory: the box's memory as qa-up sizes QA slots from it (lib/memory-preflight). Reads only /proc; MROOM_PROC, a
+# test seam, cannot come from a client, since sshd passes on only LANG and LC_*.
 cmd_memory() {
   words_are 1
   # shellcheck source=lib/memory-preflight

@@ -26,7 +26,8 @@
 #                              nginx config
 #   mroom memory-preflight <MB> [<what>]
 #                              exit 1, saying why, when the box's RAM available and free swap hold less than
-#                              <MB> more: run it before work the kernel would end half way for lack of memory
+#                              <MB> more (2 for a usage error): run it before work the kernel would end half
+#                              way for lack of memory
 #   mroom version [--source]   the installed version (--source: the release or checkout it came from)
 #   mroom help
 #

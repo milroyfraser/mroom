@@ -104,7 +104,7 @@ t_the_gates_memory() {
   gate "memory 12"; expect_rc 1; expect_err_has "memory takes 0 argument(s), got 1"
   printf 'MemTotal: 1 kB\n' >"$T/proc/meminfo"
   gate memory; expect_rc 1; expect_err_has "memory: cannot read MemTotal, MemAvailable and SwapFree"
-  expect_true "the request is not logged" grep -q 'request: memory' "$HOME/.local/state/mroom/gate.log"
+  expect_true "the request was not logged" grep -q 'request: memory' "$HOME/.local/state/mroom/gate.log"
   # A reserve that is not a number of MB is refused with box.env.
   printf 'MROOM_APP_NAME=shop\nMROOM_QA_RESERVE_MB=4G\n' >"$HOME/.config/mroom/box.env"
   meminfo 7936 3300 2000

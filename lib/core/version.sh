@@ -16,13 +16,15 @@ version_url() {
 }
 
 # version_parse: reads the version endpoint's answer, {"release": "<tag>" or null, "commit": "<sha>"}, on stdin and
-# prints release=<tag, or none> and commit=<sha>. Returns 1 for anything else: an answer that is not JSON, a commit
-# that is not a full SHA, or a tag that is not plain (letters, digits and . _ + -, at most 100).
+# prints release=<tag, or none for null> and commit=<sha>. Returns 1 for anything else: an answer that is not one
+# JSON object, a commit that is not a full SHA, or a tag that is not plain (letters, digits and . _ + -, at most
+# 100) or is the word none.
 version_parse() {
   local answer
-  answer="$(head -c 65536 | jq -er 'if type == "object" and (.commit | type) == "string"
+  answer="$(head -c 65536 | jq -ers 'if length == 1 then .[0] else error("no") end
+    | if type == "object" and (.commit | type) == "string"
       and (.commit | test("\\A[0-9a-f]{40}\\z"))
-      and (.release == null or ((.release | type) == "string" and (.release | test("\\A[A-Za-z0-9._+-]{1,100}\\z"))))
+      and (.release == null or ((.release | type) == "string" and (.release | test("\\A[A-Za-z0-9._+-]{1,100}\\z")) and .release != "none"))
     then "release=\(.release // "none")\ncommit=\(.commit)" else error("no") end' 2>/dev/null)" || return 1
   printf '%s\n' "$answer"
 }

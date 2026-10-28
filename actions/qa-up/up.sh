@@ -7,11 +7,11 @@
 #   1. refuses settings it cannot use, and a build that holds anything but files and folders, before anything is made
 #   2. refuses an environment brought up under the names of before mroom 0.5.0, which its teardown removes; waits
 #      for a site of the environment that Forge is still removing, sending the delete again when it is stuck; then,
-#      for a new environment (one whose code never went in, by the gate's record), counts the others: from as many
-#      as the box's memory holds (the gate's memory: its RAM less the box's reserve, qa.env_memory_mb each, and
-#      never more than qa.max_envs) on, it waits for a slot, and so it does while the box has less RAM available
-#      and free swap than one environment needs. It counts again once its site is made, giving way to one that
-#      made its first site before it: its sites deleted, and waited for until Forge has them gone
+#      for a new environment (one whose code never went in, by the gate's record), counts the others. Its slots
+#      are the box's RAM less the box's reserve, qa.env_memory_mb each, at most qa.max_envs (the gate's memory).
+#      With all of them in use, or with less RAM available plus free swap than one environment needs, it waits.
+#      It counts again once its site is made, giving way to one that made its first site before it: its sites
+#      deleted, and waited for until Forge has them gone
 #   3. the api site, api.<N>.<zone>, and for a frontend of its own the site <N>.<zone>: Forge isolated sites in the
 #      home of the user <app>_qa_<N>, each with a certificate (one that failed is deleted and asked for again,
 #      once; one installed but not active is enabled), and nginx's disable_symlinks if_not_owner at the top of its
@@ -107,8 +107,8 @@ mail="$(setting qa.parity.mail catcher)"
 files="$(setting qa.parity.files same)"
 max="$(setting qa.max_envs 5)"
 env_memory="$(setting qa.env_memory_mb 1024)"
-[[ "$max" =~ ^[1-9][0-9]{0,5}$ && "$env_memory" =~ ^[1-9][0-9]{0,6}$ ]] \
-  || die "qa.max_envs and qa.env_memory_mb must be whole numbers, of at most 6 and 7 digits"
+[[ "$max" =~ ^[1-9][0-9]{0,5}$ ]] || die "qa.max_envs must be a whole number of at most 6 digits"
+[[ "$env_memory" =~ ^[1-9][0-9]{0,6}$ ]] || die "qa.env_memory_mb must be a whole number of MB, of at most 7 digits"
 slots="$max" refused=""
 ttl="$(setting qa.ttl_days 5)"
 php="$(setting app.php 8.4)"
@@ -279,7 +279,8 @@ fi
 # MEM_AVAILABLE and MEM_SWAP_FREE for memory_fits (lib/memory-preflight).
 box_memory() {
   local out value name total reserve mem_total_mb mem_available_mb mem_swap_free_mb mem_reserve_mb
-  out="$(qa_gate memory)" || die "the gate could not say how much memory the box has (memory)"
+  out="$(qa_gate memory)" \
+    || die "the gate could not say how much memory the box has (memory); a box whose mroom is older than this one's has no memory operation, so upgrade the box first"
   for name in total_mb available_mb swap_free_mb reserve_mb; do
     value="$(sed -n "s/^$name=//p" <<<"$out" | head -n1)"
     [[ "$value" =~ ^[0-9]{1,9}$ ]] || die "the gate's memory gave no $name"
@@ -298,7 +299,7 @@ if [ -n "$new_env" ]; then
   box_memory
   ((running < slots)) || give_way
   if ! memory_fits "$env_memory"; then
-    refused="The box has $MEM_AVAILABLE MB of RAM available and $MEM_SWAP_FREE MB of free swap, less than the $env_memory MB a QA environment needs (qa.env_memory_mb), so this pull request waits for a slot. It deploys when one frees up, or on a later push once the box has the memory."
+    refused="The box has $MEM_AVAILABLE MB of RAM available and $MEM_SWAP_FREE MB of free swap, less than the $env_memory MB a QA environment needs (qa.env_memory_mb), so this pull request waits until the box has the memory. It is tried again when a QA environment goes down, or on a later push."
     give_way
   fi
 fi
