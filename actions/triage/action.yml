@@ -59,7 +59,7 @@ runs:
         MROOM_TRIAGE_TRACKER_TOKEN: ${{ inputs.tracker-token }}
         MROOM_TRIAGE_ERRORS_TOKEN: ${{ inputs.errors-token }}
       # Its own limit, inside the step's: the EXIT trap still writes the summary and the outputs.
-      run: 'timeout --signal=TERM 11m "$GITHUB_ACTION_PATH/triage.sh"'
+      run: 'timeout --preserve-status --signal=TERM 11m "$GITHUB_ACTION_PATH/triage.sh"'
     - id: alarm
       if: inputs.mode == 'alarm'
       name: Ping when triage could not run

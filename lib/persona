@@ -17,8 +17,8 @@
 #     keys), only for one of this run's alerts, so nothing it is told can silence an alert to come;
 #   - the markers are its own: every "<!--" in a body is escaped, and create writes one marker a key. After
 #     a create it reads the issue back, and searches for it as the next run will. When the tracker did not
-#     keep a marker, or its search does not find it, the next run would file the issue again; when it holds one the guard did not write, alert text forged it.
-#     Either way it writes nothing more in this run (exit 5) and leaves the issue's id in markers-lost,
+#     keep a marker, or its search does not find it after three tries, the next run would file the issue
+#     again; when it holds one the guard did not write, alert text forged it. Either way it writes nothing more in this run (exit 5) and leaves the issue's id in markers-lost,
 #     for the workflow's switch-off job (actions/triage, switch-off.sh);
 #   - a body or a title that holds a token this command can see, or anything shaped like one, is refused;
 #     a link to a host other than the trackers', GitHub's or the app's is defanged; a body is at most
@@ -232,15 +232,25 @@ cmd_create() {
     exit 5
   fi
   # Stored is not enough: the next run finds the issue by the tracker's search, which may read another
-  # form of the description. Search for each key as the next run will.
-  local found
-  for k in "${keys[@]}"; do
-    found="$(tracker find "$(persona_base_key "$k")")" || { say "$id was filed, but it could not be searched for"; exit 1; }
-    if ! jq -e --arg id "$id" --arg k "$k" 'any(.[]; .identifier == $id and ((.keys // []) | index($k) != null))' \
-      <<<"$found" >/dev/null; then
+  # form of the description. Search for each error as the next run will, three times before a miss counts,
+  # in case the search lags the write.
+  local found base wait seen
+  for base in $(for k in "${keys[@]}"; do persona_base_key "$k"; echo; done | sort -u); do
+    for wait in 0 2 5; do
+      [ "$wait" = 0 ] || sleep "$wait"
+      found="$(tracker find "$base")" || { say "$id was filed, but it could not be checked: the tracker could not be searched"; exit 1; }
+      seen=1
+      for k in "${keys[@]}"; do
+        [ "$(persona_base_key "$k")" = "$base" ] || continue
+        jq -e --arg id "$id" --arg k "$k" 'any(.[]; .identifier == $id and ((.keys // []) | index($k) != null))' \
+          <<<"$found" >/dev/null || seen=""
+      done
+      [ -z "$seen" ] || break
+    done
+    if [ -z "$seen" ]; then
       printf '%s\n' "$id" >"$STATE/markers-lost"
-      log markers-lost "$id: the tracker's search does not find the marker for $k"
-      say "$id was filed, but the tracker's search does not find its hidden marker for $k, so the next run would file it again. Nothing more is written until a person checks."
+      log markers-lost "$id: the tracker's search does not find its markers for $base"
+      say "$id was filed, but the tracker's search does not find its hidden markers for $base, so the next run would file it again. Nothing more is written until a person checks."
       exit 5
     fi
   done

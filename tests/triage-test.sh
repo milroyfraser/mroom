@@ -36,7 +36,7 @@ a_window() {
   add_alert new 1001 2026-10-28T11:50:00Z "TypeError: x is undefined"
   add_alert regressed 1002 2026-10-28T11:45:00Z "ValueError: bad total"
   add_alert regressed 1003 2026-10-28T11:40:00Z "KeyError: cart"
-  add_event 1001 "x is undefined for pat@example.com, key ghp_abcdefghijklmnopqrstuvwxyz0123, call +1 555 0100 2345"
+  add_event 1001 "x is undefined for pat@example.com, key ghp_abcdefghijklmnopqrstuvwxyz0123, call +1 555 0100 2345, password=hunter22"
   add_issue ENG-90 u-persona "Filed by the persona.
 <!-- mroom-alert key=sentry:1002 -->"
   add_issue ENG-91 u-person "Filed by a person, who copied the marker.
@@ -178,6 +178,20 @@ t_odd_event_text_is_cleaned_and_cut_never_refused() {
   expect_true "more than the last 3 exceptions" json_is "$(cat "$T/world.json")" '.issues[0].description | (contains("E56: ") | not) and contains("E59: ")'
 }
 
+t_a_long_event_is_cut_and_closed() {
+  pworld
+  add_alert new 1001 2026-10-28T11:50:00Z
+  world_set '.sentry.events["1001"] = {eventID: "e", dateCreated: "2026-10-28T11:58:00Z",
+    message: ([range(0; 2000) | "line \(.) " + ("y" * 40)] | join("\n")), tags: [], entries: []}'
+  triage
+  expect_rc 0
+  local d
+  d="$(jq -r '.issues[0].description' "$T/world.json")"
+  expect_true "the body was not cut: $(printf '%s' "$d" | wc -c) bytes" [ "$(printf '%s' "$d" | wc -c)" -le 30000 ]
+  expect_true "the cut body is not closed" has "$d" $'\n```\n\n_The rest was cut._\n\n_Everything above comes from the error tracker'
+  expect_true "the markers are not after it" has "$d" "<!-- mroom-alert key=sentry:1001 -->"
+}
+
 t_a_refused_alert_fails_the_run() {
   pworld
   add_alert new 1001 2026-10-28T11:50:00Z "Error near $SENTRY_TOKEN"
@@ -215,10 +229,11 @@ t_event_data_is_redacted_before_it_reaches_an_issue() {
   expect_rc 0
   local d
   d="$(jq -r '.issues[] | select(.description | contains("key=sentry:1001 -->")) | .description' "$T/world.json")"
-  expect_true "the event is not in the issue: $d" has "$d" "TypeError: x is undefined for [redacted], key [redacted token], call [redacted]"
+  expect_true "the event is not in the issue: $d" has "$d" "TypeError: x is undefined for [redacted], key [redacted token], call [redacted], password=[redacted token]"
   expect_true "an address reached the issue" lacks "$d" "pat@example.com"
   expect_true "a token reached the issue" lacks "$d" "ghp_abcdefghijklmnopqrstuvwxyz0123"
   expect_true "a phone number reached the issue" lacks "$d" "0100 2345"
+  expect_true "a password reached the issue" lacks "$d" "hunter22"
   expect_true "the frames are missing" has "$d" "src/cart.ts in total, line 12"
   expect_true "the link is missing" has "$d" "[SHOP-1001](https://example-org.sentry.io/issues/1001/)"
   expect_true "the summary was not redacted" lacks "$(cat "$T/summary.md")" "pat@example.com"
@@ -371,6 +386,7 @@ test_case one-error-one-issue t_one_error_one_issue_in_a_run
 test_case refused-fails t_a_refused_alert_fails_the_run
 test_case lost-after-refusal t_lost_markers_end_the_step_green_even_after_a_refusal
 test_case odd-event-text t_odd_event_text_is_cleaned_and_cut_never_refused
+test_case long-event-cut t_a_long_event_is_cut_and_closed
 test_case no-tracker t_without_a_tracker_nothing_is_filed
 test_case dry-run t_a_dry_run_files_nothing
 test_case tracker-down t_a_tracker_that_cannot_be_read_fails_the_run

@@ -459,7 +459,8 @@ channel = "C0123456789"            # the chat channel it pings when triage canno
   exception and in-app frames, all redacted first (`lib/core/text.py`): known token and key shapes,
   bearer tokens, `password=`, `secret=`, `token=` and `api_key=` values, a URL's password, email
   addresses, phone numbers and IBANs. It knows shapes, so a secret of no known shape can still pass.
-  The run's summary is redacted the same way.
+  The run's summary is redacted the same way. An issue shows the last 3 chained exceptions with 8 in-app frames
+  each, takes out control and text-direction characters, and is cut at 28000 bytes.
 - **The guard** (`mroom persona`) is the persona's only way to write. It files issues only for an alert
   key of this run, in `issues.team`, `persona.state` and with `persona.label`, and assigns no one. It
   comments only on an issue the tracker says the persona's token filed (`mroom tracker owned`), and has
@@ -471,15 +472,18 @@ channel = "C0123456789"            # the chat channel it pings when triage canno
   unless `live` is ticked: it prints what it would file, and writes nothing.
 - **When the tracker drops the markers.** After each issue it files, the guard reads the issue back.
   When a marker is missing, the next run could not find the issue and would file it again, every 15
-  minutes. So nothing more is written in that run, and the workflow's switch-off job turns the app's
+  minutes. It also searches for each issue as the next run will, three times, since a tracker's search
+  may read another form of the description than the one it stores; an issue the search cannot find counts
+  as lost too. So nothing more is written in that run, and the workflow's switch-off job turns the app's
   workflow off (`gh workflow disable`) and pings `persona.channel` once. To recover, read the issue's
   description through the tracker's API and check the `<!-- mroom-alert ... -->` lines; if the tracker
-  strips HTML comments, the marker's format must change before triage runs again. Merge any duplicates,
+  strips HTML comments, or stores them but leaves them out of its search (check how its description
+  filter reads the text), the marker's format must change before triage runs again. Merge any duplicates,
   then turn the workflow on again (`gh workflow enable alerts.yml`). If the workflow cannot be turned
   off, the ping asks a person to do it by hand, and repeats every run until someone does. A failed read
   of the issue is not a lost marker: the run fails, and the alarm says so.
 - **The alarm.** When a live run's triage job fails (the error tracker or the tracker could not be read
-  or written, the guard refused an alert, or a step failed or ran past 12 minutes), the alarm job pings `persona.channel` with the failed step and the run,
+  or written, the guard refused an alert, or a step failed or ran past its 11-minute limit), the alarm job pings `persona.channel` with the failed step and the run,
   at most once a UTC day. Its dedupe is the tracker's: before the ping it files the day's issue, keyed
   `triage:<yyyymmdd>`, and a day whose issue exists sends nothing. When that issue cannot be filed,
   nothing is sent: a missed ping, never one every 15 minutes.

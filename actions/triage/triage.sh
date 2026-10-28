@@ -94,7 +94,8 @@ if [ "$backend" = none ]; then
 fi
 trap finish EXIT
 # The action's own time limit sends TERM: exit, so the EXIT trap still writes the summary and outputs.
-trap 'exit 143' TERM
+# With markers lost, the step still ends green, so its outputs reach the switch-off job.
+trap 'if [ -n "$lost" ]; then exit 0; else exit 143; fi' TERM
 
 # The window's alerts, with their keys, the most urgent first.
 "$MROOM" errors new "$window" --environment "$environment" --limit "$SEARCH_LIMIT" >"$WORK/window.json" 2>"$WORK/errors.err" \
@@ -113,8 +114,22 @@ output "new=$total"
 
 # code <text>: the text as an inline code span: no backtick, no newline.
 # shellcheck disable=SC2016  # jq's, not the shell's
-CODE='def plain: tostring | gsub("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]"; "");
+CODE='def plain: tostring | gsub("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]"; "");
   def code: plain | gsub("[`\r\n\t]"; "'"'"'") | .[0:300] | "`\(.)`";'
+
+# FIT: stdin to stdout without control (but newline and tab) or direction characters, at most 28000 bytes,
+# room for the guard's footer and markers. A cut body closes its code block and keeps its last line.
+FIT='
+import re, sys
+text = re.sub("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]", "",
+              sys.stdin.buffer.read().decode("utf-8", "replace"))
+if len(text.encode()) > 28000:
+    last = text.rstrip("\n").rsplit("\n", 1)[-1]
+    tail = "\n```\n\n_The rest was cut._\n\n" + last + "\n"
+    keep = text.encode()[:28000 - len(tail.encode())].decode("utf-8", "ignore")
+    text = keep + tail
+sys.stdout.buffer.write(text.encode())
+'
 
 tracker="$("$MROOM" tracker backend)" || exit 1
 if [ "$tracker" = none ]; then
@@ -199,12 +214,11 @@ while IFS= read -r -u 3 group; do
     || { echo '{}' >"$WORK/event.json"; note "the latest event of $base could not be read"; }
   # The title: one line, redacted, at most 150 characters (the guard takes 160).
   if ! title="$(jq -nr --argjson a "$lead" '"\($a.short_id // $a.id)\(if $a.kind == "new" then "" else " " + $a.kind end): \($a.title // "untitled")"
-    | gsub("[\u0000-\u001f\u007f]"; " ") | .[0:200]' | persona_text redact | jq -Rr '.[0:150]')"; then
+    | gsub("[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]"; " ") | .[0:200]' | persona_text redact | jq -Rr '.[0:150]')"; then
     note "the title for $base could not be written out, so triage stopped"; failed=1; break
   fi
-  # The body, redacted, and cut to fit the guard's 30000 bytes with room for the footer and markers.
-  if ! body "$lead" "$WORK/event.json" "$earlier" "$also" | persona_text redact \
-    | python3 -Ic 'import sys; sys.stdout.write(sys.stdin.buffer.read()[:28000].decode("utf-8", "ignore"))' >"$WORK/body.md"; then
+  # The body, redacted, with no control or direction character, and cut to fit the guard's 30000 bytes.
+  if ! body "$lead" "$WORK/event.json" "$earlier" "$also" | persona_text redact | python3 -Ic "$FIT" >"$WORK/body.md"; then
     note "the issue for $base could not be written out, so triage stopped"; failed=1; break
   fi
   rc=0
@@ -216,7 +230,7 @@ while IFS= read -r -u 3 group; do
        [ -n "$lost" ] || failed=1
        break ;;
     4) note "the guard refused to file $base"; refused=1; continue ;;
-    *) note "$base could not be filed"; failed=1; break ;;
+    *) note "$base could not be filed, or was filed and could not be checked"; failed=1; break ;;
   esac
   filed=$((filed + 1))
   new_id="$(jq -r '.created // empty' <<<"$created")"

@@ -118,8 +118,9 @@ t_a_marker_the_search_cannot_find_stops_every_write() {
   world_set '.unsearchable_markers = true'
   body "x"
   create --key sentry:1001 --title t
-  expect_rc 5; expect_err_has "the tracker's search does not find its hidden marker for sentry:1001"
+  expect_rc 5; expect_err_has "the tracker's search does not find its hidden markers for sentry:1001"
   expect_true "markers-lost does not name the issue" [ "$(cat "$T/state/markers-lost")" = ENG-1 ]
+  expect_true "it did not search three times, waiting 2 and 5 seconds" [ "$(cat "$T/sleep.log")" = $'2\n5' ]
 }
 
 t_text_is_checked_marked_only_by_the_guard_and_defanged() {
