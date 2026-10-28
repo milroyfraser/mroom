@@ -24,11 +24,15 @@
 #   mroom baseline reverb      WebSockets for every QA environment: mroom's Reverb host with its pinned
 #                              packages, its apps file, whether its unit is this release's, and its host's
 #                              nginx config
+#   mroom guard hook | check <command>
+#                              the PreToolUse guard for Claude Code's Bash tool (design 8.3): refuses a
+#                              merge, an approval, a release, a force-push or a secret read; a speed bump,
+#                              not a boundary (GitHub is the gate)
 #   mroom version [--source]   the installed version (--source: the release or checkout it came from)
 #   mroom help
 #
 # Coming in later phases (see docs/design.md, section 11): status, sessions, resume, restart, doctor,
-# site, update, wt, user, keys, env, init, guard, default (phase 1).
+# site, update, wt, user, keys, env, init, default (phase 1).
 set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
@@ -60,7 +64,8 @@ case "$cmd" in
   job) exec "$ROOT/lib/job" "$@" ;;
   gate) exec "$ROOT/lib/gate" "$@" ;;
   baseline) exec "$ROOT/lib/baseline" "$@" ;;
-  status | sessions | resume | restart | doctor | site | update | wt | user | keys | env | init | guard | default)
+  guard) exec "$ROOT/lib/guard" "$@" ;;
+  status | sessions | resume | restart | doctor | site | update | wt | user | keys | env | init | default)
     not_yet "$cmd" 1
     ;;
   *) die "unknown command '$cmd' (mroom help lists the commands)" 2 ;;

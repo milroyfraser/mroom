@@ -185,7 +185,7 @@ fi
 dest="$share/$have"
 mkdir -p "$share" "$bindir"
 stage="$(mktemp -d "$share/.stage.XXXXXX")"
-for part in bin lib reverb-host VERSION LICENSE NOTICE README.md; do
+for part in bin lib settings reverb-host VERSION LICENSE NOTICE README.md; do
   if [ -e "$from/$part" ]; then cp -R "$from/$part" "$stage/"; fi
 done
 echo "$source_note" >"$stage/SOURCE"

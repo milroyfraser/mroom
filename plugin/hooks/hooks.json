@@ -1,0 +1,11 @@
+{
+  "description": "mroom guard: refuses a merge, an approval, a release, a force-push or a secret read in a Bash command (design 8.3)",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/hooks/guard" }]
+      }
+    ]
+  }
+}

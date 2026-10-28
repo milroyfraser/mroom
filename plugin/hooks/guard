@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# The plugin's PreToolUse hook on Bash: runs `mroom guard hook` from the installed mroom (install.sh), with
+# the hook's JSON on stdin. Claude Code copies a plugin into its cache without the rest of mroom's
+# repository, so the guard itself is not here: it stays pinned with the box's mroom version.
+#
+# Without mroom the guard is off, and says so; it does not refuse every command, since GitHub's rules
+# are the gate (design 8.3).
+for mroom in "$(command -v mroom 2>/dev/null)" "$HOME/.local/bin/mroom"; do
+  if [ -n "$mroom" ] && [ -x "$mroom" ]; then exec "$mroom" guard hook; fi
+done
+msg="mroom guard: mroom is not installed (no mroom on PATH or in ~/.local/bin), so the Bash guard is off."
+echo "$msg" >&2
+printf '{"systemMessage":"%s"}\n' "$msg"
+exit 0

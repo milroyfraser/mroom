@@ -1,0 +1,1007 @@
+#!/usr/bin/env bash
+# guard — mroom guard, the PreToolUse hook for Claude Code's Bash tool (design 8.3): it refuses the commands
+# an agent must never run, however they are spelled. Agents never merge, approve, release, force-push or read
+# secrets; a person does that.
+#
+#   mroom guard hook           read the hook's JSON on stdin (.tool_name, .tool_input.command); exit 0 lets
+#                              the command run, exit 2 refuses it with the reason on stderr
+#   mroom guard check <command>
+#                              the same check on one command given as an argument; prints "allowed" or the
+#                              reason, and exits 0 or 2
+#   mroom guard help
+#
+# It is a speed bump, not a boundary. A command built from variables (`$CMD`), a script file, an alias already
+# in a config file, `ssh host 'cmd'`, GraphQL split across quotes (`'merge''PullRequest'`) or a payload built
+# by jq gets past it. GitHub is the gate: the ruleset on the default branch, people's reviews and the
+# `production` environment (design D22). The settings fragments' prefix rules are a second layer.
+#
+# Why a parser: permission rules match on the command's prefix, so `gh api -X PUT .../pulls/N/merge`,
+# `bash -c '...'` or `true && cat .env` walk around `Bash(gh pr merge:*)` and `Read(**/.env)` (which only
+# guards the Read tool). lib/core/guard-tokenize.awk splits the whole command into simple commands (quotes,
+# $'...', `;` `&&` `||` `|` `&`, newlines, $(...), backticks, subshells, process substitution, heredocs and
+# here-strings), and this script checks every one, after stripping wrappers (sudo, env X=y, X=y, command,
+# xargs, timeout, npx, pnpm exec/dlx, yarn, bunx, ...). Text that reaches a shell (bash -c, eval, watch, a
+# heredoc, a here-string, or a pipe from echo/printf/cat) is checked again as a command; shell input it cannot
+# read is refused.
+#
+# Refused:
+#   - merging: `gh pr merge`, `gh api` writes to .../pulls/N/merge or .../merges, GraphQL
+#     mergePullRequest / enablePullRequestAutoMerge / enqueuePullRequest / mergeBranch, and any
+#     curl/wget write to api.github.com;
+#   - approving: `gh pr review --approve`, a review with event=APPROVE (REST or GraphQL);
+#   - releasing and tagging: any non-GET `gh api` on .../releases (create and edit go through
+#     `gh release create/edit`, which a settings fragment makes ask), `gh release delete`, GraphQL release
+#     mutations, and pushing tags (`--tags`, `--follow-tags`, `refs/tags/...`, `v1.2.3`, `release-v...`);
+#   - force-pushing: `git push` with -f, --force, --force-with-lease, --force-if-includes or --mirror (and
+#     their abbreviations), a `+` refspec, a push to main, master or release, `git config` that makes a later
+#     push force or mirror, an alias that pushes, non-GET `gh api` on .../git/refs, GraphQL updateRef(s),
+#     `gh repo sync --force` and `gh pr update-branch --rebase`;
+#   - passing or changing the gate: approving deployments (pending_deployments, approveDeployments,
+#     rejectDeployments), approving fork runs, non-GET on rulesets, branch protection and
+#     environments, running deploy-* workflows, `gh alias set/import` and shell git aliases (an
+#     alias can hide any of the above);
+#   - reading secrets: a reader (cat, grep, head, sed, cp, ln, base64, tar, curl -F @..., git
+#     diff/show/add, find -exec, an interpreter's code, `< file`, ...) on .env* (but not *.example),
+#     ~/.ssh (but not *.pub), ~/.config/gh*, ~/.config/mroom/secrets, any *.env under ~/.config,
+#     ~/.forge-token, ~/.aws, ~/.laravel-forge, ~/.claude*/.credentials.json; and `gh auth token`,
+#     `gh auth status -t`.
+#
+# Allowed on purpose: reading code, every `gh api` GET (including GET .../pulls/N/merge, which only
+# asks "is it merged?"), gh pr view/list/checks/create/edit/comment, `gh release create/edit` (an
+# `ask` rule prompts the developer), `git push` of a branch (an `ask` rule in base.json), `cp .env.example .env`
+# (.env is the destination), writes such as `echo X=y >> .env`, `git show HEAD:path` (committed content only),
+# and `bash script.sh` (a script file is not read here).
+#
+# Contract (https://code.claude.com/docs/en/hooks): exit 2 blocks and its stderr is shown to the model, and
+# a block applies before permission rules, so it also beats an allow rule. Any other exit lets the command
+# through, so this script exits only 0 or 2.
+#
+# A broken guard must not brick every session: without jq or awk it allows and warns. A command it cannot
+# check (over 256 KB, over 3000 simple commands, or one the tokeniser fails on) is refused instead.
+#
+# Bash 3.2 compatible (macOS). Tests: tests/guard-test.sh. No `set -u`: bash 3.2 treats an empty
+# "${array[@]}" as unbound, and any exit other than 0 or 2 lets the command through.
+export LC_ALL=C
+
+SELF="${BASH_SOURCE[0]}"
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF" | sed -n '/^  *mroom guard hook/,/^$/p'; }
+
+mode=${1:-}
+case "$mode" in
+  hook) ;;
+  check)
+    [ "$#" = 2 ] || { echo "mroom guard: check takes one command, as one argument" >&2; exit 64; }
+    ;;
+  help | -h | --help) usage; exit 0 ;;
+  *) echo "mroom guard: hook, check <command> or help" >&2; exit 64 ;;
+esac
+
+# Off, with a warning, rather than refusing every command: GitHub's rules still apply (see above).
+warn_off() {
+  local msg="mroom guard: $1 is not installed, so the Bash guard is off (GitHub's rules still apply)."
+  echo "$msg" >&2
+  [ "$mode" = hook ] && printf '{"systemMessage":"%s"}\n' "$msg"
+  exit 0
+}
+# MROOM_GUARD_AWK picks the awk (the tests run the tokeniser under gawk, mawk and BWK awk). In hook mode it
+# comes from Claude Code's environment, which a Bash command cannot change for its own hook.
+AWK=${MROOM_GUARD_AWK:-awk}
+command -v "$AWK" >/dev/null 2>&1 || warn_off "$AWK"
+
+HERE=$(cd "$(dirname "$(readlink -f "$SELF" 2>/dev/null || echo "$SELF")")" && pwd)
+TOKENIZER="$HERE/core/guard-tokenize.awk"
+MAX_BYTES=262144
+MAX_COMMANDS=3000
+
+if [ "$mode" = hook ]; then
+  command -v jq >/dev/null 2>&1 || warn_off jq
+  input=$(cat)
+  tool=$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null) || exit 0
+  [ "$tool" = "Bash" ] || exit 0
+  command=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
+else
+  command=$2
+fi
+[ -n "$command" ] || { [ "$mode" = check ] && echo allowed; exit 0; }
+
+US=$'\037'
+MK=$'\034'
+DY=$'\033'
+BLOCKED=""
+COMMANDS=0
+RAW=$(printf '%s' "$command" | tr '[:upper:]' '[:lower:]')
+
+block() { [ -n "$BLOCKED" ] || BLOCKED=$1; }
+# Lower case, with the tokeniser's encoded newlines decoded. Long strings never go through bash's
+# ${x//...} or ${x##*...}: in bash 3.2 those are quadratic or worse, and a slow hook is a bypass.
+lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr '\035' '\n'; }
+# NAME = basename of a command word (no fork: this runs per command); a word too long to be a path is left alone.
+# A leading `=` is zsh's `=cmd` (the path of cmd).
+cmd_name() { if [ "${#1}" -le 4096 ]; then NAME=${1##*/}; NAME=${NAME#=}; else NAME=$1; fi; }
+
+SHELLS=" bash sh zsh dash ksh fish "
+READERS=" cat tac head tail less more most bat batcat sed gsed awk gawk mawk nawk grep egrep fgrep rg ag ack cut sort uniq nl od xxd hexdump base64 base32 strings cp mv ln scp rsync install tar zip gzip bzip2 xz 7z diff cmp comm paste join jq yq source . vi vim nvim view nano emacs code open dd iconv fold fmt pr rev expand unexpand openssl gpg curl wget http https "
+PATTERN_FIRST=" grep egrep fgrep rg ag ack sed gsed awk gawk mawk nawk jq yq "
+COPIERS=" cp mv ln scp rsync install "
+INTERPRETERS=" python python3 php node ruby perl deno bun "
+
+# is_secret_path TOKEN: does this argument name a secret file?
+is_secret_path() {
+  local t=$1 base name
+  [ "${#t}" -le 4096 ] || return 1 # not a path; keeps the pattern matching below linear
+  t=${t##*=}
+  t=${t#@}
+  while [ "${t%/}" != "$t" ]; do t=${t%/}; done
+  [ -n "$t" ] || return 1
+  base=${t##*/}
+  case "$base" in *.example | *.example.* | *.pub) return 1 ;; esac
+  case "$base" in .env | .env.* | .envrc | .forge-token | .credentials.json) return 0 ;; esac
+  case "/$t/" in
+    */.ssh/* | */.config/gh/* | */.config/gh-* | */.config/mroom/secrets/* | */.aws/* | */.laravel-forge/* | */.config/forge/*) return 0 ;;
+    # A tool's secrets kept as an env file under ~/.config (an MCP server's keys, say).
+    */.config/*.env/) return 0 ;;
+  esac
+  # A glob starting with a dot (`.env*`, `.*`) that would match a secret file.
+  if [[ $base == .* && $base == *[\*\?\[]* ]]; then
+    for name in .env .env.local .env.testing .env.production .envrc .forge-token .credentials.json; do
+      # shellcheck disable=SC2053 # $base is a glob on purpose
+      [[ $name == $base ]] && return 0
+    done
+  fi
+  return 1
+}
+
+# mentions_secret TEXT: does code (python -c, a heredoc into php, ...) name a secret file?
+mentions_secret() {
+  local t
+  t=$(lc "$1" | sed 's/\.env\.example//g')
+  [[ $t =~ (^|[^a-z0-9_.-])\.env([^a-z0-9_]|$) ]] && return 0
+  case "$t" in
+    *.ssh/* | *.forge-token* | *.credentials.json* | *.config/gh* | *.config/mroom/secrets* | *.aws/*) return 0 ;;
+  esac
+  return 1
+}
+
+# mentions_forbidden TEXT: does code in another language run a merge, approval, release, force-push or deploy?
+mentions_forbidden() {
+  local t
+  t=$(lc "$1")
+  [[ $t =~ gh[[:space:]]+(pr[[:space:]]+merge|release[[:space:]]+delete|auth[[:space:]]+token|alias[[:space:]]+set) ]] && return 0
+  [[ $t =~ gh[[:space:]]+pr[[:space:]]+review.*(--approve|[[:space:]]-a([[:space:]]|$)) ]] && return 0
+  [[ $t =~ gh[[:space:]]+workflow[[:space:]]+run.*deploy- ]] && return 0
+  [[ $t =~ git[[:space:]]+push.*([[:space:]](--fo|--mi|-[a-z]*f|\+)|--tags) ]] && return 0
+  [[ $t =~ gh[[:space:]]+pr[[:space:]]+update-branch.*--rebase ]] && return 0
+  [[ $t =~ (pulls/[^/[:space:]]+/merge|/merges|pending_deployments|actions/runs/[^/[:space:]]+/approve) ]] && return 0
+  [[ $t =~ event.{0,6}approve ]] && return 0
+  [[ $t =~ (mergepullrequest|enablepullrequestautomerge|enqueuepullrequest|mergebranch|approvedeployments|rejectdeployments|updateref|/git/refs) ]] && return 0
+  return 1
+}
+
+check_code() {
+  local what=$1 code=$2
+  if mentions_secret "$code"; then
+    block "$what names a secret file"
+  elif mentions_forbidden "$code"; then
+    block "$what runs a merge, approval, release, force-push or deploy"
+  fi
+}
+
+# static_output RECORD: what a pipeline stage writes when that is knowable without running it
+# (echo or printf arguments, cat of a heredoc or here-string). Fails when it is not.
+static_output() {
+  local -a f w=()
+  local meta k a cmd out="" doc="" has_doc=0 from_file=0
+  IFS=$US read -r -a f <<<"$1"
+  meta=${f[0]}
+  for ((k = 1; k < ${#f[@]}; k++)); do
+    a=${f[$k]}
+    case "$a" in
+      "${MK}HD" | "${MK}HS") k=$((k + 1)); doc=${f[$k]}; has_doc=1 ;;
+      "${MK}R<") k=$((k + 1)); from_file=1 ;;
+      "${MK}R>") k=$((k + 1)) ;;
+      *) w+=("$a") ;;
+    esac
+  done
+  [ "${#w[@]}" -gt 0 ] || return 1
+  cmd_name "${w[0]}"; cmd=$NAME
+  case "$cmd" in
+    # The builtins themselves, so escapes (`echo -e`, printf's \n and %b) come out as they would.
+    echo)
+      # shellcheck disable=SC2116 # the builtin's own output, escapes and all
+      out=$(builtin echo "${w[@]:1}") || return 1
+      ;;
+    printf)
+      [ "${#w[@]}" -gt 1 ] || return 1
+      # shellcheck disable=SC2059 # the format is the command's own, on purpose
+      out=$(builtin printf -- "${w[@]:1}" 2>/dev/null) || return 1
+      ;;
+    cat)
+      [ "${#w[@]}" = 1 ] && [ "$has_doc" = 1 ] && [ "$from_file" = 0 ] && [ "${meta:0:1}" != p ] || return 1
+      out=$doc
+      ;;
+    *) return 1 ;;
+  esac
+  case "$out" in *"$DY"*) return 1 ;; esac
+  printf '%s' "$out"
+}
+
+check_secrets() {
+  local cmd=$1
+  shift
+  local -a args=("$@")
+  local i a prev="" n=${#args[@]} last_pos=-1 skip_pattern=0 seen_pos=0
+
+  case "$READERS" in *" $cmd "*) ;; *) return ;; esac
+
+  case "$PATTERN_FIRST" in
+    *" $cmd "*)
+      skip_pattern=1
+      for a in "${args[@]}"; do
+        case "$a" in -e | --regexp | --regexp=* | -f | --file | --file=* | --expression | --expression=*) skip_pattern=0 ;; esac
+      done
+      ;;
+  esac
+
+  case "$COPIERS" in
+    *" $cmd "*)
+      for ((i = 0; i < n; i++)); do
+        case "${args[$i]}" in -*) ;; *) last_pos=$i ;; esac
+      done
+      ;;
+  esac
+
+  for ((i = 0; i < n; i++)); do
+    a=${args[$i]}
+    case "$prev" in
+      -e | --regexp | --expression) prev=$a; continue ;; # a pattern, not a file
+    esac
+    prev=$a
+    case "$a" in
+      -*@*) # a flag glued to a file (`curl -d@.env`, `--data-binary@...`)
+        if [ "${#a}" -le 4096 ] && is_secret_path "${a#*@}"; then
+          block "$cmd would read a secret file (${a#*@})"
+          return
+        fi
+        continue
+        ;;
+      -*) case "$a" in *=*) ;; *) continue ;; esac ;;
+      *)
+        if [ "$skip_pattern" = 1 ] && [ "$seen_pos" = 0 ]; then
+          seen_pos=1
+          continue
+        fi
+        seen_pos=1
+        ;;
+    esac
+    [ "$i" = "$last_pos" ] && continue # the destination of cp/mv/ln
+    if is_secret_path "$a"; then
+      block "$cmd would read a secret file ($a)"
+      return
+    fi
+  done
+}
+
+check_graphql_text() {
+  local t=$1
+  if [[ $t =~ (mergepullrequest|enablepullrequestautomerge|enqueuepullrequest|mergebranch|createrelease|updaterelease|deleterelease|branchprotectionrule|repositoryruleset) ]]; then
+    block "a GraphQL mutation merges, queues a merge, releases or changes branch protection"
+  elif [[ $t =~ (createref|updateref|deleteref) ]]; then
+    block "a GraphQL mutation creates, moves or deletes a branch or tag (a force-push or a tag)"
+  elif [[ $t =~ (approvedeployments|rejectdeployments) ]]; then
+    block "a GraphQL mutation approves or rejects a deployment"
+  elif [[ $t =~ (addpullrequestreview|submitpullrequestreview) && $t =~ approve ]]; then
+    block "a GraphQL review approves a pull request"
+  fi
+}
+
+# normalize_endpoint PATH: lower case, no host, no leading/trailing or doubled slashes, no query.
+normalize_endpoint() {
+  local ep
+  [ "${#1}" -le 4096 ] || { printf '%s' "$1"; return; } # not an endpoint (see lc)
+  ep=$(lc "$1")
+  ep=${ep#https://api.github.com}
+  ep=${ep#http://api.github.com}
+  ep=${ep%%\?*}
+  ep=${ep%%#*}
+  while [[ $ep == *//* ]]; do ep=${ep//\/\//\/}; done
+  ep=${ep#/}
+  ep=${ep%/}
+  printf '%s' "$ep"
+}
+
+check_gh_api() {
+  local method="" endpoint="" fields=0 input="" approve=0 file_field=0 a v ep
+  while [ $# -gt 0 ]; do
+    a=$1
+    shift
+    v=""
+    case "$a" in
+      -X | --method) method=${1:-}; shift ;;
+      --method=*) method=${a#*=} ;;
+      -X*) method=${a#-X}; method=${method#=} ;;
+      -f | -F | --field | --raw-field) fields=1; v=${1:-}; shift ;;
+      --field=* | --raw-field=*) fields=1; v=${a#*=} ;;
+      -f* | -F*) fields=1; v=${a:2} ;;
+      --input) input=${1:-}; shift ;;
+      --input=*) input=${a#*=} ;;
+      -H | --header | -q | --jq | -t | --template | --hostname | --cache | -p | --preview) shift ;;
+      -*) ;;
+      *) [ -n "$endpoint" ] || endpoint=$a ;;
+    esac
+    if [ -n "$v" ]; then
+      case "$(lc "$v")" in event=approve) approve=1 ;; esac
+      case "$v" in *=@*) file_field=1 ;; esac
+    fi
+  done
+  method=$(printf '%s' "$method" | tr '[:lower:]' '[:upper:]')
+  if [ -z "$method" ]; then
+    if [ "$fields" = 1 ] || [ -n "$input" ]; then method=POST; else method=GET; fi
+  fi
+  ep=$(normalize_endpoint "$endpoint")
+
+  if [ "$ep" = "graphql" ]; then
+    check_graphql_text "$RAW"
+    if [ -z "$BLOCKED" ] && { [ "$file_field" = 1 ] || { [ -n "$input" ] && [ "$input" != "-" ]; }; }; then
+      block "a GraphQL query read from a file cannot be checked; pass it inline"
+    fi
+    return
+  fi
+
+  case "$method" in GET | HEAD) return ;; esac
+  case "$ep" in
+    *pulls/*/merge | merges | */merges) block "gh api $method $endpoint merges" ;;
+    *pulls/*/reviews*)
+      if [ "$approve" = 1 ]; then
+        block "gh api $method $endpoint approves a pull request"
+      elif [ "$input" = "-" ]; then
+        [[ $RAW =~ \"event\"[[:space:]]*:[[:space:]]*\"approve\" ]] && block "gh api $method $endpoint approves a pull request"
+      elif [ -n "$input" ]; then
+        block "a review payload read from a file cannot be checked for event=APPROVE; pass it inline"
+      fi
+      ;;
+    */git/refs | */git/refs/*) block "gh api $method $endpoint creates, moves or deletes a branch or tag (a force-push or a tag)" ;;
+    */releases | */releases/*) block "gh api $method $endpoint changes a release (use gh release create/edit, which asks the developer)" ;;
+    */actions/runs/*/pending_deployments* | */actions/runs/*/approve | */actions/runs/*/deployment_protection_rule*)
+      block "gh api $method $endpoint approves a deployment or a workflow run"
+      ;;
+    */rulesets* | */branches/*/protection* | */environments*) block "gh api $method $endpoint changes the merge or deploy gate" ;;
+    */actions/workflows/deploy-*) block "gh api $method $endpoint runs a deploy workflow" ;;
+    */actions/workflows/[0-9]*/dispatches) block "gh api $method $endpoint runs a workflow by numeric ID, which cannot be checked" ;;
+  esac
+}
+
+check_gh() {
+  local -a pos=()
+  local a skip=0 i=0 api_at=-1 flag
+  local -a all=("$@")
+  for a in "$@"; do
+    if [ "$skip" = 1 ]; then skip=0; i=$((i + 1)); continue; fi
+    case "$a" in
+      -R | --repo | --hostname) skip=1 ;;
+      -*) ;;
+      *)
+        pos+=("$a")
+        if [ "${#pos[@]}" = 1 ] && [ "$a" = "api" ]; then api_at=$i; fi
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  local p0=${pos[0]:-} p1=${pos[1]:-}
+  case "$p0 $p1" in
+    "api "*) ;; # endpoints use {owner}/{repo}
+    *[{}]*) block "brace expansion in a gh subcommand cannot be checked"; return ;;
+  esac
+  case "$p0 $p1" in
+    "pr merge") block "gh pr merge merges a pull request" ;;
+    "pr review")
+      for flag in "$@"; do
+        case "$flag" in
+          --approve | --approve=*) block "gh pr review --approve approves a pull request" ;;
+          --*) ;;
+          -*) short_group_has_approve "$flag" && block "gh pr review -a approves a pull request" ;;
+        esac
+      done
+      ;;
+    "release delete" | "release delete-asset") block "gh release $p1 deletes a release" ;;
+    "auth token") block "gh auth token prints the GitHub token" ;;
+    "auth status")
+      for flag in "$@"; do
+        case "$flag" in -t | --show-token) block "gh auth status --show-token prints the GitHub token" ;; esac
+      done
+      ;;
+    "alias set" | "alias import") block "gh alias $p1 could hide a merge, approve or release behind a new name" ;;
+    "workflow run") check_gh_workflow_run "$@" ;;
+    "repo sync")
+      for flag in "$@"; do
+        case "$flag" in --force | --force=*) block "gh repo sync --force overwrites a branch, like a force-push" ;; esac
+      done
+      ;;
+    "pr update-branch")
+      for flag in "$@"; do
+        case "$flag" in --rebase | --rebase=*) block "gh pr update-branch --rebase rewrites the branch, like a force-push" ;; esac
+      done
+      ;;
+  esac
+  if [ "$p0" = "api" ] && [ "$api_at" -ge 0 ]; then
+    check_gh_api "${all[@]:$((api_at + 1))}"
+  fi
+}
+
+# short_group_has_approve -GROUP: pflag reads `-ab x` as -a -b x and `-ba` as -b a, so walk the
+# group: an `a` before a value-taking flag (-b body, -F body-file, -R repo) is --approve.
+short_group_has_approve() {
+  local g=${1#-} c
+  [ "${#g}" -le 64 ] || return 1
+  while [ -n "$g" ]; do
+    c=${g:0:1}
+    g=${g:1}
+    case "$c" in
+      a) return 0 ;;
+      b | F | R | =) return 1 ;;
+    esac
+  done
+  return 1
+}
+
+# gh workflow run [flags] <workflow> [flags]: flags and their values can come before the workflow.
+check_gh_workflow_run() {
+  local a seen=0 workflow=""
+  while [ $# -gt 0 ]; do
+    a=$1
+    shift
+    case "$a" in
+      -R | --repo | --hostname | -r | --ref | -f | -F | --field | --raw-field | --json) shift; continue ;;
+      -*) continue ;;
+    esac
+    if [ "$seen" -lt 2 ]; then seen=$((seen + 1)); continue; fi # "workflow" "run"
+    [ -n "$workflow" ] || workflow=$a
+  done
+  cmd_name "$workflow"
+  case "$NAME" in
+    deploy-*) block "gh workflow run $workflow deploys" ;;
+    *[!0-9]* | "") ;;
+    *) block "gh workflow run by numeric ID cannot be checked; name the workflow file" ;;
+  esac
+}
+
+# Any write to the GitHub API outside gh: use gh, which this hook can read.
+check_http() {
+  local a hit=0 write=0 method=""
+  for a in "$@"; do
+    case "$(lc "$a")" in *api.github.com*) hit=1 ;; esac
+  done
+  [ "$hit" = 1 ] || return
+  for a in "$@"; do
+    if [ "$method" = "next" ]; then method=$a; continue; fi
+    case "$a" in
+      -X | --request) method=next ;;
+      -X* | --request=*) method=${a#-X}; method=${method#--request=} ;;
+      -d* | --data* | -F | --form* | --json* | -T | --upload-file* | --post-data* | --post-file* | --method=*) write=1 ;;
+    esac
+  done
+  case "$(lc "$method")" in "" | get | head | next) ;; *) write=1 ;; esac
+  [ "$write" = 1 ] && block "it writes to the GitHub API outside gh"
+}
+
+# find NAMES-A-SECRET -exec ... / -print0 / piped / inside $(...): it hands the secret on.
+check_find() {
+  local meta=$1 depth=$2
+  shift 2
+  local secret=0 hands_on=0 a v
+  local -a ex
+  [[ ${meta:1:1} == p || ${meta:2:1} == s ]] && hands_on=1
+  while [ $# -gt 0 ]; do
+    a=$1
+    shift
+    case "$a" in
+      -name | -iname | -path | -ipath | -wholename | -iwholename | -regex | -iregex)
+        v=${1:-}
+        shift
+        find_pattern_secret "$a" "$v" && secret=1
+        ;;
+      -exec | -execdir | -ok | -okdir)
+        hands_on=1
+        ex=()
+        while [ $# -gt 0 ] && [ "$1" != ";" ] && [ "$1" != "+" ]; do ex+=("$1"); shift; done
+        [ $# -gt 0 ] && shift
+        [ "${#ex[@]}" -gt 0 ] && check_segment "$depth" "---" "" "${ex[@]}"
+        ;;
+      -print0 | -fprint | -fprint0 | -fprintf | -fls | -printf) hands_on=1 ;;
+      -*) ;;
+      *) is_secret_path "$a" && secret=1 ;;
+    esac
+  done
+  if [ "$secret" = 1 ] && [ "$hands_on" = 1 ]; then
+    block "find hands a secret file to another command"
+  fi
+}
+
+find_pattern_secret() {
+  local flag=$1 pat=$2 cand
+  case "$pat" in *"$DY"*) return 0 ;; esac # a pattern from a variable: assume the worst
+  case "$flag" in
+    -regex | -iregex)
+      for cand in ./backend/.env ./.env /home/u/.ssh/id_rsa /home/u/.forge-token /home/u/.claude/.credentials.json /home/u/.config/mroom/secrets/forge-token; do
+        [[ $cand =~ $pat ]] && return 0
+      done
+      ;;
+    -name | -iname)
+      [ "$flag" = -iname ] && pat=$(lc "$pat")
+      for cand in .env .env.local .env.testing .env.production .envrc .forge-token .credentials.json id_rsa id_ed25519 hosts.yml forge-token mcp.env; do
+        # shellcheck disable=SC2053 # $pat is a glob on purpose
+        [[ $cand == $pat ]] && return 0
+      done
+      ;;
+    *)
+      [[ $flag == -i* ]] && pat=$(lc "$pat")
+      for cand in ./backend/.env ./.env /home/u/.ssh/id_rsa /home/u/.ssh/id_ed25519 /home/u/.config/gh/hosts.yml /home/u/.forge-token /home/u/.claude/.credentials.json /home/u/.config/mroom/secrets/forge-token /home/u/.config/tool/mcp.env; do
+        # shellcheck disable=SC2053 # $pat is a glob on purpose
+        [[ $cand == $pat ]] && return 0
+      done
+      ;;
+  esac
+  return 1
+}
+
+# git: shell aliases (`!cmd`), config keys that run a command, and working-tree secrets.
+check_git() {
+  local depth=$1
+  shift
+  local a v sub="" k
+  local -a rest=()
+  while [ $# -gt 0 ]; do
+    a=$1
+    shift
+    case "$a" in
+      -c) v=${1:-}; shift; check_git_config_pair "$depth" "$v" ;;
+      -c*) check_git_config_pair "$depth" "${a#-c}" ;;
+      --config-env=*) case "$(lc "$a")" in *=alias.*) block "git --config-env defines an alias that cannot be checked" ;; esac ;;
+      -C | --git-dir | --work-tree | --namespace) shift ;;
+      -*) ;;
+      *) sub=$a; rest=("$@"); break ;;
+    esac
+  done
+  [ -n "$BLOCKED" ] && return
+  case "$sub" in
+    config) check_git_config_set "$depth" ${rest[@]+"${rest[@]}"} ;;
+    push) check_git_push ${rest[@]+"${rest[@]}"} ;;
+    credential | credential-*) block "git $sub reads or stores a credential" ;;
+    diff | show | cat-file | grep | blame | add | hash-object | update-index)
+      for ((k = 0; k < ${#rest[@]}; k++)); do
+        a=${rest[$k]}
+        case "$a" in -* | *:*) continue ;; esac # REV:path is committed content
+        if is_secret_path "$a"; then
+          block "git $sub would read a secret file ($a)"
+          return
+        fi
+      done
+      ;;
+  esac
+}
+
+# Git config keys whose value is a command git runs (or, for core.hooksPath, a directory of them).
+is_git_command_key() {
+  case "$1" in
+    core.pager | core.editor | core.sshcommand | core.fsmonitor | core.hookspath | core.askpass | sequence.editor | diff.external | gpg.program | gpg.*.program | credential.helper | credential.*.helper | *.command | *.cmd | *.textconv | filter.* | merge.*.driver | interactive.difffilter | uploadpack.packobjectshook) return 0 ;;
+  esac
+  return 1
+}
+
+# git -c KEY=VALUE for one command: a shell alias or a hooks directory is refused, a command value
+# is checked as a command (so `-c core.editor=true` still works).
+check_git_config_pair() {
+  local depth=$1 pair=$2 key value
+  [ "${#pair}" -le 4096 ] || { block "a git -c value too long to check"; return; }
+  key=$(lc "${pair%%=*}")
+  value=${pair#*=}
+  case "$key" in
+    alias.*)
+      if [ "${value:0:1}" = "!" ]; then
+        block "git -c $key defines a shell alias (!...), which can run anything"
+      else
+        check_git_alias "$depth" "$value"
+      fi
+      ;;
+    core.hookspath) block "git -c core.hooksPath runs hooks from a directory this hook cannot read" ;;
+    *)
+      if is_git_push_key "$key"; then
+        block "git -c $key changes what a push does (force, mirror or tags)"
+      elif is_git_command_key "$key"; then
+        analyze "${value#!}" $((depth + 1))
+      fi
+      ;;
+  esac
+}
+
+# git config ... KEY VALUE (any scope, the old and the `set` syntax): setting a key that runs a
+# command, or a shell alias, is refused; reading, listing and unsetting pass.
+check_git_config_set() {
+  local depth=$1
+  shift
+  local -a ops=()
+  local a key value read=0
+  while [ $# -gt 0 ]; do
+    a=$1
+    shift
+    case "$a" in
+      --get | --get-all | --get-regexp | --get-urlmatch | --list | -l | --unset | --unset-all | --remove-section | --rename-section | --edit | -e) read=1 ;;
+      -f | --file | --blob | --type | --default | --comment | -t) shift ;;
+      -*) ;;
+      *) ops+=("$a") ;;
+    esac
+  done
+  [ "$read" = 1 ] && return
+  case "${ops[0]:-}" in
+    get | list | unset | remove-section | rename-section | edit) return ;;
+    set) key=${ops[1]:-}; value=${ops[2]:-}; [ "${#ops[@]}" -ge 3 ] || return ;;
+    *) key=${ops[0]:-}; value=${ops[1]:-}; [ "${#ops[@]}" -ge 2 ] || return ;;
+  esac
+  key=$(lc "$key")
+  case "$key" in
+    alias.*)
+      if [ "${value:0:1}" = "!" ]; then
+        block "git config defines a shell alias (!...), which can run anything"
+      else
+        check_git_alias "$depth" "$value"
+      fi
+      ;;
+    *)
+      if is_git_command_key "$key"; then
+        block "git config sets $key, which makes git run a command"
+      elif is_git_push_key "$key"; then
+        block "git config sets $key, which makes a later push force, mirror or push tags"
+      fi
+      ;;
+  esac
+}
+
+# Git config keys that change what a plain `git push` does: a refspec (which can start with +), mirroring,
+# and pushing tags.
+is_git_push_key() {
+  case "$1" in
+    remote.*.push | remote.*.mirror | push.followtags | push.pushoption) return 0 ;;
+  esac
+  return 1
+}
+
+# A git alias that is not a shell alias runs a git subcommand: check it as `git VALUE`, so `push -f` behind a
+# new name is refused too.
+check_git_alias() {
+  [ "${#2}" -le 4096 ] || { block "a git alias too long to check"; return; }
+  analyze "git $2" $(($1 + 1))
+}
+
+# Branch names a push must never update (the default branch, and the branch a deploy points at the release
+# tag, design section 10), and tag names that look like releases.
+is_protected_ref() {
+  local r
+  r=$(lc "$1")
+  r=${r#refs/heads/}
+  case "$r" in
+    main | master | release) return 0 ;;
+    refs/tags/* | v[0-9]* | release-v*) return 0 ;;
+  esac
+  return 1
+}
+
+# git push [options] [remote [refspec...]]: any form of force (git takes a long option's unambiguous
+# abbreviation, so `--forc` is `--force`), a mirror, tags, or a push to a protected branch.
+check_git_push() {
+  local a g c npos=0 src dst
+  while [ $# -gt 0 ]; do
+    a=$1
+    shift
+    case "$a" in
+      --no-*) continue ;;
+      --for* | --mi*) block "git push $a force-pushes"; return ;;
+      --ta* | --fol*) block "git push $a pushes tags, which can start a release"; return ;;
+      --all | --al*) block "git push $a pushes every branch, the default branch too"; return ;;
+      --repo | --receive-pack | --exec | --push-option) shift; continue ;;
+      --*) continue ;;
+      -*)
+        g=${a#-}
+        [ "${#g}" -le 64 ] || { block "a git push option too long to check"; return; }
+        while [ -n "$g" ]; do
+          c=${g:0:1}
+          g=${g:1}
+          case "$c" in
+            f) block "git push $a force-pushes"; return ;;
+            o) [ -n "$g" ] || shift; break ;; # -o takes a value, glued or next
+          esac
+        done
+        continue
+        ;;
+    esac
+    npos=$((npos + 1))
+    [ "$npos" = 1 ] && continue # the remote
+    case "$a" in
+      +*) block "git push $a force-pushes (a + refspec)"; return ;;
+      *"$DY"*) block "git push with a refspec from a variable cannot be checked"; return ;;
+    esac
+    src=${a%%:*}
+    dst=${a#*:}
+    if is_protected_ref "$dst" || { [ "$src" = "$a" ] && is_protected_ref "$src"; }; then
+      block "git push $a updates a protected branch or pushes a tag"
+      return
+    fi
+  done
+}
+
+# NAME=value (or NAME+=value) before a command. Git's config-in-the-environment and SSH command
+# variables are refused outright (they can set any key above, invisibly); command-valued ones
+# (pagers, editors) are checked as commands; BASH_ENV/ENV naming a secret is a read.
+check_assignment() {
+  local depth=$1 word=$2 name value
+  [ "${#word}" -le 4096 ] || return
+  name=${word%%=*}
+  name=${name%+}
+  value=${word#*=}
+  case "$name" in
+    GIT_CONFIG_COUNT | GIT_CONFIG_KEY_* | GIT_CONFIG_VALUE_* | GIT_CONFIG_PARAMETERS | GIT_CONFIG | GIT_CONFIG_GLOBAL | GIT_CONFIG_SYSTEM | GIT_SSH_COMMAND | GIT_SSH)
+      block "$name sets git configuration or its SSH command from the environment, which cannot be checked"
+      ;;
+    GIT_EXTERNAL_DIFF | GIT_PAGER | GIT_EDITOR | GIT_SEQUENCE_EDITOR | GIT_ASKPASS | SSH_ASKPASS | PAGER | EDITOR | VISUAL | PROMPT_COMMAND)
+      analyze "$value" $((depth + 1))
+      ;;
+    BASH_ENV | ENV) is_secret_path "$value" && block "$name would source a secret file ($value)" ;;
+  esac
+}
+
+# check_segment DEPTH META PREV_RECORD WORD...: one simple command, after taking out redirections
+# and stripping wrappers. META comes from the tokeniser; PREV_RECORD is the command piping into it.
+check_segment() {
+  local depth=$1 meta=$2 prev=$3
+  shift 3
+  local -a words=()
+  local a k base stdin="" stdin_kind="" stdin_file="" brace_list=0
+  local -a raw=("$@")
+
+  # Redirections can sit anywhere, even before the command word (`<<EOF bash`, `2>&1 gh ...`).
+  for ((k = 0; k < ${#raw[@]}; k++)); do
+    a=${raw[$k]}
+    case "$a" in
+      "${MK}HD" | "${MK}HS") k=$((k + 1)); stdin=${raw[$k]}; stdin_kind=static ;;
+      "${MK}R<") k=$((k + 1)); stdin_file=${raw[$k]}; stdin_kind="file" ;;
+      "${MK}R>") k=$((k + 1)) ;;
+      "${MK}BL") brace_list=1 ;;
+      "${MK}UE") block "a \$'...' escape (\\u, \\U or \\c) that cannot be decoded here"; return ;;
+      *) words+=("$a") ;;
+    esac
+  done
+  if [ -n "$stdin_file" ] && is_secret_path "$stdin_file"; then
+    block "it reads a secret file ($stdin_file) through a redirection"
+    return
+  fi
+  if [ -z "$stdin_kind" ] && [ "${meta:0:1}" = p ]; then
+    if stdin=$(static_output "$prev"); then stdin_kind=static; else stdin_kind=pipe; fi
+  fi
+
+  set -- ${words[@]+"${words[@]}"}
+  while [ $# -gt 0 ]; do
+    [ -n "$BLOCKED" ] && return
+    if [[ $1 =~ ^[A-Za-z_][A-Za-z0-9_]*\+?= ]]; then
+      check_assignment "$depth" "$1"
+      shift
+      continue
+    fi
+    cmd_name "$1"; base=$NAME
+    case "$base" in
+      sudo | doas)
+        shift
+        while [ $# -gt 0 ] && [[ $1 == -* ]]; do
+          case "$1" in -u | -g | -C | -h | -p | -U) shift ;; esac
+          shift
+        done
+        ;;
+      env)
+        shift
+        while [ $# -gt 0 ] && [[ $1 == -* || $1 =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; do
+          case "$1" in
+            -S | --split-string) analyze "${2:-}" $((depth + 1)); return ;;
+            -u | -C | --unset | --chdir) shift ;;
+            -*) ;;
+            *) check_assignment "$depth" "$1" ;;
+          esac
+          shift
+        done
+        ;;
+      command | builtin | exec | nohup | time | nice | ionice | stdbuf | caffeinate | unbuffer | xargs | timeout | gtimeout | then | do | else | elif | if | while | until | '!' | '{' | '}' | '[[' | npx | bunx | arch | noglob | nocorrect)
+        shift
+        while [ $# -gt 0 ] && [[ $1 == -* || $1 =~ ^[0-9.]+[smhd]?$ || $1 == '{}' ]]; do
+          case "$1" in -I | -n | -P | -L | -d | -E | -s | -c | -k | -a | --signal | --kill-after | -p | --package) shift ;; esac
+          shift
+        done
+        ;;
+      pnpm | yarn | npm | bun)
+        shift
+        while [ $# -gt 0 ] && [[ $1 == -* ]]; do
+          case "$1" in -C | --dir | --filter | -F | -w | --workspace | -p | --package) shift ;; esac
+          shift
+        done
+        case "${1:-}" in exec | dlx | x | run) shift ;; esac
+        while [ $# -gt 0 ] && [[ $1 == -* ]]; do
+          case "$1" in -p | --package) shift ;; esac
+          shift
+        done
+        ;;
+      watch)
+        shift
+        while [ $# -gt 0 ] && [[ $1 == -* ]]; do
+          case "$1" in -n | --interval | -d) shift ;; esac
+          shift
+        done
+        analyze "$*" $((depth + 1))
+        return
+        ;;
+      eval)
+        shift
+        analyze "$*" $((depth + 1))
+        return
+        ;;
+      *)
+        case "$SHELLS" in
+          *" $base "*) shift; check_shell "$depth" "$stdin_kind" "$stdin" "$@"; return ;;
+        esac
+        break
+        ;;
+    esac
+  done
+  [ $# -gt 0 ] || return
+  local cmd
+  cmd_name "$1"; cmd=$NAME
+  shift
+  case "$cmd" in
+    *"$DY"*) check_gh "$@" ;; # a command from a variable: at least catch `$GH pr merge`
+  esac
+  if [ "${#cmd}" -le 4096 ]; then
+    case "$cmd" in *[{}]*,*) block "brace expansion in a command name cannot be checked"; return ;; esac
+  fi
+  [ -n "$BLOCKED" ] && return
+  # A brace list in an argument (`cat {.env,}`, `.env{,}`) expands to names this hook never sees.
+  if [ "$brace_list" = 1 ]; then
+    case "$READERS$INTERPRETERS gh git find " in
+      *" $cmd "*) block "brace expansion in a $cmd argument cannot be checked"; return ;;
+    esac
+  fi
+  case "$cmd" in
+    git-credential-*) block "$cmd reads or stores a credential"; return ;;
+    security)
+      case "${1:-}" in
+        find-generic-password | find-internet-password | find-key | find-certificate | dump-keychain | export | export-keychain)
+          block "security $1 reads the keychain"
+          return
+          ;;
+      esac
+      ;;
+  esac
+
+  case "$INTERPRETERS" in
+    *" $cmd "*) check_interpreter "$cmd" "$stdin_kind" "$stdin" "$@"; return ;;
+  esac
+  case "$cmd" in
+    gh) check_gh "$@" ;;
+    git) check_git "$depth" "$@" ;;
+    curl | wget | http | https) check_http "$@" ;;
+    find) check_find "$meta" "$depth" "$@" ;;
+    source | .)
+      for a in "$@"; do
+        [ "$a" = "${MK}PS" ] && block "$cmd of a process substitution cannot be checked"
+      done
+      ;;
+  esac
+  [ -n "$BLOCKED" ] && return
+  check_secrets "$cmd" "$@"
+}
+
+# check_shell DEPTH STDIN_KIND STDIN ARG...: bash/sh/zsh with -c, a script file, or stdin.
+check_shell() {
+  local depth=$1 stdin_kind=$2 stdin=$3
+  shift 3
+  local a script="" has_c=0 from_stdin=0 file="" skip=0 opts=1
+  # Options first: short groups (-ec, +x), and -o/+o/-O/+O whose next word is an option name, not
+  # a script. The first other word is the -c string or the script file.
+  for a in "$@"; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    if [ "$opts" = 1 ]; then
+      case "$a" in
+        --) opts=0; continue ;;
+        --rcfile | --init-file) skip=1; continue ;;
+        --*) continue ;;
+        - ) from_stdin=1; opts=0; continue ;;
+        [-+]*)
+          case "$a" in *[oO]*) skip=1 ;; esac
+          case "$a" in -*c*) has_c=1 ;; esac
+          case "$a" in -*s*) from_stdin=1 ;; esac
+          continue
+          ;;
+      esac
+      opts=0
+    fi
+    if [ "$has_c" = 1 ]; then
+      [ -n "$script" ] || script=$a
+    else
+      [ -n "$file" ] || file=$a
+    fi
+  done
+  if [ "$has_c" = 1 ]; then
+    [ -n "$script" ] && analyze "$script" $((depth + 1))
+    return
+  fi
+  if [ "$file" = "${MK}PS" ]; then
+    block "a shell running a process substitution cannot be checked"
+    return
+  fi
+  if [ -n "$file" ] && is_secret_path "$file"; then
+    block "a shell would run (and with -x or -v print) a secret file ($file)"
+    return
+  fi
+  [ -n "$file" ] && [ "$from_stdin" = 0 ] && return # a script file: not read here
+  case "$stdin_kind" in
+    static) analyze "$stdin" $((depth + 1)) ;;
+    file) block "a shell reading commands from a file through < cannot be checked" ;;
+    pipe) block "a shell reading commands from a pipe it cannot read (only echo, printf and cat of a heredoc can be checked)" ;;
+  esac
+}
+
+# check_interpreter CMD STDIN_KIND STDIN ARG...: python -c / php -r / node -e code, or code on stdin.
+check_interpreter() {
+  local cmd=$1 stdin_kind=$2 stdin=$3
+  shift 3
+  local a inline=0 positional=0
+  for a in "$@"; do
+    case "$a" in
+      -c | -e | -E | -r | -p | --eval | --print | --eval=* | --print=* | -m | -f | eval | run) inline=1 ;;
+      -) ;;
+      -*) ;;
+      *) positional=1 ;;
+    esac
+    check_code "inline $cmd code" "$a"
+    [ -n "$BLOCKED" ] && return
+  done
+  if [ "$inline" = 0 ] && [ "$positional" = 0 ] && [ "$stdin_kind" = static ]; then
+    check_code "$cmd code on stdin" "$stdin"
+  fi
+}
+
+# analyze STRING DEPTH: tokenise STRING and check each simple command.
+analyze() {
+  local s=$1 depth=$2 out rec prev="" status=0
+  [ "$depth" -le 8 ] || { block "the command nests shells too deeply to check"; return; }
+  out=$(printf '%s' "$s" | "$AWK" -f "$TOKENIZER") || status=$?
+  if [ "$status" != 0 ]; then
+    block "the command could not be parsed to check it"
+    return
+  fi
+  [ -n "$out" ] || return
+  local -a f
+  while IFS= read -r rec; do
+    [ -n "$BLOCKED" ] && return
+    COMMANDS=$((COMMANDS + 1))
+    if [ "$COMMANDS" -gt "$MAX_COMMANDS" ]; then
+      block "the command has more than $MAX_COMMANDS simple commands, too many to check in time"
+      return
+    fi
+    IFS=$US read -r -a f <<<"$rec"
+    check_segment "$depth" "${f[0]}" "$prev" "${f[@]:1}"
+    prev=$rec
+  done <<<"$out"
+}
+
+if [ ! -r "$TOKENIZER" ]; then
+  block "its tokeniser ($TOKENIZER) is missing"
+elif [ "${#command}" -gt "$MAX_BYTES" ]; then
+  block "the command is over $MAX_BYTES bytes, too long to check in time"
+else
+  analyze "$command" 0
+fi
+
+if [ -n "$BLOCKED" ]; then
+  {
+    echo "Refused by mroom guard: $BLOCKED."
+    echo "Agents never merge, approve, release, force-push or read secrets; a person does that."
+    echo "Stop and ask a person to run it themselves if it is really needed."
+  } >&2
+  exit 2
+fi
+[ "$mode" = check ] && echo allowed
+exit 0

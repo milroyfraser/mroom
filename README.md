@@ -22,8 +22,9 @@ The full design, including how each requirement is measured, is in [docs/design.
 
 **Pre-alpha, phase 1 of 6 under way.** What exists today: the skeleton (the `mroom` front door,
 `mroom config`, the one reader of `mroom.toml` and `box.env`, `install.sh`, tests and CI) and the first
-part of phase 1: the [box watchdog](#box-watchdog) with its job records, and the
-[regression label](#regression-label) check with its measures. Every other command prints
+part of phase 1: the [box watchdog](#box-watchdog) with its job records, the
+[regression label](#regression-label) check with its measures, and the
+[guard, the plugin's skeleton and the settings fragments](#guard-and-settings). Every other command prints
 `not yet: phase N`. The phases and what each delivers are in
 [section 11 of the design](docs/design.md#11-phases). Expect breaking changes in every `0.x` release.
 
@@ -258,6 +259,60 @@ To store the token without it showing on screen or in history:
 
 On a runner, the QA actions use the same client (`lib/core/forge.sh`) with `MROOM_FORGE_ORG`,
 `MROOM_FORGE_SERVER` and `MROOM_FORGE_TOKEN` in the environment.
+
+## Guard and settings
+
+Agents never merge, approve, release, force-push or read secrets; a person does that. Two layers
+keep them to it (design 8.3), and GitHub is the gate behind both.
+
+**`mroom guard`** is a `PreToolUse` hook on Claude Code's Bash tool. It parses the whole command:
+each command in a chain (`;`, `&&`, `||`, `|`, newlines), inside `bash -c`, `eval`, `$(...)`,
+backticks, subshells and heredocs, behind wrappers such as `sudo`, `env`, `xargs` and `npx`. It
+refuses, among others:
+
+- `gh pr merge`, `gh pr review --approve`, and `gh api` writes to `/merge`, `/merges`, `/reviews`
+  with `APPROVE`, `/releases` and `/git/refs`, and GraphQL merges, ref updates and deploy approvals;
+- `git push` with any form of force (`-f`, `--force`, `--force-with-lease`, `--mirror`, a `+`
+  refspec, abbreviations too), with tags, or to `main`, `master` or `release`; git config or aliases
+  that would make a later push do one of those; `gh pr update-branch --rebase`;
+- reading `.env*` (not `*.example`), `~/.ssh` (not `*.pub`), `~/.config/gh*`,
+  `~/.config/mroom/secrets`, any `*.env` under `~/.config`, `~/.forge-token` and Claude's
+  credentials, through any reader, interpreter or redirection; `gh auth token`.
+
+```bash
+mroom guard check 'true && git push --force origin feat/x'   # exit 2, and why
+mroom guard check 'git push -u origin feat/x'                # allowed
+```
+
+**It is a speed bump, not a boundary.** A command built from variables (`$CMD`), a script file
+(`bash x.sh`), an alias already in a config file or `ssh host 'cmd'` gets past it. Without jq or
+awk it is off and says so; a command it cannot parse is refused. The real gate is GitHub: the
+default branch's ruleset, review by people, and the `production` environment (design D22).
+
+**The plugin** in `plugin/` runs the guard. Claude Code copies a plugin without the rest of this
+repository, so its hook runs the installed `mroom guard hook` (from `PATH` or `~/.local/bin`):
+
+```text
+/plugin install mroom --marketplace milroyfraser/mroom
+```
+
+(On a Claude Code older than 2.1.275: `/plugin marketplace add milroyfraser/mroom`, then
+`/plugin install mroom@mroom`.)
+
+**Settings fragments** in `settings/` are the second layer: prefix rules (`allow`, `ask`, `deny`)
+for `.claude/settings.json`. A plugin cannot set permissions, so `mroom init` (coming in phase 1)
+will merge them into the app's settings:
+
+| Fragment | For |
+|---|---|
+| `base.json` | every app: git and gh reads, pushes and releases ask, merges, approvals, force-pushes and secret reads denied |
+| `laravel-vite.json` | Laravel and Vite: tests, linters and builds allowed; migrations, seeds and tinker ask |
+| `forge.json` | Forge: `forge-api GET` allowed; the Forge CLI and its tokens denied |
+| `tracker-linear.json` | a Linear tracker: GitHub issue writes denied |
+
+The merge joins every list. Claude Code checks deny first, then ask, then allow, so an `allow` rule
+never overrides an `ask` or a `deny`. `tests/settings-test.sh` checks each fragment and what the
+merged set decides for common commands.
 
 ## QA gate
 
