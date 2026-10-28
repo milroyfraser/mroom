@@ -183,6 +183,73 @@ id_pattern = "(SHOP"'
   expect_err_has "issues.id_pattern is not a valid regular expression"
 }
 
+t_optional_prints_nothing_for_an_unset_key() {
+  toml '[app]
+name = "shop"
+
+[errors]
+org = "example-org"'
+  run "$MROOM" config get errors.org --optional; expect_rc 0; expect_out example-org
+  run "$MROOM" config get errors.provider --optional; expect_rc 0; expect_out ""; expect_err_empty
+  run "$MROOM" config get issues.team --optional --json; expect_rc 0; expect_out null
+  run "$MROOM" config get errors.provider --optional --default sentry; expect_rc 2
+  run "$MROOM" config get errors.provider; expect_rc 1; expect_err_has "errors.provider is not set"
+}
+
+t_adapter_rules() {
+  toml '[app]
+name = "shop"
+
+[issues]
+tracker = "linear"
+team = "ENG TEAM"
+token_env = "MROOM_FORGE_TOKEN"
+
+[errors]
+provider = "sentry"
+org = "Example Org"
+region = "eu"
+id_pattern = "(SHOP"
+token_env = "lower_case"'
+  run "$MROOM" config validate; expect_rc 1
+  expect_err_has 'issues.team must be a team key'
+  expect_err_has 'issues.token_env must be an environment variable'
+  expect_err_has 'errors.org must be an organisation slug'
+  expect_err_has 'errors.region must be one of us, de (got "eu")'
+  expect_err_has "errors.id_pattern is not a valid regular expression"
+  expect_err_has 'errors.token_env must be an environment variable'
+  toml '[app]
+name = "shop"
+
+[issues]
+tracker = "linear"
+team = "ENG"
+token_env = "SHOP_LINEAR_API_KEY"
+
+[errors]
+provider = "sentry"
+org = "example-org"
+region = "de"
+id_pattern = "SHOP-[A-Z0-9]+"
+token_env = "GH_TOKEN"'
+  run "$MROOM" config validate; expect_rc 1; expect_err_has 'errors.token_env must be an environment variable'
+  sed -i 's/GH_TOKEN/SHOP_SENTRY_TOKEN/' "$T/mroom.toml"
+  run "$MROOM" config validate; expect_rc 0
+  run "$MROOM" config get errors.region; expect_out de
+  local bad
+  for bad in APP_KEY SHOP_LINEAR AWS_SESSION_TOKEN FORGE_API_TOKEN SHOP_SECRET_TOKEN SENTRY_AUTH_TOKEN; do
+    printf '[app]\nname = "shop"\n[issues]\ntoken_env = "%s"\n' "$bad" >"$T/mroom.toml"
+    run "$MROOM" config validate; expect_rc 1; expect_err_has "issues.token_env"
+  done
+  printf '[app]\nname = "shop"\n[issues]\ntoken_env = ["SHOP_LINEAR_API_KEY"]\n' >"$T/mroom.toml"
+  run "$MROOM" config validate; expect_rc 1; expect_err_has "issues.token_env must be a string"; expect_err_lacks "Traceback"
+  printf '[app]\nname = "shop"\n[errors]\ntoken_env = "LINEAR_API_KEY"\n' >"$T/mroom.toml"
+  run "$MROOM" config validate; expect_rc 1; expect_err_has "must name different variables"
+  run "$MROOM" config get errors.token_env; expect_rc 1; expect_err_has "must name different variables"
+  printf '[app]\nname = "shop"\n[issues]\ntoken_env = "SHOP_LINEAR_API_KEY"\n' >"$T/mroom.toml"
+  run "$MROOM" config validate; expect_rc 0
+}
+
 t_qa_rules() {
   toml '[app]
 name = "shop"
@@ -279,6 +346,8 @@ test_case get-errors-scoped-to-key t_get_errors_scoped_to_key
 test_case default-takes-the-key-type t_default_takes_the_key_type
 test_case type-errors t_type_errors
 test_case rules t_rules
+test_case optional t_optional_prints_nothing_for_an_unset_key
+test_case adapter-rules t_adapter_rules
 test_case qa-rules t_qa_rules
 test_case shape-errors t_shape_errors
 test_case bad-toml t_bad_toml
