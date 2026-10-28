@@ -644,7 +644,8 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
 Each pull request can have a QA environment of its own on the box: `api.<N>.<zone>` for the Laravel app and,
 for a frontend of its own, `<N>.<zone>`, with the services the QA gate gives it (design 8.2). Reusable
 workflows run it; the app calls each from a workflow of its own, pinned to the mroom release the box runs
-(`v0.4.0` below is the first release with these workflows):
+(`v0.5.0` below is the next release tag, the first with these host names; 0.4.0's workflows name the sites
+differently):
 
 | Workflow | Runs on | What it does |
 |---|---|---|
@@ -664,10 +665,15 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
   reaper warns about it: the same one two nights running needs a person in Forge.
 - **Environments of mroom before 0.5.0** have their sites at `api-<N>.<zone>` and `go-<N>.<zone>`, with their
   cookies set for the whole zone. They are found, counted, reaped and torn down like any, but not refreshed under
-  the new names beside the old: a deploy to one stops and says to tear it down (`gh workflow run qa-down.yml -f
-  pr_number=<N>`), and the next deploy brings it up as `<N>.<zone>` and `api.<N>.<zone>`. The box and the app's
-  workflow pins move to 0.5.0 together, with the root recipe run again for its `site-op`, since the two releases
-  name the sites differently: until both have moved, deploys fail and the next push tries again.
+  the new names beside the old: a deploy to one stops before it changes anything and says to tear it down (`gh
+  workflow run qa-down.yml -f pr_number=<N>`), and the next deploy brings it up under the new names. Moving to
+  0.5.0, the box and the app's workflow pins move together, since the two releases name the sites differently,
+  and the root recipe runs again as soon as 0.5.0 is installed: until the box has 0.5.0's `site-op`, the gate
+  refuses work in a site, a teardown's included. With `MROOM_QA_CERTIFICATE` set, each API site now asks Let's
+  Encrypt for its own. A browser that used an environment of before 0.5.0 keeps its cookies, set for the whole
+  zone, until they expire. The new cookie names keep them from being read in place of the new ones, but Laravel's
+  remember-me cookie keeps one name, so clear the zone's cookies once. Going back to 0.4.0 needs every
+  environment torn down first: 0.4.0 neither sees nor deletes sites of the new names.
 - **A teardown.** qa-down's first job only reads Forge, so a pull request that never had an environment gets no
   teardown; one started by hand or by the reaper skips it. The second job runs every step, each skipping what is
   already gone, whether or not Forge still has a site: daemons first, since supervisor starts again what is
@@ -754,8 +760,9 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
 - **The `.env`.** `MROOM_QA_ENV_TEMPLATE` (third-party test-mode keys only: no app key, no credential for the
   box), less every entry whose key mroom sets (read entry by entry, so a quoted value of several lines stays
   whole), then mroom's: the `APP_KEY` the gate keeps for the environment, `APP_ENV=qa` (which Laravel counts as
-  not production: a known gap, design 9), `APP_DEBUG=false`, the public values below, the database, Redis user,
-  host, port and prefixes the gate gives, and as `[qa.parity]` says: the mail login with plain SMTP to the box
+  not production: a known gap, design 9), `APP_DEBUG=false`, `SESSION_SECURE_COOKIE=true` (the hosts answer over
+  https alone, so the cookies never go over http), the public values below, the database, Redis user, host, port
+  and prefixes the gate gives, and as `[qa.parity]` says: the mail login with plain SMTP to the box
   (`MAIL_SCHEME=smtp`, `MAIL_ENCRYPTION=null`, whatever the template says) for `catcher`, or `MAIL_MAILER=log`;
   for each disk of `qa.disks`, a bucket and a key of its own under Laravel's s3 env names with the disk's prefix
   in place of `AWS_` (`files = "AWS_"` gives `AWS_BUCKET`, `AWS_ACCESS_KEY_ID` and the rest; a disk in
@@ -772,8 +779,9 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
   any other `env:<KEY>` is empty, since the build runs the pull request's code. A frontend of its own reads the
   session and XSRF cookies the Laravel app sets, so they are set for `.<N>.<zone>`: no other environment's host
   is under it, and neither are the zone's shared hosts, Garage's and the Reverb host's. An app with no frontend
-  of its own keeps them on its one host. Their names are the environment's own too, `<app>_qa_<N>_session` and
-  `<app>_qa_<N>_xsrf`.
+  of its own keeps them on its one host. Their names are the environment's own too, `<app>_qa_<N>_sid` and
+  `<app>_qa_<N>_csrf`, and not those of before 0.5.0: a browser may hold cookies of those for the whole zone
+  until they expire, and would send them first.
 - **The path rules.** The plan is `none` when every changed path is one no user can see: tests, docs, CI,
   agent and developer tooling; any other path, a path outside the app's folders included, makes it `maybe`.
   A renamed file counts with both its names, and a name that holds a control character, a newline among them,
@@ -791,7 +799,8 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
    against the box's own `/etc/ssh/ssh_host_ed25519_key.pub`) and, when they apply, `MROOM_QA_SSH_USER` (when
    the box user is not `forge`), `MROOM_QA_CERTIFICATE` (a certificate in Forge to clone onto a frontend's site,
    such as one for `*.<zone>`; the API's site, `api.<N>.<zone>`, is a level below what that names, so it asks
-   Let's Encrypt, as every site does without it) and `MROOM_QA_NGINX_TEMPLATE` (an nginx template for new
+   Let's Encrypt, as every site does without it, which checks the site over http: the box answers on port 80
+   for the zone's names) and `MROOM_QA_NGINX_TEMPLATE` (an nginx template for new
    sites) go in the repository's variables, not the `qa` environment's: none is secret, and every job of the
    called workflows reads the repository's, while GitHub's docs never say an environment's own reach a called
    workflow's job that sets `deployment: false`. Until `MROOM_FORGE_SERVER` is set, the workflows tear down and
@@ -827,7 +836,7 @@ jobs:
       actions: write # the hand-over, for a plan the wake started; the build job itself only reads
       contents: read
       pull-requests: read
-    uses: milroyfraser/mroom/.github/workflows/qa-plan.yml@v0.4.0
+    uses: milroyfraser/mroom/.github/workflows/qa-plan.yml@v0.5.0
     with:
       pr: ${{ inputs.pr_number || github.event.pull_request.number }}
 ```
@@ -853,7 +862,7 @@ jobs:
       actions: write # read the plan's run, and start next-workflows after a hand-over
       contents: read
       pull-requests: write
-    uses: milroyfraser/mroom/.github/workflows/qa-up.yml@v0.4.0
+    uses: milroyfraser/mroom/.github/workflows/qa-up.yml@v0.5.0
     # with:
     #   next-workflows: qa-browser.yml # what follows qa-up on workflow_run, started by dispatch after a hand-over
     secrets:
@@ -881,7 +890,7 @@ jobs:
       actions: write
       contents: read
       pull-requests: write
-    uses: milroyfraser/mroom/.github/workflows/qa-down.yml@v0.4.0
+    uses: milroyfraser/mroom/.github/workflows/qa-down.yml@v0.5.0
     with:
       pr: ${{ inputs.pr_number || github.event.pull_request.number }}
       reason: ${{ inputs.reason || 'hand' }}
@@ -904,7 +913,7 @@ jobs:
     permissions:
       actions: write # to start a teardown for each environment past its time
       contents: read
-    uses: milroyfraser/mroom/.github/workflows/qa-reap.yml@v0.4.0
+    uses: milroyfraser/mroom/.github/workflows/qa-reap.yml@v0.5.0
     secrets:
       MROOM_FORGE_TOKEN: ${{ secrets.MROOM_FORGE_TOKEN }}
 ```
