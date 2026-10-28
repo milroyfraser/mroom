@@ -447,6 +447,77 @@ t_list_refuses_an_unbounded_or_bad_request() {
   expect_true "Linear was called" [ "$(calls)" = 0 ]
 }
 
+# find_node <id> <created> <description>: one issue as the find query answers it.
+find_node() {
+  jq -nc --arg id "$1" --arg at "$2" --arg d "$3" '{identifier: $id, title: ("Issue " + $id),
+    url: ("https://tracker.example.dev/issue/" + $id), branchName: ("b/" + $id), description: $d, createdAt: $at,
+    state: {name: "Triage", type: "triage"}, creator: {name: "Agent"}, labels: {nodes: [{name: "found-by-agent"}]}}'
+}
+M='<!-- mroom-alert key=sentry:1001 -->'
+
+t_find_asks_for_the_marker_in_the_team() {
+  world
+  answer 200 "$(list_page "$(find_node ENG-7 2026-01-03T00:00:00Z "Seen in checkout.
+$M")" false null)"
+  run "$MROOM" tracker find sentry:1001
+  expect_rc 0; expect_err_empty
+  expect_true "expected 1 call, got $(calls)" [ "$(calls)" = 1 ]
+  expect_true "the find query" has "$(query 1)" 'issues(first: 50, after: $after, filter: $f, orderBy: createdAt, includeArchived: true)'
+  expect_true "the query does not read the description" has "$(query 1)" 'description createdAt'
+  expect_true "the filter: $(vars 1)" [ "$(vars 1)" = '{"f":{"description":{"contains":"<!-- mroom-alert key=sentry:1001"},"team":{"key":{"eq":"ENG"}}}}' ]
+  expect_true "the answer: $out" json_is "$out" '. == [{identifier: "ENG-7", title: "Issue ENG-7",
+    url: "https://tracker.example.dev/issue/ENG-7", branch: "b/ENG-7", state: "Triage", state_type: "triage",
+    creator: "Agent", labels: ["found-by-agent"], created_at: "2026-01-03T00:00:00Z"}]'
+  expect_true "the description was passed on" lacks "$out" "Seen in checkout"
+  expect_true "the token leaked" token_nowhere
+  expect_true "a file was left in TMPDIR" tmp_empty
+}
+
+t_find_keeps_only_the_descriptions_that_hold_the_whole_marker() {
+  world $'tracker = "linear"'
+  # Linear's contains is a substring match: sentry:100's marker is in sentry:1001's description too.
+  answer 200 "$(list_page "$(find_node ENG-1 2026-01-01T00:00:00Z '<!-- mroom-alert key=sentry:1001 -->'),$(find_node ENG-2 2026-01-02T00:00:00Z 'The marker, quoted: `<!-- mroom-alert key=sentry:100`'),$(find_node ENG-3 2026-01-03T00:00:00Z '<!-- mroom-alert key=sentry:100 -->')" false null)"
+  run "$MROOM" tracker find sentry:100
+  expect_rc 0
+  expect_true "no team without issues.team: $(vars 1)" [ "$(vars 1)" = '{"f":{"description":{"contains":"<!-- mroom-alert key=sentry:100"}}}' ]
+  expect_true "a longer id's or a broken marker's issue was kept: $out" json_is "$out" '[.[].identifier] == ["ENG-3"]'
+}
+
+t_find_answers_an_empty_list_when_none_holds_it() {
+  world
+  answer 200 "$(list_page "" false null)"
+  run "$MROOM" tracker find sentry:1001
+  expect_rc 0; expect_err_empty; expect_out "[]"
+  reset; world
+  answer 200 "$(list_page "$(find_node ENG-1 2026-01-01T00:00:00Z 'Nothing here.'),$(jq -nc '{identifier: "ENG-2", title: "t", url: "u", branchName: null, description: null, createdAt: "2026-01-02T00:00:00Z", state: {name: "Todo", type: "unstarted"}, creator: null, labels: {nodes: []}}')" false null)"
+  run "$MROOM" tracker find sentry:1001
+  expect_rc 0; expect_out "[]"
+}
+
+t_find_reads_every_page_and_puts_the_first_filed_first() {
+  world
+  answer 200 "$(list_page "$(find_node ENG-9 2026-01-09T00:00:00Z "$M"),$(find_node ENG-4 2026-01-04T00:00:00Z 'First alert.
+<!-- mroom-alert key=sentry:1001:regressed:v1.4.0 -->')" true '"cursor-f-2"')"
+  answer 200 "$(list_page "$(find_node ENG-2 2026-01-02T00:00:00Z "$M")" false null)"
+  run "$MROOM" tracker find sentry:1001
+  expect_rc 0
+  expect_true "expected 2 calls, got $(calls)" [ "$(calls)" = 2 ]
+  expect_true "the second page lost the cursor" [ "$(vars 2 | jq -r .after)" = cursor-f-2 ]
+  expect_true "not every match, the first filed first: $out" json_is "$out" '[.[].identifier] == ["ENG-2", "ENG-4", "ENG-9"]'
+}
+
+t_find_refuses_a_bad_key_and_calls_nothing_without_a_tracker() {
+  world
+  run "$MROOM" tracker find; expect_rc 2; expect_err_has "usage: find <alert key"
+  run "$MROOM" tracker find SHOP-1A2; expect_rc 2; expect_err_has "not an alert key"
+  run "$MROOM" tracker find 'sentry:10 -->'; expect_rc 2; expect_err_has "not an alert key"
+  run "$MROOM" tracker find 'sentry:10"}'; expect_rc 2
+  run "$MROOM" tracker find sentry:1001 sentry:1002; expect_rc 2
+  world $'tracker = "none"'
+  run "$MROOM" tracker find sentry:1001; expect_rc 3; expect_err_has "no tracker to find an issue in"
+  expect_true "a tracker was called" [ "$(calls)" = 0 ]
+}
+
 t_the_backend_comes_from_config_and_none_calls_nothing() {
   world; answer 200 "$ISSUE"
   run "$MROOM" tracker backend; expect_rc 0; expect_out linear
@@ -509,6 +580,11 @@ test_case id-must-match t_an_id_must_match_the_pattern
 test_case list-mine-sorted t_list_mine_reads_every_page_and_sorts_by_priority
 test_case list-label-limit t_list_by_label_stops_at_its_limit
 test_case list-refuses t_list_refuses_an_unbounded_or_bad_request
+test_case find-asks-in-the-team t_find_asks_for_the_marker_in_the_team
+test_case find-whole-marker-only t_find_keeps_only_the_descriptions_that_hold_the_whole_marker
+test_case find-none t_find_answers_an_empty_list_when_none_holds_it
+test_case find-many-first-filed-first t_find_reads_every_page_and_puts_the_first_filed_first
+test_case find-refuses t_find_refuses_a_bad_key_and_calls_nothing_without_a_tracker
 test_case backend-from-config t_the_backend_comes_from_config_and_none_calls_nothing
 test_case usage-errors t_usage_errors
 finish
