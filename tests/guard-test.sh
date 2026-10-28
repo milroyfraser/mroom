@@ -38,6 +38,16 @@ refuse() {
   fi
 }
 
+# refuse_for REASON COMMAND: refused, and for the right reason (REASON is part of the message).
+refuse_for() {
+  refuse "$2"
+  count=$((count + 1))
+  if ! grep -qF -- "$1" "$err"; then
+    echo "FAIL [$AWK_UNDER_TEST] (refused, but not for \"$1\"): $2 -- $(head -1 "$err")" >&2
+    failures=$((failures + 1))
+  fi
+}
+
 allow() {
   local status
   count=$((count + 1))
@@ -241,6 +251,106 @@ EOF"
   allow 'tar czf /tmp/x.tgz ~/code/shop'
   allow 'gh config get git_protocol'
   allow 'gh workflow run qa-plan.yml'
+
+  # Found by the second review: wrapper options, other HTTP clients, config from the environment,
+  # aliases, refspec forms, review payloads from files, other ways to deploy or commit, stdin scripts,
+  # more shells and interpreters, more secret files. Each must be refused for its own reason.
+  refuse_for 'merges a pull request' 'command -p gh pr merge 1'
+  refuse_for 'merges a pull request' 'time -p gh pr merge 1'
+  refuse_for 'merges a pull request' 'exec -c gh pr merge 1'
+  refuse_for 'merges a pull request' "npx -c 'gh pr merge 1'"
+  refuse_for 'merges a pull request' 'stdbuf -o L gh pr merge 1'
+  refuse_for 'merges a pull request' 'nice -n 5 gh pr merge 1'
+  refuse_for 'merges a pull request' 'ionice -c 3 gh pr merge 1'
+  refuse_for 'merges a pull request' 'timeout -s KILL 30 gh pr merge 1'
+  refuse_for 'merges a pull request' "env -S'gh pr merge 1'"
+  refuse_for 'merges a pull request' "env --split-string='gh pr merge 1'"
+  refuse_for 'GitHub API outside gh' 'curl -sX PUT https://api.github.com/repos/o/r/pulls/1/merge'
+  refuse_for 'GitHub API outside gh' "curl -sd '{\"event\":\"APPROVE\"}' https://api.github.com/repos/o/r/pulls/1/reviews"
+  refuse_for 'GitHub API outside gh' 'wget --method PUT https://api.github.com/repos/o/r/pulls/1/merge'
+  refuse_for 'GitHub API outside gh' 'http PUT https://api.github.com/repos/o/r/pulls/1/merge'
+  refuse_for 'GitHub API outside gh' 'http https://api.github.com/repos/o/r/pulls/1/reviews event=APPROVE'
+  refuse_for 'config-env' 'git --config-env=remote.origin.mirror=E push'
+  refuse_for 'config-env' 'git --config-env alias.x=E x'
+  refuse_for 'GIT_CONFIG_COUNT' "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0='!gh pr merge 1'; git x"
+  refuse_for 'GIT_SSH_COMMAND' 'declare -x GIT_SSH_COMMAND="ssh -i /tmp/k"'
+  refuse_for 'alias for push' 'git -c alias.p=push p --force origin feat'
+  refuse_for 'alias for push' 'git config alias.p push'
+  refuse_for 'protected branch' 'git push origin HEAD:heads/main'
+  refuse_for 'protected branch' 'git push origin HEAD:tags/v1.0'
+  refuse_for 'every branch' 'git push --branches origin'
+  refuse_for 'every branch' 'git push --b origin'
+  refuse_for 'force-pushes' 'git push --m origin'
+  refuse_for 'from a file' 'printf APPROVE > e.txt && gh api repos/o/r/pulls/1/reviews -F event=@e.txt'
+  refuse_for 'from a file or a pipe' 'gh api -X POST repos/o/r/pulls/1/reviews --input - < review.json'
+  refuse_for 'approves a pull request' "printf '{\"event\":\"APPROVE\"}' | gh api repos/o/r/pulls/1/reviews --input -"
+  refuse_for 'GraphQL query on stdin' 'gh api graphql --input - < q.json'
+  refuse_for 'deploy workflow' 'gh api -X POST repos/o/r/actions/workflows/deploy.yml/dispatches -f ref=main'
+  refuse_for 'commits to a branch' "gh api graphql -f query='mutation { createCommitOnBranch(input: {}) { clientMutationId } }'"
+  refuse_for 'without a push' 'gh api -X PUT repos/o/r/contents/README.md -f branch=main -f message=x -f content=eA=='
+  refuse_for 'merges a pull request' "bash /dev/stdin <<<'gh pr merge 1'"
+  refuse_for 'merges a pull request' "sh /dev/fd/0 <<<'gh pr merge 1'"
+  refuse_for 'merges a pull request' "source /dev/stdin <<<'gh pr merge 1'"
+  refuse_for 'cannot be checked' 'cat x.sh | source /dev/stdin'
+  refuse_for 'merges a pull request' "tcsh -c 'gh pr merge 1'"
+  refuse_for 'merges a pull request' "mksh -c 'gh pr merge 1'"
+  refuse_for 'merges a pull request' "pwsh -Command 'gh pr merge 1'"
+  refuse_for 'encoded command' 'pwsh -EncodedCommand ZwBoAA=='
+  refuse_for 'runs a merge' "python3.12 -c 'import os; os.system(\"gh pr merge 1\")'"
+  refuse_for 'runs a merge' "awk 'BEGIN { system(\"gh pr merge 1\") }'"
+  refuse_for 'runs a merge' "osascript -e 'do shell script \"gh pr merge 1\"'"
+  refuse_for 'force-pushes' "git rebase -x 'git push -f origin x' main"
+  refuse_for 'force-pushes' "git submodule foreach 'git push --force origin x'"
+  refuse_for 'merges a pull request' 'git bisect run gh pr merge 1'
+  refuse_for 'merges a pull request' "trap 'gh pr merge 1' EXIT"
+  refuse_for 'merges a pull request' 'function f { gh pr merge 1; }'
+  refuse_for 'merges a pull request' 'coproc gh pr merge 1'
+  refuse_for 'secret file' 'cat ~/.git-credentials'
+  refuse_for 'secret file' 'cat ~/.netrc'
+  refuse_for 'secret file' 'cat ~/.npmrc'
+  refuse_for 'secret file' 'cat ~/.config/composer/auth.json'
+  refuse_for 'secret file' 'cat ~/.docker/config.json'
+  refuse_for 'secret file' 'cat .ENV'
+  refuse_for 'secret file' 'cat /Users/x/.Ssh/id_rsa'
+  refuse_for 'secret file' 'xargs -a .env echo'
+  refuse_for 'secret file' 'column -t .env'
+  refuse_for 'secret file' 'shuf .env'
+  refuse_for 'GitHub token' 'gh auth git-credential get'
+  refuse_for 'GitHub token' 'gh auth status --show-token=true'
+  refuse_for 'GitHub token' 'gh auth status -at'
+  refuse_for 'prints a secret' 'printenv GH_TOKEN'
+  refuse_for 'secret files' 'tar czf h.tgz ~someone'
+  refuse_for 'repository dispatch' 'gh api -X POST repos/o/r/dispatches -f event_type=deploy'
+  refuse_for 'merges a pull request' "npm exec -c 'gh pr merge 1'"
+  refuse_for 'merges a pull request' 'direnv exec . gh pr merge 1'
+  refuse_for 'merges a pull request' 'mise exec node@22 -- gh pr merge 1'
+  refuse_for 'merges a pull request' 'uv run gh pr merge 1'
+  refuse_for 'merges a pull request' 'op run --env-file x -- gh pr merge 1'
+  refuse_for 'reads a secret' 'op read op://vault/item/token'
+  refuse_for 'merges a pull request' 'strace -f -o /tmp/t gh pr merge 1'
+  refuse_for 'merges a pull request' 'chrt -r 1 gh pr merge 1'
+  refuse_for 'merges a pull request' 'taskset 0x1 gh pr merge 1'
+  refuse_for 'merges a pull request' 'systemd-run --user -p X=y gh pr merge 1'
+  refuse_for 'merges a pull request' "tmux new-session -d 'gh pr merge 1'"
+  refuse_for 'merges a pull request' "at now <<< 'gh pr merge 1'"
+  refuse_for 'cannot be checked' 'at now -f job.sh < job.sh'
+  refuse_for 'secret file' 'git show :.env'
+  allow 'git show HEAD:.env.example'
+  allow "tmux new-session -d -s work 'php artisan queue:work'"
+  allow 'uv run pytest'
+  allow 'git push origin v2-branch'
+  allow 'git checkout -b v1-fix && git push -u origin v1-fix'
+  allow "bash -ec 'echo ok'"
+  allow "sed -i 's/APP_ENV=.env/x/' config/app.php"
+  allow "awk '{ print \$1 }' access.log"
+  allow 'export PATH="$HOME/.local/bin:$PATH"'
+  allow 'time -p php artisan test'
+  allow 'stdbuf -oL tail -n 5 storage/logs/laravel.log'
+  allow 'curl -sS https://api.github.com/repos/o/r'
+  allow 'http GET https://api.github.com/repos/o/r'
+  allow "git rebase -x 'php artisan test' main"
+  allow 'printenv HOME'
+  allow 'gh auth status -a'
 
   # --- Chained, nested and wrapped forms -------------------------------------------------------
   refuse 'git status && gh pr merge 1'

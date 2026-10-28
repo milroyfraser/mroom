@@ -143,6 +143,11 @@ want deny 'git push --follow-tags origin feat/x'
 want deny 'git push origin +feat/x'
 want deny 'git push origin HEAD:main'
 want deny 'git push origin HEAD:release'
+want deny 'git push origin HEAD:master'
+want deny 'gh workflow run deploy.yml'
+want deny 'gh workflow run "Deploy production"'
+want deny 'gh api repos/o/r/pulls/1/reviews -f event=approve'
+want deny 'gh auth git-credential get'
 want deny 'gh api -X PATCH repos/o/r/git/refs/heads/x -F force=true'
 want deny 'gh api repos/o/r/git/refs -f ref=refs/tags/v1 -f sha=abc'
 want deny 'gh pr update-branch 12 --rebase'
@@ -175,6 +180,11 @@ read_want deny '~/.claude-work/.credentials.json'
 read_want deny '~/.forge-token'
 read_want deny '~/.laravel-forge/config.json'
 read_want deny '~/.config/forge/token'
+read_want deny backend/.env.staging
+read_want deny '~/.git-credentials'
+read_want deny '~/.netrc'
+read_want deny '~/.config/composer/auth.json'
+read_want deny '~/.docker/config.json'
 read_want none .env.example
 read_want none backend/app/Models/User.php
 
