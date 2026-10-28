@@ -112,7 +112,21 @@ t_a_later_tag_covers_a_re_run() {
   # The older push's run, run again: v1.1.0 is on a later commit and counts its merge.
   git -C "$T/app" switch -q --detach "$older"
   tag; expect_rc 0; expect_out "v1.1.0, on a later commit, already counts this one: nothing to do"
-  expect_true "the outputs are wrong" [ "$(output)" = $'previous=v1.0.0\ntag=v1.1.0\nbump=none' ]
+  expect_true "the outputs are wrong" [ "$(output)" = $'tag=v1.1.0\nbump=none' ]
+}
+
+t_a_re_run_never_tags_after_a_later_tag() {
+  world
+  tag_here v1.0.0
+  merge "fix: keep it (#1)"
+  local older
+  older="$(git -C "$T/app" rev-parse HEAD)"
+  merge "feat: add (#2)"
+  tag; expect_out_has "tagged v1.1.0"
+  # The older push's run would make v1.0.1, after v1.1.0.
+  git -C "$T/app" switch -q --detach "$older"
+  tag; expect_rc 0; expect_out "v1.1.0, on a later commit, already counts this one: nothing to do"
+  expect_true "pushed a tag after a later one" [ "$(origin_tags)" = "v1.0.0 v1.1.0 " ]
 }
 
 t_the_highest_merged_version_counts() {
@@ -200,6 +214,7 @@ test_case merge-commits t_merge_commits_are_read_by_their_title
 test_case first-tag t_the_first_tag_counts_from_zero
 test_case tagged-commit t_a_tagged_commit_is_left_alone
 test_case later-tag-covers t_a_later_tag_covers_a_re_run
+test_case re-run-never-after t_a_re_run_never_tags_after_a_later_tag
 test_case highest-merged t_the_highest_merged_version_counts
 test_case prefix t_a_prefix
 test_case bad-settings t_bad_settings_are_refused

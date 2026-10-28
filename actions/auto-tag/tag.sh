@@ -10,7 +10,7 @@
 # The biggest bump of all the merges since the last tag wins, so a run that was cancelled or skipped loses no
 # change. It reads each merge's title as GitHub writes it (a squash merge's first line, or the line after a merge
 # commit's "Merge pull request" line), following only the first parent. With no version tag yet, it starts from
-# 0.0.0. A commit that already has a version tag is left as it is, so a re-run tags nothing new.
+# 0.0.0. A commit that already has a version tag, or comes before one, is left as it is, so a re-run tags nothing.
 #
 # It pushes an annotated tag to origin, unless MROOM_TAG_DRY_RUN is true, and writes tag, previous and bump to
 # $GITHUB_OUTPUT when that is set. A tag pushed with the job token starts no workflow.
@@ -62,6 +62,16 @@ if [ -n "$here" ]; then
   exit 0
 fi
 
+# A re-run of an older push, after a newer run tagged a later commit: that tag counts this commit's merges, and a
+# tag here would come after it.
+later="$(versions --contains "$head" | sed -n 1p)"
+if [ -n "$later" ]; then
+  echo "${later##* }, on a later commit, already counts this one: nothing to do"
+  output tag "${later##* }"
+  output bump none
+  exit 0
+fi
+
 read -r major minor patch previous <<<"$(versions --merged "$head" | sed -n 1p)" || true
 range="$head"
 since="${previous:-the first commit}"
@@ -100,13 +110,6 @@ esac
 tag="$PREFIX$major.$minor.$patch"
 [[ "$tag" =~ $VERSION_RE ]] || fail "The next version, $tag, is out of range."
 if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-  # A re-run of an older push, after a newer run tagged a later commit that counts this one's merges.
-  if git merge-base --is-ancestor "$head" "refs/tags/$tag^{commit}"; then
-    echo "$tag, on a later commit, already counts this one: nothing to do"
-    output tag "$tag"
-    output bump none
-    exit 0
-  fi
   fail "$tag already exists on another commit; tag this one by hand, or remove the stray tag."
 fi
 

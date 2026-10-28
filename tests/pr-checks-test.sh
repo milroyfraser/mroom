@@ -20,11 +20,12 @@ world() {
   cat >"$T/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 # fake gh: "api --paginate <path>/labels --jq <filter>" answers from $FAKE/labels.json, the labels the pull request
-# has now; every other call is a write, logged as "api -X <method> <path> [-f <field>]". With $FAKE/down every
+# has now, and "api <path>/pulls/<N> --jq <filter>" from $FAKE/pull.json, the pull request as it is now; every other call is a write, logged as "api -X <method> <path> [-f <field>]". With $FAKE/down every
 # call fails; with $FAKE/404 a DELETE does, as for a label already gone; with $FAKE/writes-fail every write does.
 if [ -f "$FAKE/down" ]; then echo "error connecting to api.github.com" >&2; exit 1; fi
 [ "$1" = api ] || { echo "fake gh: unexpected: $*" >&2; exit 1; }
 if [ "$2" = --paginate ]; then jq -r "$5" "$FAKE/labels.json"; exit; fi
+case "$2" in */pulls/*) jq -r "$4" "$FAKE/pull.json"; exit ;; esac
 printf '%s\n' "$*" >>"$FAKE/gh.log"
 if [ -f "$FAKE/writes-fail" ]; then echo "error connecting to api.github.com" >&2; exit 1; fi
 if [ "$3" = DELETE ] && [ -f "$FAKE/404" ]; then echo "gh: Label does not exist (HTTP 404)" >&2; exit 1; fi
@@ -41,6 +42,7 @@ event() {
   jq -n --arg t "$title" '{pull_request: {number: 42, title: $t, labels: ($ARGS.positional | map({name: .}))}}' \
     --args "$@" >"$T/event.json"
   jq -n '$ARGS.positional | map({name: .})' --args "$@" >"$FAKE/labels.json"
+  jq -n --arg t "$title" '{title: $t}' >"$FAKE/pull.json" 2>/dev/null || true
 }
 
 check() { run "$CHECK" "$T/event.json"; }
@@ -171,6 +173,11 @@ t_labels_are_read_as_they_are_now() {
   event "feat: add" type:bug
   touch "$FAKE/404"
   label; expect_rc 0; expect_out_has "labelled type:feature"
+  # A re-run of an older run, after the title changed: the title as it is now counts.
+  rm -f "$FAKE/gh.log" "$FAKE/404"
+  event "feat: add"
+  jq -n '{title: "fix: keep the filter"}' >"$FAKE/pull.json"
+  label; expect_rc 0; expect_out "labelled type:bug"
 }
 
 t_no_type_no_label() {
@@ -197,12 +204,19 @@ t_label_failures_are_errors() {
   world
   event "feat: add" type:bug
   touch "$FAKE/down"
-  label; expect_rc 1; expect_out_has "Could not read the pull request's labels; run the check again."
+  label; expect_rc 1; expect_out_has "Could not read the pull request's title; run the check again."
   rm "$FAKE/down"
+  mv "$FAKE/labels.json" "$FAKE/labels.json.away"
+  label; expect_rc 1; expect_out_has "Could not read the pull request's labels; run the check again."
+  mv "$FAKE/labels.json.away" "$FAKE/labels.json"
   touch "$FAKE/writes-fail"
   label; expect_rc 1; expect_out_has "Could not take the label type:bug off; run the check again."
+  expect_err_has "error connecting to api.github.com"
   event "feat: add"
   label; expect_rc 1; expect_out_has "Could not add the label type:feature; run the check again."
+  rm "$FAKE/writes-fail"
+  mv "$FAKE/pull.json" "$FAKE/pull.json.away"
+  label; expect_rc 1; expect_out_has "Could not read the pull request's title; run the check again."
   echo '{"pull_request": {"title": "feat: add"}}' >"$T/event.json"
   label; expect_rc 1; expect_out_has "The event file names no pull request."
 }

@@ -9,7 +9,7 @@
 # A title edit moves the label: it takes off the other two type labels and adds the one the title wants. A title
 # with no Conventional Commit type changes nothing; the title check reports it.
 #
-# It reads the pull request's number and title from the event file and its labels, as they are now, from GitHub.
+# It reads the pull request's number from the event file, and its title and labels, as they are now, from GitHub.
 # It prints only the label names it was given. Env: REPO
 # (owner/repo) and GH_TOKEN for gh; MROOM_LABEL_FEATURE, MROOM_LABEL_BUG and MROOM_LABEL_CHORE, the three names.
 set -euo pipefail
@@ -33,10 +33,12 @@ if [ "${FEATURE,,}" = "${BUG,,}" ] || [ "${FEATURE,,}" = "${CHORE,,}" ] || [ "${
   fail "The three label names must differ."
 fi
 
-{ number="$(jq -r '.pull_request.number' "$EVENT")" &&
-  title="$(jq -r '.pull_request.title // empty' "$EVENT")"; } ||
+number="$(jq -r '.pull_request.number' "$EVENT")" ||
   fail "Could not read the pull request from the event file; the error is above."
 [[ "$number" =~ ^[1-9][0-9]*$ ]] || fail "The event file names no pull request."
+# The title as it is now, not as the event saw it: a re-run of an older run reuses its event.
+title="$(gh api "repos/$REPO/pulls/$number" --jq '.title')" ||
+  fail "Could not read the pull request's title; run the check again."
 
 if ! cc_parse "$title"; then
   echo "no Conventional Commit type in the title; the title check reports it"
@@ -64,6 +66,7 @@ for label in "$FEATURE" "$BUG" "$CHORE"; do
     # A 404: someone took it off in the meantime.
     if ! gh api -X DELETE "repos/$REPO/issues/$number/labels/$encoded" >/dev/null 2>"$errors" &&
       ! grep -q "HTTP 404" "$errors"; then
+      cat "$errors" >&2
       fail "Could not take the label $label off; run the check again."
     fi
     echo "took off $label"
