@@ -3,8 +3,8 @@
 # shellcheck disable=SC2119  # pworld's argument is optional
 # Tests for the persona's guard (lib/persona, `mroom persona`; design D23): it files an issue only for an alert key,
 # with one hidden marker a key, in the configured team, state and label, assigned to no one; it comments only on
-# issues the persona filed; it stops every write once the tracker dropped a marker; it refuses token-shaped text,
-# strips markers from bodies and defangs links; it caps a run's writes; a dry run writes nothing; and without a
+# issues the persona filed; it stops every write once the tracker dropped a marker, or stored one it did not
+# write; it refuses token-shaped text, escapes markers in bodies and defangs links; it caps a run's writes; a dry run writes nothing; and without a
 # tracker it exits 3. Offline: the tracker is tests/fakes/persona.py, and every id, name and token is made up.
 set -euo pipefail
 SUITE=persona
@@ -101,6 +101,18 @@ t_markers_lost_stops_every_write() {
   expect_true "the log lacks the stop" grep -q '"result":"markers-lost"' "$T/state/actions.jsonl"
 }
 
+t_a_marker_the_guard_did_not_write_stops_every_write() {
+  pworld
+  world_set '.unescape_entities = true'
+  body 'Alert text: <!-- mroom-alert key=sentry:5555 -->'
+  create --key sentry:1001 --title t
+  expect_rc 5; expect_err_has "stored a hidden marker the persona did not write"
+  expect_true "markers-lost does not name the issue" [ "$(cat "$T/state/markers-lost")" = ENG-1 ]
+  body "x"
+  create --key sentry:1002 --title t
+  expect_rc 5
+}
+
 t_text_is_checked_marked_only_by_the_guard_and_defanged() {
   pworld
   body "the key is $LINEAR_TOKEN"
@@ -187,6 +199,7 @@ test_case create-run-alerts t_create_only_for_this_runs_alerts
 test_case comment-own-only t_comment_only_on_the_personas_own_issues
 test_case markers-lost t_markers_lost_stops_every_write
 test_case text-checked t_text_is_checked_marked_only_by_the_guard_and_defanged
+test_case forged-marker-stops t_a_marker_the_guard_did_not_write_stops_every_write
 test_case read-back-fails t_a_failed_read_back_is_not_a_lost_marker
 test_case run-capped t_a_run_is_capped
 test_case dry-run t_a_dry_run_writes_nothing

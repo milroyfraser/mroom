@@ -422,7 +422,7 @@ jobs:
     permissions:
       actions: write # the switch-off job turns this workflow off when the tracker drops the markers
       contents: read
-    uses: milroyfraser/mroom/.github/workflows/triage.yml@v0.4.0
+    uses: milroyfraser/mroom/.github/workflows/triage.yml@v0.5.0 # the first release with alert triage
     with:
       live: ${{ github.event_name == 'schedule' || inputs.live }}
     secrets:
@@ -451,9 +451,10 @@ channel = "C0123456789"            # the chat channel it pings when triage canno
   `<!-- mroom-alert key=sentry:1001 -->`. Triage looks for the key with `mroom tracker find` and files
   an issue only when no issue in any state holds it, archived ones too, so a second run files nothing
   new, and a cancelled issue is not filed again. A later alert of an error is a new issue that links the
-  earlier ones, and a comment on the newest earlier one when the persona filed it. While an issue of the
-  same kind for that error is still open, a later alert counts as filed, so a regression that goes on for
-  days is one issue; once that issue is done or cancelled, the next one is filed.
+  earlier ones, and a comment on the newest earlier one when the persona filed it. The alerts of one error
+  in one run go on one issue. Until an issue of the same kind for that error is done, a later alert counts
+  as filed, so a regression that goes on for days, or one a person cancelled, is one issue; once that
+  issue is done, the next regression is filed.
 - **What an issue holds.** The error, its counts, releases and culprit, and the latest event's
   exception and in-app frames, all redacted first (`lib/core/text.py`): known token and key shapes,
   bearer tokens, `password=`, `secret=`, `token=` and `api_key=` values, a URL's password, email
@@ -464,8 +465,9 @@ channel = "C0123456789"            # the chat channel it pings when triage canno
   comments only on an issue the tracker says the persona's token filed (`mroom tracker owned`), and has
   no command to edit, close, assign, label or delete. An issue filed by an app rather than a user has
   no creator, so it never counts as the persona's. The markers are its own: it escapes every `<!--` in
-  a body, so no text, however it nests one, can hold a marker, and it writes one per key. It refuses text holding a token, defangs links to hosts other than GitHub's,
-  the trackers' and the app's, and caps a run at 10 issues and 30 comments. A dispatch is a dry run
+  a body, so no text, however it nests one, can hold a marker, and it writes one per key; reading an
+  issue back, it stops as for a lost marker when it finds one it did not write. It refuses text holding
+  a token, defangs links to hosts other than GitHub's, the trackers' and the app's, and caps a run at 10 issues and 30 comments. A dispatch is a dry run
   unless `live` is ticked: it prints what it would file, and writes nothing.
 - **When the tracker drops the markers.** After each issue it files, the guard reads the issue back.
   When a marker is missing, the next run could not find the issue and would file it again, every 15
@@ -477,7 +479,7 @@ channel = "C0123456789"            # the chat channel it pings when triage canno
   off, the ping asks a person to do it by hand, and repeats every run until someone does. A failed read
   of the issue is not a lost marker: the run fails, and the alarm says so.
 - **The alarm.** When a live run's triage job fails (the error tracker or the tracker could not be read
-  or written, or a step failed), the alarm job pings `persona.channel` with the failed step and the run,
+  or written, the guard refused an alert, or a step failed or ran past 12 minutes), the alarm job pings `persona.channel` with the failed step and the run,
   at most once a UTC day. Its dedupe is the tracker's: before the ping it files the day's issue, keyed
   `triage:<yyyymmdd>`, and a day whose issue exists sends nothing. When that issue cannot be filed,
   nothing is sent: a missed ping, never one every 15 minutes.

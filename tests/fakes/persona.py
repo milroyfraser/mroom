@@ -12,6 +12,7 @@ the calls change there, so a second run sees what the first one filed:
   issues          [{id, identifier, title, description, url, createdAt, creator, assignee, state, labels,
                     comments: [{body, createdAt, user}]}], creator being a user's id
   strip_markers   true: the tracker drops HTML comments from the descriptions it stores, as a tracker might
+  unescape_entities  true: it turns &lt; and the like back into characters, as a rich-text store might
   sentry          {projects, new, regressed, escalating: [<Sentry issue>], events: {<id>: <event>}}
   slack_error     an error Slack answers every post with (channel_not_found, say)
   down            ["linear" | "sentry" | "slack"]: that service answers 503
@@ -22,6 +23,7 @@ operation's first field), {service, method, path} for Sentry and {service, body}
 Authorization value it got.
 """
 
+import html
 import json
 import os
 import re
@@ -150,6 +152,8 @@ def linear(req, auth):
         desc = i.get("description", "")
         if state.get("strip_markers"):
             desc = re.sub(r"<!--.*?-->", "", desc, flags=re.S)
+        if state.get("unescape_entities"):
+            desc = html.unescape(desc)
         state["issues"].append({
             "id": f"uuid-{n}", "identifier": ident, "title": i["title"], "description": desc,
             "url": f"https://tracker.example.dev/issue/{ident}", "createdAt": f"2026-10-28T10:{n:02d}:00Z",

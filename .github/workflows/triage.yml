@@ -73,6 +73,8 @@ jobs:
           sparse-checkout: /mroom.toml
           sparse-checkout-cone-mode: false
       - id: triage
+        # A step's own limit fails the job, which the alarm sees; the job's limit would cancel it.
+        timeout-minutes: 12
         uses: ./mroom/actions/triage
         with:
           mode: triage

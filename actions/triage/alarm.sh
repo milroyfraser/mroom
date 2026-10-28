@@ -40,8 +40,8 @@ failed_step() {
   [ -n "${GITHUB_RUN_ID:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ] || return 0
   gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --jq '.jobs' 2>/dev/null | jq -r --arg j "$job_name" '
     [.[] | select(.name == $j or (.name | endswith(" / " + $j)))][0] // {}
-    | [.steps[]? | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out")][0].name // empty' \
-    2>/dev/null | head -c 120 || true
+    | [.steps[]? | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out")][0].name // empty
+    | .[0:120]' 2>/dev/null || true
 }
 
 step="$(failed_step)"

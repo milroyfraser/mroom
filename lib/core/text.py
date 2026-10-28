@@ -28,6 +28,10 @@ TOKEN = re.compile(
     r"lin_(?:api|oauth)_[A-Za-z0-9]{16,}"
     r"|xox[abposre]-[A-Za-z0-9-]{8,}"
     r"|sk-ant-[A-Za-z0-9_-]{8,}"
+    r"|sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{16,}"
+    r"|glpat-[A-Za-z0-9_-]{16,}"
+    r"|npm_[A-Za-z0-9]{30,}"
+    r"|AIza[0-9A-Za-z_-]{30,}"
     r"|gh[pousr]_[A-Za-z0-9]{20,}"
     r"|github_pat_[A-Za-z0-9_]{20,}"
     r"|sntry[su]?_[A-Za-z0-9+/=_-]{20,}"
@@ -37,8 +41,10 @@ TOKEN = re.compile(
     r"|whsec_[A-Za-z0-9]{8,}"
     r"|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}"
 )
-BEARER = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}")
-PAIR = re.compile(r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)(\s*[=:]\s*)[^\s&\"',;]+")
+BEARER = re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{8,}")
+# A key and its value, as in a query (password=x), a header (cookie: x) or JSON ("password": "x").
+PAIR = re.compile(r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|session|cookie)"
+                  r"([\"']?\s*[=:]\s*[\"']?)[^\s&\"',;]+")
 URL_PASSWORD = re.compile(r"(?<=://)[^/\s:@]+:[^/\s@]+@")
 IBAN = re.compile(r"\b[A-Z]{2}[0-9]{2}(?:[ ]?[A-Z0-9]{4}){2,7}(?:[ ]?[A-Z0-9]{1,3})?\b")
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
@@ -46,7 +52,8 @@ EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-
 PHONE_INTL = re.compile(r"(?<![\w+])\+[1-9][0-9]{0,2}(?:[ .-]?\(?[0-9]{1,4}\)?){2,5}[0-9]\b")
 PHONE_NATIONAL = re.compile(r"(?<![\w.:/-])0[1-9][0-9]?(?:[ -]?[0-9]){7,8}\b")
 # A link's authority ends at the first /, ?, # or \ (a browser reads \ as /), whitespace or bracket.
-LINK = re.compile(r"\b(https?)://([^/?#\\\s<>()|`\"'\]\[]+)", re.I)
+# Browsers also follow http:host, http:/\host and https:\\host, and a Markdown link may start with //.
+LINK = re.compile(r"(?:\b(https?):[/\\]*|(?<=\]\()(//))([^/?#\\\s<>()|`\"'\]\[]+)", re.I)
 WWW = re.compile(r"(?<![\w./:@-])(www\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)", re.I)
 HOST = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
 
@@ -72,10 +79,10 @@ def defang(text: str, hosts: list[str]) -> str:
         return any(bare == h or bare.endswith("." + h) for h in hosts)
 
     def one(match: re.Match) -> str:
-        scheme, host = match.group(1), match.group(2)
+        scheme, host = match.group(1), match.group(3)
         if allowed(host):
             return match.group(0)
-        return re.sub("t", "x", scheme, flags=re.I) + "://" + host.replace(".", "[.]")
+        return (re.sub("t", "x", scheme, flags=re.I) + "://" if scheme else "//x/") + host.replace(".", "[.]")
 
     def www(match: re.Match) -> str:
         return match.group(0) if allowed(match.group(1)) else match.group(1).replace(".", "[.]")

@@ -17,8 +17,9 @@
 #     keys), only for one of this run's alerts, so nothing it is told can silence an alert to come;
 #   - the markers are its own: every "<!--" in a body is escaped, and create writes one marker a key. After
 #     a create it reads the issue back. When the tracker did not keep a marker, the next run could not find
-#     the issue and would file it again, so it writes nothing more in this run (exit 5) and leaves the
-#     issue's id in markers-lost, for the workflow's switch-off job (actions/triage, switch-off.sh);
+#     the issue and would file it again; when it holds one the guard did not write, alert text forged it.
+#     Either way it writes nothing more in this run (exit 5) and leaves the issue's id in markers-lost,
+#     for the workflow's switch-off job (actions/triage, switch-off.sh);
 #   - a body or a title that holds a token this command can see, or anything shaped like one, is refused;
 #     a link to a host other than the trackers', GitHub's or the app's is defanged; a body is at most
 #     30000 bytes and a title 160 characters;
@@ -57,10 +58,15 @@ usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' 
 LIVE=false
 [ "${MROOM_PERSONA_LIVE:-}" = 1 ] && LIVE=true
 # The run's folder. On a runner, RUNNER_TEMP is the run's own; anywhere else, without MROOM_PERSONA_STATE,
-# a fresh folder each call, never a shared fixed path another user could make first.
+# a fresh folder for this call alone, removed when it ends, never a shared fixed path another user could
+# make first. The caps and the markers-lost stop hold within one folder: one run, on a runner.
+OWN_STATE=""
 if [ -n "${MROOM_PERSONA_STATE:-}" ]; then STATE="$MROOM_PERSONA_STATE"
 elif [ -n "${RUNNER_TEMP:-}" ]; then STATE="$RUNNER_TEMP/mroom-persona"
-else STATE="$(mktemp -d)"; fi
+else STATE="$(mktemp -d)"; OWN_STATE="$STATE"; fi
+tmp=""
+cleanup() { rm -rf ${tmp:+"$tmp"} ${OWN_STATE:+"$OWN_STATE"}; }
+trap cleanup EXIT
 
 # log <result> <detail>: one line in the run's actions.jsonl, for its summary (ids and keys, never a body).
 log() {
@@ -86,15 +92,16 @@ count() {
 }
 
 # secrets_in <text file>: whether the file holds a token this command can see: the tracker's, the error
-# tracker's or the chat bot's.
+# tracker's, the chat bot's or GitHub's. The token goes to grep through a file descriptor, never argv.
 secrets_in() {
   local -
   set +x
   local name value
-  for name in "$(persona_config issues.token_env LINEAR_API_KEY)" "$(persona_config errors.token_env SENTRY_AUTH_TOKEN)" SLACK_BOT_TOKEN; do
+  for name in "$(persona_config issues.token_env LINEAR_API_KEY)" "$(persona_config errors.token_env SENTRY_AUTH_TOKEN)" \
+    SLACK_BOT_TOKEN GH_TOKEN GITHUB_TOKEN; do
     value="${!name:-}"
     [ "${#value}" -ge 8 ] || continue
-    if grep -qF -- "$value" "$1"; then return 0; fi
+    if grep -qFf <(printf '%s\n' "$value") "$1"; then return 0; fi
   done
   return 1
 }
@@ -135,12 +142,8 @@ body_in() {
   [ -n "$(tr -d '[:space:]' <"$1")" ] || { say "the body on stdin is empty"; exit 2; }
 }
 
-# scratch: makes the private folder $tmp, removed when the command ends.
-tmp=""
-scratch() {
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
-}
+# scratch: makes the private folder $tmp, removed when the command ends (cleanup).
+scratch() { tmp="$(mktemp -d)"; }
 
 # tracker <args...>: mroom tracker, its exit code kept (3: no tracker).
 tracker() { "$TRACKER" "$@"; }
@@ -178,7 +181,8 @@ cmd_create() {
   [ "$(tracker backend)" != none ] || { say "issues.tracker is none, so there is no tracker to file an issue in"; exit 3; }
   title="${title//[$'\r\n\t']/ }"
   [ -n "${title// /}" ] || { say "create needs --title"; exit 2; }
-  [ "${#title}" -le "$MAX_TITLE" ] || refuse "the title is ${#title} characters; the limit is $MAX_TITLE"
+  n="$(jq -Rr 'length' <<<"$title")"
+  [ "$n" -le "$MAX_TITLE" ] || refuse "the title is $n characters; the limit is $MAX_TITLE"
   scratch
   body_in "$tmp/body"
   printf '%s' "$title" >"$tmp/title.in"
@@ -216,6 +220,17 @@ cmd_create() {
       exit 5
     fi
   done
+  # And no marker but these: a tracker that turned escaped text back into a comment would let alert text
+  # forge one, which silences that alert to come. The same stop: a person must look.
+  local stored wanted
+  stored="$(grep -oE '<!--[[:space:]]*mroom-[^>]*-->' <<<"$desc" | sort -u)" || true
+  wanted="$(for k in "${keys[@]}"; do persona_marker "$k"; echo; done | sort -u)"
+  if [ "$stored" != "$wanted" ]; then
+    printf '%s\n' "$id" >"$STATE/markers-lost"
+    log markers-lost "$id: the tracker stored a marker the persona did not write"
+    say "$id was filed, but the tracker stored a hidden marker the persona did not write, so alert text could forge one. Nothing more is written until a person checks."
+    exit 5
+  fi
   jq -c --args '. + {keys: $ARGS.positional}' "${keys[@]}" <<<"$answer"
 }
 

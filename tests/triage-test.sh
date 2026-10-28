@@ -80,7 +80,7 @@ t_one_issue_per_alert_key() {
   expect_true "the outputs: $(cat "$T/output")" [ "$(output_of new) $(output_of filed)" = "3 3" ]
   expect_true "the regression does not link the earlier issue" json_is "$all" \
     '[.[] | select(.description | contains("key=sentry:1002:regressed"))][0].description | contains("Earlier alerts of this error: [ENG-90](https://tracker.example.dev/issue/ENG-90)")'
-  expect_true "the persona's earlier issue got no comment" json_is "$(issue ENG-90)" '.comments | length == 1 and (.[0].body | startswith("This error is regressed again (2026-10-28): ENG-"))'
+  expect_true "the persona's earlier issue got no comment" json_is "$(issue ENG-90)" '.comments | length == 1 and (.[0].body | startswith("This error has a new alert (regressed, 2026-10-28): ENG-"))'
   expect_true "the summary lacks the count" grep -q "3 alert(s) in the window: 0 already filed, 3 filed now, 1 comment(s) on earlier issues." "$T/summary.md"
 }
 
@@ -99,6 +99,13 @@ t_a_second_run_files_nothing_new() {
   export MROOM_NOW=$((NOW_EPOCH + 86400))
   triage; expect_rc 0
   expect_true "an open regression was filed again" [ "$(count_ops linear issueCreate)" = 3 ]
+  # A cancelled one stays quiet too.
+  world_set '(.issues[] | select(.description | contains("key=sentry:1002:regressed")) | .state) = "s-canceled"
+    | .states += [{id: "s-canceled", name: "Canceled", type: "canceled"}]'
+  export MROOM_NOW=$((NOW_EPOCH + 2 * 86400))
+  world_set '.sentry.regressed[0].lastSeen = "2026-10-30T11:45:00Z"'
+  triage; expect_rc 0
+  expect_true "a cancelled regression was filed again" [ "$(count_ops linear issueCreate)" = 3 ]
   # Once that issue is done, a regression is a new alert.
   world_set '(.issues[] | select(.description | contains("key=sentry:1002:regressed")) | .state) = "s-done"'
   triage; expect_rc 0
@@ -131,6 +138,30 @@ t_at_most_ten_filed_and_the_rest_wait() {
   expect_true "the summary does not say 2 wait" grep -q "0 already filed, 10 filed now, 0 comment(s) on earlier issues, 2 waiting for the next run." "$T/summary.md"
   triage
   expect_true "the next run did not file the 2" [ "$(count_ops linear issueCreate)" = 12 ]
+}
+
+t_one_error_one_issue_in_a_run() {
+  pworld
+  add_alert escalating 1001 2026-10-28T11:55:00Z
+  add_alert new 1001 2026-10-28T11:50:00Z
+  triage
+  expect_rc 0
+  expect_true "two issues for one error: $(issues)" [ "$(count_ops linear issueCreate)" = 1 ]
+  expect_true "the issue lacks a key: $(issue ENG-1)" json_is "$(issue ENG-1)" '.description
+    | contains("<!-- mroom-alert key=sentry:1001:escalating:2026-10-28 -->") and contains("<!-- mroom-alert key=sentry:1001 -->")
+      and contains("Also in this window: new")'
+  triage
+  expect_true "the second run filed it again" [ "$(count_ops linear issueCreate)" = 1 ]
+}
+
+t_a_refused_alert_fails_the_run() {
+  pworld
+  add_alert new 1001 2026-10-28T11:50:00Z "Error near $SENTRY_TOKEN"
+  add_alert new 1005 2026-10-28T11:51:00Z
+  triage
+  expect_rc 1
+  expect_true "the other alert was not filed" [ "$(count_ops linear issueCreate)" = 1 ]
+  expect_true "the summary does not say why" grep -q "the guard refused to file sentry:1001" "$T/summary.md"
 }
 
 t_no_write_to_an_issue_the_persona_did_not_file() {
@@ -177,7 +208,7 @@ t_the_stop_when_markers_are_lost_and_the_switch_off() {
   expect_rc 0
   expect_true "triage went on after the markers were lost" [ "$(count_ops linear issueCreate)" = 1 ]
   expect_true "markers_lost: $(cat "$T/output")" [ "$(output_of markers_lost)" = ENG-1 ]
-  expect_true "the summary does not say why" grep -q "the tracker did not keep the hidden marker on ENG-1" "$T/summary.md"
+  expect_true "the summary does not say why" grep -q "the tracker did not keep the hidden markers on ENG-1" "$T/summary.md"
   # The workflow's switch-off job.
   export SLACK_BOT_TOKEN="$CHAT_TOKEN"
   run "$SWITCH_OFF" ENG-1
@@ -312,6 +343,8 @@ test_case alarm-records-first t_the_alarm_sends_nothing_it_cannot_record
 test_case alarm-token-and-lost t_the_alarm_needs_a_chat_token_and_hands_over_lost_markers
 test_case filed-never-crowd-out t_filed_alerts_never_crowd_out_a_new_one
 test_case ten-a-run t_at_most_ten_filed_and_the_rest_wait
+test_case one-error-one-issue t_one_error_one_issue_in_a_run
+test_case refused-fails t_a_refused_alert_fails_the_run
 test_case no-tracker t_without_a_tracker_nothing_is_filed
 test_case dry-run t_a_dry_run_files_nothing
 test_case tracker-down t_a_tracker_that_cannot_be_read_fails_the_run

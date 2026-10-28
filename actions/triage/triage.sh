@@ -8,19 +8,20 @@
 # for a later alert of it, the day being when it was seen so (UTC). A run every 15 minutes looks back 40,
 # since GitHub often starts a scheduled run late; an alert seen twice is already filed the second time.
 #
-# For each alert, escalating first, then regressed, then new:
-#   - mroom persona find <error's key> lists the issues holding a marker of that error. One that holds this
-#     alert's key means it is filed: nothing more (the dedupe, stateless and across every state, archived
-#     too);
-#   - else it reads the error and its latest event (mroom errors get), builds the issue's body from them,
-#     redacted (lib/core/text.py: tokens, email addresses, phone numbers, IBANs), and files it
-#     (mroom persona create), in persona.state with persona.label, assigned to no one;
+# For each error, the most urgent first (escalating, then regressed, then new):
+#   - mroom persona find <error's key> lists the issues holding a marker of that error. One that holds an
+#     alert's key means that alert is filed (the dedupe, stateless and across every state, archived too).
+#     A later alert also counts as filed while an issue of the same kind for that error is not done, so a
+#     regression that goes on for days, or one a person cancelled, is one issue;
+#   - the error's other alerts go on one new issue, which holds a marker for each: it reads the error and
+#     its latest event (mroom errors get), builds the body from them, redacted (lib/core/text.py), and
+#     files it (mroom persona create), in persona.state with persona.label, assigned to no one;
 #   - a later alert of an error whose earlier issue the persona filed also gets a comment there, linking
 #     the new one. An earlier issue someone else filed gets nothing: the persona writes only to its own.
-# Every alert of the window is looked up, but at most 10 are filed a run; the rest wait for the next run,
-# which still sees them if they are in its window, and the summary says how many waited. A later alert
-# also counts as filed while an issue of the same kind for that error is still open, so a regression that
-# goes on for days is one issue. Each search takes at most 100 issues; the summary says when one was full.
+# Every error of the window is looked up, but at most 10 issues are filed a run; the rest wait for the next
+# run, which still sees them if they are in its window, and the summary says how many waited. Each search
+# takes at most 100 issues; the summary says when one was full. An alert the guard refuses fails the run,
+# since it would be refused again every run.
 #
 # Without a tracker (issues.tracker = "none": mroom tracker exits 3), nothing is filed: the run's summary
 # lists the window's alerts instead. Without an error tracker there is nothing to triage.
@@ -94,17 +95,15 @@ fi
 trap finish EXIT
 
 # The window's alerts, with their keys, the most urgent first.
-"$MROOM" errors new "$window" --environment "$environment" --limit "$SEARCH_LIMIT" >"$WORK/window.json" \
-  || { note "the error tracker could not be read, so nothing was triaged"; exit 1; }
+"$MROOM" errors new "$window" --environment "$environment" --limit "$SEARCH_LIMIT" >"$WORK/window.json" 2>"$WORK/errors.err" \
+  || { cat "$WORK/errors.err" >&2; note "the error tracker could not be read, so nothing was triaged"; exit 1; }
+while IFS= read -r line; do
+  case "$line" in *"its limit, so some"*) note "${line#mroom errors: }" ;; *) echo "$line" >&2 ;; esac
+done <"$WORK/errors.err"
 jq -c --arg p "$backend" '
   [.[] | . + {key: (if .kind == "new" then "\($p):\(.id)" else "\($p):\(.id):\(.kind):\(.at[0:10])" end), base: "\($p):\(.id)"}]
   | {alerts: (reduce .[] as $a ([]; if any(.[]; .key == $a.key) then . else . + [$a] end))}' "$WORK/window.json" >"$WORK/alerts.json" \
   || { note "the error tracker's answer could not be read"; exit 1; }
-for kind in new regressed escalating; do
-  if [ "$(jq --arg k "$kind" '[.[] | select(.kind == $k)] | length' "$WORK/window.json")" -ge "$SEARCH_LIMIT" ]; then
-    note "the error tracker gave $SEARCH_LIMIT $kind issues, its most for one search, so some of the window's may be missed"
-  fi
-done
 jq -c '[.alerts[].key]' "$WORK/alerts.json" >"$WORK/keys.json"
 export MROOM_PERSONA_ALERTS="$WORK/keys.json"
 total="$(jq '.alerts | length' "$WORK/alerts.json")"
@@ -122,9 +121,10 @@ if [ "$tracker" = none ]; then
 fi
 
 
-# body <alert> <event file> <earlier issues>: the new issue's body, before redaction.
+# body <alert> <event file> <earlier issues> <the other kinds in this window>: the new issue's body, before
+# redaction.
 body() {
-  jq -r --argjson a "$1" --argjson earlier "$3" --arg env "$environment" "$CODE"'
+  jq -r --argjson a "$1" --argjson earlier "$3" --argjson also "${4:-[]}" --arg env "$environment" "$CODE"'
     ($a.kind | if . == "new" then "New error" elif . == "regressed" then "Regressed error" else "Escalating error" end) as $what
     | (.latest_event // {}) as $e
     | "**\($what)** in \($env | code): [\($a.short_id // $a.id)](\($a.permalink // "")) \($a.title // "untitled" | code)",
@@ -133,6 +133,7 @@ body() {
       "- \($a.count // "?") event(s), \($a.user_count // "?") user(s)",
       "- First release \($a.first_release // "?" | code), last release \($a.last_release // "?" | code)",
       (if ($a.culprit // "") != "" then "- Culprit \($a.culprit | code)" else empty end),
+      (if ($also | length) > 0 then "- Also in this window: \($also | join(", "))" else empty end),
       "",
       (if $e == {} then "The latest event could not be read." else
         "Latest event, \($e.at // "?"), release \($e.release // "?" | code):",
@@ -147,52 +148,77 @@ body() {
     "$2"
 }
 
-n=0
-while IFS= read -r alert; do
-  n=$((n + 1))
-  key="$(jq -r .key <<<"$alert")" base="$(jq -r .base <<<"$alert")" id="$(jq -r .id <<<"$alert")"
-  persona_key_ok "$key" || { note "an alert with a key that is not one: ${key:0:80}"; continue; }
+# filed_check <alert> <found>: 0 when the alert is filed, 1 when not, 2 when it cannot tell. Filed: an issue
+# holds its key. A later alert also counts as filed while an issue of the same kind for this error is not
+# done, so one regression that goes on for days is one issue, not one a day; a cancelled one stays quiet too.
+filed_check() {
+  local rc=0
+  jq -e --argjson a "$1" '
+    any(.[]; ((.keys // []) | index($a.key) != null)
+      or ($a.kind != "new" and (.state_type // "") != "completed"
+          and any((.keys // [])[]; startswith($a.base + ":" + $a.kind + ":"))))' <<<"$2" >/dev/null 2>&1 || rc=$?
+  case "$rc" in 0 | 1) return "$rc" ;; *) return 2 ;; esac
+}
+
+# The window's alerts by error, the most urgent first: one issue holds every new alert of one error.
+jq -c '.alerts | reduce .[] as $a ([]; if any(.[]; .base == $a.base)
+  then map(if .base == $a.base then .alerts += [$a] else . end) else . + [{base: $a.base, alerts: [$a]}] end) | .[]' \
+  "$WORK/alerts.json" >"$WORK/groups.jsonl"
+
+refused=""
+while IFS= read -r -u 3 group; do
+  base="$(jq -r .base <<<"$group")"
+  persona_key_ok "$base" || { note "an alert with a key that is not one: ${base:0:80}"; continue; }
   found="$("$MROOM" persona find "$base")" || { note "the tracker could not be searched for $base, so triage stopped"; failed=1; break; }
-  # Filed: an issue holds this key. A later alert also counts as filed while an issue of the same kind for
-  # this error is still open, so one regression that goes on for days is one issue, not one a day.
-  if jq -e --arg k "$key" --arg b "$base" --arg kind "$(jq -r .kind <<<"$alert")" '
-    any(.[]; ((.keys // []) | index($k) != null)
-      or ($kind != "new" and ((.state_type // "") | IN("completed", "canceled") | not)
-          and any((.keys // [])[]; startswith($b + ":" + $kind + ":"))))' <<<"$found" >/dev/null; then
-    known=$((known + 1))
-    continue
-  fi
+  unfiled=()
+  while IFS= read -r alert; do
+    persona_key_ok "$(jq -r .key <<<"$alert")" || { note "an alert with a key that is not one"; continue; }
+    rc=0
+    filed_check "$alert" "$found" || rc=$?
+    case "$rc" in
+      0) known=$((known + 1)) ;;
+      1) unfiled+=("$alert") ;;
+      *) note "the tracker's answer for $base could not be read, so triage stopped"; failed=1; break 2 ;;
+    esac
+  done < <(jq -c '.alerts[]' <<<"$group")
+  [ "${#unfiled[@]}" -gt 0 ] || continue
   if [ "$filed" -ge "$MAX_ALERTS" ]; then
-    held_back=$((held_back + 1))
+    held_back=$((held_back + ${#unfiled[@]}))
     continue
   fi
+  lead="${unfiled[0]}"
+  id="$(jq -r .id <<<"$lead")"
+  keys=()
+  for alert in "${unfiled[@]}"; do keys+=(--key "$(jq -r .key <<<"$alert")"); done
+  also="$(printf '%s\n' "${unfiled[@]:1}" | jq -sc '[.[] | select(. != null) | .kind]')"
   earlier="$(jq -c '[.[] | {identifier, url}]' <<<"$found")"
-  "$MROOM" errors get "$id" >"$WORK/event.json" 2>/dev/null || { echo '{}' >"$WORK/event.json"; note "the latest event of $base could not be read"; }
+  "$MROOM" errors get "$id" >"$WORK/event.json" 2>/dev/null </dev/null \
+    || { echo '{}' >"$WORK/event.json"; note "the latest event of $base could not be read"; }
   # The title: one line, redacted, at most 150 characters (the guard takes 160).
-  title="$(jq -nr --argjson a "$alert" '"\($a.short_id // $a.id)\(if $a.kind == "new" then "" else " " + $a.kind end): \($a.title // "untitled")"
+  title="$(jq -nr --argjson a "$lead" '"\($a.short_id // $a.id)\(if $a.kind == "new" then "" else " " + $a.kind end): \($a.title // "untitled")"
     | gsub("[\r\n\t]"; " ") | .[0:200]' | persona_text redact | jq -Rr '.[0:150]')"
-  if ! body "$alert" "$WORK/event.json" "$earlier" | persona_text redact >"$WORK/body.md"; then
-    note "the issue for $key could not be written out, so triage stopped"; failed=1; break
+  if ! body "$lead" "$WORK/event.json" "$earlier" "$also" | persona_text redact >"$WORK/body.md"; then
+    note "the issue for $base could not be written out, so triage stopped"; failed=1; break
   fi
   rc=0
-  created="$("$MROOM" persona create --key "$key" --title "$title" <"$WORK/body.md")" || rc=$?
+  created="$("$MROOM" persona create "${keys[@]}" --title "$title" <"$WORK/body.md")" || rc=$?
   case "$rc" in
     0) ;;
     5) lost="$(head -n1 "$WORK/markers-lost" 2>/dev/null || true)"
-       note "the tracker did not keep the hidden marker on ${lost:-an issue}, so triage stopped; the switch-off job turns it off"
+       note "the tracker did not keep the hidden markers on ${lost:-an issue}, so triage stopped; the switch-off job turns it off"
        [ -n "$lost" ] || failed=1
        break ;;
-    4) note "the guard refused to file $key"; continue ;;
-    *) note "$key could not be filed"; failed=1; break ;;
+    4) note "the guard refused to file $base"; refused=1; continue ;;
+    *) note "$base could not be filed"; failed=1; break ;;
   esac
   filed=$((filed + 1))
   new_id="$(jq -r '.created // empty' <<<"$created")"
   # A later alert: a comment on the newest earlier issue, when it is the persona's own.
   last="$(jq -r 'last.identifier // empty' <<<"$earlier")"
   if [ -n "$last" ] && [ -n "$new_id" ]; then
-    owned="$("$MROOM" persona owned "$last" 2>/dev/null | jq -r '.owned' 2>/dev/null)" || owned=""
+    owned="$("$MROOM" persona owned "$last" 2>/dev/null </dev/null | jq -r '.owned' 2>/dev/null)" || owned=""
     if [ "$owned" = true ]; then
-      if printf 'This error is %s again (%s): %s.\n' "$(jq -r .kind <<<"$alert")" "$(jq -r '.at[0:10]' <<<"$alert")" "$new_id" \
+      if printf 'This error has a new alert (%s, %s): %s.\n' "$(jq -r .kind <<<"$lead")" "$(jq -r '.at[0:10]' <<<"$lead")" "$new_id" \
         | "$MROOM" persona comment "$last" >/dev/null; then
         commented=$((commented + 1))
       else
@@ -200,7 +226,9 @@ while IFS= read -r alert; do
       fi
     fi
   fi
-done < <(jq -c '.alerts[]' "$WORK/alerts.json")
+done 3<"$WORK/groups.jsonl"
 
+# A refused alert is refused again every run: fail, so the alarm says so.
+[ -z "$refused" ] || failed=1
 [ -z "$failed" ] || exit 1
 exit 0

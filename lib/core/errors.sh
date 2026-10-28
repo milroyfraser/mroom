@@ -168,6 +168,12 @@ sentry_new_since() {
   new="$(sentry_search "firstSeen:-${minutes}m" "$environment" 24h "$limit")" || return 1
   regressed="$(sentry_search "is:regressed lastSeen:-${minutes}m" "$environment" 24h "$limit")" || return 1
   escalating="$(sentry_search "is:escalating lastSeen:-${minutes}m" "$environment" 24h "$limit")" || return 1
+  local kind list
+  for kind in new regressed escalating; do
+    list="${!kind}"
+    [ "$(jq 'length' <<<"$list")" -lt "$limit" ] \
+      || errors_say "the $kind search gave $limit issues, its limit, so some of the window's may be missed"
+  done
   printf '%s\n%s\n%s\n' "$escalating" "$regressed" "$new" | jq -sc --arg from "$from" '
     def since($kind; $at): [.[] | select((.id | type) == "string" and (.id | test("^[0-9]{1,20}$")))
       | . + {kind: $kind, at: .[$at]} | select((.at // "") >= $from)] | sort_by(.at) | reverse;
