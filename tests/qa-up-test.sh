@@ -5,10 +5,11 @@
 # on each site by a link to a root-owned file whose content must not come back; certificates that fail deleted, waited
 # for and asked for again once, and one not enabled enabled; daemons and scheduled jobs of another user gone before
 # the code; the code and the frontend as data through the gate; the environment's own services, kept secrets and
-# .env, the template read entry by entry; a deploy script and a worker that refuse any user but the site user; /up
-# asked again after a 502, and the commit said to be deployed only after it; slots, two first deploys at once
-# included; and secrets never in the log. Offline: Forge, GitHub and the gate are fakes that answer as the real ones
-# do.
+# .env, the template read entry by entry; a Reverb app of its own, whose public settings are the ones qa-plan built
+# the frontend with and whose secret stays the same from deploy to deploy; a deploy script and a worker that refuse
+# any user but the site user; /up asked again after a 502, and the commit said to be deployed only after it; slots,
+# two first deploys at once included; and secrets never in the log. Offline: Forge, GitHub and the gate are fakes
+# that answer as the real ones do.
 set -euo pipefail
 SUITE=qa-up
 # shellcheck source=tests/lib.sh
@@ -21,7 +22,7 @@ skip_unless has_tomllib "python3 has no tomllib (needs 3.11+)"
 UP="$ROOT/actions/qa-up/up.sh"
 SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 APP_KEY="base64:$(printf 'app-key-of-environment-%09d' 7 | base64 -w0)"
-SECRETS=(db-pw-7 redis-pw-7 mail-pw-7 bucket-pw-files bucket-pw-media "$APP_KEY")
+SECRETS=(db-pw-7 redis-pw-7 mail-pw-7 bucket-pw-files bucket-pw-media reverb-pw-7-1 "$APP_KEY")
 WORKER="bash -c 'test \"\$(id -un)\" = shop_qa_7 || exit 78; exec php8.4 artisan queue:work --queue=default,mail --tries=3 --max-time=3600'"
 TWO='[app]
 name = "shop"
@@ -38,10 +39,7 @@ queues = ["default", "mail"]
 zone = "qa.example.dev"
 max_envs = 3
 disks = { files = "AWS_", media = "MEDIA_" }
-public_disks = ["media"]
-
-[qa.parity]
-broadcast = "log"'
+public_disks = ["media"]'
 
 # app <toml> [<path=content>...]: the app's mroom.toml, GitHub's tarball of $SHA with those files, a frontend
 # build in $T/dist, the shared .env template and /up answering 200.
@@ -58,7 +56,8 @@ app() {
   export MROOM_QA_DIST="$T/dist" FORGE_UP="$T/up-codes" LABEL=qa
   # A runner sets GITHUB_ACTIONS, with which up.sh masks its secrets; the test that wants that sets it itself.
   unset GITHUB_ACTIONS
-  export MROOM_QA_ENV_TEMPLATE=$'APP_NAME=Shop\nAPP_KEY=base64:from-the-template\nDB_PASSWORD=from-the-template\nMAPS_KEY=test-maps-key\nMAIL_ENCRYPTION=tls\nAPP_ENV=production'
+  # Its Reverb lines as Reverb's installer writes them, the Vite ones reading the others.
+  export MROOM_QA_ENV_TEMPLATE=$'APP_NAME=Shop\nAPP_KEY=base64:from-the-template\nDB_PASSWORD=from-the-template\nMAPS_KEY=test-maps-key\nMAIL_ENCRYPTION=tls\nAPP_ENV=production\nBROADCAST_CONNECTION=pusher\nREVERB_APP_SECRET=template-reverb-secret\nREVERB_HOST="localhost"\nVITE_REVERB_HOST="${REVERB_HOST}"'
   echo 200 >"$FORGE_UP"
 }
 up() { run "$UP" 7 "$SHA"; }
@@ -91,7 +90,7 @@ t_a_new_environment_comes_up() {
 forge POST /sites\nforge POST /sites/103/domains/1030/certificates\nforge PUT /sites/103/nginx
 gate probe-link 7 api\ngate probe-link 7 web
 gate code-put 7 '"$SHA"$'\ngate dist-put 7\ngate db-create 7\ngate redis-user-add 7\ngate mail-user-add 7
-gate bucket-create 7 files\ngate bucket-create 7 media public\ngate app-key 7\ngate env-put 7
+gate bucket-create 7 files\ngate bucket-create 7 media public\ngate reverb-app-add 7\ngate app-key 7\ngate env-put 7
 forge PUT /sites/101/deployments/script\nforge POST /sites/101/deployments\nforge POST /background-processes'
   # The code is GitHub's tarball, as it came; the frontend, the build's files.
   expect_true "the code put is not GitHub's tarball" cmp -s "$GATE/code-put.in" "$GH_FAKE/tarball.tgz"
@@ -215,7 +214,10 @@ t_the_env_holds_the_environments_own_values() {
     MAIL_ENCRYPTION=null AWS_BUCKET=shop-qa-7-files AWS_ACCESS_KEY_ID=GKfiles \
     AWS_SECRET_ACCESS_KEY=bucket-pw-files AWS_DEFAULT_REGION=garage AWS_ENDPOINT=https://s3.qa.example.dev \
     AWS_USE_PATH_STYLE_ENDPOINT=true MEDIA_BUCKET=shop-qa-7-media MEDIA_URL=https://files.qa.example.dev/shop-qa-7-media \
-    BROADCAST_CONNECTION=log APP_ENV=qa APP_DEBUG=false SESSION_SECURE_COOKIE=true "APP_KEY=$APP_KEY" \
+    BROADCAST_CONNECTION=reverb BROADCAST_DRIVER=reverb "REVERB_APP_ID=$(reverb_app 7)" "REVERB_APP_KEY=$(reverb_app 7)" \
+    REVERB_APP_SECRET=reverb-pw-7-1 REVERB_HOST=ws.qa.example.dev REVERB_PORT=443 REVERB_SCHEME=https \
+    "VITE_REVERB_APP_KEY=$(reverb_app 7)" VITE_REVERB_HOST=ws.qa.example.dev VITE_REVERB_PORT=443 VITE_REVERB_SCHEME=https \
+    APP_ENV=qa APP_DEBUG=false SESSION_SECURE_COOKIE=true "APP_KEY=$APP_KEY" \
     "APP_URL=https://$API" "CLIENT_URL=https://$WEB" "SESSION_DOMAIN=.$WEB" SESSION_COOKIE=shop_qa_7_sid \
     XSRF_COOKIE_NAME=shop_qa_7_csrf "CORS_ALLOWED_ORIGINS=https://$WEB" "SANCTUM_STATEFUL_DOMAINS=$WEB,$API" \
     CACHE_PREFIX=shop_qa_7_cache_; do
@@ -239,6 +241,11 @@ t_the_env_holds_the_environments_own_values() {
   run grep -c -e '^APP_KEY=' -e '^DB_PASSWORD=' -e '^MAIL_ENCRYPTION=' -e '^APP_ENV=' <<<"$sent"; expect_out 4
   expect_true "the template's app key was kept" lacks "$sent" "from-the-template"
   expect_true "a private disk got a URL" lacks "$sent" "AWS_URL="
+  # So are its Reverb lines, the Vite one that reads another too.
+  run grep -c -e '^BROADCAST_CONNECTION=' -e '^REVERB_APP_SECRET=' -e '^REVERB_HOST=' -e '^VITE_REVERB_HOST=' <<<"$sent"
+  expect_out 4
+  expect_true "the template's Reverb secret was kept" lacks "$sent" "template-reverb-secret"
+  expect_true "a Vite value of the template's that reads another was kept" lacks "$sent" '${REVERB_HOST}'
   # The app key is the gate's, the same each deploy, so the environment's users stay signed in.
   up
   run grep -c "^APP_KEY=$APP_KEY\$" "$GATE/env-put.in"; expect_out 1
@@ -376,7 +383,7 @@ t_an_existing_environment_is_refreshed() {
   # code, the services, the .env and a deploy.
   run order
   expect_out $'gate env-sha 7\ngate probe-link 7 api\ngate probe-link 7 web\ngate code-put 7 '"$SHA"$'\ngate dist-put 7\ngate db-create 7\ngate redis-user-add 7\ngate mail-user-add 7
-gate bucket-create 7 files\ngate bucket-create 7 media public\ngate app-key 7\ngate env-put 7
+gate bucket-create 7 files\ngate bucket-create 7 media public\ngate reverb-app-add 7\ngate app-key 7\ngate env-put 7
 forge PUT /sites/101/deployments/script\nforge POST /sites/101/deployments'
   run state '.sites | length'; expect_out 2
   run state '.processes | length'; expect_out 1
@@ -607,12 +614,88 @@ t_a_site_that_is_not_isolated_or_of_another_user_is_refused() {
   run gate_log; expect_out ""
 }
 
-t_broadcast_same_is_not_yet() {
-  app "${TWO/broadcast = \"log\"/broadcast = \"same\"}" api/artisan=php
+t_the_reverb_app_keeps_its_secret_from_deploy_to_deploy() {
+  app "$TWO" api/artisan=php
   up
-  expect_rc 1; expect_err_has "not yet: qa.parity.broadcast = \"same\" needs mroom's Reverb host, which exists but is not wired into QA environments yet"
-  run forge_writes; expect_out ""
-  run gate_log; expect_out ""
+  expect_rc 0; expect_out_has "==> Reverb app"
+  run grep -c -x "REVERB_APP_SECRET=reverb-pw-7-1" "$GATE/env-put.in"; expect_out 1
+  # Each deploy asks for the app again, and gets the same secret, so open sockets keep their private channels.
+  up
+  expect_rc 0
+  run grep -c -x "REVERB_APP_SECRET=reverb-pw-7-1" "$GATE/env-put.in"; expect_out 1
+  run grep -c -x "reverb-app-add 7" "$GATE/gate.log"; expect_out 2
+  # Nothing removes it first, which would give it a new secret, and the .env goes through the gate alone.
+  run gate_log; expect_true "a deploy removed the Reverb app" lacks "$out" "reverb-app-remove"
+  run forge_writes; expect_true "a deploy wrote the .env through Forge" lacks "$out" "/environment"
+}
+
+t_the_gates_reverb_app_is_the_one_the_frontend_was_built_for() {
+  local right pair
+  right="REVERB_APP_ID=$(reverb_app 7)
+REVERB_APP_KEY=$(reverb_app 7)
+REVERB_APP_SECRET=reverb-pw-x
+REVERB_HOST=ws.qa.example.dev
+REVERB_PORT=443
+REVERB_SCHEME=https"
+  app "$TWO" api/artisan=php
+  printf '%s\n' "$right" >"$GATE/reverb-app-add.out"
+  up
+  expect_rc 0
+  # box.env names the app or the zone otherwise than mroom.toml, or the gate gives another host: the frontend would
+  # open its sockets for another app, or on another host. Nothing is written.
+  for pair in "REVERB_APP_ID=$(reverb_app 8)" "REVERB_APP_KEY=$(reverb_app 8)" REVERB_HOST=ws.qa.other.dev REVERB_PORT=8080 \
+    REVERB_SCHEME=http; do
+    app "$TWO" api/artisan=php
+    awk -F= -v pair="$pair" '$1 == substr(pair, 1, index(pair, "=") - 1) { print pair; next } { print }' <<<"$right" \
+      >"$GATE/reverb-app-add.out"
+    up
+    expect_rc 1
+    expect_err_has "the gate's Reverb app has another ${pair%%=*} than"
+    expect_no_file "$GATE/env-put.in"
+  done
+  expect_err_has "than https, which qa-plan builds the frontend with: box.env's MROOM_APP_NAME and MROOM_QA_ZONE must be mroom.toml's app.name and qa.zone"
+  # One the gate cannot give fails the deploy too, and one with no secret.
+  app "$TWO" api/artisan=php
+  echo 1 >"$GATE/reverb-app-add.rc"
+  up
+  expect_rc 1; expect_err_has "the gate could not give the environment its Reverb app (reverb-app-add)"
+  expect_no_file "$GATE/env-put.in"
+  app "$TWO" api/artisan=php
+  grep -v '^REVERB_APP_SECRET=' <<<"$right" >"$GATE/reverb-app-add.out"
+  up
+  expect_rc 1; expect_err_has "the gate gave no REVERB_APP_SECRET"
+}
+
+t_broadcast_log_asks_for_no_reverb_app() {
+  app "$TWO"$'\n\n[qa.parity]\nbroadcast = "log"' api/artisan=php
+  up
+  expect_rc 0
+  run gate_log; expect_true "a Reverb app was asked for" lacks "$out" "reverb-app"
+  local sent
+  sent="$(env_sent)"
+  expect_true ".env lacks BROADCAST_CONNECTION=log" has_line "$sent" BROADCAST_CONNECTION=log
+  expect_true ".env lacks BROADCAST_DRIVER=log" has_line "$sent" BROADCAST_DRIVER=log
+  run grep -c -e '^REVERB_APP_KEY=' -e '^REVERB_APP_ID=' -e '^VITE_REVERB_APP_KEY=' <<<"$sent"; expect_out 0
+}
+
+t_vite_gets_the_reverb_values_only_with_a_frontend() {
+  local sent
+  # Vite inside the Laravel app: the values it was built with.
+  app $'[app]\nname = "shop"\n\n[qa]\nzone = "qa.example.dev"\n\n[qa.parity]\nmail = "log"\nfiles = "local"' artisan=php
+  up
+  expect_rc 0
+  sent="$(env_sent)"
+  expect_true ".env lacks REVERB_APP_KEY" has_line "$sent" "REVERB_APP_KEY=$(reverb_app 7)"
+  expect_true ".env lacks VITE_REVERB_APP_KEY" has_line "$sent" "VITE_REVERB_APP_KEY=$(reverb_app 7)"
+  expect_true ".env lacks VITE_REVERB_HOST" has_line "$sent" VITE_REVERB_HOST=ws.qa.example.dev
+  # No frontend: no Vite values of mroom's, and the template's line stays as it was.
+  app $'[app]\nname = "shop"\nfrontend_dir = ""\n\n[qa]\nzone = "qa.example.dev"\n\n[qa.parity]\nmail = "log"\nfiles = "local"' artisan=php
+  up
+  expect_rc 0
+  sent="$(env_sent)"
+  expect_true ".env lacks REVERB_APP_KEY" has_line "$sent" "REVERB_APP_KEY=$(reverb_app 7)"
+  run grep -c -e '^VITE_REVERB_APP_KEY=' -e '^VITE_REVERB_PORT=' -e '^VITE_REVERB_SCHEME=' <<<"$sent"; expect_out 0
+  expect_true "the template's Vite line changed" has_line "$sent" 'VITE_REVERB_HOST="${REVERB_HOST}"'
 }
 
 t_a_build_with_a_link_is_refused_before_anything_is_made() {
@@ -924,7 +1007,10 @@ test_case waits-for-a-slot t_a_new_environment_waits_for_a_slot
 test_case old-names-up t_an_environment_of_the_old_names_is_torn_down_not_refreshed
 test_case old-names-slot t_an_environment_of_the_old_names_holds_a_slot
 test_case not-isolated t_a_site_that_is_not_isolated_or_of_another_user_is_refused
-test_case broadcast-not-yet t_broadcast_same_is_not_yet
+test_case reverb-secret-kept t_the_reverb_app_keeps_its_secret_from_deploy_to_deploy
+test_case reverb-as-built t_the_gates_reverb_app_is_the_one_the_frontend_was_built_for
+test_case broadcast-log t_broadcast_log_asks_for_no_reverb_app
+test_case vite-reverb t_vite_gets_the_reverb_values_only_with_a_frontend
 test_case build-with-a-link t_a_build_with_a_link_is_refused_before_anything_is_made
 test_case daemons-before-code t_daemons_of_another_user_go_before_the_code
 test_case jobs-by-command t_daemons_and_scheduled_jobs_found_by_their_command_go_too

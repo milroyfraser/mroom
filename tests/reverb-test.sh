@@ -3,14 +3,16 @@
 # Tests for the gate's Reverb operations (design D16): reverb-app-add gives an environment an app of its own on
 # mroom's Reverb host, with an id and key built from box.env and the PR alone, a new secret each time, and
 # origins of its own two sites; reverb-app-remove takes it away; both replace the apps file whole, keep every
-# other environment's app, never log a secret, and refuse what is not theirs to do. Offline: a small Python
-# server on the host's socket answers its health check. tests/reverb/gate-real-test.sh runs the same gate
-# against the real Reverb host in CI, with sockets that connect and events that arrive.
+# other environment's app, never log a secret, and refuse what is not theirs to do; and what qa-plan derives
+# for the frontend is what the gate gives. Offline: a small Python server on the host's socket answers its
+# health check. tests/reverb/gate-real-test.sh runs the same gate against the real Reverb host in CI, with
+# sockets that connect and events that arrive.
 set -euo pipefail
 SUITE=reverb
 # shellcheck source=tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 skip_unless has_box_tools "this host lacks bash 5, flock or GNU date, which box commands need"
+skip_unless has_tomllib "python3 has no tomllib (needs 3.11+), which reading mroom.toml needs"
 
 HOSTS=()
 cleanup() {
@@ -158,6 +160,22 @@ t_adds_at_once_keep_every_app() {
   expect_out '["shop-qa-21","shop-qa-22","shop-qa-23","shop-qa-24","shop-qa-25"]'
 }
 
+t_qa_plan_derives_what_the_gate_gives() {
+  # qa-plan builds the frontend with the app's settings that are not secret, without asking the gate
+  # (lib/core/qa.sh, qa_public_env): the two must build them alike, for an app name with an _ too, which a
+  # bucket's name turns into a -.
+  world; host_up
+  printf 'MROOM_APP_NAME=my_shop\nMROOM_QA_ZONE=qa.example.test\n' >"$HOME/.config/mroom/box.env"
+  printf '[app]\nname = "my_shop"\n\n[qa]\nzone = "qa.example.test"\n' >"$T/mroom.toml"
+  gate "reverb-app-add 12"; expect_rc 0
+  local given derived
+  given="$(grep -v '^REVERB_APP_SECRET=' <<<"$out")"
+  derived="$(MROOM_ROOT="$ROOT" MROOM_CONFIG="$T/mroom.toml" bash -c '. "$MROOM_ROOT/lib/core/util.sh"
+    . "$MROOM_ROOT/lib/core/forge.sh"; . "$MROOM_ROOT/lib/core/qa.sh"; qa_names 12 && qa_public_env' | grep '^REVERB_')"
+  expect_true "qa-plan derives other Reverb settings than the gate gives: $derived" [ "$derived" = "$given" ]
+  run jq -r '.apps[0].app_id' "$(apps_file)"; expect_out my_shop-qa-12
+}
+
 t_add_refuses_while_the_host_does_not_answer() {
   world
   gate "reverb-app-add 12"
@@ -204,6 +222,7 @@ test_case remove-add t_remove_then_add_gives_a_new_secret
 test_case remove t_remove_takes_only_its_own_app
 test_case remove-host-down t_remove_works_while_the_host_is_down
 test_case adds-at-once t_adds_at_once_keep_every_app
+test_case derived-alike t_qa_plan_derives_what_the_gate_gives
 test_case host-down t_add_refuses_while_the_host_does_not_answer
 test_case refusals t_what_the_reverb_operations_refuse
 finish

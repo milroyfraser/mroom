@@ -3,10 +3,10 @@ description: >-
   One step of tearing down a pull request's QA environment (design 8.2, 8.9). check only reads whether Forge has
   one (output state). down tears it down, running every step and skipping what is already gone, so re-running it
   finishes one that stopped: its daemons, its site user's processes and files (the gate's user-clean), its sites,
-  then its database and role, Redis user and keys, mail login and mail, and buckets, through the gate; the pull
-  request's QA environment comment says what happened, and output freed says whether it freed a slot. wake gives a
-  freed slot to the pull request that has waited longest. Run check and down only from a job in the qa environment
-  that checks out the default branch alone, and wake one at a time (.github/workflows/qa-down.yml).
+  then its database and role, Redis user and keys, mail login and mail, buckets, and Reverb app, through the gate;
+  the pull request's QA environment comment says what happened, and output freed says whether it freed a slot. wake
+  gives a freed slot to the pull request that has waited longest. Run check and down only from a job in the qa
+  environment that checks out the default branch alone, and wake one at a time (.github/workflows/qa-down.yml).
 inputs:
   pr:
     description: The pull request's number, which is its environment's

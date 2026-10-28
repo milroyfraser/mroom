@@ -2,9 +2,10 @@
 # shellcheck disable=SC2317  # the t_* functions run indirectly, through test_case
 # Tests for the QA teardown (actions/qa-down: check.sh and down.sh) and what it shares (lib/core/qa.sh): the check
 # reads Forge and changes nothing; the teardown runs every step, skipping what is gone, so a run again finishes one
-# that stopped; daemons go first and are waited for, then user-clean, then the sites, then the box's side; a failed
-# user-clean keeps the sites; the comment says removing, removed, or which step failed; ssh never reads a loop's
-# input; and the SSH key never reaches a command line. Offline: Forge, GitHub and the gate are fakes.
+# that stopped; daemons go first and are waited for, then user-clean, then the sites, then the box's side, its
+# Reverb app included, an environment's of the old names too; a failed user-clean keeps the sites; the comment says
+# removing, removed, or which step failed; ssh never reads a loop's input; and the SSH key never reaches a command
+# line. Offline: Forge, GitHub and the gate are fakes.
 set -euo pipefail
 SUITE=qa-down
 # shellcheck source=tests/lib.sh
@@ -16,7 +17,7 @@ skip_unless has_tomllib "python3 has no tomllib (needs 3.11+)"
 
 DOWN="$ROOT/actions/qa-down/down.sh"
 CHECK="$ROOT/actions/qa-down/check.sh"
-BOX_SIDE=$'db-drop 7\nredis-user-remove 7\nredis-clear 7\nmail-user-remove 7\nmail-clear 7\nbucket-drop 7'
+BOX_SIDE=$'db-drop 7\nredis-user-remove 7\nredis-clear 7\nmail-user-remove 7\nmail-clear 7\nbucket-drop 7\nreverb-app-remove 7'
 
 # environment_7: pull request 7's two sites and its daemon, beside environment 70's.
 environment_7() {
@@ -46,7 +47,7 @@ t_an_environment_comes_down_in_order() {
   run order
   expect_out $'forge DELETE /background-processes/5\nforge DELETE /background-processes/6\ngate user-clean 7
 forge DELETE /sites/11\nforge DELETE /sites/12\ngate db-drop 7\ngate redis-user-remove 7\ngate redis-clear 7
-gate mail-user-remove 7\ngate mail-clear 7\ngate bucket-drop 7'
+gate mail-user-remove 7\ngate mail-clear 7\ngate bucket-drop 7\ngate reverb-app-remove 7'
   run grep -c '^GET /background-processes' "$FORGE_LOG"; expect_out 3
   # The comment says it is being removed before anything goes, then that it was removed.
   run gh_log
@@ -67,9 +68,9 @@ t_the_ssh_key_stays_off_every_command_line() {
   # Batch mode, no config file, no agent, the pinned host key, and no stdin for any of these requests.
   run grep -c -x -e 'BatchMode=yes' -e 'StrictHostKeyChecking=yes' -e 'IdentitiesOnly=yes' -e 'IdentityAgent=none' \
     -e 'GlobalKnownHostsFile=/dev/null' "$GATE/ssh.argv"
-  expect_out 35
-  run grep -c -x -e '-n' "$GATE/ssh.argv"; expect_out 7
-  run grep -c -x 'forge@box.example.dev' "$GATE/ssh.argv"; expect_out 7
+  expect_out 40
+  run grep -c -x -e '-n' "$GATE/ssh.argv"; expect_out 8
+  run grep -c -x 'forge@box.example.dev' "$GATE/ssh.argv"; expect_out 8
   expect_true "the key folder was left in TMPDIR" tmp_empty
   expect_true "the Forge token was printed" lacks "$out$err" fake-forge-token
 }
@@ -231,6 +232,15 @@ t_one_box_step_failing_leaves_the_others_to_run() {
   run "$DOWN" 7
   expect_rc 1; expect_err_has "its sites are gone, but not the box's Redis user"
   run gate_log; expect_out $'user-clean 7\n'"$BOX_SIDE"
+  # The Reverb app, the last of them, is named too, and a run again removes it.
+  qa_world; environment_7
+  echo 1 >"$GATE/reverb-app-remove.rc"
+  run "$DOWN" 7 --reason closed --state present
+  expect_rc 1; expect_err_has "environment 7: its sites are gone, but not the box's Reverb app"
+  run gh_log; expect_out_has "The teardown stopped at the box's Reverb app"
+  rm "$GATE/reverb-app-remove.rc"
+  run "$DOWN" 7 --reason closed --state present
+  expect_rc 0; expect_out_has "environment 7: removed"
 }
 
 t_a_delete_that_finds_nothing_counts_as_done() {
@@ -253,7 +263,7 @@ t_a_delete_that_finds_nothing_counts_as_done() {
 
 t_services_qa_does_not_use_are_left_alone() {
   qa_world; environment_7
-  printf '\n[qa.parity]\nmail = "log"\nfiles = "local"\n' >>"$MROOM_CONFIG"
+  printf '\n[qa.parity]\nmail = "log"\nfiles = "local"\nbroadcast = "log"\n' >>"$MROOM_CONFIG"
   run "$DOWN" 7
   expect_rc 0
   run gate_log; expect_out $'user-clean 7\ndb-drop 7\nredis-user-remove 7\nredis-clear 7'
@@ -308,6 +318,13 @@ t_an_environment_of_the_old_names_comes_down_too() {
 gate user-clean 7\nforge DELETE /sites/11\nforge DELETE /sites/12\n'"gate ${BOX_SIDE//$'\n'/$'\ngate '}"
   run jq -r '[.sites[] | select(.status != "removing") | .id] | join(",")' "$FORGE_STATE"; expect_out "13"
   run freed; expect_out true
+  # The reaper's teardown, past its time, takes its Reverb app too: the gate finds it by N alone.
+  qa_world
+  site 11 "$(old_api_host 7)" installed "$(ago $((9 * 86400)))"
+  echo reverb-pw-7-1 >"$GATE/reverb-7"
+  run "$DOWN" 7 --reason ttl
+  expect_rc 0; expect_out_has "==> Reverb app"$'\n'"    Reverb app $(reverb_app 7): removed"
+  expect_no_file "$GATE/reverb-7"
   # Its frontend's site alone, as a teardown that stopped halfway leaves it, is the environment still; and once Forge
   # is removing that, the environment is being removed.
   qa_world
