@@ -266,7 +266,8 @@ required_checks = ["test", "lint", "e2e", "check-title"]
 
 [qa]
 zone = "<qa-zone>"                 # api.<PR>.<zone> (the Laravel app), <PR>.<zone> (a frontend of its own)
-max_envs = 5
+max_envs = 5                       # at most; the box's memory may hold fewer (section 9)
+env_memory_mb = 1024               # what one environment needs, in MB: slots = (RAM - box reserve) / this
 ttl_days = 5
 template_database = "qa_template"
 persona_domain = ".test"           # sign-in codes are only ever read for these addresses
@@ -293,14 +294,17 @@ agent_login = "<agents-account>"   # the box's one GitHub account (D22); `mroom 
 branch has none, after its error id (`errors.id_pattern`).
 
 **Required keys and defaults, by phase.** A key becomes required in the phase whose command cannot run without it;
-until then a reader passes its own fallback (`mroom config get <key> --default <value>`).
+until then a reader passes its own fallback (`mroom config get <key> --default <value>`). A key whose default mroom
+has decided gets it from `mroom config get` when the file leaves it out, whatever `--default` says, so every reader
+agrees; `mroom config keys` shows it.
 
 | Keys | Required from | Default |
 |---|---|---|
 | `app.name` | phase 0 | none: required |
 | `app.backend_dir`, `app.frontend_dir`, `app.package_manager`, `app.php`, `app.build.*`, `tests.*` | phase 1 decides | phase 1 decides |
-| `app.version_path` | phase 2 decides | `/version` |
-| `qa.*` (`qa.db_read_allowlist` has no default, ever; section 8.6) | phase 2 decides | phase 2 decides; `qa.parity.*` defaults to the values above |
+| `app.version_path` | never: optional | `/version`, mroom's own (phase 2a) |
+| `qa.max_envs`, `qa.env_memory_mb` | never: optional | `5` and `1024`, mroom's own (phase 2a) |
+| other `qa.*` (`qa.db_read_allowlist` has no default, ever; section 8.6) | phase 2 decides | phase 2 decides; `qa.parity.*` defaults to the values above |
 | `issues.*` | phase 3 decides | phase 3 decides |
 | `errors.*` | phase 3 decides | none: without the table there is no error tracker |
 | `pr.required_checks` | phase 4 decides | phase 4 decides |
@@ -309,12 +313,14 @@ until then a reader passes its own fallback (`mroom config get <key> --default <
 **Validation** (`mroom config validate`, and before every `get`):
 
 - A missing required key fails with its name and an example line; a wrong type fails with the key's name. Types:
-  string, whole number ≥ 1 (`qa.max_envs`, `qa.ttl_days`), list of strings, table of strings
+  string, whole number ≥ 1 (`qa.max_envs`, `qa.env_memory_mb`, `qa.ttl_days`), list of strings, table of strings
   (`app.build.frontend_env`), or one of a fixed set (`app.package_manager`: npm | pnpm; `issues.tracker`:
   linear | none; `errors.provider`: sentry; each `qa.parity.*` key: the values listed above).
 - `app.name` matches `[a-z][a-z0-9_]{0,31}`, since it is built into database names and Redis prefixes. A Redis
   prefix puts `:` after each part (`shop:`, `shop:qa12:`), a character no name contains, so no app's or
   environment's ACL pattern matches another's keys.
+- `app.version_path` is a path: `/`, then plain parts (letters, digits and `. _ ~ -`), none of them `.` or `..`, with
+  no query, since the checks add their own (section 10).
 - `tests.database_pattern` contains `{slug}`, so each worktree gets its own database.
 - `issues.url` contains `{id}`.
 - `issues.id_pattern` and `errors.id_pattern` compile as **Python** regular expressions (`re`), not POSIX ERE;
@@ -418,7 +424,8 @@ Invariants, each with a test:
      `db-drop`, `redis-user-add`, `redis-user-remove`, `redis-clear`, `code-put`, `dist-put`, `env-put`, `env-sha`,
      `probe-link`, `signin-code`, `user-clean`, `app-key`, `db-read`, and for the QA services `bucket-create`,
      `bucket-drop`, `reverb-app-add`, `reverb-app-remove`, `mail-user-add`, `mail-user-remove`, `mail-read`,
-     `mail-clear` and `template-load`. No CI key gets a shell on the box. The gate is installed from a release by a
+     `mail-clear` and `template-load`, and `memory`, the box's RAM, what is available and the box's reserve, which
+     qa-up sizes its slots from. No CI key gets a shell on the box. The gate is installed from a release by a
      person.
    - Gate operations that touch a site's files or run its code (unpacking in `code-put` and `dist-put`, hashing
      `.env` in `env-sha`, the link `probe-link` makes, `signin-code` and `user-clean`) run as that site's user. The
@@ -528,7 +535,16 @@ What a Laravel app must have or add, documented in `docs/app-contract.md` and ch
   they start. With a separate SPA, the frontend build writes them to `version.json`. A deploy waits on these
   (section 10). In a QA environment the PR's own code serves the endpoint, so browser QA asks the gate instead:
   `env-sha` reports the commit the gate recorded when it unpacked the tree (D17). The gate also writes the version
-  file, `version.json` in the backend with `"release": null`, since a tarball has no git history.
+  file, `version.json` in the backend with `"release": null`, since a tarball has no git history, in place of any
+  the tree holds. The checks share one reader, `lib/core/version.sh`: the address with a query no cache has seen,
+  the answer read strictly, and a QA environment's commit from `env-sha`.
+- Fits the box's memory in QA: each environment counts as `qa.env_memory_mb` (1024 by default). qa-up asks the gate
+  for the box's RAM, and holds as many environments as fit in it once the box keeps its reserve
+  (`MROOM_QA_RESERVE_MB` in `box.env`, 4096 by default, for the dev site, sessions and builds), never more than
+  `qa.max_envs`. Swap does not count there: an environment lives for days. A new environment also waits while RAM
+  available and free swap hold less than one environment, as `mroom memory-preflight` checks before a build, and
+  is tried again when an environment goes down or on a later push. The box is upgraded before the app's workflow
+  pins, since a gate without `memory` fails every new environment.
 - Honours the isolation keys in section 8.7; with a separate SPA, also `CLIENT_URL`, `CORS_ALLOWED_ORIGINS` and
   `SANCTUM_STATEFUL_DOMAINS`.
 - With `qa.parity.broadcast = "same"`, broadcasts through `BROADCAST_CONNECTION` and the `REVERB_*` keys, and a
@@ -709,7 +725,7 @@ Phase 2 comes in two steps, so environments work before browser QA depends on th
 |---|---|---|
 | 0. Skeleton (merged, #1) | repo, LICENSE, NOTICE, README, CI (shellcheck, tests), `mroom config`, `install.sh`, release tagging | **Works:** `install.sh` on a fresh Ubuntu box installs `mroom`, `mroom config get app.name` reads an example |
 | 1. Box | `mroom` and `lib/*` generalised (config instead of hard-coded names, slug rules and paths), `forge-api`, Forge client, hooks with defaults, settings fragments, `mroom guard`, plugin hooks (banner, guard, worktree), `mroom init`, box job records (`mroom job run`); a box watchdog (an MCP probe, processes killed for lack of memory, failed box jobs and scheduled workflows, each posted to chat); the `regression` label (a PR that fixes a production problem names the release that caused it, `Breaks: v1.2.3`), so later phases have a baseline | **Works:** a new box is set up from the README, `box.env` and `mroom.toml` alone; no app's name appears in mroom's code. **Moves (4):** fewer box or pipeline failures are noticed by a person before mroom reports them |
-| 2a. QA environments | qa-plan (path rules), qa-up, qa-down, qa-reap, the gate and its operations, Forge site isolation with code delivered as data (D17), a Redis user (D15), a Postgres role (D18) and an app key per environment, the app contract, `mroom doctor --app`, the template database (seeded, or the opt-in snapshot), the QA services of `[qa.parity]` (section 8.9; D14, D16, D19) with pinned checksums (section 3), `app.version_path`; slots sized from box memory (a memory budget per environment sets `qa.max_envs`) | **Works:** an example app gets `<PR>.<zone>`/`api.<PR>.<zone>` with its own database and role, app key, Redis user, buckets, Reverb app and mail login, and the section 8 invariants are tested. **Moves (3):** fewer production problems per release |
+| 2a. QA environments | qa-plan (path rules), qa-up, qa-down, qa-reap, the gate and its operations, Forge site isolation with code delivered as data (D17), a Redis user (D15), a Postgres role (D18) and an app key per environment, the app contract, `mroom doctor --app`, the template database (seeded, or the opt-in snapshot), the QA services of `[qa.parity]` (section 8.9; D14, D16, D19) with pinned checksums (section 3), `app.version_path` (its default, the gate's version file, one reader for the checks); slots sized from box memory (`qa.env_memory_mb` per environment and the box's reserve, `qa.max_envs` the upper limit) and `memory-preflight` | **Works:** an example app gets `<PR>.<zone>`/`api.<PR>.<zone>` with its own database and role, app key, Redis user, buckets, Reverb app and mail login, and the section 8 invariants are tested. **Moves (3):** fewer production problems per release |
 | 2b. Browser QA | the runner sandbox (8.5); the plan's Claude step with `blast-radius` (vendored from pstack); the `verify-app` harness (pluggable sign-in) and `qa-engineer` | **Works:** an example app gets a browser QA check on each PR's last commit. **Moves (4):** fewer product PRs reach a person without a needed browser test passing |
 | 3. Agent workflow | skills generalised over the tracker adapter and `mroom.toml`; principles vendored; `mroom check size` (a file over 500 lines may not grow, and a static-analysis baseline may not grow), run by the pre-push hook and CI | **Works:** `/implement` and `/fix-issue` reach a PR on the example app with tracker `none` and with Linear. **Moves (1):** files over 500 lines stop growing, in number and in lines |
 | 4. PR checks and CI/CD | conventional title, type labels + release notes, Claude review, review findings, auto-tag (optional); CI templates with the section 10 defaults (cache warming, apt cache, vendor cache, measured shards) and `tools/ci-first-push.sh`; the deploy template (the `release` branch, and the release's commits attached in the error tracker, so `Fixes <id>` lines resolve their issues when the release ships), `deploy-verify` and the `production` environment (section 10, patterns 8 to 10) | **Works:** a repo calling the reusable workflows gets the checks, and a deploy in tests (with a fake host) waits until the live commit matches the tag. **Moves (2):** every release confirms its live commit. First-push CI time stays under 4 minutes (the pilot app already has the section 10 patterns) |

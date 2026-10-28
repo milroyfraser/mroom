@@ -55,7 +55,7 @@ SCHEMA = {
     "app.package_manager": (("npm", "pnpm"), False, 'package_manager = "npm"', "npm | pnpm"),
     "app.php": ("str", False, 'php = "8.4"', "PHP version"),
     "app.version_path": ("str", False, 'version_path = "/version"',
-                         "the path that reports the running release and commit"),
+                         "the path that answers {\"release\", \"commit\"}: the release and commit the app runs"),
     "app.build.frontend": ("str", False, 'frontend = "npm run build"', "frontend build command"),
     "app.build.frontend_env": ("map", False, 'frontend_env = { VITE_APP_KEY = "env:APP_KEY" }',
                                "environment for the frontend build"),
@@ -78,7 +78,10 @@ SCHEMA = {
                    "issue link; must contain {id}"),
     "pr.required_checks": ("list", False, 'required_checks = ["test"]', "check names the ruleset requires"),
     "qa.zone": ("str", False, 'zone = "qa.example.dev"', "QA hosts are api.<PR>.<zone> and <PR>.<zone>"),
-    "qa.max_envs": ("int", False, "max_envs = 5", "QA environments at once"),
+    "qa.max_envs": ("int", False, "max_envs = 5",
+                    "QA environments at once, at most; the box's memory may hold fewer (qa.env_memory_mb)"),
+    "qa.env_memory_mb": ("int", False, "env_memory_mb = 1024",
+                         "the memory one QA environment needs, in MB; sets how many the box holds"),
     "qa.ttl_days": ("int", False, "ttl_days = 5", "days before an idle QA environment is reaped"),
     "qa.template_database": ("str", False, 'template_database = "qa_template"', "QA template database"),
     "qa.persona_domain": ("str", False, 'persona_domain = ".test"',
@@ -101,6 +104,14 @@ SCHEMA = {
     "qa.parity.files": (("same", "local"), False, 'files = "same"',
                         "same (a bucket per environment) | local"),
     "persona.name": ("str", False, 'name = "Agent"', "the bot persona's name"),
+}
+
+# What get gives for a single key the file leaves out, before any --default: only keys mroom has decided. A whole
+# table (get qa --json) shows only what the file holds.
+DEFAULTS = {
+    "app.version_path": "/version",
+    "qa.max_envs": 5,
+    "qa.env_memory_mb": 1024,
 }
 
 # Every table that may appear, including parents of tables.
@@ -181,6 +192,9 @@ def rule_error(key: str, value) -> str | None:
         return f"{key} must match [a-z][a-z0-9_]* and be at most 32 characters (got {json.dumps(value)})"
     if key == "tests.database_pattern" and "{slug}" not in value:
         return f"{key} must contain {{slug}}, so each worktree gets its own database"
+    if key == "app.version_path" and not version_path_ok(value):
+        return (f"{key} must be a path such as /version: / and then plain parts (letters, digits and . _ ~ -), "
+                f"none of them . or .., with no query (got {json.dumps(value)[:80]})")
     if key == "issues.url" and "{id}" not in value:
         return f"{key} must contain {{id}}"
     if key == "issues.id_pattern":
@@ -208,6 +222,16 @@ def rule_error(key: str, value) -> str | None:
             if not DISK.fullmatch(disk):
                 return f"{key} has a disk name that is not [a-z][a-z0-9]{{0,15}}: {json.dumps(disk)}"
     return None
+
+
+def version_path_ok(value: str) -> bool:
+    """A path deploy-verify and /release add to a host's address, and add a query of their own to (design 10)."""
+    if not 2 <= len(value) <= 200 or not value.startswith("/"):
+        return False
+    parts = value[1:].split("/")
+    if parts[-1] == "" and len(parts) > 1:
+        parts = parts[:-1]  # one trailing slash
+    return all(VERSION_PART.fullmatch(part) and part not in (".", "..") for part in parts)
 
 
 def example(key: str) -> str:
@@ -310,6 +334,7 @@ BOX_KEYS = {
     "MROOM_QA_PHP": "the PHP binary QA sites run, such as php8.4; php by default",
     "MROOM_QA_PERSONA_DOMAIN": "the domain QA personas' addresses end in, such as .test (the default)",
     "MROOM_QA_SMTP_PORT": "the port on 127.0.0.1 where mroom's mail relay takes QA apps' mail; 1025 by default",
+    "MROOM_QA_RESERVE_MB": "the memory, in MB, the box keeps for all but QA environments; 4096 by default",
 }
 # Names the gate builds SQL from, so each is a plain Postgres identifier (design 5.1, D18), matched as a
 # whole (fullmatch: "$" alone would let a trailing newline through).
@@ -321,6 +346,7 @@ DNS_ZONE = re.compile(r"(?=.{1,200}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a
 REPO_DIR = re.compile(r"\.|(?=.{1,200}$)[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*")
 PHP_BINARY = re.compile(r"php(?:[0-9]+(?:\.[0-9]+)?)?")
 DISK = re.compile(r"[a-z][a-z0-9]{0,15}")
+VERSION_PART = re.compile(r"[A-Za-z0-9._~-]+")
 ENV_PREFIX = re.compile(r"[A-Z][A-Z0-9_]{0,40}")
 PERSONA_DOMAIN = re.compile(r"(?=.{2,200}$)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
 # A persona domain is made up: under a name reserved for that (RFC 2606, 6761), or a subdomain of a domain of
@@ -375,6 +401,8 @@ def box_value_error(key: str, value: str) -> str | None:
     if key == "MROOM_QA_SMTP_PORT" and not (value.isascii() and value.isdigit() and 1024 <= int(value) <= 65535
                                              and value == str(int(value))):
         return "MROOM_QA_SMTP_PORT must be a port number from 1024 to 65535"
+    if key == "MROOM_QA_RESERVE_MB" and not re.fullmatch(r"0|[1-9][0-9]{0,6}", value):
+        return "MROOM_QA_RESERVE_MB must be a whole number of MB, from 0 to 9999999"
     return None
 
 
@@ -519,10 +547,14 @@ def cmd_get(args: list[str]) -> int:
     try:
         value = lookup(data, key)
     except KeyError:
-        if default is None:
+        # mroom's own default comes first, so every reader agrees on it; --default is for the other keys.
+        if key in DEFAULTS:
+            value = DEFAULTS[key]
+        elif default is None:
             print(f"{PROG}: {key} is not set in {path}", file=sys.stderr)
             return 1
-        value = fallback
+        else:
+            value = fallback
     if as_json:
         sys.stdout.write(json.dumps(value) + "\n")
     elif key in SECTIONS:
@@ -555,6 +587,8 @@ def cmd_keys(args: list[str]) -> int:
         raise UsageError("keys takes no arguments")
     for key, (kind, required, _, text) in SCHEMA.items():
         shown = "|".join(kind) if isinstance(kind, tuple) else kind
+        if key in DEFAULTS:
+            text += f" (default {DEFAULTS[key]})"
         print(f"{key:24} {shown:15} {'required' if required else 'optional':9} {text}")
     return 0
 

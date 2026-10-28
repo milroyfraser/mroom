@@ -1,0 +1,52 @@
+# shellcheck shell=bash
+# memory-preflight — what the box's memory holds (design 4, 11). Sourced, never run on its own: by the gate's
+# memory operation, by qa-up, which sizes QA slots from it, and by `mroom memory-preflight`, which stops work the box
+# cannot hold before it starts. A build or an environment that runs out of memory is ended half way by the kernel's
+# OOM killer, with whatever it had done left as it was.
+#
+# Memory comes from <MROOM_PROC, default /proc>/meminfo, and every figure is in MB.
+# shellcheck disable=SC2034  # MEM_* are read by the scripts that source this file
+
+# memory_read: sets MEM_TOTAL, MEM_AVAILABLE and MEM_SWAP_FREE from meminfo's MemTotal, MemAvailable and SwapFree.
+# Returns 1, with nothing set, when the file lacks one of them.
+memory_read() {
+  local file="${MROOM_PROC:-/proc}/meminfo" total available swap
+  total="$(awk '$1 == "MemTotal:" && $3 == "kB" { print $2; exit }' "$file" 2>/dev/null)" || return 1
+  available="$(awk '$1 == "MemAvailable:" && $3 == "kB" { print $2; exit }' "$file" 2>/dev/null)" || return 1
+  swap="$(awk '$1 == "SwapFree:" && $3 == "kB" { print $2; exit }' "$file" 2>/dev/null)" || return 1
+  [[ "$total" =~ ^[0-9]{1,12}$ && "$available" =~ ^[0-9]{1,12}$ && "$swap" =~ ^[0-9]{1,12}$ ]] || return 1
+  MEM_TOTAL=$((10#$total / 1024)) MEM_AVAILABLE=$((10#$available / 1024)) MEM_SWAP_FREE=$((10#$swap / 1024))
+}
+
+# memory_slots <total> <reserve> <per environment> <at most>: how many QA environments the box's memory holds:
+# what is left of its RAM once the box keeps its reserve, in whole environments, and never more than the limit.
+# Swap does not count: an environment lives for days, and one in swap is too slow to test.
+memory_slots() {
+  local room=$(($1 - $2)) slots
+  (($3 >= 1)) || { echo 0; return 1; }
+  ((room > 0)) || room=0
+  slots=$((room / $3))
+  ((slots <= $4)) || slots=$4
+  echo "$slots"
+}
+
+# memory_fits <need>: whether RAM available and free swap together hold <need> more, after memory_read. Swap counts
+# here, since a busy box's idle pages go there first.
+memory_fits() { ((MEM_AVAILABLE + MEM_SWAP_FREE >= $1)); }
+
+# memory_preflight <need> <what>: stops <what> before it starts when the box cannot hold <need> more. Prints why
+# and returns 1 when it cannot; MROOM_SKIP_MEMORY_CHECK=1 skips the check, and a meminfo it cannot read skips it
+# with a note, rather than blocking work on a host without one.
+memory_preflight() {
+  [ -z "${MROOM_SKIP_MEMORY_CHECK:-}" ] || return 0
+  if ! memory_read; then
+    echo "memory check skipped: cannot read MemTotal, MemAvailable and SwapFree from ${MROOM_PROC:-/proc}/meminfo" >&2
+    return 0
+  fi
+  if ! memory_fits "$1"; then
+    echo "refusing: $2 needs about $1 MB, and the box has $MEM_AVAILABLE MB of RAM available plus $MEM_SWAP_FREE MB of free swap." >&2
+    echo "Close idle sessions and heavy jobs and run it again, or set MROOM_SKIP_MEMORY_CHECK=1 to go on anyway." >&2
+    return 1
+  fi
+  echo "memory ok: $MEM_AVAILABLE MB available + $MEM_SWAP_FREE MB free swap (need $1 MB)"
+}
