@@ -234,13 +234,16 @@ t_one_box_step_failing_leaves_the_others_to_run() {
   run gate_log; expect_out $'user-clean 7\n'"$BOX_SIDE"
   # The Reverb app, the last of them, is named too, and a run again removes it.
   qa_world; environment_7
+  echo reverb-pw-7-1 >"$GATE/reverb-7"
   echo 1 >"$GATE/reverb-app-remove.rc"
   run "$DOWN" 7 --reason closed --state present
   expect_rc 1; expect_err_has "environment 7: its sites are gone, but not the box's Reverb app"
   run gh_log; expect_out_has "The teardown stopped at the box's Reverb app"
+  expect_file "$GATE/reverb-7"
   rm "$GATE/reverb-app-remove.rc"
   run "$DOWN" 7 --reason closed --state present
-  expect_rc 0; expect_out_has "environment 7: removed"
+  expect_rc 0; expect_out_has "    Reverb app $(reverb_app 7): removed"; expect_out_has "environment 7: removed"
+  expect_no_file "$GATE/reverb-7"
 }
 
 t_a_delete_that_finds_nothing_counts_as_done() {

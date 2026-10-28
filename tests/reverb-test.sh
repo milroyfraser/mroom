@@ -12,7 +12,6 @@ SUITE=reverb
 # shellcheck source=tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 skip_unless has_box_tools "this host lacks bash 5, flock or GNU date, which box commands need"
-skip_unless has_tomllib "python3 has no tomllib (needs 3.11+), which reading mroom.toml needs"
 
 HOSTS=()
 cleanup() {
@@ -163,7 +162,17 @@ t_adds_at_once_keep_every_app() {
 t_qa_plan_derives_what_the_gate_gives() {
   # qa-plan builds the frontend with the app's settings that are not secret, without asking the gate
   # (lib/core/qa.sh, qa_public_env): the two must build them alike, for an app name with an _ too, which a
-  # bucket's name turns into a -.
+  # bucket's name turns into a -. Reading mroom.toml needs tomllib, which only this case does: without it, the case
+  # skips, as skip_unless would, and in CI it fails.
+  if ! has_tomllib; then
+    if [ -n "${CI:-}" ]; then
+      echo "  FAIL [$CURRENT] python3 has no tomllib (needs 3.11+), and CI must run every test" >&2
+      failures=$((failures + 1))
+    else
+      echo "  skip [$CURRENT] python3 has no tomllib (needs 3.11+)"
+    fi
+    return 0
+  fi
   world; host_up
   printf 'MROOM_APP_NAME=my_shop\nMROOM_QA_ZONE=qa.example.test\n' >"$HOME/.config/mroom/box.env"
   printf '[app]\nname = "my_shop"\n\n[qa]\nzone = "qa.example.test"\n' >"$T/mroom.toml"

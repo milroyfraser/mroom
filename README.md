@@ -673,7 +673,9 @@ differently):
   Encrypt for its own. A browser that used an environment of before 0.5.0 keeps its cookies, set for the whole
   zone, until they expire. The new cookie names keep them from being read in place of the new ones, but Laravel's
   remember-me cookie keeps one name, so clear the zone's cookies once. Going back to 0.4.0 needs every
-  environment torn down first: 0.4.0 neither sees nor deletes sites of the new names.
+  environment torn down first: 0.4.0 neither sees nor deletes sites of the new names. 0.5.0 also wires
+  `qa.parity.broadcast = "same"`, which 0.4.0 refused: an app that set `"log"` for that alone can drop it once
+  the box has the Reverb host and its frontend maps what Laravel Echo reads (sockets in the frontend, below).
 - **A teardown.** qa-down's first job only reads Forge, so a pull request that never had an environment gets no
   teardown; one started by hand or by the reaper skips it. The second job runs every step, each skipping what is
   already gone, whether or not Forge still has a site: daemons first, since supervisor starts again what is
@@ -764,30 +766,30 @@ differently):
   (`MAIL_SCHEME=smtp`, `MAIL_ENCRYPTION=null`, whatever the template says) for `catcher`, or `MAIL_MAILER=log`;
   for each disk of `qa.disks`, a bucket and a key of its own under Laravel's s3 env names with the disk's prefix
   in place of `AWS_` (`files = "AWS_"` gives `AWS_BUCKET`, `AWS_ACCESS_KEY_ID` and the rest; a disk in
-  `qa.public_disks` also gets `<prefix>URL`), or `FILESYSTEM_DISK=local`; and for `broadcast = "same"`, an app
-  of its own on the box's Reverb host: `BROADCAST_CONNECTION=reverb` (and `BROADCAST_DRIVER`, its name before
-  Laravel 11), the app's secret the gate gives, and for an app with a frontend `VITE_REVERB_APP_KEY`,
+  `qa.public_disks` also gets `<prefix>URL`), or `FILESYSTEM_DISK=local`; and `BROADCAST_CONNECTION=log`,
+  unless `broadcast = "same"`. With `same`, the environment has an app of its own on the box's Reverb host, and
+  the file gets `BROADCAST_CONNECTION=reverb` (and `BROADCAST_DRIVER`, its name before Laravel 11), the app's
+  public values (below) and the secret the gate gives. An app with a frontend also gets `VITE_REVERB_APP_KEY`,
   `VITE_REVERB_HOST`, `VITE_REVERB_PORT` and `VITE_REVERB_SCHEME`, the build values Reverb's installer puts in a
-  Laravel app's `.env`, as the frontend was built with them; or `BROADCAST_CONNECTION=log`. The app's id, key,
-  host, port and scheme are public values (below): qa-up stops before the `.env` when the gate's are not those,
-  since the frontend would open its sockets for another app or on another host. The file goes through the gate's
-  `env-put` alone, never through Forge's API for a site's environment. The passwords and secret keys the gate
-  gives, the Reverb app's secret among them, and the app key, are masked in the run's log, and a line of the
-  gate's answer that could hold a value is never shown. The gate keeps the passwords, the bucket keys, the Reverb
-  app's secret and the app key (QA gate, above), so every deploy gets the same ones: the environment's users stay
-  signed in, and its open sockets keep their private channels.
+  Laravel app's `.env`, as the frontend was built with them. qa-up stops before the `.env` when the gate's id,
+  key, host, port or scheme is not the public one, since the frontend would open its sockets for another app or
+  on another host. The file goes through the gate's `env-put` alone, never through Forge's API for a site's
+  environment. The passwords and secret keys the gate gives, the Reverb app's secret among them, and the app key,
+  are masked in the run's log, and a line of the gate's answer that could hold a value is never shown. The gate
+  keeps the passwords, the bucket keys, the Reverb app's secret and the app key (QA gate, above), so every deploy
+  gets the same ones: the environment's users stay signed in, and its open sockets keep their private channels.
 - **What the plan builds.** `app.frontend_dir` is a folder for a frontend of its own (it gets the site
   `<N>.<zone>`), `.` for Vite inside the Laravel app, or empty for no frontend; `app.build.frontend` is the
   command, and without one nothing is built; `app.build.frontend_dist` is where it writes (`dist`, or
   `public/build` for Vite inside Laravel). In `app.build.frontend_env`, `env:<KEY>` is the environment's own
   value of a key it does not keep secret (`APP_URL`, `CLIENT_URL`, `SESSION_DOMAIN`, `SESSION_COOKIE`,
-  `XSRF_COOKIE_NAME`, and for a frontend of its own `CORS_ALLOWED_ORIGINS` and `SANCTUM_STATEFUL_DOMAINS`), and
-  any other `env:<KEY>` is empty, since the build runs the pull request's code. A frontend of its own reads the
-  session and XSRF cookies the Laravel app sets, so they are set for `.<N>.<zone>`: no other environment's host
-  is under it, and neither are the zone's shared hosts, Garage's and the Reverb host's. An app with no frontend
-  of its own keeps them on its one host. Their names are the environment's own too, `<app>_qa_<N>_sid` and
-  `<app>_qa_<N>_csrf`, and not those of before 0.5.0: a browser may hold cookies of those for the whole zone
-  until they expire, and would send them first.
+  `XSRF_COOKIE_NAME`, for a frontend of its own `CORS_ALLOWED_ORIGINS` and `SANCTUM_STATEFUL_DOMAINS`, and with
+  `broadcast = "same"` the Reverb ones below), and any other `env:<KEY>` is empty, since the build runs the pull
+  request's code. A frontend of its own reads the session and XSRF cookies the Laravel app sets, so they are set
+  for `.<N>.<zone>`: no other environment's host is under it, and neither are the zone's shared hosts, Garage's
+  and the Reverb host's. An app with no frontend of its own keeps them on its one host. Their names are the
+  environment's own too, `<app>_qa_<N>_sid` and `<app>_qa_<N>_csrf`, and not those of before 0.5.0: a browser
+  may hold cookies of those for the whole zone until they expire, and would send them first.
 - **Sockets in the frontend.** With `qa.parity.broadcast = "same"`, the default, the plan's public values hold
   the environment's Reverb app too: `REVERB_APP_ID` and `REVERB_APP_KEY`, both `<app>-qa-<N>` from the pull
   request's number, as the gate makes them, and the box's Reverb host, `REVERB_HOST` (`ws.<zone>`),
@@ -802,10 +804,11 @@ differently):
   VITE_REVERB_SCHEME = "env:REVERB_SCHEME"
   ```
 
-  The plan builds by the pull request's `mroom.toml`, and qa-up wires the environment by the default branch's,
-  so a pull request that changes `qa.parity.broadcast` gets a frontend built for its own setting until it
-  merges. The box needs the Reverb host first (QA gate, step 14): without it, the gate cannot give an app, and
-  the deploy fails.
+  The plan builds by the pull request's `mroom.toml`, and qa-up wires the environment by the default branch's.
+  So a pull request whose `qa.parity.broadcast` is not the default branch's, one branched before the default
+  branch changed it among them, gets a frontend built for its own setting until the two agree. The box needs the
+  Reverb host first (QA gate, step 14). Without it, the gate gives no app: a deploy fails at that step, after its
+  sites and code are in, and a teardown's Reverb step fails too.
 - **The path rules.** The plan is `none` when every changed path is one no user can see: tests, docs, CI,
   agent and developer tooling; any other path, a path outside the app's folders included, makes it `maybe`.
   A renamed file counts with both its names, and a name that holds a control character, a newline among them,

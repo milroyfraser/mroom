@@ -594,14 +594,15 @@ else
 fi
 if [ "$broadcast" = same ]; then
   # An app of its own on the box's Reverb host, which takes sockets from the environment's own hosts alone. Its id,
-  # key, host, port and scheme are public: qa-plan built the frontend with them, from the pull request's number
-  # alone, so the gate's must be those, or the frontend would open its sockets for another app or on another host.
+  # key, host, port and scheme are public, and qa-plan builds the frontend with them, from mroom.toml and the pull
+  # request's number (lib/core/qa.sh, qa_public_env): the gate's must be the ones derived here, or the frontend would
+  # open its sockets for another app or on another host.
   # Each deploy asks for the app again, and never removes it first: the gate keeps its secret while it exists, since
   # each open socket holds the app it opened with, and a new secret would fail their private channels.
   service "Reverb app" reverb-app-add "$n"
   for key in REVERB_APP_ID REVERB_APP_KEY REVERB_HOST REVERB_PORT REVERB_SCHEME; do
     [ "$(gate_value "$key")" = "$(public_value "$key")" ] \
-      || die "the gate's Reverb app has another $key than $(public_value "$key"), which qa-plan builds the frontend with: box.env's MROOM_APP_NAME and MROOM_QA_ZONE must be mroom.toml's app.name and qa.zone"
+      || die "the gate's Reverb app has another $key than $(public_value "$key"), which qa-plan builds the frontend with: box.env's MROOM_APP_NAME and MROOM_QA_ZONE must be mroom.toml's app.name and qa.zone, and the box must run the mroom release the workflows pin"
   done
   keep REVERB_APP_SECRET
   set_env BROADCAST_CONNECTION reverb

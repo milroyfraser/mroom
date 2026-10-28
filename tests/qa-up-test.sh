@@ -246,6 +246,10 @@ t_the_env_holds_the_environments_own_values() {
   expect_out 4
   expect_true "the template's Reverb secret was kept" lacks "$sent" "template-reverb-secret"
   expect_true "a Vite value of the template's that reads another was kept" lacks "$sent" '${REVERB_HOST}'
+  # No key comes twice, whoever wrote it. This template's values are one line each.
+  local twice
+  twice="$(cut -d= -f1 <<<"$sent" | sort | uniq -d | paste -sd' ' -)"
+  expect_true "the .env has these keys more than once: $twice" [ -z "$twice" ]
   # The app key is the gate's, the same each deploy, so the environment's users stay signed in.
   up
   run grep -c "^APP_KEY=$APP_KEY\$" "$GATE/env-put.in"; expect_out 1
@@ -643,8 +647,8 @@ REVERB_SCHEME=https"
   expect_rc 0
   # box.env names the app or the zone otherwise than mroom.toml, or the gate gives another host: the frontend would
   # open its sockets for another app, or on another host. Nothing is written.
-  for pair in "REVERB_APP_ID=$(reverb_app 8)" "REVERB_APP_KEY=$(reverb_app 8)" REVERB_HOST=ws.qa.other.dev REVERB_PORT=8080 \
-    REVERB_SCHEME=http; do
+  for pair in "REVERB_APP_ID=$(reverb_app 8)" "REVERB_APP_KEY=$(reverb_app 8)" REVERB_HOST=ws.qa.other.example.dev \
+    REVERB_PORT=8080 REVERB_SCHEME=http; do
     app "$TWO" api/artisan=php
     awk -F= -v pair="$pair" '$1 == substr(pair, 1, index(pair, "=") - 1) { print pair; next } { print }' <<<"$right" \
       >"$GATE/reverb-app-add.out"
@@ -653,7 +657,7 @@ REVERB_SCHEME=https"
     expect_err_has "the gate's Reverb app has another ${pair%%=*} than"
     expect_no_file "$GATE/env-put.in"
   done
-  expect_err_has "than https, which qa-plan builds the frontend with: box.env's MROOM_APP_NAME and MROOM_QA_ZONE must be mroom.toml's app.name and qa.zone"
+  expect_err_has "than https, which qa-plan builds the frontend with: box.env's MROOM_APP_NAME and MROOM_QA_ZONE must be mroom.toml's app.name and qa.zone, and the box must run the mroom release the workflows pin"
   # One the gate cannot give fails the deploy too, and one with no secret.
   app "$TWO" api/artisan=php
   echo 1 >"$GATE/reverb-app-add.rc"
