@@ -101,6 +101,12 @@ SCHEMA = {
     "qa.parity.files": (("same", "local"), False, 'files = "same"',
                         "same (a bucket per environment) | local"),
     "persona.name": ("str", False, 'name = "Agent"', "the bot persona's name"),
+    "persona.channel": ("str", False, 'channel = "C0123456789"',
+                        "the chat channel the persona pings (a Slack channel id)"),
+    "persona.chat_users": ("str", False, 'chat_users = ".github/chat-users.json"',
+                           "the chat user map: GitHub logins and commit emails to chat user ids, on the default branch"),
+    "github.agent_login": ("str", False, 'agent_login = "shop-agents"',
+                           "the GitHub account the box's agents work as (D22)"),
 }
 
 # Every table that may appear, including parents of tables.
@@ -203,6 +209,15 @@ def rule_error(key: str, value) -> str | None:
                 return f"{key} has a disk name that is not [a-z][a-z0-9]{{0,15}}: {json.dumps(disk)}"
             if not ENV_PREFIX.fullmatch(prefix):
                 return f"{key}.{disk} must be the prefix of env names, such as AWS_ (got {json.dumps(prefix)})"
+    # The persona's name goes into every note it writes, and its channel to chat (actions/pr-status).
+    if key == "persona.name" and not PERSONA_NAME.fullmatch(value):
+        return f"{key} must be a name of letters, digits, spaces, - and _, at most 40 (got {json.dumps(value)})"
+    if key == "persona.channel" and not CHANNEL_ID.fullmatch(value):
+        return f"{key} must be a Slack channel id, such as C0123456789 (got {json.dumps(value)})"
+    if key == "persona.chat_users" and not REPO_JSON.fullmatch(value):
+        return f"{key} must be a .json file inside the repository, with no . or .. part (got {json.dumps(value)})"
+    if key == "github.agent_login" and not GITHUB_LOGIN.fullmatch(value):
+        return f"{key} must be a GitHub login (got {json.dumps(value)})"
     if key == "qa.public_disks":
         for disk in value:
             if not DISK.fullmatch(disk):
@@ -321,6 +336,11 @@ DNS_ZONE = re.compile(r"(?=.{1,200}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a
 REPO_DIR = re.compile(r"\.|(?=.{1,200}$)[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*")
 PHP_BINARY = re.compile(r"php(?:[0-9]+(?:\.[0-9]+)?)?")
 DISK = re.compile(r"[a-z][a-z0-9]{0,15}")
+PERSONA_NAME = re.compile(r"(?=.{1,40}$)[A-Za-z0-9_-]+(?: [A-Za-z0-9_-]+)*")
+CHANNEL_ID = re.compile(r"[CG][A-Z0-9]{8,12}")
+# A committed .json file: plain path characters, folders such as .github allowed, no . or .. part.
+REPO_JSON = re.compile(r"(?=.{1,200}$)(?:(?!\.\.?/)[A-Za-z0-9._-]+/)*(?!\.json$)[A-Za-z0-9._-]+\.json")
+GITHUB_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
 ENV_PREFIX = re.compile(r"[A-Z][A-Z0-9_]{0,40}")
 PERSONA_DOMAIN = re.compile(r"(?=.{2,200}$)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
 # A persona domain is made up: under a name reserved for that (RFC 2606, 6761), or a subdomain of a domain of

@@ -45,3 +45,4 @@ files = "same"
 
 [persona]
 name = "Agent"
+channel = "C0123456789"

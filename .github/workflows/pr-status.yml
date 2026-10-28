@@ -1,0 +1,181 @@
+name: PR status
+
+# The persona's one status note per pull request, and its pings (design section 11, phase 5; actions/pr-status).
+# The app calls this workflow from one of its own (README, PR status) on pull_request_target, on workflow_run of
+# the workflows the note reads, and on workflow_dispatch. Every run rebuilds the note from GitHub, so it does not
+# matter which event woke it, or in what order events came.
+#
+# The chat token lives in the persona environment, which admits the default branch alone (design 8.8). Every
+# trigger the README names runs the default branch's copy of the app's workflow: pull_request_target, not
+# pull_request, whose run takes the pull request's own copy of the calling file. The jobs check out only the
+# default branch's mroom.toml, and mroom at the commit of this file; the pull request is read as data, through the
+# API, never checked out.
+#
+#   relay          a qa-up run links no pull request, so its completed event carries none: its run-name ends in
+#                  "PR #<n>", and this starts the app's own PR status workflow for that number
+#   retry-closed   a closed pull request's note is final only once GitHub took that edit; every workflow_run also
+#                  starts an update for the ones closed in the last day that are not final yet
+#   update         the note and the pings, one pull request at a time
+on:
+  workflow_call:
+    inputs:
+      pr:
+        description: The pull request to update; empty takes it from the event
+        type: string
+        default: ""
+      workflow:
+        description: The app's own PR status workflow file, which relay and retry-closed start by dispatch
+        type: string
+        default: pr-status.yml
+      qa-up-name:
+        description: The name of the app's qa-up workflow, whose runs relay follows
+        type: string
+        default: QA environment up
+      qa-workflow:
+        description: The app's qa-up workflow file, whose runs the note reads
+        type: string
+        default: qa-up.yml
+      qa-deploy-job:
+        description: The deploy job of a qa-up run
+        type: string
+        default: QA deploy
+      reviewer:
+        description: The GitHub login that posts the Claude review
+        type: string
+        default: claude[bot]
+      review-check:
+        description: The Claude review's check run, as the app's workflow names it (<caller job> / review)
+        type: string
+        default: claude / review
+      findings-check:
+        description: The review findings check run
+        type: string
+        default: Review findings
+      browser-check:
+        description: The browser QA check run
+        type: string
+        default: QA (browser)
+      dry-run:
+        description: true to print what it would write and ping, and change nothing
+        type: boolean
+        default: false
+    secrets:
+      MROOM_CHAT_TOKEN:
+        description: The chat bot's token (Slack, chat:write), from the persona environment; without it no pings
+        required: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  relay:
+    name: Relay a qa-up run
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.name == inputs.qa-up-name
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write # to start the app's PR status workflow
+    steps:
+      - name: Update the pull request of this qa-up run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ github.event.workflow_run.display_title }}
+          WORKFLOW: ${{ inputs.workflow }}
+        run: |
+          [[ "$WORKFLOW" =~ ^[A-Za-z0-9._-]{1,100}\.ya?ml$ ]] || { echo "::error::workflow must be a workflow file name"; exit 1; }
+          if [[ "$TITLE" =~ PR\ \#([1-9][0-9]{0,8})$ ]]; then
+            gh workflow run "$WORKFLOW" --repo "$GITHUB_REPOSITORY" -f pr="${BASH_REMATCH[1]}"
+          else
+            echo "::notice::no pull request number at the end of the run-name"
+          fi
+
+  retry-closed:
+    name: Retry closed pull requests
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    # A burst of events collapses into one run.
+    concurrency:
+      group: mroom-pr-status-retry-closed
+      cancel-in-progress: true
+    permissions:
+      actions: write # to start the app's PR status workflow
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
+      - name: Start an update for each closed pull request whose note is not final
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: ${{ inputs.workflow }}
+        run: |
+          [[ "$WORKFLOW" =~ ^[A-Za-z0-9._-]{1,100}\.ya?ml$ ]] || { echo "::error::workflow must be a workflow file name"; exit 1; }
+          for pr in $(mroom/actions/pr-status/pr-status.sh --closed-not-final); do
+            echo "::notice::pull request $pr is closed, but its note is not final; trying again"
+            gh workflow run "$WORKFLOW" --repo "$GITHUB_REPOSITORY" -f pr="$pr" || true
+          done
+
+  update:
+    name: Update the note
+    # A workflow_run with no pull request is a push to the default branch, a fork's pull request or a qa-up run,
+    # which relay takes.
+    if: inputs.pr != '' || github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: persona
+      deployment: false
+    # One update per pull request at a time, never cancelled, so reading and writing the note never interleave. A
+    # queued run may replace an older queued one: each rebuilds everything, so nothing is lost.
+    concurrency:
+      group: mroom-pr-status-${{ inputs.pr || github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: write # to write the note
+      issues: write # a pull request's comments are its issue's
+      checks: read
+      actions: read # the qa-up runs and their jobs
+    steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
+      - name: Check out the app's mroom.toml
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: app
+          persist-credentials: false
+          sparse-checkout: /mroom.toml
+          sparse-checkout-cone-mode: false
+      - name: Check the persona environment
+        env:
+          HAS_CHAT: ${{ secrets.MROOM_CHAT_TOKEN != '' }}
+        run: |
+          [[ "$HAS_CHAT" == true ]] || echo "::warning::The persona environment has no MROOM_CHAT_TOKEN, so no pings go out (README, PR status)."
+      - uses: ./mroom/actions/pr-status
+        with:
+          pr: ${{ inputs.pr || github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number }}
+          config: app/mroom.toml
+          chat-token: ${{ secrets.MROOM_CHAT_TOKEN }}
+          dry-run: ${{ inputs.dry-run }}
+          reviewer: ${{ inputs.reviewer }}
+          review-check: ${{ inputs.review-check }}
+          findings-check: ${{ inputs.findings-check }}
+          browser-check: ${{ inputs.browser-check }}
+          qa-workflow: ${{ inputs.qa-workflow }}
+          qa-deploy-job: ${{ inputs.qa-deploy-job }}

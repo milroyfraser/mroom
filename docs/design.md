@@ -274,6 +274,8 @@ files = "same"                     # same (a bucket per environment and file dis
 
 [persona]
 name = "Agent"                     # the name people see on notes and pings
+channel = "C0123456789"            # the chat channel the persona pings (a Slack channel id)
+chat_users = ".github/chat-users.json"   # GitHub logins and commit emails to chat user ids, on the default branch
 
 [github]
 agent_login = "<agents-account>"   # the box's one GitHub account (D22); `mroom user setup` refuses any other
@@ -294,7 +296,7 @@ until then a reader passes its own fallback (`mroom config get <key> --default <
 | `issues.*` | phase 3 decides | phase 3 decides |
 | `errors.*` | phase 3 decides | none: without the table there is no error tracker |
 | `pr.required_checks` | phase 4 decides | phase 4 decides |
-| `persona.name` | phase 5 decides | phase 5 decides |
+| `persona.*`, `github.agent_login` | none (phase 5) | `persona.name`: Agent; `persona.chat_users`: `.github/chat-users.json`; without `persona.channel` no pings go out; without `github.agent_login` an agent's pull request pings that account's developer only |
 
 **Validation** (`mroom config validate`, and before every `get`):
 
@@ -749,6 +751,14 @@ What the pilot's scripts learned after this table was drawn, which their ports k
   map has it, else by its email. Later commits, such as a reviewer's committed suggestion or a bot's fix, never
   count. A first commit the map knows by neither, such as the agents' own or a bot's, pings the developer the map
   names for the agents' account.
+- **One note per pull request (`actions/pr-status`, phase 5).** The note is found by a hidden line under it that
+  also holds the pings already sent, and should a person's edit lose that line, by its footer, so it is edited
+  in place and never posted again. A ping is recorded in the note before it goes out, so a note that cannot be
+  written sends none, and a lost line records that run's pings unsent: a missed ping, never a repeat. A closed
+  pull request's note is final only once GitHub took that edit, and later runs retry the ones that are not. In
+  v1 the note lives on the pull request (the tracker `none` of section 7) whatever the tracker; on the issue,
+  it comes with the tracker adapter's `issue_comment_upsert`, and the QA environment's error count with the
+  errors adapter.
 - **Forge logs (`mroom user`, phase 1).** The box's Forge token holds no scope for reading a background process's
   log, and Forge answers 403. Setup says the log is unreadable and goes on, instead of stopping under `set -e`
   before the profile clean-up above; the port tests that clean-up with an unreadable log.
