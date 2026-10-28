@@ -328,6 +328,7 @@ The workflow skills of phase 3 reach the issue tracker and the error tracker thr
 ```bash
 mroom tracker get SHOP-12                    # title, state, labels, branch, description, every comment
 mroom tracker list --mine --open             # my 50 latest open issues, by priority; or --label lesson
+mroom tracker find sentry:1001               # the issues whose description holds the marker for an alert
 mroom tracker comment SHOP-12 < note.md      # adds a comment; the body comes on stdin
 mroom tracker state SHOP-12 "In Review"      # the team's state of that name, in any case
 mroom tracker create --allow-create --title "Checkout fails" --state Triage --label bug < body.md
@@ -361,6 +362,13 @@ token_env = "SENTRY_AUTH_TOKEN"    # the default
 - **Listing** needs `--mine` or `--label`, so it never reads a whole backlog. It takes the `--limit`
   (50, at most 250) most recently updated issues, in `issues.team` when that is set, then sorts
   them by priority. `get` says whether the issue is assigned to the token's user (`assigned_to_me`).
+- **Finding** an error's issue reads the hidden marker the persona puts in each issue it files,
+  one per alert: `<!-- mroom-alert key=sentry:1001 -->`, where the key is the error tracker and the
+  error issue's numeric id, and a later alert adds `:<kind>:...` after the id. Linear's search is a
+  substring match, so `find` checks each description again and keeps an issue only when the marker
+  ends there or goes on with `:`; the marker for `sentry:100` never finds `sentry:1001`'s issue. It
+  reads every page, in `issues.team` when that is set, and lists the issues in every state, the
+  first filed at the top.
 - **Creating an issue** needs `--allow-create`; without it, nothing is sent. It files in `issues.team`
   and uses labels that already exist, of that team or the whole workspace (not a parent team's); mroom
   never creates a label.
@@ -394,6 +402,7 @@ that Claude Code reads; in a session they are `/mroom:<name>`.
 | `/mroom:refine` | lists my open issues, tags each with a Design value, and runs `/mroom:implement` on the ones I confirm |
 | `/mroom:deliver <id>` | a design gate when the issue needs one (a canvas, approved in a comment), then `/mroom:implement`; resumes stopped work |
 | `/mroom:implement <id>` | one issue to a PR in review: a worktree, the change, the affected tests, a draft PR, CI and QA on the PR's environment, then stop |
+| `/mroom:fix-issue <error id>` | one error issue to a fix in review: reads the error and its latest event, finds the issue the persona filed (`mroom tracker find`), works on a branch that names both ids, reproduces the error with a failing test before it fixes it, and links the error issue only through a `Fixes <error id>` line on the fixing commit; never resolves it |
 | `/mroom:release` | only when a person asks: what ships, what to watch, the notes, one question, then a **draft** release that the person publishes; then a read-only watch of the deploy |
 | `/mroom:correct` | finds a mistake agents repeat, and adds the highest check that stops it (adapted from pstack, MIT) |
 | `/mroom:forge` | Forge through `forge-api` only: reads free, writes asked first, secrets never printed |
@@ -424,13 +433,15 @@ tag_prefix = ""                              # "release-" gives release-v1.2.3
 ```
 
 The settings fragment `base.json` allows the adapters' reads (`mroom tracker get`, `list`,
-`backend`; `mroom errors get`, `search`, `backend`) and asks before `mroom tracker create` and
+`find`, `backend`; `mroom errors get`, `search`, `backend`) and asks before `mroom tracker create` and
 `mroom errors resolve`. `tests/skills-test.sh` checks the skills as a contract: their frontmatter,
 that every `mroom` command, skill and key they name exists, the rules above, the release's draft and
-question, and that none names a host, an IP address, an id or an email address. Names of people and
+question, that no skill resolves an error issue, and that none names a host, an IP address, an id or
+an email address. For `fix-issue` it also checks that the branch names both ids, that a failing test
+comes before the fix, that the only link is the `Fixes` line, and that it stops at a PR in review. Names of people and
 projects come from `$MROOM_PRIVATE_WORDS`, a file of patterns kept outside the repository.
 
-Not here yet: `fix-issue` and `blast-radius` (later in phase 3), the principle skills (named in the
+Not here yet: `blast-radius` (later in phase 3), the principle skills (named in the
 skills, read when installed), and `verify-app` with `qa-engineer` (phase 2b).
 
 ## QA gate

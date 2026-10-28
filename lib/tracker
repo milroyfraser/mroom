@@ -7,6 +7,8 @@
 #                                           issues in issues.team: assigned to the token's user, not done or
 #                                           canceled, with a label; needs --mine or --label; the --limit most
 #                                           recently updated, then by priority
+#   mroom tracker find <alert key>          the issues whose description holds the persona's marker for an
+#                                           alert key, such as sentry:1001; every state, the oldest first
 #   mroom tracker comment <id> < body       adds the comment on stdin
 #   mroom tracker state <id> <state name>   moves the issue to the team's state of that name (any case)
 #   mroom tracker create --allow-create --title <title> [--state <name>] [--priority 0-4]
@@ -44,11 +46,12 @@ rc=0
 case "$cmd" in
   get) issue_get "$@" || rc=$? ;;
   list) issue_list "$@" || rc=$? ;;
+  find) issue_find_by_marker "$@" || rc=$? ;;
   comment) issue_comment "$@" || rc=$? ;;
   state) issue_set_state "$@" || rc=$? ;;
   create) issue_create "$@" || rc=$? ;;
   backend) [ "$#" = 0 ] || { echo "mroom tracker: backend takes no arguments" >&2; exit 2; }; tracker_backend || rc=$? ;;
   help | -h | --help) usage ;;
-  *) echo "mroom tracker: unknown command '$cmd' (get, list, comment, state, create, backend)" >&2; rc=2 ;;
+  *) echo "mroom tracker: unknown command '$cmd' (get, list, find, comment, state, create, backend)" >&2; rc=2 ;;
 esac
 exit "$rc"
