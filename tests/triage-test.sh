@@ -201,9 +201,38 @@ t_the_earlier_list_is_capped() {
   expect_rc 0
   local d
   d="$(jq -r '.issues[-1].description' "$T/world.json")"
-  expect_true "the earlier list is not capped" has "$d" "[ENG-130](https://tracker.example.dev/issue/ENG-130), and 10 more."
+  expect_true "the earlier list is not capped" has "$d" "[ENG-130](https://tracker.example.dev/issue/ENG-130), and 10 older ones."
   expect_true "an early one is listed" lacks "$d" "[ENG-110]("
-  expect_true "a fence was left open" [ $(( $(grep -c '^```' <<<"$d") % 2 )) = 0 ]
+}
+
+t_hidden_characters_never_split_a_secret_from_the_redactor() {
+  pworld
+  add_alert new 1001 2026-10-28T11:50:00Z
+  world_set '.sentry.new[0].title = "Mail to pat@exa\u200bmple.com failed"'
+  local zw=$'\u200b'
+  add_event 1001 "for pat@exa${zw}mple.com with ghp_abcdefghij${zw}klmnopqrstuvwxyz0123"
+  triage
+  expect_rc 0
+  local all
+  expect_true "the event lacks its hidden character" has "$(jq -r '.sentry.events["1001"].message' "$T/world.json")" "$zw"
+  all="$(jq -r '.issues[0] | .title + "\n" + .description' "$T/world.json")"
+  expect_true "a split address or token got past the redactor: $all" lacks "$all" "example.com"
+  expect_true "the token got past the redactor" lacks "$all" "klmnopqrstuvwxyz0123"
+}
+
+t_a_cut_closes_a_code_block_only_when_one_is_open() {
+  local FIT out_fit
+  eval "$(sed -n "/^FIT='$/,/^'$/p" "$TRIAGE")"
+  # The cut inside the code block closes it; one after it opens none; both stay within 28000 bytes.
+  out_fit="$(python3 -Ic "$FIT" < <(printf 'head\n```text\n'; for i in $(seq 1 1000); do printf 'line %04d %s\n' "$i" "$(printf '%040d' 0)"; done; printf '```\nlast line\n'))"
+  expect_true "the cut is too long" [ "$(printf '%s\n' "$out_fit" | wc -c)" -le 28000 ]
+  expect_true "the cut left the code block open" [ $(( $(grep -c '^```' <<<"$out_fit") % 2 )) = 0 ]
+  expect_true "the last line is gone" has "$out_fit" $'_The rest was cut._\n\nlast line'
+  out_fit="$(python3 -Ic "$FIT" < <(printf '```text\nx\n```\n'; for i in $(seq 1 1000); do printf 'after %04d %s\n' "$i" "$(printf '%040d' 0)"; done; printf 'last line\n'))"
+  expect_true "the second cut is too long" [ "$(printf '%s\n' "$out_fit" | wc -c)" -le 28000 ]
+  expect_true "the cut opened a code block: $(grep -c '^```' <<<"$out_fit")" [ "$(grep -c '^```' <<<"$out_fit")" = 2 ]
+  out_fit="$(printf 'short\n' | python3 -Ic "$FIT")"
+  expect_true "a short body was changed" [ "$out_fit" = short ]
 }
 
 t_a_refused_alert_fails_the_run() {
@@ -314,7 +343,12 @@ t_the_alarm_sends_nothing_it_cannot_record() {
   alarm
   expect_rc 1; expect_err_has "does not ping"
   expect_true "a ping with no record" [ "$(count_ops slack)" = 0 ]
-  world_set '.down = [] | .slack_error = "channel_not_found"'
+  # The day's issue cannot be filed (here: the label is gone): nothing is sent.
+  world_set '.down = [] | .labels = []'
+  alarm
+  expect_rc 1; expect_err_has "the day's issue could not be filed, so the alarm does not ping"
+  expect_true "a ping with no record of it" [ "$(count_ops slack)" = 0 ]
+  world_set '.labels = [{id: "l-1", name: "found-by-agent"}] | .slack_error = "channel_not_found"'
   alarm
   expect_rc 1; expect_err_has "Slack refused the message: channel_not_found"
   world_set 'del(.slack_error)'
@@ -402,6 +436,8 @@ test_case lost-after-refusal t_lost_markers_end_the_step_green_even_after_a_refu
 test_case odd-event-text t_odd_event_text_is_cleaned_and_cut_never_refused
 test_case long-event-cut t_a_long_event_is_cut_and_closed
 test_case earlier-capped t_the_earlier_list_is_capped
+test_case hidden-characters t_hidden_characters_never_split_a_secret_from_the_redactor
+test_case fit-fences t_a_cut_closes_a_code_block_only_when_one_is_open
 test_case no-tracker t_without_a_tracker_nothing_is_filed
 test_case dry-run t_a_dry_run_files_nothing
 test_case tracker-down t_a_tracker_that_cannot_be_read_fails_the_run

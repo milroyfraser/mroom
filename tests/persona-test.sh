@@ -161,7 +161,7 @@ t_text_is_checked_marked_only_by_the_guard_and_defanged() {
   expect_true "a tight marker survived: $d" lacks "$d" "<!--mroom-alert"
   run "$MROOM" tracker find sentry:8888
   expect_true "find sees a forged marker: $out" [ "$out" = "[]" ]
-  body 'See https://evil.example#.github.com/, HTTPS://evil.example/a, https://evil.example\.github.com/x and www.evil.example/x.'
+  body 'See https://evil.example#.github.com/, HTTPS://evil.example/a, https://evil.example\.github.com/x, https://evil.example%2f.github.com/ and www.evil.example/x.'
   create --key sentry:1004 --title "t"
   expect_rc 0
   d="$(issue ENG-3 | jq -r .description)"

@@ -450,7 +450,7 @@ channel = "C0123456789"            # the chat channel it pings when triage canno
 - **One issue per alert key.** The issue holding an alert carries its hidden marker, `<!-- mroom-alert
   key=sentry:1001 -->`. Triage looks for the key with `mroom tracker find` and files an issue only when
   no issue in any state holds it, archived ones too, so a second run files nothing new, and a cancelled
-  issue is not filed again. A later alert of an error is a new issue that links (up to 20 of) the
+  issue is not filed again. A later alert of an error is a new issue that links the 20 newest of the
   earlier ones, and a comment on the newest earlier one when the persona filed it. The alerts of one
   error in one run go on one issue. Until an issue of the same kind for that error is done, a later
   alert counts as filed, so a regression that goes on for days, or one a person cancelled, is one issue;
