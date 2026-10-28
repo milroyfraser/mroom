@@ -560,6 +560,24 @@ t_a_file_in_both_places_stops_the_move() {
   expect_rc 0; expect_out_has "Mailpit: its data moved"
   run cat "$(services)/mailpit/data/mailpit.db"; expect_out mail
   expect_no_file "$(services)/mailpit/data/.mailpit.db.moving"
+  # The same for one file, the SMTP logins: finished, never replaced by a fresh placeholder.
+  local logins
+  logins="$(cat "$(etc mailpit)/mailpit-smtp.passwd")"
+  mv "$(etc mailpit)/mailpit-smtp.passwd" "$(etc mailpit)/.mailpit-smtp.passwd.moving"
+  run "$MROOM" baseline mailpit
+  expect_rc 0; expect_true "the logins were made again" lacks "$out" "SMTP logins:"
+  run cat "$(etc mailpit)/mailpit-smtp.passwd"; expect_out "$logins"
+  # A hidden copy beside one already in place: a person decides.
+  cp "$(etc mailpit)/mailpit-smtp.passwd" "$(etc mailpit)/.mailpit-smtp.passwd.moving"
+  run "$MROOM" baseline mailpit
+  expect_rc 1; expect_err_has ".mailpit-smtp.passwd.moving is what an earlier move left halfway, and"
+  rm "$(etc mailpit)/.mailpit-smtp.passwd.moving"
+  # An old entry that already has the name of a move under way is refused, with nothing moved.
+  mkdir -p "$(old)/mailpit/data"
+  printf 'x\n' >"$(old)/mailpit/data/.x.moving"
+  run "$MROOM" baseline mailpit
+  expect_rc 1; expect_err_has "has the name mroom gives a move under way"
+  expect_file "$(old)/mailpit/data/.x.moving"
 }
 
 t_usage_and_unknown_parts() {
