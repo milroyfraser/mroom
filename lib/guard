@@ -53,6 +53,10 @@
 #     and a recursive copy, archive or search of a folder that holds them (~, ~/.config, ~/.claude); and
 #     `gh auth token`, `gh auth status -t`, `gh config get ...token`.
 #
+# Refused on purpose, though they can be harmless: setting a git key that runs a command (`git config
+# core.editor vim`; `git -c` checks the value instead, since it lasts one command), opening a secret in an
+# editor, and httpie to api.github.com without an explicit GET or HEAD (it sends its stdin as the body).
+#
 # Allowed on purpose: reading code, every `gh api` GET (including GET .../pulls/N/merge, which only
 # asks "is it merged?"), gh pr view/list/checks/create/edit/comment, `gh release create/edit` (an
 # `ask` rule prompts the developer), `git push` of a branch (an `ask` rule in base.json), `cp .env.example .env`
@@ -147,8 +151,12 @@ is_secret_path() {
   base=${t##*/}
   case "$base" in *.example | *.example.* | *.pub) return 1 ;; esac
   case "$base" in
-    .env | .env.* | .envrc | .forge-token | .credentials.json | .git-credentials | .netrc | .npmrc | .pgpass | auth.json) return 0 ;;
+    .env | .env.* | .envrc | .forge-token | .credentials.json | .git-credentials | .netrc | .pgpass) return 0 ;;
   esac
+  # Composer's auth.json (in the project root or Composer's home) and the home folder's .npmrc hold tokens;
+  # a test fixture named auth.json or a project's .npmrc usually does not.
+  case "$t" in auth.json | ./auth.json | */.config/composer/auth.json | */.composer/auth.json) return 0 ;; esac
+  [ "$base" = .npmrc ] && home_rest "$t" && [ "$REST" = .npmrc ] && return 0
   case "/$t/" in
     */.ssh/* | */.config/gh/* | */.config/gh-* | */.config/mroom/secrets/* | */.aws/* | */.laravel-forge/* | */.config/forge/*) return 0 ;;
     */.docker/config.json/ | */.config/git/credentials/) return 0 ;;
@@ -408,7 +416,7 @@ check_gh_api() {
     elif [ -z "$BLOCKED" ] && [ "$input" = "-" ]; then
       case "$SEG_STDIN_KIND" in
         static) check_graphql_text "$(lc "$SEG_STDIN")" ;;
-        file | pipe) block "a GraphQL query on stdin from a file or a pipe cannot be checked; pass it inline" ;;
+        *) block "a GraphQL query on stdin that is not a heredoc, here-string or echo cannot be checked; pass it inline" ;;
       esac
     fi
     return
@@ -429,8 +437,8 @@ check_gh_api() {
       elif [ "$input" = "-" ]; then
         case "$SEG_STDIN_KIND" in
           static) [[ $(lc "$SEG_STDIN") =~ \"event\"[[:space:]]*:[[:space:]]*\"approve\" ]] && block "gh api $method $endpoint approves a pull request" ;;
-          file | pipe) block "a review payload on stdin from a file or a pipe cannot be checked for event=APPROVE" ;;
-          *) [[ $RAW =~ \"event\"[[:space:]]*:[[:space:]]*\"approve\" ]] && block "gh api $method $endpoint approves a pull request" ;;
+          # A file, a pipe, or stdin from outside this command (`bash -c '...' < x`): it cannot be read here.
+          *) block "a review payload on stdin from a file or a pipe cannot be checked for event=APPROVE" ;;
         esac
       elif [ -n "$input" ]; then
         block "a review payload read from a file cannot be checked for event=APPROVE; pass it inline"
@@ -555,35 +563,36 @@ check_gh_workflow_run() {
 
 # Any request to the GitHub API outside gh that is not plainly a read: use gh, which this hook can read.
 # A method flag, a body or a form in any spelling (short groups such as -sX or -sd too) counts as a write,
-# and so do httpie's verb and data items.
+# and so does httpie unless it names GET or HEAD, since it sends whatever is on its stdin as the body.
 check_http() {
-  local cmd=$1 a hit=0 write=0 npos=0
+  local cmd=$1 a hit=0 write=0 verb=""
   shift
   for a in "$@"; do
-    case "$(lc "$a")" in *api.github.com*) hit=1 ;; esac
+    case "$(lc "$a")" in *api.github.com* | *uploads.github.com*) hit=1 ;; esac
   done
   [ "$hit" = 1 ] || return
   for a in "$@"; do
     case "$a" in
-      --request* | --method* | --data* | --form* | --json* | --upload-file* | --post-* | --body*) write=1 ;;
+      --request* | --method* | --data* | --form* | --json* | --upload-file* | --post-* | --body* | --raw*) write=1 ;;
       --*) ;;
       -*[XdFTE]*) write=1 ;;
       -*) ;;
       *)
-        npos=$((npos + 1))
         case "$cmd" in
           http | https)
             case "$(lc "$a")" in
-              get | head) ;;
-              post | put | patch | delete) write=1 ;;
-              *api.github.com*) ;;
-              *=* | *@*) write=1 ;;
+              get | head) [ -n "$verb" ] || verb="read" ;;
+              *github.com*) ;;
+              *:=* | *=* | *@*) write=1 ;; # a data item (x=y, x:=y, x@file)
+              *:*) ;;                      # a header (Name:value)
+              *) write=1 ;;                # another verb
             esac
             ;;
         esac
         ;;
     esac
   done
+  case "$cmd" in http | https) [ "$verb" = read ] || write=1 ;; esac
   [ "$write" = 1 ] && block "$cmd writes to the GitHub API outside gh, or cannot be checked"
 }
 
@@ -689,12 +698,12 @@ check_git() {
     esac
   done
   case "$sub" in
-    rebase)
-      # -x/--exec runs a command after each commit.
+    rebase | difftool | mergetool | filter-branch)
+      # rebase -x/--exec, difftool -x/--extcmd and filter-branch --*-filter run a command they are given.
       for ((k = 0; k < ${#rest[@]}; k++)); do
         case "${rest[$k]}" in
-          -x | --exec) analyze "${rest[$((k + 1))]:-}" $((depth + 1)) ;;
-          --exec=*) analyze "${rest[$k]#--exec=}" $((depth + 1)) ;;
+          -x | --exec | --extcmd | --*-filter) analyze "${rest[$((k + 1))]:-}" $((depth + 1)) ;;
+          --exec=* | --extcmd=* | --*-filter=*) analyze "${rest[$k]#*=}" $((depth + 1)) ;;
           -x*) analyze "${rest[$k]#-x}" $((depth + 1)) ;;
         esac
       done
@@ -763,7 +772,7 @@ check_git_config_pair() {
     core.hookspath) block "git -c core.hooksPath runs hooks from a directory this hook cannot read" ;;
     *)
       if is_git_push_key "$key" "$value"; then
-        block "git -c $key changes what a push does (force, mirror or tags)"
+        block "git -c $key changes what a push does, or loads configuration from elsewhere"
       elif is_git_command_key "$key"; then
         analyze "${value#!}" $((depth + 1))
       fi
@@ -781,6 +790,11 @@ check_git_config_set() {
   while [ $# -gt 0 ]; do
     a=$1
     shift
+    # After a key, the next word is its value, even one that starts with a dash (`alias.p '--no-pager push'`).
+    if [ "${#ops[@]}" -ge 1 ] && [[ ${ops[${#ops[@]} - 1]} == *.* ]] && [[ $a == -* ]]; then
+      ops+=("$a")
+      continue
+    fi
     case "$a" in
       --get | --get-all | --get-regexp | --get-urlmatch | --list | -l | --unset | --unset-all | --remove-section | --rename-section | --edit | -e) read=1 ;;
       -f | --file | --blob | --type | --default | --comment | -t) shift ;;
@@ -807,7 +821,7 @@ check_git_config_set() {
       if is_git_command_key "$key"; then
         block "git config sets $key, which makes git run a command"
       elif is_git_push_key "$key" "$value"; then
-        block "git config sets $key, which makes a later push force, mirror or push tags"
+        block "git config sets $key, which changes what a later push does, or loads configuration from elsewhere"
       fi
       ;;
   esac
@@ -817,6 +831,8 @@ check_git_config_set() {
 # and pushing tags.
 is_git_push_key() {
   case "$1" in
+    # Configuration loaded from another file can set any key above, out of sight.
+    include.path | includeif.*.path) return 0 ;;
     remote.*.push | remote.*.mirror | push.followtags | push.pushoption) return 0 ;;
     # matching pushes every branch that exists on both sides, the default branch too.
     push.default) case "$(lc "$2")" in matching) return 0 ;; esac ;;
@@ -828,9 +844,10 @@ is_git_push_key() {
 # new name is refused too.
 check_git_alias() {
   [ "${#2}" -le 4096 ] || { block "a git alias too long to check"; return; }
-  # An alias for push itself would take its options where this hook no longer sees them (`git p --force`).
-  case "$(lc "$2")" in
-    push | push\ * | send-pack*) block "a git alias for push hides the options a later push passes it"; return ;;
+  # An alias for push itself would take its options where this hook no longer sees them (`git p --force`),
+  # even behind git's own options (`--no-pager push`, `-C . push`).
+  case " $(lc "$2") " in
+    *" push "* | *" send-pack "*) block "a git alias for push hides the options a later push passes it"; return ;;
   esac
   analyze "git $2" $(($1 + 1))
 }
@@ -915,6 +932,8 @@ check_assignment() {
       analyze "$value" $((depth + 1))
       ;;
     BASH_ENV | ENV) is_secret_path "$value" && block "$name would source a secret file ($value)" ;;
+    # Another home or config folder gives git (and gh) configuration this hook never sees.
+    HOME | XDG_CONFIG_HOME) block "$name points git and gh at configuration this hook cannot read" ;;
   esac
 }
 
@@ -933,7 +952,16 @@ check_segment() {
     case "$a" in
       "${MK}HD" | "${MK}HS") k=$((k + 1)); stdin=${raw[$k]}; stdin_kind=static ;;
       "${MK}R<") k=$((k + 1)); stdin_file=${raw[$k]}; stdin_kind="file" ;;
-      "${MK}R>") k=$((k + 1)) ;;
+      "${MK}R>")
+        k=$((k + 1))
+        # Writing git's own config or hooks changes what later git commands do, out of sight.
+        case "/$(lc "${raw[$k]:-}")" in
+          */.git/config | */.git/hooks/* | */.gitconfig | */.config/git/config)
+            block "it writes git's configuration or hooks (${raw[$k]})"
+            return
+            ;;
+        esac
+        ;;
       "${MK}BL") brace_list=1 ;;
       "${MK}UE") block "a \$'...' escape (\\u, \\U or \\c) that cannot be decoded here"; return ;;
       *) words+=("$a") ;;
@@ -963,7 +991,7 @@ check_segment() {
       sudo | doas)
         shift
         while [ $# -gt 0 ] && [[ $1 == -* ]]; do
-          case "$1" in -u | -g | -C | -h | -p | -U) shift ;; esac
+          case "$1" in -u | -g | -C | -h | -p | -U | -D | -r | -t | -T | -R | --user | --group | --chdir | --host | --prompt | --other-user | --role | --type | --command-timeout | --close-from | --chroot) shift ;; esac
           shift
         done
         ;;
@@ -975,7 +1003,7 @@ check_segment() {
             -S*) analyze "${1#-S}" $((depth + 1)); return ;;
             --split-string=*) analyze "${1#--split-string=}" $((depth + 1)); return ;;
             -*S*) block "env with -S in a group of options cannot be checked"; return ;;
-            -u | -C | --unset | --chdir) shift ;;
+            -u | -C | -P | --unset | --chdir) shift ;;
             -*) ;;
             *) check_assignment "$depth" "$1" ;;
           esac
@@ -992,14 +1020,63 @@ check_segment() {
         [ $# -gt 0 ] && shift # the lock file
         case "${1:-}" in -c | --command) analyze "${2:-}" $((depth + 1)); return ;; esac
         ;;
-      script | su | runuser)
-        # Each runs a -c string as a command (script's own file argument is its log).
+      script | su | runuser | expect)
+        # Each runs a -c string: a shell command, or for expect a Tcl script (checked as code). macOS
+        # script takes its log file, then the command's words.
+        shift
+        local -a sargs=("$@")
+        while [ $# -gt 0 ]; do
+          case "$base:$1" in
+            expect:-c) check_code "expect's script" "${2:-}"; return ;;
+            *:-c | *:--command) analyze "${2:-}" $((depth + 1)); return ;;
+          esac
+          shift
+        done
+        [ "$base" = script ] || return
+        set -- ${sargs[@]+"${sargs[@]}"}
+        while [ $# -gt 0 ] && [[ $1 == -* ]]; do
+          case "$1" in -t | -T | -F | -E | -I | -O) shift ;; esac
+          shift
+        done
+        [ $# -gt 0 ] && shift # the log file
+        [ $# -gt 0 ] || return
+        ;;
+      gdb)
+        # gdb -ex 'shell CMD' (or '!CMD') runs a shell command.
         shift
         while [ $# -gt 0 ]; do
-          case "$1" in -c | --command) analyze "${2:-}" $((depth + 1)); return ;; esac
+          case "$1" in
+            -ex | -iex | --eval-command)
+              case "${2:-}" in
+                shell\ * | '!'*) a=${2#shell }; analyze "${a#!}" $((depth + 1)) ;;
+              esac
+              shift
+              ;;
+          esac
           shift
         done
         return
+        ;;
+      entr)
+        # entr [-s 'CMD' | CMD...]: the command runs when files change.
+        shift
+        local entr_s=0
+        while [ $# -gt 0 ] && [[ $1 == -* ]]; do
+          case "$1" in -*s*) entr_s=1 ;; esac
+          shift
+        done
+        if [ "$entr_s" = 1 ]; then analyze "${1:-}" $((depth + 1)); return; fi
+        ;;
+      screen | unshare | nsenter)
+        # screen [-dmS NAME] COMMAND..., unshare [OPTIONS] COMMAND...
+        shift
+        while [ $# -gt 0 ] && [[ $1 == -* ]]; do
+          case "$1" in
+            -S | -c | -L | -Logfile | -t | -T | -X | -p | --setgroups | --propagation | --target) shift ;;
+            -*S) shift ;; # screen -dmS NAME
+          esac
+          shift
+        done
         ;;
       parallel)
         # parallel COMMAND ::: ARGS: the command, with its arguments after ::: left out.
@@ -1095,20 +1172,26 @@ check_segment() {
         # tmux new-session/new-window/split-window/respawn-pane/send-keys ... 'COMMAND': each word a command.
         shift
         while [ $# -gt 0 ] && [[ $1 == -* ]]; do
-          case "$1" in -L | -S | -f | -c) shift ;; esac
+          case "$1" in
+            -c) analyze "${2:-}" $((depth + 1)); return ;; # tmux -c COMMAND runs it in a shell
+            -L | -S | -f) shift ;;
+          esac
           shift
         done
         case "${1:-}" in
           new | new-session | neww | new-window | splitw | split-window | respawn-pane | respawnp | respawn-window | respawnw | send-keys | send | run-shell | run)
+            # The words after the options are one shell command, joined.
             shift
+            local -a twords=()
             while [ $# -gt 0 ]; do
               case "$1" in
-                -s | -n | -t | -c | -x | -y | -F | -e | -l | -w | -h) shift ;;
+                -s | -n | -t | -c | -x | -y | -F | -e | -l | -w | -h | -T) shift ;;
                 -*) ;;
-                *) analyze "$1" $((depth + 1)) ;;
+                *) twords+=("$1") ;;
               esac
               shift
             done
+            [ "${#twords[@]}" -gt 0 ] && analyze "${twords[*]}" $((depth + 1))
             ;;
         esac
         return
@@ -1247,8 +1330,13 @@ check_segment() {
     awk | gawk | mawk | nawk)
       # awk runs commands through system() and pipes: such a program is checked as code. (Its files are
       # checked as reads below; sed's rarely used e command is not checked.)
+      local skipv=0
       for a in "$@"; do
-        case "$a" in -*) continue ;; esac
+        if [ "$skipv" = 1 ]; then skipv=0; continue; fi
+        case "$a" in
+          -v | -F | -f | --assign | --field-separator | --file) skipv=1; continue ;;
+          -*) continue ;;
+        esac
         case "$a" in
           *system* | *'|'*) check_code "$cmd's program" "$a" ;;
         esac
@@ -1273,19 +1361,31 @@ check_shell() {
   local a script="" has_c=0 from_stdin=0 file="" skip=0 opts=1
   # Options first: short groups (-ec, +x), and -o/+o/-O/+O whose next word is an option name, not
   # a script. The first other word is the -c string or the script file.
+  local init_next=0
   for a in "$@"; do
     if [ "$skip" = 1 ]; then skip=0; continue; fi
+    if [ "$init_next" = 1 ]; then init_next=0; analyze "$a" $((depth + 1)); continue; fi
     if [ "$opts" = 1 ] && [ "$SHELL_NAME" = pwsh ]; then
-      # PowerShell: -Command (and its abbreviations) is -c; an encoded command cannot be read.
-      case "$a" in
-        -[Cc][Oo]*) has_c=1; continue ;;
-        -[Ee][Nn]* | -[Ee][Cc]) block "pwsh's encoded command cannot be checked"; return ;;
+      # PowerShell's options, matched without case: -Command (and its abbreviations, -c) is the command,
+      # -File the script, an encoded command cannot be read, and a few take a value.
+      case "$(lc "$a")" in
+        -configurationname | -configurationfile | -cnf | -workingdirectory | -wd | -executionpolicy | -ep | \
+          -outputformat | -of | -inputformat | -if | -settingsfile | -custompipename) skip=1; continue ;;
+        -c | -co*) has_c=1; continue ;;
+        -e | -ec | -en*) block "pwsh's encoded command cannot be checked"; return ;;
+        -f | -file) opts=0; continue ;;
+        -*) continue ;;
       esac
     fi
     if [ "$opts" = 1 ]; then
       case "$a" in
         --) opts=0; continue ;;
         --rcfile | --init-file) skip=1; continue ;;
+        # fish: --command, and -C/--init-command, which runs before anything else.
+        --command=* | --init-command=*) analyze "${a#*=}" $((depth + 1)); [ "${a%%=*}" = --command ] && return; continue ;;
+        --command) has_c=1; continue ;;
+        --init-command) init_next=1; continue ;;
+        -C) [ "$SHELL_NAME" = fish ] && init_next=1; continue ;;
         --*) continue ;;
         - ) from_stdin=1; opts=0; continue ;;
         [-+]*)

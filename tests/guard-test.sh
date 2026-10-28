@@ -335,6 +335,56 @@ EOF"
   refuse_for 'merges a pull request' "at now <<< 'gh pr merge 1'"
   refuse_for 'cannot be checked' 'at now -f job.sh < job.sh'
   refuse_for 'secret file' 'git show :.env'
+  # Found by the third review.
+  refuse_for 'GraphQL query on stdin' "bash -c 'gh api graphql --input -' < q.json"
+  refuse_for 'GraphQL query on stdin' '{ gh api graphql --input -; } < q.json'
+  refuse_for 'review payload on stdin' '(gh api -X POST repos/o/r/pulls/1/reviews --input -) < review.json'
+  refuse_for 'review payload on stdin' "cat review.json | bash -c 'gh api repos/o/r/pulls/1/reviews --input -'"
+  refuse_for 'GitHub API outside gh' "echo '{\"event\":\"APPROVE\"}' | http api.github.com/repos/o/r/pulls/1/reviews"
+  refuse_for 'GitHub API outside gh' 'http api.github.com/repos/o/r/pulls/1/reviews < review.json'
+  refuse_for 'GitHub API outside gh' "http --raw '{\"event\":\"APPROVE\"}' api.github.com/repos/o/r/pulls/1/reviews"
+  refuse_for 'GitHub API outside gh' 'curl -X POST https://uploads.github.com/repos/o/r/releases/1/assets'
+  refuse_for 'merges a pull request' "pwsh -NoProfile -Command 'gh pr merge 1'"
+  refuse_for 'merges a pull request' "pwsh -NoProfile -c 'gh pr merge 1'"
+  refuse_for 'merges a pull request' "fish --command='gh pr merge 1'"
+  refuse_for 'merges a pull request' "fish -C 'gh pr merge 1'"
+  refuse_for 'merges a pull request' "fish --init-command='gh pr merge 1' -c true"
+  refuse_for 'merges a pull request' "tmux -c 'gh pr merge 1'"
+  refuse_for 'merges a pull request' 'tmux new -d gh pr merge 1'
+  refuse_for 'runs a merge' "awk -v x=1 'BEGIN { system(\"gh pr merge 1\") }'"
+  refuse_for 'runs a merge' "awk -F ' ' 'BEGIN { system(\"gh pr merge 1\") }'"
+  refuse_for 'loads configuration' 'git -c include.path=/tmp/g push origin x'
+  refuse_for 'loads configuration' 'git config --global include.path /tmp/g'
+  refuse_for 'loads configuration' 'git config includeIf.gitdir:~/.path /tmp/g'
+  refuse_for 'alias for push' "git config alias.p '--no-pager push'"
+  refuse_for 'alias for push' "git config alias.p '-C . push'"
+  refuse_for 'merges a pull request' "git difftool -x 'gh pr merge 1' HEAD"
+  refuse_for 'merges a pull request' "git difftool --extcmd='gh pr merge 1' HEAD"
+  refuse_for 'merges a pull request' "git filter-branch --tree-filter 'gh pr merge 1' HEAD"
+  refuse_for 'merges a pull request' 'script -q /dev/null gh pr merge 1'
+  refuse_for 'merges a pull request' 'sudo --user root gh pr merge 1'
+  refuse_for 'merges a pull request' 'sudo -D /tmp gh pr merge 1'
+  refuse_for 'merges a pull request' 'env -P /usr/bin gh pr merge 1'
+  refuse_for 'merges a pull request' 'screen -dmS x gh pr merge 1'
+  refuse_for 'merges a pull request' 'unshare -r gh pr merge 1'
+  refuse_for 'runs a merge' "expect -c 'spawn gh pr merge 1'"
+  refuse_for 'merges a pull request' "gdb -batch -ex 'shell gh pr merge 1'"
+  refuse_for 'merges a pull request' "ls | entr -s 'gh pr merge 1'"
+  refuse_for 'merges a pull request' 'ls | entr gh pr merge 1'
+  refuse_for 'configuration this hook cannot read' 'HOME=/tmp/h git push origin x'
+  refuse_for 'configuration this hook cannot read' 'XDG_CONFIG_HOME=/tmp/c git push origin x'
+  refuse_for "git's configuration" "printf '[push]\n' >> .git/config"
+  refuse_for 'secret file' 'cat ~/.npmrc'
+  refuse_for 'secret file' 'cat auth.json'
+  allow 'jq . tests/fixtures/auth.json'
+  allow 'cat .npmrc'
+  allow 'cat frontend/.npmrc'
+  allow 'tmux new-session -d -s dev npm run dev'
+  allow "awk -F ' ' '{ print \$2 }' x.txt"
+  allow "bash -C -c 'echo ok'"
+  allow "fish -c 'echo ok'"
+  allow 'http GET https://api.github.com/repos/o/r Accept:application/json'
+  allow 'script -q /dev/null php artisan test'
   allow 'git show HEAD:.env.example'
   allow "tmux new-session -d -s work 'php artisan queue:work'"
   allow 'uv run pytest'
