@@ -1,0 +1,56 @@
+# mroom template (copied once by `mroom init`; the app owns it from then on). Placeholders: README, "CI templates".
+name: Changed areas
+description: >-
+  Which parts of the repository a pull request changes, so a job can skip work the PR can't affect.
+  Every job still runs and reports, so required checks always arrive: a job skipped as a whole (by a
+  job-level `if` or a `paths:` filter) never reports, and a skipped matrix job reports under an
+  unexpanded name, so a required check would wait forever. Outside a pull request, or when the file
+  list can't be read, everything counts as changed.
+
+outputs:
+  backend:
+    description: "'true' when backend code or its CI changed"
+    value: ${{ steps.areas.outputs.backend }}
+  frontend:
+    description: "'true' when frontend code or its CI changed"
+    value: ${{ steps.areas.outputs.frontend }}
+  e2e:
+    description: "'true' when anything the end-to-end tests exercise changed"
+    value: ${{ steps.areas.outputs.e2e }}
+
+runs:
+  using: composite
+  steps:
+    - id: areas
+      shell: bash
+      env:
+        EVENT: ${{ github.event_name }}
+        BACKEND_DIR: <<app.backend_dir>>
+        FRONTEND_DIR: <<app.frontend_dir>>
+      run: |
+        set -uo pipefail
+        all() { printf 'backend=true\nfrontend=true\ne2e=true\n' >> "$GITHUB_OUTPUT"; echo "areas: all ($1)"; exit 0; }
+        [ "$EVENT" = pull_request ] || all "not a pull request"
+        # On a pull request the checkout is GitHub's merge commit, whose first parent is the base
+        # branch, so the diff between them is exactly the PR's change. Read from git rather than the
+        # API, which the job token may be refused. The checkout is shallow, so fetch the two parents.
+        git fetch --no-tags --quiet --depth=2 origin "$GITHUB_SHA" || all "could not fetch the merge commit's parents"
+        files=$(git diff --name-only HEAD^1 HEAD) || all "could not diff the merge commit against its base"
+        [ -n "$files" ] || all "no files listed"
+        # A folder of "." is the whole repository; "" (no frontend) matches nothing.
+        dir() {
+          case "$1" in
+            .) printf '.' ;;
+            "") printf '^$' ;;
+            *) printf '^%s/' "$(sed 's/[].[^$*+?(){}|\\]/\\&/g' <<<"$1")" ;;
+          esac
+        }
+        back=$(dir "$BACKEND_DIR") front=$(dir "$FRONTEND_DIR")
+        # Changes to the shared actions count everywhere: they hold the cache keys and the builds.
+        shared='^\.github/actions/'
+        has() { grep -qE "$1|$shared" <<<"$files" && echo true || echo false; }
+        backend=$(has "$back|^\.github/workflows/(ci-backend|ci-cache-warm)\.yml\$")
+        frontend=$(has "$front|^\.github/workflows/ci-frontend\.yml\$|^\.github/scripts/vitest-file-times\.mjs\$")
+        e2e=$(has "$back|$front|^\.github/workflows/(ci-e2e|ci-cache-warm|ci-e2e-build-warm)\.yml\$")
+        printf 'backend=%s\nfrontend=%s\ne2e=%s\n' "$backend" "$frontend" "$e2e" >> "$GITHUB_OUTPUT"
+        echo "areas: backend=$backend frontend=$frontend e2e=$e2e"

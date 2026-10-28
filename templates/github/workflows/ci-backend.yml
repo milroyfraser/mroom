@@ -1,0 +1,364 @@
+# mroom template (copied once by `mroom init`; the app owns it from then on). Placeholders: README, "CI templates".
+# The patterns are design section 10's: restore-only caches, the installed vendor/ with a fallback key,
+# shards split by measured time with one catch-all, a measuring mode, and one fixed required check.
+name: CI backend
+
+on:
+  # No `paths:` filter on pull_request. The `test` check below is required by the ruleset, and a
+  # workflow skipped by a path filter never reports, so a PR that touches only docs or CI would wait
+  # forever on a check that cannot arrive. Every job runs and reports instead, and skips its work when
+  # the PR can't affect it (.github/actions/changed-areas).
+  pull_request:
+  # Measuring mode: Actions > CI backend > Run workflow, with "measure" ticked. One job per test suite,
+  # then a table of each suite's time and a split into shards to copy into the matrix below.
+  workflow_dispatch:
+    inputs:
+      measure:
+        description: Run one job per test suite and report each suite's time
+        type: boolean
+        default: false
+      shards:
+        description: How many shards to suggest a split for
+        type: number
+        default: 4
+
+concurrency:
+  # By pull request number, not branch name: two forks' branches can share a name.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# No job here needs a secret or writes anything: the PR's code runs with a read-only token.
+permissions:
+  contents: read
+
+env:
+  # The CI database. It must satisfy the app's own test-database guard, as tests.database_pattern does.
+  DB_CONNECTION: pgsql
+  DB_HOST: 127.0.0.1
+  DB_PORT: 5432
+  DB_DATABASE: <<tests.database>>
+  DB_USERNAME: postgres
+  DB_PASSWORD: postgres
+  REDIS_HOST: 127.0.0.1
+  REDIS_PORT: 6379
+
+jobs:
+  # Checks that need no database run beside the shards, not in front of them.
+  static:
+    if: github.event_name == 'pull_request'
+    name: Backend static checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: <<app.backend_dir>>
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check what this PR changes
+        id: areas
+        uses: ./.github/actions/changed-areas
+
+      - name: Setup PHP
+        if: steps.areas.outputs.backend == 'true'
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '<<app.php>>'
+          extensions: pdo_pgsql, redis
+          coverage: none
+
+      # The installed vendor/, so `composer install` only checks it against the lock and dumps the
+      # autoloader instead of unpacking every package (~25 s per job). On a changed lock the fallback key
+      # restores the previous vendor/ and composer installs, updates or removes only what differs, so
+      # composer's own download cache is not needed. Restore only: ci-cache-warm.yml saves it.
+      - name: Cache vendor
+        if: steps.areas.outputs.backend == 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: <<app.backend_dir>>/vendor
+          key: ${{ runner.os }}-vendor-php<<app.php>>-${{ hashFiles('<<app.backend_dir>>/composer.lock') }}
+          restore-keys: ${{ runner.os }}-vendor-php<<app.php>>-
+
+      - name: Install dependencies
+        if: steps.areas.outputs.backend == 'true'
+        run: composer install --no-interaction --prefer-dist
+
+      # Formatting, static analysis, architecture rules: whatever needs no database.
+      - name: Static checks
+        if: steps.areas.outputs.backend == 'true'
+        run: <<fill:backend_static_checks>>
+
+  # The suite split into shards by measured time, not by name (pattern 4). Pest's own `--shard` is not
+  # usable under `--parallel`: it runs the whole suite in every shard.
+  #
+  # Each named shard runs the suites the measuring mode showed belong together, so the slowest shard
+  # is as short as it can be. Record the measured times here when you rebalance:
+  #   <<fill:measured_times>>
+  #
+  # The last shard, `rest`, excludes the named suites (and the end-to-end suite) instead of listing the
+  # others, so a new suite lands in it and runs rather than never running. Keep its exclude list equal
+  # to every suite named above it. Changing the shards renames their checks, which is why the ruleset
+  # requires `test` below, never a shard.
+  tests:
+    if: github.event_name == 'pull_request'
+    name: Backend tests (${{ matrix.shard.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Every shard reports: cancelling siblings on the first red hides the rest of the failures.
+      fail-fast: false
+      matrix:
+        shard:
+          - name: <<fill:slowest_suite>>
+            suites: --testsuite=<<fill:slowest_suite>>
+          - name: rest
+            suites: --exclude-testsuite=<<fill:e2e_suite>>,<<fill:slowest_suite>>
+    defaults:
+      run:
+        shell: bash
+        working-directory: <<app.backend_dir>>
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: <<tests.database>>
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check what this PR changes
+        id: areas
+        uses: ./.github/actions/changed-areas
+
+      - name: Setup PHP
+        if: steps.areas.outputs.backend == 'true'
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '<<app.php>>'
+          extensions: pdo_pgsql, redis
+          coverage: none
+
+      # Restore only, with the same path and keys as ci-cache-warm.yml.
+      - name: Cache vendor
+        if: steps.areas.outputs.backend == 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: <<app.backend_dir>>/vendor
+          key: ${{ runner.os }}-vendor-php<<app.php>>-${{ hashFiles('<<app.backend_dir>>/composer.lock') }}
+          restore-keys: ${{ runner.os }}-vendor-php<<app.php>>-
+
+      - name: Install dependencies
+        if: steps.areas.outputs.backend == 'true'
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Prepare environment
+        if: steps.areas.outputs.backend == 'true'
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+
+      - name: Run tests
+        if: steps.areas.outputs.backend == 'true'
+        env:
+          SUITES: ${{ matrix.shard.suites }}
+        run: |
+          read -ra options <<<"$SUITES"
+          <<tests.command>> "${options[@]}"
+
+  # The ruleset requires a check named `test`. This job keeps that name whatever the shards are, and
+  # fails unless the static checks and every shard passed. `always()` makes it report even when a shard
+  # failed or was cancelled: without it a failed shard skips this job, and a skipped check counts as
+  # passed (pattern 11).
+  test:
+    if: always() && github.event_name == 'pull_request'
+    needs: [static, tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the static checks and every test shard to pass
+        env:
+          STATIC: ${{ needs.static.result }}
+          TESTS: ${{ needs.tests.result }}
+        run: |
+          echo "static: $STATIC, tests: $TESTS"
+          [ "$STATIC" = success ] && [ "$TESTS" = success ]
+
+  # ---- Measuring mode (workflow_dispatch with measure) ----
+
+  # The suites phpunit.xml names, but the end-to-end one.
+  suites:
+    if: github.event_name == 'workflow_dispatch' && inputs.measure
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.list.outputs.list }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: <<app.backend_dir>>
+    steps:
+      - uses: actions/checkout@v7
+      # The runner image's own PHP (with simplexml) is enough to read phpunit.xml.
+      - name: List the test suites
+        id: list
+        env:
+          SKIP: <<fill:e2e_suite>>
+        run: |
+          file=phpunit.xml
+          [ -f "$file" ] || file=phpunit.xml.dist
+          # shellcheck disable=SC2016 # the $ are PHP's
+          list=$(php -r '
+            $names = [];
+            foreach (simplexml_load_file($argv[1])->testsuites->testsuite as $suite) {
+              $name = (string) $suite["name"];
+              if ($name !== $argv[2]) { $names[] = $name; }
+            }
+            echo json_encode($names);
+          ' "$file" "$SKIP")
+          echo "suites: $list"
+          [ "$list" != "[]" ] || { echo "::error::no test suites in $file"; exit 1; }
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+
+  measure:
+    needs: suites
+    name: Measure (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(needs.suites.outputs.list) }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: <<app.backend_dir>>
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: <<tests.database>>
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '<<app.php>>'
+          extensions: pdo_pgsql, redis
+          coverage: none
+
+      - name: Cache vendor
+        uses: actions/cache/restore@v6
+        with:
+          path: <<app.backend_dir>>/vendor
+          key: ${{ runner.os }}-vendor-php<<app.php>>-${{ hashFiles('<<app.backend_dir>>/composer.lock') }}
+          restore-keys: ${{ runner.os }}-vendor-php<<app.php>>-
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Prepare environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+
+      # Only the test run is timed, as the `Run tests` step of a shard is. A failing suite still
+      # records its time, then fails the job.
+      - name: Run tests
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          start=$(date +%s) status=0
+          <<tests.command>> --testsuite="$SUITE" || status=$?
+          jq -n --arg suite "$SUITE" --argjson seconds "$(( $(date +%s) - start ))" --argjson passed "$([ "$status" = 0 ] && echo true || echo false)" \
+            '{suite: $suite, seconds: $seconds, passed: $passed}' > "$RUNNER_TEMP/suite-time.json"
+          exit "$status"
+
+      # The attempt is in the name, so "Re-run failed jobs" does not collide with the first attempt's.
+      - name: Upload the time
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: suite-time-${{ strategy.job-index }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/suite-time.json
+          retention-days: 14
+
+  # Each suite's time, slowest first, and a split into shards: the slowest suites first, each to the
+  # shard with the least time so far. The smallest shard becomes `rest`. A suite's latest attempt
+  # counts; a suite with no time is named, so it is not lost from the split.
+  measure-report:
+    needs: [suites, measure]
+    if: always() && needs.measure.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: suite-time-*
+          path: times
+      - name: Report the times
+        env:
+          SHARDS: ${{ inputs.shards }}
+          SUITES: ${{ needs.suites.outputs.list }}
+        run: |
+          python3 - "$SHARDS" times "$SUITES" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import glob, json, os, re, sys
+          count = max(1, int(sys.argv[1]))
+          latest = {}
+          for f in glob.glob(sys.argv[2] + "/*/suite-time.json"):
+              attempt = int(re.search(r"-attempt-([0-9]+)$", os.path.dirname(f)).group(1))
+              t = json.load(open(f))
+              if t["suite"] not in latest or latest[t["suite"]][0] < attempt:
+                  latest[t["suite"]] = (attempt, t)
+          times = sorted((t for _, t in latest.values()), key=lambda t: -t["seconds"])
+          print("### Test suite times\n\n| suite | seconds | passed |\n|---|---:|---|")
+          for t in times:
+              print(f"| {t['suite']} | {t['seconds']} | {'yes' if t.get('passed', True) else 'no'} |")
+          missing = [s for s in json.loads(sys.argv[3]) if s not in latest]
+          if missing:
+              print(f"\nNo time for: {', '.join(missing)}. Run the measuring mode again before splitting.")
+          shards = [[0, []] for _ in range(min(count, len(times)) or 1)]
+          for t in times:
+              shard = min(shards, key=lambda s: s[0])
+              shard[0] += t["seconds"]
+              shard[1].append(t["suite"])
+          shards.sort(key=lambda s: -s[0])
+          print(f"\n### A split into {len(shards)} shards\n\nThe last is `rest`: it excludes every suite named above it.\n")
+          print("| shard | seconds | suites |\n|---|---:|---|")
+          for i, (total, names) in enumerate(shards):
+              label = "rest" if i == len(shards) - 1 and len(shards) > 1 else ", ".join(names)
+              print(f"| {label} | {total} | {', '.join(names)} |")
+          PY
+          cat "$GITHUB_STEP_SUMMARY"

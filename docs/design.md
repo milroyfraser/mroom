@@ -191,7 +191,8 @@ mroom/
                                 provider that reads its apps from a file (D16)
   .github/workflows/            reusable workflows (on: workflow_call) that check out mroom at job.workflow_sha
                                 and call its actions from there (section 14, question 1), plus mroom's own CI
-  templates/                    copied once by `mroom init`: ci-backend, ci-frontend, ci-e2e, deploy-production,
+  templates/                    copied once by `mroom init`: github/ (ci-backend, ci-frontend, ci-e2e, the two
+                                cache-warming workflows and their composite actions), deploy-production,
                                 dependabot, .mcp.json, CLAUDE.md policy block, mroom.toml, hooks/*
   settings/                     settings fragments: base, laravel-vite, forge, tracker-linear
   examples/single-app/, examples/two-folder/   neutral configs (and, later, hooks) for the two layouts of D1
@@ -252,7 +253,7 @@ org = "<org>"
 id_pattern = "[A-Z]+-[A-Z0-9]+"    # an error issue's id, as APP-1A2; names a worktree with no tracker id
 
 [pr]
-required_checks = ["test", "lint", "e2e", "check-title"]
+required_checks = ["test", "lint", "unit-tests", "e2e", "check-title"]
 
 [qa]
 zone = "<qa-zone>"                 # api-<PR>.<zone>, go-<PR>.<zone>
@@ -615,6 +616,11 @@ frontend alone also restored the e2e build (pattern 7) and took 123 to 151 s; th
    maps but stays minified: `vite build` 27.6 s, from 51 s (36 s unminified, so minifying is faster as
    well as closer to production).
 
+**Where they are.** `templates/github/` ships patterns 1 to 7, 11 and 12: the three CI workflows, the two
+warm workflows and their composite actions, each placeholder listed in the README. A test checks each pattern's
+shape: no cache is saved off the default branch, the keys and fallbacks, the catch-all shard, the aggregate checks.
+The backend's measuring mode is a `workflow_dispatch` input: one job per suite, then a split into shards.
+
 **The deploy (CD).** The usual deploy fires the host's deploy hook, sleeps, and checks that a health route
 answers. It passes even when the deploy failed on the host, and the hook deploys the branch tip, which may not be
 the tag. The deploy template adds three patterns instead:
@@ -720,7 +726,7 @@ turned into config:
 | `reverb-host/` | the dev site's Reverb daemon | one Reverb for every QA environment, its apps read from a file (D16) |
 | `mroom baseline` (QA services) | Garage and Mailpit as run in the phase 2a spikes | pinned binaries with committed checksums; each service's secrets under `forge`'s home |
 | `actions/pr-status`, `review-findings`, `triage` | the PR status notes, review findings and alert triage | persona name, adapters, constants into config |
-| `templates/ci-*`, `deploy-production` | the backend, frontend and end-to-end CI, and the production deploy | placeholders; the deploy points the `release` branch at the tag |
+| `templates/github/*`, `deploy-production` | the backend, frontend and end-to-end CI, and the production deploy | `<<key>>` placeholders from `mroom.toml`, `<<fill:name>>` ones a person fills (README, "CI templates"); caches save only on the default branch; the deploy points the `release` branch at the tag |
 | `actions/deploy-verify` | the deploy's fixed sleep and health ping | waits until `app.version_path` reports the tag's commit |
 | pstack sync | the weekly upstream check | keeps mroom's vendored skills current |
 

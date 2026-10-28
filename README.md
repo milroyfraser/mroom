@@ -917,6 +917,87 @@ never by event, since a dispatched run is as much a run of its workflow as one `
 goes by the run's first starter here too, so a person's re-run of a dispatched qa-up starts it again; should
 that re-run also end with a `workflow_run`, it runs twice for one commit.
 
+## CI templates
+
+`templates/github/` holds CI workflows with the measured defaults of
+[section 10 of the design](docs/design.md#10-cicd-defaults-measured). `mroom init` (phase 1, still to come)
+copies them once into an app's `.github/`, and the app owns them from then on. Until then, copy them by hand
+and fill the placeholders below.
+
+| File | What it does |
+|---|---|
+| `workflows/ci-backend.yml` | static checks, the test shards, the `test` check, and a measuring mode |
+| `workflows/ci-frontend.yml` | `lint`, the unit-test shards and the `unit-tests` check |
+| `workflows/ci-e2e.yml` | the `e2e` check: browser tests against the served app |
+| `workflows/ci-cache-warm.yml` | saves the dependency caches on the default branch |
+| `workflows/ci-e2e-build-warm.yml` | saves the e2e frontend build on the default branch |
+| `actions/changed-areas/` | which parts a pull request changes, so a job can skip its work and still report |
+| `actions/setup-frontend/` | Node, pnpm (for pnpm), the package store (restore only) and the frontend's install |
+| `actions/e2e-frontend-build/` | the e2e build: restored when its inputs are unchanged, built otherwise |
+| `scripts/vitest-file-times.mjs` | a vitest reporter that records each test file's time |
+
+What they do, in short:
+
+- **Caches are saved only on the default branch** (by the two warm workflows) and only restored in pull
+  requests. No template uses `actions/cache` (which saves from any branch) or setup-node's own cache.
+- **apt's downloads are cached**, keyed on the lockfile that pins Playwright plus the ISO week, and the weekly
+  save runs `apt-get autoclean` first.
+- **The installed `vendor/` is cached** with a fallback key, so a changed lock starts from the last one.
+- **Backend shards are split by measured time**, and the last shard, `rest`, excludes the named suites, so a
+  new suite runs. Run the measuring mode (Actions, CI backend, Run workflow, tick `measure`) to get each
+  suite's time and a suggested split. The frontend shards split by count; each uploads its files' times.
+- **Required checks keep their names:** `test`, `lint`, `unit-tests` and `e2e`. Put these in the ruleset and
+  in `pr.required_checks`, never a shard's name, so changing a shard count needs no ruleset change.
+- **The e2e build is reused** when the frontend is unchanged, and built without source maps but minified.
+
+After the templates merge, run each warm workflow once (`gh workflow run ci-cache-warm.yml`, and
+`ci-e2e-build-warm.yml`), so the first pull request finds warm caches. `tools/ci-first-push.sh` measures what
+a pull request's first push waits for; its defaults match the templates' job and step names.
+
+Things to know:
+
+- With pnpm, the frontend's `package.json` needs a `packageManager` field: `pnpm/action-setup` reads the
+  pnpm version from it.
+- The workflows have no `merge_group` trigger. With a merge queue, add `merge_group:` beside `pull_request:`,
+  or the queue waits forever on the required checks.
+- Actions are pinned by version tag, as GitHub's own docs show. The warm workflows run third-party actions
+  (`shivammathur/setup-php`, `pnpm/action-setup`) on the default branch, where caches are written; pin
+  them to a commit if that matters more to you than easy updates.
+- The vitest reporter needs vitest 3 or later.
+- `ci-e2e.yml` waits for Laravel's `/up` route (Laravel 11 and later), and expects Playwright in the backend
+  folder's Node lockfile, as Pest's browser plugin has it: the backend folder needs a `package.json`.
+- In a public repository, GitHub turns off a scheduled workflow after 60 days with no activity. Turn the weekly
+  cache warm back on in the Actions tab if that happens.
+
+**Placeholders.** A `<<key>>` is filled from `mroom.toml` or the repository; a `<<fill:name>>` is a value
+config cannot know, and a person fills it. When a folder is `.` and a `/` follows the placeholder, both go:
+`<<app.backend_dir>>/vendor` becomes `vendor`. An app with no frontend (`app.frontend_dir = ""`) is not
+supported yet: the Node steps would build their paths from the repository's root.
+
+| Placeholder | Filled with |
+|---|---|
+| `<<app.backend_dir>>` | `app.backend_dir` |
+| `<<app.frontend_dir>>` | `app.frontend_dir` |
+| `<<app.php>>` | `app.php`, such as `8.4` |
+| `<<app.package_manager>>` | `app.package_manager`: `npm` or `pnpm` |
+| `<<app.build.frontend_dist>>` | `app.build.frontend_dist`; by default `dist`, or `public/build` when `app.frontend_dir` is `.` |
+| `<<tests.command>>` | `tests.command`; a shard adds its `--testsuite` options |
+| `<<tests.database>>` | `tests.database_pattern` with `{app}` as `app.name` and `{slug}` as `ci` |
+| `<<default_branch>>` | the repository's default branch, such as `main` |
+| `<<pm.lockfile>>` | `package-lock.json` (npm) or `pnpm-lock.yaml` (pnpm) |
+| `<<pm.install>>` | `npm ci` or `pnpm install --frozen-lockfile` |
+| `<<pm.exec>>` | `npx` or `pnpm exec` |
+| `<<pm.store_path>>` | `npm config get cache` or `pnpm store path --silent` |
+| `<<fill:node_version>>` | the Node version for CI, such as `22` |
+| `<<fill:backend_static_checks>>` | the backend checks that need no database, such as `vendor/bin/pint --test` |
+| `<<fill:slowest_suite>>` | a phpunit suite that needs a shard of its own; the measuring mode shows which (add more shards like it) |
+| `<<fill:e2e_suite>>` | the phpunit suite of the browser tests, which the backend shards leave out |
+| `<<fill:measured_times>>` | each suite's measured time and the date, as a comment for the next rebalance |
+| `<<fill:frontend_lint>>` | the frontend's lint, format and type checks, such as `pnpm lint && pnpm exec tsc --noEmit` |
+| `<<fill:frontend_src>>` | the frontend's source folder inside its own: `src` for a separate SPA, `resources` for Vite inside Laravel (then add the other folders Tailwind scans to the build's key) |
+| `<<fill:e2e_build>>` | the build without source maps but minified, with the env it needs, such as `VITE_API_URL=http://127.0.0.1:8000 pnpm exec vite build --sourcemap false` |
+| `<<fill:e2e_command>>` | the browser tests, failing when none are found, such as `php artisan test --testsuite=Browser --fail-on-empty-test-suite` |
+
 ## Regression label
 
 A pull request that fixes a problem a release caused in production carries the `regression` label and
