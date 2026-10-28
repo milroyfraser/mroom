@@ -61,11 +61,13 @@ Commits do not show a person's work, because agents make almost all of them.
   health (`mroom status`, `mroom doctor`) and a watchdog that reports the box's own failures to chat.
 - **An agent workflow**: `/refine`, `/deliver`, `/implement` and `/fix-issue` stop at a PR in review; `/release` on a
   person's say-so. `/fix-issue <error id>` takes one error-tracker issue the same way: it reads the error and its
-  latest event, finds the tracker issue the persona filed for it (by its marker, confirmed against the description),
-  works in a worktree whose branch names both ids, and reproduces the error with a failing test before it fixes it.
-  It links the error issue to the PR through the repository's SCM integration: a `Fixes <id>` line on the fixing
-  commit, which reaches the default branch through squash merges that keep the commits' messages. Principle skills
-  named at the step that needs them.
+  latest event, finds the tracker issue the persona filed for it when there is a tracker (by its marker, confirmed
+  against the description), works in a worktree whose branch names both ids, and reproduces the error with a failing
+  test before it fixes it. It links the error issue to the fix through the repository's SCM integration: a
+  `Fixes <id>` line on the fixing commit, which reaches the default branch in a merge commit, or in a squash merge
+  that keeps the commits' messages. The error tracker links the commit as soon as it is pushed, but resolves the
+  issue only when a release that contains the commit has its commits attached, which is why the deploy template
+  attaches them (phase 4). Principle skills named at the step that needs them.
 - **Guardrails**: agents never merge, approve, deploy, release or read secrets; enforced by a command parser,
   not only prefix rules, and gated by GitHub, where only people's approvals count and a person approves each
   deploy (D22).
@@ -697,7 +699,7 @@ Phase 2 comes in two steps, so environments work before browser QA depends on th
 | 2a. QA environments | qa-plan (path rules), qa-up, qa-down, qa-reap, the gate and its operations, Forge site isolation with code delivered as data (D17), a Redis user (D15), a Postgres role (D18) and an app key per environment, the app contract, `mroom doctor --app`, the template database (seeded, or the opt-in snapshot), the QA services of `[qa.parity]` (section 8.9; D14, D16, D19) with pinned checksums (section 3), `app.version_path`; slots sized from box memory (a memory budget per environment sets `qa.max_envs`) | **Works:** an example app gets `go-<PR>`/`api-<PR>` with its own database and role, app key, Redis user, buckets, Reverb app and mail login, and the section 8 invariants are tested. **Moves (3):** fewer production problems per release |
 | 2b. Browser QA | the runner sandbox (8.5); the plan's Claude step with `blast-radius` (vendored from pstack); the `verify-app` harness (pluggable sign-in) and `qa-engineer` | **Works:** an example app gets a browser QA check on each PR's last commit. **Moves (4):** fewer product PRs reach a person without a needed browser test passing |
 | 3. Agent workflow | skills generalised over the tracker adapter and `mroom.toml`; principles vendored; `mroom check size` (a file over 500 lines may not grow, and a static-analysis baseline may not grow), run by the pre-push hook and CI | **Works:** `/implement` and `/fix-issue` reach a PR on the example app with tracker `none` and with Linear. **Moves (1):** files over 500 lines stop growing, in number and in lines |
-| 4. PR checks and CI/CD | conventional title, type labels + release notes, Claude review, review findings, auto-tag (optional); CI templates with the section 10 defaults (cache warming, apt cache, vendor cache, measured shards) and `tools/ci-first-push.sh`; the deploy template (the `release` branch), `deploy-verify` and the `production` environment (section 10, patterns 8 to 10) | **Works:** a repo calling the reusable workflows gets the checks, and a deploy in tests (with a fake host) waits until the live commit matches the tag. **Moves (2):** every release confirms its live commit. First-push CI time stays under 4 minutes (the pilot app already has the section 10 patterns) |
+| 4. PR checks and CI/CD | conventional title, type labels + release notes, Claude review, review findings, auto-tag (optional); CI templates with the section 10 defaults (cache warming, apt cache, vendor cache, measured shards) and `tools/ci-first-push.sh`; the deploy template (the `release` branch, and the release's commits attached in the error tracker, so `Fixes <id>` lines resolve their issues when the release ships), `deploy-verify` and the `production` environment (section 10, patterns 8 to 10) | **Works:** a repo calling the reusable workflows gets the checks, and a deploy in tests (with a fake host) waits until the live commit matches the tag. **Moves (2):** every release confirms its live commit. First-push CI time stays under 4 minutes (the pilot app already has the section 10 patterns) |
 | 5. Persona | PR notes and pings (`pr-status`), alert triage, alarm and guard | **Works:** the example repo gets one note per PR and deduplicated pings; triage files one issue per alert key; the persona re-checks its open issues against the error tracker and works one with `/fix-issue`. **Moves (2):** the time from a release to the first report of a problem it caused falls |
 
 ## 12. Where each part comes from
