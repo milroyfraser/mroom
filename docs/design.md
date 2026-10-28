@@ -555,7 +555,14 @@ for 6 s of e2e tests); backend shards split by suite name rather than time (one 
 |---|---|---|
 | Slowest backend shard | mean 301 s, p50 324 s (48 runs) | mean 242 s (4 runs) |
 | e2e | mean 298 s, p90 565 s, max 921 s (47 runs) | mean 204 s, max 226 s |
-| First push of a PR (cold) | backend p50 273 s, e2e p50 245 s, max 469 s | measured by `tools/ci-first-push.sh` |
+| First push of a PR (cold) | backend p50 273 s, e2e p50 245 s, max 469 s (6 and 7 PRs) | backend p50 262 s, e2e p50 151 s, max 210 s (12 and 15 PRs) |
+
+First pushes after the change were measured on 27 Oct 2026 with `tools/ci-first-push.sh`, over every PR opened
+since cache warming merged on 23 Oct whose first push ran tests: the slowest backend shard mean 250 s, p90
+275 s, max 285 s (before: mean 283 s, p90 325 s, max 339 s); e2e mean 165 s, p90 209 s, max 210 s (before:
+mean 267 s, p90 293 s, max 469 s). Every e2e first push restored its four dependency caches (`vendor`,
+`pnpm-store`, `playwright`, `playwright-debs`), and the apt step took 13 to 30 s. The 8 in 15 that left the
+frontend alone also restored the e2e build (pattern 7) and took 123 to 151 s; the others took 178 to 210 s.
 
 **Patterns the CI templates ship:**
 
@@ -603,9 +610,40 @@ the tag. The deploy template adds three patterns instead:
     safe because migrations are expand/contract (section 9); the old code must also run jobs that the new code
     queued, and the deploy restarts workers and clears caches.
 
-**Next levers, by measured size:** the frontend unit shards (~226 s, fixed by required check names),
-service container start (~30 s per job), and runner speed itself, which moved the same shard by ~25%
-between runs.
+**Sharded jobs.** The frontend unit tests came next: four vitest shards, the slowest shard's job 254 s, and a
+count the ruleset held in place, because it required each shard by name. With six shards the slowest shard's job
+took 152 to 181 s over four runs, and its `Test` step 105 to 135 s, from 201 s. The CI templates add two patterns
+for sharded jobs:
+
+11. **One aggregate required check per sharded job.** A ruleset names the checks it requires, and a sharded job's
+    check names change with its count (`shard 2/4` becomes `shard 2/6`). Pattern 5's `test` gates the backend
+    shards; the frontend unit shards had no gate, so the ruleset named all four. Each sharded job gets one gate
+    job, named for the suite: `needs:` the sharded job, `if: always()`, and one step that fails unless
+    `needs.<job>.result` is `success`. Without `always()` a failed shard skips the gate, and a skipped check
+    counts as passed. The ruleset requires the gate and no shard. The shards read their count from
+    `strategy.job-total`, in their names and in `--shard`, so a rebalance edits only the matrix list, never the
+    ruleset.
+12. **Measure, then shard by count.** A small vitest reporter writes each file's phases (environment, collect,
+    setup, run) to JSON on the CI runner, and each shard uploads it. The suite's 309 files (2,434 tests) summed
+    to 622 s; the median file took 1.5 s and the slowest 9.6 s, 1.5% of the total. So the shards were uneven
+    because of the split, not a slow file: vitest 3.2's `--shard` sorts files by a hash of their path and cuts
+    equal counts (four shards of 75 to 78 files summed 129 to 184 s). That split, replayed on the measured times,
+    reproduced each shard's sum and put the slowest at 184, 149, 121 and 107 s for 4 to 7 shards. At six or
+    seven, a split by measured time would save only ~17 s more. That is less than the noise: over three runs of
+    one commit, one shard's `Test` step took 85 to 120 s. It would also need a durations file kept up to date.
+    `--shard` needs nothing: every file lands in exactly one shard, so a new test always runs. Add shards first,
+    and split by time (pattern 4) only when the gain beats the run-to-run noise. Each shard costs ~45 s of
+    setup, so stop once the job is no longer the slowest check.
+
+**Moving a ruleset to the gate.** When one PR adds the gate and changes the count, it never reports the old shard
+names, so requiring the gate first and dropping the names after the merge cannot work. An admin drops the shard
+names and adds the gate in one edit, and the PR merges straight after. Between the edit and the merge, other open
+PRs cannot merge. With up-to-date branches required, they must update after the merge anyway, and then they report
+the gate. Adding the gate in a PR of its own, before changing the count, avoids even that window.
+
+**Next levers, by measured size:** lint and types (one job, 173 to 199 s, against 152 to 181 s for the slowest
+unit shard), service container start (~30 s per job), and runner speed itself, which moved the same shard by
+~25% between runs.
 
 **A control-plane package is not a speed lever.** Replacing Actions with a Laravel package (Horizon-
 style, GitHub App webhooks and check runs, executors on a box) gains speed only through warm executors,
