@@ -111,6 +111,23 @@ t_pnpm_installs_from_the_lockfile() {
   run cat "$T/tools.log"; expect_out $'pnpm install --frozen-lockfile (in /web)\npnpm run build (in /web)'
 }
 
+t_pnpm_is_used_with_a_relative_app_folder() {
+  # The workflow passes a relative folder; mroom.toml must still be read after the build's cd into it.
+  app $'frontend_dir = "web"\npackage_manager = "pnpm"\n\n[app.build]\nfrontend = "pnpm run build"'
+  mkdir -p "$T/app/web"
+  run bash -c 'cd "$T" && "$1" run 7 app' _ "$BUILD"
+  expect_rc 0; expect_out_has "built web/dist"
+  run cat "$T/tools.log"; expect_out $'pnpm install --frozen-lockfile (in /web)\npnpm run build (in /web)'
+}
+
+t_a_frontend_env_that_cannot_be_read_fails() {
+  app $'frontend_dir = "web"\n\n[app.build]\nfrontend = "npm run build"\nfrontend_env = "VITE_API=env:APP_URL"'
+  mkdir -p "$T/app/web"
+  run "$BUILD" run 7 "$T/app"
+  expect_rc 1; expect_err_has "mroom.toml's app.build.frontend_env could not be read"
+  expect_no_file "$T/tools.log"
+}
+
 t_a_build_that_writes_nothing_fails() {
   app $'frontend_dir = "web"\n\n[app.build]\nfrontend = "true"'
   mkdir -p "$T/app/web"
@@ -132,6 +149,8 @@ test_case public-values-only t_the_build_gets_public_values_only
 test_case reverb-from-the-pr t_the_reverb_settings_come_from_the_pull_request
 test_case vite-inside-laravel t_vite_inside_laravel_gets_the_api_host_for_both
 test_case pnpm t_pnpm_installs_from_the_lockfile
+test_case pnpm-relative-app t_pnpm_is_used_with_a_relative_app_folder
+test_case frontend-env-unreadable t_a_frontend_env_that_cannot_be_read_fails
 test_case writes-nothing t_a_build_that_writes_nothing_fails
 test_case refused t_a_bad_name_or_number_is_refused
 finish

@@ -34,6 +34,8 @@ mode="${1:-}" n="${2:-}" app="${3:-}"
 case "$mode" in settings | run) ;; *) echo "usage: build.sh settings|run <N> <app folder>" >&2; exit 2 ;; esac
 qa_number "$n" || { qa_say "the pull request's number is not a number"; exit 2; }
 [ -d "$app" ] || { qa_say "there is no app folder $app"; exit 2; }
+# An absolute path, so mroom.toml is still found after the build's cd into the app.
+app="$(CDPATH="" cd -- "$app" && pwd)"
 export MROOM_CONFIG="$app/mroom.toml"
 qa_names "$n"
 
@@ -61,6 +63,8 @@ if [ -z "$dist" ]; then echo "nothing to build: no app.build.frontend, or app.fr
 values="$(qa_public_env)" || { qa_say "mroom.toml could not say how the environment broadcasts (qa.parity.broadcast)"; exit 1; }
 declare -A public=()
 while IFS='=' read -r key value; do public["$key"]="$value"; done <<<"$values"
+# Read before the loop, so a frontend_env that cannot be read stops the build instead of giving it no values.
+lines="$(qa_config app.build.frontend_env '{}')" || { qa_say "mroom.toml's app.build.frontend_env could not be read"; exit 1; }
 vars=()
 while IFS= read -r line; do
   [ -n "$line" ] || continue
@@ -76,10 +80,11 @@ while IFS= read -r line; do
     fi
   fi
   vars+=("$name=$value")
-done < <(qa_config app.build.frontend_env '{}')
+done <<<"$lines"
 
+manager="$(qa_config app.package_manager npm)" || { qa_say "mroom.toml's app.package_manager could not be read"; exit 1; }
 cd "$app/$dir"
-case "$(qa_config app.package_manager npm)" in
+case "$manager" in
   pnpm)
     if ! command -v pnpm >/dev/null 2>&1; then
       # The version package.json pins, else the current major one.
