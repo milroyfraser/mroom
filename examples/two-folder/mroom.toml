@@ -27,7 +27,7 @@ id_pattern = "BK-[0-9]+"
 url = "https://linear.app/example/issue/{id}"
 
 [pr]
-required_checks = ["test", "lint", "e2e", "check-title"]
+required_checks = ["test", "lint", "unit-tests", "e2e", "check-title"]
 
 [qa]
 zone = "qa.example.dev"

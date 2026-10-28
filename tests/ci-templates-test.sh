@@ -4,7 +4,7 @@
 # GitHub: caches are saved only on the default branch and only restored in pull requests; the apt and
 # vendor keys and their fallbacks; the catch-all shard; the fixed aggregate checks; the measuring mode;
 # no secret or write permission near a pull request's code; every placeholder documented. The shape
-# checks are in tests/files/ci-check.py; this file also runs the changed-areas script and the measuring
+# checks are in tests/ci/check.py; this file also runs the changed-areas script and the measuring
 # report, and renders every template from both example configs into YAML that parses.
 set -euo pipefail
 SUITE=ci-templates
@@ -12,12 +12,13 @@ SUITE=ci-templates
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TPL="$ROOT/templates/github"
-CHECK="$ROOT/tests/files/ci-check.py"
-RENDER="$ROOT/tests/files/ci-render.py"
+CHECK="$ROOT/tests/ci/check.py"
+RENDER="$ROOT/tests/ci/render.py"
 
 has_yaml() { python3 -c 'import yaml' >/dev/null 2>&1; }
+has_node() { command -v node >/dev/null 2>&1; }
 
-# shape <check>: one check of ci-check.py passes.
+# shape <check>: one check of tests/ci/check.py passes.
 shape() { run python3 "$CHECK" "$1" "$ROOT"; expect_rc 0; }
 
 t_caches_are_never_saved_by_a_post_step() { shape no-save-on-post; }
@@ -31,6 +32,7 @@ t_each_sharded_job_has_one_fixed_aggregate_check() { shape aggregate; }
 t_the_backend_has_a_measuring_mode() { shape measure; }
 t_no_secret_or_write_permission_reaches_pull_request_code() { shape no-secrets; }
 t_required_checks_always_report() { shape required-checks-report; }
+t_runs_are_grouped_per_pull_request() { shape concurrency; }
 t_job_names_match_ci_first_push_defaults() { shape first-push-names; }
 t_the_e2e_build_is_reused_and_saved_on_the_default_branch() { shape e2e-build; }
 t_every_placeholder_is_documented() { shape placeholders; }
@@ -113,15 +115,45 @@ print(run.split("<<'"'"'PY'"'"'\n", 1)[1].split("\nPY\n", 1)[0])' "$TPL/workflow
   i=0
   for pair in Orders:150 Billing:140 Users:60 Mail:40 Search:30; do
     i=$((i + 1))
-    mkdir -p "$dir/suite-time-$i"
-    printf '{"suite": "%s", "seconds": %s}\n' "${pair%%:*}" "${pair##*:}" >"$dir/suite-time-$i/suite-time.json"
+    mkdir -p "$dir/suite-time-$i-attempt-1"
+    printf '{"suite": "%s", "seconds": %s, "passed": true}\n' "${pair%%:*}" "${pair##*:}" \
+      >"$dir/suite-time-$i-attempt-1/suite-time.json"
   done
-  run python3 "$T/report.py" 3 "$dir"
+  # A re-run's time replaces the first attempt's.
+  printf '{"suite": "Search", "seconds": 999, "passed": false}\n' >"$dir/suite-time-5-attempt-1/suite-time.json"
+  mkdir -p "$dir/suite-time-5-attempt-2"
+  printf '{"suite": "Search", "seconds": 30, "passed": true}\n' >"$dir/suite-time-5-attempt-2/suite-time.json"
+  run python3 "$T/report.py" 3 "$dir" '["Orders", "Billing", "Users", "Mail", "Search", "Lost"]'
   expect_rc 0
-  expect_out_has "| Orders | 150 |"
+  expect_out_has "| Orders | 150 | yes |"
   expect_out_has "| Orders | 150 | Orders |"
   expect_out_has "| Billing | 140 | Billing |"
   expect_out_has "| rest | 130 | Users, Mail, Search |"
+  expect_out_has "No time for: Lost."
+  case "$out" in *999*) fail "the first attempt's time counted" ;; *) ok ;; esac
+}
+
+t_a_failing_suite_still_records_its_time() {
+  mkdir -p "$T/bin"
+  printf '#!/bin/sh\nexit 3\n' >"$T/bin/fake-tests"
+  chmod +x "$T/bin/fake-tests"
+  python3 -c '
+import sys, yaml
+steps = yaml.safe_load(open(sys.argv[1]))["jobs"]["measure"]["steps"]
+print(next(s for s in steps if s.get("name") == "Run tests")["run"].replace("<<tests.command>>", "fake-tests"))' \
+    "$TPL/workflows/ci-backend.yml" >"$T/measure.sh"
+  run env PATH="$T/bin:$PATH" SUITE=Orders RUNNER_TEMP="$T" bash -e "$T/measure.sh"
+  expect_rc 3
+  run python3 -c 'import json, sys; t = json.load(open(sys.argv[1])); print(t["suite"], t["passed"])' "$T/suite-time.json"
+  expect_out "Orders False"
+}
+
+t_the_vitest_reporter_writes_each_files_phases() {
+  run env VITEST_FILE_TIMES_OUTPUT="$T/times.json" GITHUB_STEP_SUMMARY="$T/summary.md" \
+    node "$ROOT/tests/ci/vitest-driver.mjs" "$TPL/scripts/vitest-file-times.mjs"
+  expect_rc 0
+  expect_out "src/b.test.ts:3:336:passed src/a.test.ts:2:136:passed"
+  expect_true "the job summary has no table of files" grep -qF "| src/b.test.ts | 3 | 0.3 | 0.0 | 0.3 |" "$T/summary.md"
 }
 
 # render_all <example>: renders every template from examples/<example>/mroom.toml into $T/<example>.
@@ -150,6 +182,10 @@ t_the_single_app_example_renders() {
   expect_true "Vite inside Laravel does not build into public/build" grep -qx '        path: public/build' \
     "$T/single-app/actions/e2e-frontend-build/action.yml"
   expect_true "a single app starts a frontend server of its own" grep -qF "'.' != '.'" "$T/single-app/workflows/ci-e2e.yml"
+  # Vite inside Laravel may read vendor/, so the warm build installs it first.
+  # Its three steps: PHP, the vendor/ cache and composer install.
+  expect_true "the build warm job skips vendor/ for a single app" \
+    [ "$(grep -cF "if: \${{ '.' == '.' }}" "$T/single-app/workflows/ci-e2e-build-warm.yml")" = 3 ]
 }
 
 t_the_two_folder_example_renders() {
@@ -159,6 +195,20 @@ t_the_two_folder_example_renders() {
   expect_true "the test command is not tests.command" grep -qxF '          php artisan test --compact --parallel "${options[@]}"' "$backend"
   expect_true "the pnpm install is not frozen" grep -qF 'pnpm install --frozen-lockfile' "$T/two-folder/workflows/ci-e2e.yml"
   expect_true "the default branch is not main" grep -qF "github.ref == 'refs/heads/main'" "$T/two-folder/workflows/ci-cache-warm.yml"
+  expect_true "the build is not in web/dist" grep -qx '        path: web/dist' "$T/two-folder/actions/e2e-frontend-build/action.yml"
+  expect_true "pnpm is not set up from web/package.json" grep -qx '        package_json_file: web/package.json' \
+    "$T/two-folder/actions/setup-frontend/action.yml"
+  expect_true "no frontend server for a separate frontend" grep -qF "'web' != 'api'" "$T/two-folder/workflows/ci-e2e.yml"
+  expect_true "the frontend jobs do not run in web" grep -qx '        working-directory: web' "$T/two-folder/workflows/ci-frontend.yml"
+  expect_true "the build warm job's vendor steps are not for one folder only" grep -qF "'web' == 'api'" \
+    "$T/two-folder/workflows/ci-e2e-build-warm.yml"
+}
+
+t_an_app_with_no_frontend_is_refused() {
+  sed 's/^frontend_dir = .*/frontend_dir = ""/' "$ROOT/examples/two-folder/mroom.toml" >"$T/mroom.toml"
+  run python3 "$RENDER" "$TPL/workflows/ci-cache-warm.yml" "$T/mroom.toml"
+  expect_rc 1
+  expect_err_has "do not support an app with no frontend yet"
 }
 
 t_an_unfilled_placeholder_fails_the_render() {
@@ -180,6 +230,7 @@ test_case aggregate t_each_sharded_job_has_one_fixed_aggregate_check
 test_case measure t_the_backend_has_a_measuring_mode
 test_case secrets t_no_secret_or_write_permission_reaches_pull_request_code
 test_case report t_required_checks_always_report
+test_case concurrency t_runs_are_grouped_per_pull_request
 test_case first-push t_job_names_match_ci_first_push_defaults
 test_case e2e-build t_the_e2e_build_is_reused_and_saved_on_the_default_branch
 test_case placeholders t_every_placeholder_is_documented
@@ -188,9 +239,13 @@ test_case areas-ci t_changed_areas_for_ci_files
 test_case areas-one t_changed_areas_for_one_folder_and_none
 test_case areas-push t_changed_areas_outside_a_pull_request_is_everything
 test_case measure-report t_the_measuring_report_suggests_a_split_with_rest_last
+test_case measure-fail t_a_failing_suite_still_records_its_time
 # Rendering reads mroom.toml through bin/mroom, which needs python3 3.11+.
 skip_unless has_tomllib "python3 has no tomllib (3.11+)"
 test_case single-app t_the_single_app_example_renders
 test_case two-folder t_the_two_folder_example_renders
+test_case no-frontend t_an_app_with_no_frontend_is_refused
+skip_unless has_node "no node, which runs the vitest reporter"
+test_case reporter t_the_vitest_reporter_writes_each_files_phases
 test_case unfilled t_an_unfilled_placeholder_fails_the_render
 finish

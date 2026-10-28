@@ -11,7 +11,8 @@ on:
   pull_request:
 
 concurrency:
-  group: ci-e2e-${{ github.head_ref || github.ref }}
+  # By pull request number, not branch name: two forks' branches can share a name.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 # No job here needs a secret or writes anything: the PR's code runs with a read-only token.

@@ -253,7 +253,7 @@ org = "<org>"
 id_pattern = "[A-Z]+-[A-Z0-9]+"    # an error issue's id, as APP-1A2; names a worktree with no tracker id
 
 [pr]
-required_checks = ["test", "lint", "e2e", "check-title"]
+required_checks = ["test", "lint", "unit-tests", "e2e", "check-title"]
 
 [qa]
 zone = "<qa-zone>"                 # api-<PR>.<zone>, go-<PR>.<zone>

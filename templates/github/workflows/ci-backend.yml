@@ -23,7 +23,8 @@ on:
         default: 4
 
 concurrency:
-  group: ci-backend-${{ github.head_ref || github.ref }}
+  # By pull request number, not branch name: two forks' branches can share a name.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 # No job here needs a secret or writes anything: the PR's code runs with a read-only token.
@@ -293,27 +294,32 @@ jobs:
           cp .env.example .env
           php artisan key:generate
 
-      # Only the test run is timed, as the `Run tests` step of a shard is.
+      # Only the test run is timed, as the `Run tests` step of a shard is. A failing suite still
+      # records its time, then fails the job.
       - name: Run tests
         env:
           SUITE: ${{ matrix.suite }}
         run: |
-          start=$(date +%s)
-          <<tests.command>> --testsuite="$SUITE"
-          jq -n --arg suite "$SUITE" --argjson seconds "$(( $(date +%s) - start ))" \
-            '{suite: $suite, seconds: $seconds}' > "$RUNNER_TEMP/suite-time.json"
+          start=$(date +%s) status=0
+          <<tests.command>> --testsuite="$SUITE" || status=$?
+          jq -n --arg suite "$SUITE" --argjson seconds "$(( $(date +%s) - start ))" --argjson passed "$([ "$status" = 0 ] && echo true || echo false)" \
+            '{suite: $suite, seconds: $seconds, passed: $passed}' > "$RUNNER_TEMP/suite-time.json"
+          exit "$status"
 
+      # The attempt is in the name, so "Re-run failed jobs" does not collide with the first attempt's.
       - name: Upload the time
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: suite-time-${{ strategy.job-index }}
+          name: suite-time-${{ strategy.job-index }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/suite-time.json
           retention-days: 14
 
   # Each suite's time, slowest first, and a split into shards: the slowest suites first, each to the
-  # shard with the least time so far. The smallest shard becomes `rest`.
+  # shard with the least time so far. The smallest shard becomes `rest`. A suite's latest attempt
+  # counts; a suite with no time is named, so it is not lost from the split.
   measure-report:
-    needs: measure
+    needs: [suites, measure]
     if: always() && needs.measure.result != 'skipped'
     runs-on: ubuntu-latest
     steps:
@@ -324,15 +330,24 @@ jobs:
       - name: Report the times
         env:
           SHARDS: ${{ inputs.shards }}
+          SUITES: ${{ needs.suites.outputs.list }}
         run: |
-          python3 - "$SHARDS" times >> "$GITHUB_STEP_SUMMARY" <<'PY'
-          import glob, json, sys
+          python3 - "$SHARDS" times "$SUITES" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import glob, json, os, re, sys
           count = max(1, int(sys.argv[1]))
-          times = [json.load(open(f)) for f in glob.glob(sys.argv[2] + "/*/suite-time.json")]
-          times.sort(key=lambda t: -t["seconds"])
-          print("### Test suite times\n\n| suite | seconds |\n|---|---:|")
+          latest = {}
+          for f in glob.glob(sys.argv[2] + "/*/suite-time.json"):
+              attempt = int(re.search(r"-attempt-([0-9]+)$", os.path.dirname(f)).group(1))
+              t = json.load(open(f))
+              if t["suite"] not in latest or latest[t["suite"]][0] < attempt:
+                  latest[t["suite"]] = (attempt, t)
+          times = sorted((t for _, t in latest.values()), key=lambda t: -t["seconds"])
+          print("### Test suite times\n\n| suite | seconds | passed |\n|---|---:|---|")
           for t in times:
-              print(f"| {t['suite']} | {t['seconds']} |")
+              print(f"| {t['suite']} | {t['seconds']} | {'yes' if t.get('passed', True) else 'no'} |")
+          missing = [s for s in json.loads(sys.argv[3]) if s not in latest]
+          if missing:
+              print(f"\nNo time for: {', '.join(missing)}. Run the measuring mode again before splitting.")
           shards = [[0, []] for _ in range(min(count, len(times)) or 1)]
           for t in times:
               shard = min(shards, key=lambda s: s[0])

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ci-check.py <check> <repository root> - one shape check over the CI templates (templates/github).
+"""check.py <check> <repository root> - one shape check over the CI templates (templates/github).
 
 Used by tests/ci-templates-test.sh, one check per test case. Reads the templates as YAML (PyYAML), with
 their placeholders unfilled: every placeholder sits inside a scalar, so the raw files parse. Prints what
@@ -270,6 +270,14 @@ def check_required_checks_report(files):
                 problem(f"{name}:{gate} can be skipped as a whole: if: {cond!r}")
 
 
+def check_concurrency(files):
+    # By pull request number: two forks' branches of the same name must not cancel each other's runs.
+    for name in REQUIRED:
+        group = str((files[f"workflows/{name}"][0].get("concurrency") or {}).get("group", ""))
+        if group != "${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}":
+            problem(f"{name}: the concurrency group {group!r} is not per pull request")
+
+
 def check_first_push_names(files):
     # tools/ci-first-push.sh's defaults: BACKEND_JOB_PREFIX, E2E_JOB and APT_STEP.
     backend = files["workflows/ci-backend.yml"][0]["jobs"]["tests"]["name"]
@@ -344,6 +352,7 @@ CHECKS = {
     "measure": check_measure,
     "no-secrets": check_no_secrets,
     "required-checks-report": check_required_checks_report,
+    "concurrency": check_concurrency,
     "first-push-names": check_first_push_names,
     "e2e-build": check_e2e_build,
 }

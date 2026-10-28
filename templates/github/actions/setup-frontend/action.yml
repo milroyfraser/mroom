@@ -10,6 +10,9 @@ inputs:
   install:
     description: "'false' to set up Node and the package manager without installing the frontend's dependencies"
     default: 'true'
+  store:
+    description: "'false' to leave the package store alone (ci-cache-warm.yml restores and saves it itself)"
+    default: 'true'
 
 runs:
   using: composite
@@ -30,6 +33,7 @@ runs:
         package-manager-cache: false
 
     - name: Find the package store
+      if: inputs.store == 'true'
       id: store
       shell: bash
       working-directory: <<app.frontend_dir>>
@@ -37,6 +41,7 @@ runs:
 
     # The same path and key as ci-cache-warm.yml, which saves it: a different string never restores.
     - name: Restore the package store
+      if: inputs.store == 'true'
       uses: actions/cache/restore@v6
       with:
         path: ${{ steps.store.outputs.dir }}

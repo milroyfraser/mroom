@@ -25,20 +25,22 @@ export default class FileTimesReporter {
     this.root = ctx.config.root;
   }
 
-  onFinished(files = []) {
-    const rows = files
-      .map((file) => {
+  // onTestRunEnd, not onFinished: vitest 4 removed onFinished. This hook exists from vitest 3.
+  onTestRunEnd(testModules = []) {
+    const rows = testModules
+      .map((testModule) => {
+        const diagnostic = testModule.diagnostic();
         const phases = {
-          environment: round(file.environmentLoad),
-          prepare: round(file.prepareDuration),
-          collect: round(file.collectDuration),
-          setup: round(file.setupDuration),
-          run: round(file.result?.duration),
+          environment: round(diagnostic.environmentSetupDuration),
+          prepare: round(diagnostic.prepareDuration),
+          collect: round(diagnostic.collectDuration),
+          setup: round(diagnostic.setupDuration),
+          run: round(diagnostic.duration),
         };
         return {
-          file: relative(this.root, file.filepath),
-          tests: countTests(file),
-          state: file.result?.state ?? "unknown",
+          file: relative(this.root, testModule.moduleId),
+          tests: [...testModule.children.allTests()].length,
+          state: testModule.state(),
           ...phases,
           total: Object.values(phases).reduce((sum, ms) => sum + ms, 0),
         };
@@ -74,9 +76,4 @@ export default class FileTimesReporter {
     ];
     appendFileSync(summary, `${lines.join("\n")}\n`);
   }
-}
-
-function countTests(task) {
-  if (task.type === "test") return 1;
-  return (task.tasks ?? []).reduce((total, child) => total + countTests(child), 0);
 }

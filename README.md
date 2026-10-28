@@ -932,7 +932,7 @@ and fill the placeholders below.
 | `workflows/ci-cache-warm.yml` | saves the dependency caches on the default branch |
 | `workflows/ci-e2e-build-warm.yml` | saves the e2e frontend build on the default branch |
 | `actions/changed-areas/` | which parts a pull request changes, so a job can skip its work and still report |
-| `actions/setup-frontend/` | Node, pnpm and the package store, restore only |
+| `actions/setup-frontend/` | Node, pnpm (for pnpm), the package store (restore only) and the frontend's install |
 | `actions/e2e-frontend-build/` | the e2e build: restored when its inputs are unchanged, built otherwise |
 | `scripts/vitest-file-times.mjs` | a vitest reporter that records each test file's time |
 
@@ -954,10 +954,21 @@ After the templates merge, run each warm workflow once (`gh workflow run ci-cach
 `ci-e2e-build-warm.yml`), so the first pull request finds warm caches. `tools/ci-first-push.sh` measures what
 a pull request's first push waits for; its defaults match the templates' job and step names.
 
+Things to know:
+
+- With pnpm, the frontend's `package.json` needs a `packageManager` field: `pnpm/action-setup` reads the
+  pnpm version from it.
+- The workflows have no `merge_group` trigger. With a merge queue, add `merge_group:` beside `pull_request:`,
+  or the queue waits forever on the required checks.
+- Actions are pinned by version tag, as GitHub's own docs show. The warm workflows run third-party actions
+  (`shivammathur/setup-php`, `pnpm/action-setup`) on the default branch, where caches are written; pin
+  them to a commit if that matters more to you than easy updates.
+- The vitest reporter needs vitest 3 or later.
+
 **Placeholders.** A `<<key>>` is filled from `mroom.toml` or the repository; a `<<fill:name>>` is a value
 config cannot know, and a person fills it. When a folder is `.` and a `/` follows the placeholder, both go:
-`<<app.backend_dir>>/vendor` becomes `vendor`. With no separate frontend (`app.frontend_dir = ""`), leave out
-`ci-frontend.yml`, `ci-e2e-build-warm.yml` and the frontend steps of `ci-e2e.yml`.
+`<<app.backend_dir>>/vendor` becomes `vendor`. An app with no frontend (`app.frontend_dir = ""`) is not
+supported yet: the Node steps would build their paths from the repository's root.
 
 | Placeholder | Filled with |
 |---|---|

@@ -24,6 +24,9 @@ on:
       - '<<app.backend_dir>>/<<pm.lockfile>>'
       - '<<app.frontend_dir>>/<<pm.lockfile>>'
       - '.github/workflows/ci-cache-warm.yml'
+      # These hold the same keys (the PHP version in vendor's, say): a change there must warm again.
+      - '.github/workflows/ci-backend.yml'
+      - '.github/workflows/ci-e2e.yml'
       - '.github/actions/setup-frontend/**'
   pull_request:
     paths:
@@ -65,6 +68,7 @@ jobs:
         uses: ./.github/actions/setup-frontend
         with:
           install: 'false'
+          store: 'false'
 
       # Backend: the installed vendor/. On a changed lock the fallback key restores the previous vendor/
       # and composer installs, updates or removes only what differs.

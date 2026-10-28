@@ -38,6 +38,30 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # With Vite inside the Laravel app the build may read vendor/ (Ziggy, Flux, Tailwind sources),
+      # and composer scripts may publish into public/, which is in the build's key. So the build
+      # runs after `composer install`, as in the e2e job, or it saves a different build.
+      - name: Setup PHP
+        if: ${{ '<<app.frontend_dir>>' == '<<app.backend_dir>>' }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '<<app.php>>'
+          extensions: pdo_pgsql, redis
+          coverage: none
+
+      - name: Cache vendor
+        if: ${{ '<<app.frontend_dir>>' == '<<app.backend_dir>>' }}
+        uses: actions/cache/restore@v6
+        with:
+          path: <<app.backend_dir>>/vendor
+          key: ${{ runner.os }}-vendor-php<<app.php>>-${{ hashFiles('<<app.backend_dir>>/composer.lock') }}
+          restore-keys: ${{ runner.os }}-vendor-php<<app.php>>-
+
+      - name: Install backend dependencies
+        if: ${{ '<<app.frontend_dir>>' == '<<app.backend_dir>>' }}
+        working-directory: <<app.backend_dir>>
+        run: composer install --no-interaction --prefer-dist
+
       # Node, the package manager and the package store (restore only); the action installs.
       - name: Setup Node
         uses: ./.github/actions/setup-frontend

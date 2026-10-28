@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ci-render.py <template> <mroom.toml> [name=value ...] - a CI template with its placeholders filled.
+"""render.py <template> <mroom.toml> [name=value ...] - a CI template with its placeholders filled.
 
 The tests' stand-in for what `mroom init` will do, following the README's "CI templates" rules: each
 <<key>> from `mroom config get` (through bin/mroom, so the real reader and its checks run), the derived
@@ -35,6 +35,9 @@ def values(config, fills):
     out = {key: get(config, key) for key in
            ("app.name", "app.backend_dir", "app.frontend_dir", "app.package_manager", "app.php", "tests.command")}
     frontend = out["app.frontend_dir"]
+    if frontend == "":
+        # The templates need a Node folder; with no frontend they would build paths from the root.
+        raise SystemExit('app.frontend_dir = "": the CI templates do not support an app with no frontend yet')
     out["app.build.frontend_dist"] = get(config, "app.build.frontend_dist",
                                          "public/build" if frontend == "." else "dist")
     pattern = get(config, "tests.database_pattern")

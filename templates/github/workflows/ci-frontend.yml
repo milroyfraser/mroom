@@ -9,7 +9,8 @@ on:
   pull_request:
 
 concurrency:
-  group: ci-frontend-${{ github.head_ref || github.ref }}
+  # By pull request number, not branch name: two forks' branches can share a name.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 # No job here needs a secret or writes anything: the PR's code runs with a read-only token.
@@ -87,7 +88,8 @@ jobs:
           name: vitest-file-times-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/vitest-file-times.json
           retention-days: 14
-          if-no-files-found: ignore
+          # A shard that wrote no times shows a warning instead of passing in silence.
+          if-no-files-found: warn
 
   # One stable name for the ruleset to require, so changing the shard count never renames a required
   # check. `always()` makes it report when a shard failed or was cancelled: without it a failed shard
