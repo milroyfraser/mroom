@@ -419,11 +419,11 @@ WebSockets go to mroom's Reverb host (D16), one Reverb for every environment, ea
   the gate, the host and the environment's `.env` hold it. A later `reverb-app-add` keeps it, since Reverb
   keeps the app each socket opened with: a new secret would fail the private channels of every socket already
   open. To change it, remove the app, then add it.
-- **Its limits.** A browser may open its sockets only from the environment's two sites, at most 100
-  subscribed at once, and only a socket subscribed to a channel may send client events on it. The host closes
-  a socket it refuses; Reverb itself only sends the error. It also gives each client event to its own app:
-  Reverb 1.12.0 looks the channel up in whichever app it served last, so with more than one app a valid one
-  is refused at random (fixed upstream after 1.12.0).
+- **Its limits.** A browser may open its sockets only from the environment's two hosts, `api.<N>.<zone>` and
+  `<N>.<zone>`, at most 100 subscribed at once, and only a socket subscribed to a channel may send client events
+  on it. The host closes a socket it refuses; Reverb itself only sends the error. It also gives each client event
+  to its own app: Reverb 1.12.0 looks the channel up in whichever app it served last, so with more than one app a
+  valid one is refused at random (fixed upstream after 1.12.0).
 - **One host.** Browsers and apps reach it through nginx on `ws.<zone>`: the frontend opens its sockets
   there, and the backend sends its events there, signed with its secret.
 - **No port to take.** It listens only on a Unix socket in a folder only the box user can open, so no site
@@ -651,7 +651,7 @@ differently):
 |---|---|---|
 | `qa-plan.yml` | a push to a pull request, or by hand | sorts the changed paths (could a user notice the change?), then builds the frontend from the pull request's code with public values only; it holds no secret |
 | `qa-up.yml` | the QA plan run completing, or the plan's hand-over | brings the environment up or refreshes it, when a user could notice the change, the environment exists, the `qa` label is on, or a person started the plan |
-| `qa-down.yml` | the pull request closing, its `qa` label coming off, the reaper, or by hand | tears the environment down: its daemons, its site user's processes and files, its sites, then its database, Redis user and keys, mail and buckets, through the gate |
+| `qa-down.yml` | the pull request closing, its `qa` label coming off, the reaper, or by hand | tears the environment down: its daemons, its site user's processes and files, its sites, then its database, Redis user and keys, mail, buckets and Reverb app, through the gate |
 | `qa-reap.yml` | a schedule, or by hand | starts a teardown for every environment older than `qa.ttl_days` (5) |
 
 - **Who holds what.** Only jobs in the GitHub environment `qa` hold the Forge token and the box's SSH key,
@@ -751,12 +751,10 @@ differently):
   check is matched by its name. The QA environment comment says how each deploy went; require the app's own
   CI.
 - **When it says no.** A pull request that is closed, has moved on, or whose change no user could notice gets
-  no environment. A build that failed, `qa.parity.broadcast = "same"` (the default: mroom's Reverb host exists,
-  but qa-up does not wire environments into it yet, so set `broadcast = "log"` meanwhile), and a pull request
-  whose `mroom.toml` puts the frontend elsewhere than the default branch's (qa-up deploys a build by the
-  default branch's) each get a comment that says so, and the run stays green. The comment comes from the
-  action's last step, which runs whatever happened before it, so a step that failed before it could say why
-  is said too.
+  no environment. A build that failed, and a pull request whose `mroom.toml` puts the frontend elsewhere than
+  the default branch's (qa-up deploys a build by the default branch's), each get a comment that says so, and
+  the run stays green. The comment comes from the action's last step, which runs whatever happened before it,
+  so a step that failed before it could say why is said too.
 - **The `.env`.** `MROOM_QA_ENV_TEMPLATE` (third-party test-mode keys only: no app key, no credential for the
   box), less every entry whose key mroom sets (read entry by entry, so a quoted value of several lines stays
   whole), then mroom's: the `APP_KEY` the gate keeps for the environment, `APP_ENV=qa` (which Laravel counts as
@@ -766,10 +764,18 @@ differently):
   (`MAIL_SCHEME=smtp`, `MAIL_ENCRYPTION=null`, whatever the template says) for `catcher`, or `MAIL_MAILER=log`;
   for each disk of `qa.disks`, a bucket and a key of its own under Laravel's s3 env names with the disk's prefix
   in place of `AWS_` (`files = "AWS_"` gives `AWS_BUCKET`, `AWS_ACCESS_KEY_ID` and the rest; a disk in
-  `qa.public_disks` also gets `<prefix>URL`), or `FILESYSTEM_DISK=local`; and `BROADCAST_CONNECTION=log`. The
-  passwords and secret keys the gate gives, and the app key, are masked in the run's log, and a line of the
-  gate's answer that could hold a value is never shown. The gate keeps the passwords, the bucket keys and the app
-  key (QA gate, above), so every deploy gets the same ones, and the environment's users stay signed in.
+  `qa.public_disks` also gets `<prefix>URL`), or `FILESYSTEM_DISK=local`; and for `broadcast = "same"`, an app
+  of its own on the box's Reverb host: `BROADCAST_CONNECTION=reverb` (and `BROADCAST_DRIVER`, its name before
+  Laravel 11), the app's secret the gate gives, and for an app with a frontend `VITE_REVERB_APP_KEY`,
+  `VITE_REVERB_HOST`, `VITE_REVERB_PORT` and `VITE_REVERB_SCHEME`, the build values Reverb's installer puts in a
+  Laravel app's `.env`, as the frontend was built with them; or `BROADCAST_CONNECTION=log`. The app's id, key,
+  host, port and scheme are public values (below): qa-up stops before the `.env` when the gate's are not those,
+  since the frontend would open its sockets for another app or on another host. The file goes through the gate's
+  `env-put` alone, never through Forge's API for a site's environment. The passwords and secret keys the gate
+  gives, the Reverb app's secret among them, and the app key, are masked in the run's log, and a line of the
+  gate's answer that could hold a value is never shown. The gate keeps the passwords, the bucket keys, the Reverb
+  app's secret and the app key (QA gate, above), so every deploy gets the same ones: the environment's users stay
+  signed in, and its open sockets keep their private channels.
 - **What the plan builds.** `app.frontend_dir` is a folder for a frontend of its own (it gets the site
   `<N>.<zone>`), `.` for Vite inside the Laravel app, or empty for no frontend; `app.build.frontend` is the
   command, and without one nothing is built; `app.build.frontend_dist` is where it writes (`dist`, or
@@ -782,6 +788,24 @@ differently):
   of its own keeps them on its one host. Their names are the environment's own too, `<app>_qa_<N>_sid` and
   `<app>_qa_<N>_csrf`, and not those of before 0.5.0: a browser may hold cookies of those for the whole zone
   until they expire, and would send them first.
+- **Sockets in the frontend.** With `qa.parity.broadcast = "same"`, the default, the plan's public values hold
+  the environment's Reverb app too: `REVERB_APP_ID` and `REVERB_APP_KEY`, both `<app>-qa-<N>` from the pull
+  request's number, as the gate makes them, and the box's Reverb host, `REVERB_HOST` (`ws.<zone>`),
+  `REVERB_PORT` (443) and `REVERB_SCHEME` (https). The app's secret is never one of them. A frontend that opens
+  its sockets with Laravel Echo maps what Echo reads:
+
+  ```toml
+  [app.build.frontend_env]
+  VITE_REVERB_APP_KEY = "env:REVERB_APP_KEY"
+  VITE_REVERB_HOST = "env:REVERB_HOST"
+  VITE_REVERB_PORT = "env:REVERB_PORT"
+  VITE_REVERB_SCHEME = "env:REVERB_SCHEME"
+  ```
+
+  The plan builds by the pull request's `mroom.toml`, and qa-up wires the environment by the default branch's,
+  so a pull request that changes `qa.parity.broadcast` gets a frontend built for its own setting until it
+  merges. The box needs the Reverb host first (QA gate, step 14): without it, the gate cannot give an app, and
+  the deploy fails.
 - **The path rules.** The plan is `none` when every changed path is one no user can see: tests, docs, CI,
   agent and developer tooling; any other path, a path outside the app's folders included, makes it `maybe`.
   A renamed file counts with both its names, and a name that holds a control character, a newline among them,

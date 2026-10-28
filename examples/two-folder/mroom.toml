@@ -11,10 +11,16 @@ version_path = "/version"
 
 [app.build]
 frontend = "pnpm build"
-frontend_env = { VITE_REVERB_APP_KEY = "env:REVERB_APP_KEY" }
 after_deploy = ["config:clear", "route:cache"]
 daemons = ["horizon", "reverb"]
 queues = ["default", "mail"]
+
+# What Laravel Echo reads. In QA, mroom gives each from the pull request: its Reverb app's key, and the box's host.
+[app.build.frontend_env]
+VITE_REVERB_APP_KEY = "env:REVERB_APP_KEY"
+VITE_REVERB_HOST = "env:REVERB_HOST"
+VITE_REVERB_PORT = "env:REVERB_PORT"
+VITE_REVERB_SCHEME = "env:REVERB_SCHEME"
 
 [tests]
 command = "php artisan test --compact --parallel"
