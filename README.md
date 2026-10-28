@@ -322,11 +322,11 @@ anything that scans, such as `cache:prune-stale-tags` (SCAN); `redis-clear` empt
 A pattern subscription must be exactly `<prefix>*`. And one Redis keeps environments' data apart, not their
 load: a long script or a large write from one PR slows every environment and the dev site.
 
-An environment's two sites, `api-<N>.<MROOM_QA_ZONE>` and `go-<N>.<MROOM_QA_ZONE>`, are Forge isolated
-sites in the home of one user of their own, `<MROOM_APP_NAME>_qa_<N>` (D17); qa-up creates them. The
-gate works in them only through `site-op`, run as that user with `sudo`, so it never unpacks a tarball,
-follows a PR's link or runs its code as the box user. `site-op` runs only as a QA site's user, and only on
-that environment's own `api-<N>` and `go-<N>` sites:
+An environment's two sites, `api.<N>.<MROOM_QA_ZONE>` for the Laravel app and `<N>.<MROOM_QA_ZONE>` for a
+frontend of its own, are Forge isolated sites in the home of one user of their own, `<MROOM_APP_NAME>_qa_<N>`
+(D17); qa-up creates them. The gate works in them only through `site-op`, run as that user with `sudo`, so it
+never unpacks a tarball, follows a PR's link or runs its code as the box user. `site-op` runs only as a QA
+site's user, and only on that environment's own two sites:
 
 - **Unpacking** uses Python's safe tarfile filter: no absolute path, no `..`, no link that leaves the
   tree, no device file, no setuid bit, and no oversized header. A code tree must be GitHub's one folder
@@ -641,8 +641,8 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
 
 ## QA environments
 
-Each pull request can have a QA environment of its own on the box: `api-<N>.<zone>` for the Laravel app and,
-for a frontend of its own, `go-<N>.<zone>`, with the services the QA gate gives it (design 8.2). Reusable
+Each pull request can have a QA environment of its own on the box: `api.<N>.<zone>` for the Laravel app and,
+for a frontend of its own, `<N>.<zone>`, with the services the QA gate gives it (design 8.2). Reusable
 workflows run it; the app calls each from a workflow of its own, pinned to the mroom release the box runs
 (`v0.4.0` below is the first release with these workflows):
 
@@ -657,11 +657,17 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
   which reach root (design D20). `qa` admits the default branch alone, and those jobs check out only the
   default branch's `mroom.toml`, and mroom at the commit of the workflow file, so a pull request is only a
   number to them. Its code runs only in `qa-plan`, with no secret, and on the box, in its own isolated sites.
-- **Forge is the source of truth.** An environment exists while Forge has its `api-<N>` or `go-<N>` site, a
-  site being removed not counting. A Forge read that fails is retried and then fails the run, so it never
-  reads as "no environment". Forge can accept a delete and never run it, so a site still removing after 30
-  minutes gets the delete again, and the reaper warns about it: the same one two nights running needs a
-  person in Forge.
+- **Forge is the source of truth.** An environment exists while Forge has one of its sites, a site being removed
+  not counting. The zone is QA's alone: a site of it named `<N>.<zone>` or `api.<N>.<zone>` is environment N's. A
+  Forge read that fails is retried and then fails the run, so it never reads as "no environment". Forge can
+  accept a delete and never run it, so a site still removing after 30 minutes gets the delete again, and the
+  reaper warns about it: the same one two nights running needs a person in Forge.
+- **Environments of mroom before 0.5.0** have their sites at `api-<N>.<zone>` and `go-<N>.<zone>`, with their
+  cookies set for the whole zone. They are found, counted, reaped and torn down like any, but not refreshed under
+  the new names beside the old: a deploy to one stops and says to tear it down (`gh workflow run qa-down.yml -f
+  pr_number=<N>`), and the next deploy brings it up as `<N>.<zone>` and `api.<N>.<zone>`. The box and the app's
+  workflow pins move to 0.5.0 together, with the root recipe run again for its `site-op`, since the two releases
+  name the sites differently: until both have moved, deploys fail and the next push tries again.
 - **A teardown.** qa-down's first job only reads Forge, so a pull request that never had an environment gets no
   teardown; one started by hand or by the reaper skips it. The second job runs every step, each skipping what is
   already gone, whether or not Forge still has a site: daemons first, since supervisor starts again what is
@@ -748,24 +754,26 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
 - **The `.env`.** `MROOM_QA_ENV_TEMPLATE` (third-party test-mode keys only: no app key, no credential for the
   box), less every entry whose key mroom sets (read entry by entry, so a quoted value of several lines stays
   whole), then mroom's: the `APP_KEY` the gate keeps for the environment, `APP_ENV=qa` (which Laravel counts as
-  not production: a known gap, design 9), `APP_DEBUG=false`, `SESSION_SECURE_COOKIE=true` (the hosts answer over
-  https alone), the public values below, the database, Redis user, host, port and prefixes the gate gives, and as
-  `[qa.parity]` says: the mail login with plain SMTP to the box (`MAIL_SCHEME=smtp`, `MAIL_ENCRYPTION=null`,
-  whatever the template says) for `catcher`, or `MAIL_MAILER=log`; for each disk of `qa.disks`, a bucket and a
-  key of its own under Laravel's s3 env names with the disk's prefix in place of `AWS_` (`files = "AWS_"` gives
-  `AWS_BUCKET`, `AWS_ACCESS_KEY_ID` and the rest; a disk in `qa.public_disks` also gets `<prefix>URL`), or
-  `FILESYSTEM_DISK=local`; and `BROADCAST_CONNECTION=log`. The passwords and secret keys the gate gives, and the
-  app key, are masked in the run's log, and a line of the gate's answer that could hold a value is never shown.
-  The gate keeps the passwords, the bucket keys and the app key (QA gate, above), so every deploy gets the same
-  ones, and the environment's users stay signed in.
-- **What the plan builds.** `app.frontend_dir` is a folder for a frontend of its own (it gets the go site),
-  `.` for Vite inside the Laravel app, or empty for no frontend; `app.build.frontend` is the command, and
-  without one nothing is built; `app.build.frontend_dist` is where it writes (`dist`, or `public/build` for
-  Vite inside Laravel). In `app.build.frontend_env`, `env:<KEY>` is the environment's own value of a key it
-  does not keep secret (`APP_URL`, `CLIENT_URL`, `SESSION_DOMAIN`, `SESSION_COOKIE`, `XSRF_COOKIE_NAME`, and
-  for a frontend of its own `CORS_ALLOWED_ORIGINS` and `SANCTUM_STATEFUL_DOMAINS`), and any other `env:<KEY>`
-  is empty, since the build runs the pull request's code. Each environment's cookies have names of their
-  own, `<app>_qa_<N>_session` and `<app>_qa_<N>_xsrf`, since every environment shares the zone.
+  not production: a known gap, design 9), `APP_DEBUG=false`, the public values below, the database, Redis user,
+  host, port and prefixes the gate gives, and as `[qa.parity]` says: the mail login with plain SMTP to the box
+  (`MAIL_SCHEME=smtp`, `MAIL_ENCRYPTION=null`, whatever the template says) for `catcher`, or `MAIL_MAILER=log`;
+  for each disk of `qa.disks`, a bucket and a key of its own under Laravel's s3 env names with the disk's prefix
+  in place of `AWS_` (`files = "AWS_"` gives `AWS_BUCKET`, `AWS_ACCESS_KEY_ID` and the rest; a disk in
+  `qa.public_disks` also gets `<prefix>URL`), or `FILESYSTEM_DISK=local`; and `BROADCAST_CONNECTION=log`. The
+  passwords and secret keys the gate gives, and the app key, are masked in the run's log, and a line of the
+  gate's answer that could hold a value is never shown. The gate keeps the passwords, the bucket keys and the app
+  key (QA gate, above), so every deploy gets the same ones, and the environment's users stay signed in.
+- **What the plan builds.** `app.frontend_dir` is a folder for a frontend of its own (it gets the site
+  `<N>.<zone>`), `.` for Vite inside the Laravel app, or empty for no frontend; `app.build.frontend` is the
+  command, and without one nothing is built; `app.build.frontend_dist` is where it writes (`dist`, or
+  `public/build` for Vite inside Laravel). In `app.build.frontend_env`, `env:<KEY>` is the environment's own
+  value of a key it does not keep secret (`APP_URL`, `CLIENT_URL`, `SESSION_DOMAIN`, `SESSION_COOKIE`,
+  `XSRF_COOKIE_NAME`, and for a frontend of its own `CORS_ALLOWED_ORIGINS` and `SANCTUM_STATEFUL_DOMAINS`), and
+  any other `env:<KEY>` is empty, since the build runs the pull request's code. A frontend of its own reads the
+  session and XSRF cookies the Laravel app sets, so they are set for `.<N>.<zone>`: no other environment's host
+  is under it, and neither are the zone's shared hosts, Garage's and the Reverb host's. An app with no frontend
+  of its own keeps them on its one host. Their names are the environment's own too, `<app>_qa_<N>_session` and
+  `<app>_qa_<N>_xsrf`.
 - **The path rules.** The plan is `none` when every changed path is one no user can see: tests, docs, CI,
   agent and developer tooling; any other path, a path outside the app's folders included, makes it `maybe`.
   A renamed file counts with both its names, and a name that holds a control character, a newline among them,
@@ -781,8 +789,9 @@ workflows run it; the app calls each from a workflow of its own, pinned to the m
    `MROOM_QA_ENV_TEMPLATE`. The variables `MROOM_FORGE_ORG`, `MROOM_FORGE_SERVER`, `MROOM_QA_SSH_HOST`,
    `MROOM_QA_SSH_KNOWN_HOSTS` (the box's host key line, as `ssh-keyscan -t ed25519 <host>` prints it, checked
    against the box's own `/etc/ssh/ssh_host_ed25519_key.pub`) and, when they apply, `MROOM_QA_SSH_USER` (when
-   the box user is not `forge`), `MROOM_QA_CERTIFICATE` (a wildcard certificate in Forge to clone onto each
-   site; without it each site asks Let's Encrypt) and `MROOM_QA_NGINX_TEMPLATE` (an nginx template for new
+   the box user is not `forge`), `MROOM_QA_CERTIFICATE` (a certificate in Forge to clone onto a frontend's site,
+   such as one for `*.<zone>`; the API's site, `api.<N>.<zone>`, is a level below what that names, so it asks
+   Let's Encrypt, as every site does without it) and `MROOM_QA_NGINX_TEMPLATE` (an nginx template for new
    sites) go in the repository's variables, not the `qa` environment's: none is secret, and every job of the
    called workflows reads the repository's, while GitHub's docs never say an environment's own reach a called
    workflow's job that sets `deployment: false`. Until `MROOM_FORGE_SERVER` is set, the workflows tear down and
