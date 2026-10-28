@@ -396,6 +396,13 @@ EOF"
   refuse_for 'changes what a later push does' 'git config push.default upstream'
   refuse_for 'changes what a push does' 'git -c push.default=tracking push'
   refuse_for 'changes what a later push does' 'git config branch.feat.merge refs/heads/main'
+  # Found by the fifth review.
+  refuse_for 'secret file' 'cp -rt /tmp/x .env'
+  refuse_for 'secret file' 'ln -st /tmp/x .env'
+  refuse_for 'folder of secret files' 'env -C ~/.ssh cat id_rsa'
+  refuse_for 'secret file' 'cat ~/.my.cnf'
+  refuse_for 'secret file' 'cat ~/.kube/config'
+  allow 'rsync -avt src/ /tmp/src'
   allow 'grep -rn --exclude=.env KEY src'
   allow 'rsync -a --exclude=.env ./ /tmp/app'
   allow 'tar --exclude=.env -czf /tmp/x.tgz .'

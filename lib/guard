@@ -50,7 +50,8 @@
 #   - reading secrets: a reader (cat, grep, head, sed, cp, ln, base64, tar, curl -F @..., git
 #     diff/show/add, find -exec, an interpreter's code, `< file`, ...) on .env* (but not *.example),
 #     ~/.ssh (but not *.pub), ~/.config/gh*, ~/.config/mroom/secrets, any *.env under ~/.config,
-#     ~/.git-credentials, ~/.netrc, ~/.npmrc, auth.json, ~/.docker/config.json (in any case: macOS ignores it),
+#     ~/.git-credentials, ~/.netrc, ~/.npmrc, ~/.my.cnf, ~/.kube, auth.json, ~/.docker/config.json (in any case:
+#     macOS ignores it),
 #     ~/.forge-token, ~/.aws, ~/.laravel-forge, ~/.claude*/.credentials.json, a glob that matches one,
 #     and a recursive copy, archive or search of a folder that holds them (~, ~/.config, ~/.claude); and
 #     `gh auth token`, `gh auth status -t`, `gh config get ...token`.
@@ -154,7 +155,7 @@ is_secret_path() {
   base=${t##*/}
   case "$base" in *.example | *.example.* | *.pub) return 1 ;; esac
   case "$base" in
-    .env | .env.* | .envrc | .forge-token | .credentials.json | .git-credentials | .netrc | .pgpass) return 0 ;;
+    .env | .env.* | .envrc | .forge-token | .credentials.json | .git-credentials | .netrc | .pgpass | .my.cnf) return 0 ;;
   esac
   # Composer's auth.json (in the project root or Composer's home) and the home folder's .npmrc hold tokens;
   # a test fixture named auth.json or a project's .npmrc usually does not.
@@ -162,7 +163,7 @@ is_secret_path() {
   [ "$base" = .npmrc ] && home_rest "$t" && [ "$REST" = .npmrc ] && return 0
   case "/$t/" in
     */.ssh/* | */.config/gh/* | */.config/gh-* | */.config/mroom/secrets/* | */.aws/* | */.laravel-forge/* | */.config/forge/*) return 0 ;;
-    */.docker/config.json/ | */.config/git/credentials/) return 0 ;;
+    */.docker/config.json/ | */.config/git/credentials/ | */.kube/*) return 0 ;;
     # A tool's secrets kept as an env file under ~/.config (an MCP server's keys, say).
     */.config/*.env/) return 0 ;;
   esac
@@ -311,7 +312,7 @@ check_secrets() {
       for ((i = 0; i < n; i++)); do
         case "${args[$i]}" in
           # -t DIR names the destination, so every other word is a source.
-          -t | -t* | --target-directory*) last_pos=-2; break ;;
+          -t | -t* | -[!-]*t* | --target-directory*) last_pos=-2; break ;; # -t alone or in a group (-rt)
           -*) ;;
           *) last_pos=$i ;;
         esac
@@ -1036,7 +1037,12 @@ check_segment() {
             -S*) analyze "${1#-S}" $((depth + 1)); return ;;
             --split-string=*) analyze "${1#--split-string=}" $((depth + 1)); return ;;
             -*S*) block "env with -S in a group of options cannot be checked"; return ;;
-            -u | -C | -P | --unset | --chdir) shift ;;
+            -C | --chdir)
+              is_secret_path "${2:-}/x" && { block "env -C into a folder of secret files (${2:-})"; return; }
+              shift
+              ;;
+            --chdir=*) is_secret_path "${1#*=}/x" && { block "env --chdir into a folder of secret files"; return; } ;;
+            -u | -P | --unset) shift ;;
             -*) ;;
             *) check_assignment "$depth" "$1" ;;
           esac
