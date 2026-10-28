@@ -58,7 +58,7 @@ A tagged release (the way a shared box should run it, so switching branches in a
 the installed mroom):
 
 ```bash
-./install.sh --version v0.3.1
+./install.sh --version v0.4.0
 ```
 
 Either way mroom lands in `~/.local/share/mroom/<version>/` and `~/.local/bin/mroom` links to it. Make
@@ -68,7 +68,7 @@ tool put there, and `./install.sh --uninstall` removes every installed version a
 `~/.config/mroom`). `--version` downloads with `gh` when it is signed in, and with `curl` otherwise.
 
 ```bash
-mroom version            # 0.3.1
+mroom version            # 0.4.0
 mroom version --source   # the release or checkout it was installed from
 mroom help
 ```
@@ -644,7 +644,7 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
 Each pull request can have a QA environment of its own on the box: `api-<N>.<zone>` for the Laravel app and,
 for a frontend of its own, `go-<N>.<zone>`, with the services the QA gate gives it (design 8.2). Reusable
 workflows run it; the app calls each from a workflow of its own, pinned to the mroom release the box runs
-(`v0.4.0` below is the next release tag, the first with these workflows):
+(`v0.4.0` below is the first release with these workflows):
 
 | Workflow | Runs on | What it does |
 |---|---|---|
@@ -959,7 +959,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - uses: milroyfraser/mroom/actions/regression-label@v0.3.1
+      - uses: milroyfraser/mroom/actions/regression-label@v0.4.0
 ```
 
 The check fails when the label and the `Breaks` line do not come together, when the release does not exist
