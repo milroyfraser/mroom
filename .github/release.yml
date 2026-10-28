@@ -1,0 +1,24 @@
+# The release notes' groups, by the type labels the PR checks set (actions/pr-type-label). Copy it to
+# .github/release.yml in the app's repository; GitHub reads it there when it generates a release's notes. A
+# pull request in more than one group shows in the first: regression fixes (actions/regression-label) come first.
+changelog:
+  categories:
+    - title: Regression Fixes
+      labels:
+        - regression
+    - title: Features
+      labels:
+        - "type:feature"
+    - title: Bug Fixes
+      labels:
+        - "type:bug"
+    - title: Chores & Maintenance
+      labels:
+        - "type:chore"
+        - dependencies
+    - title: Other Changes
+      labels:
+        - "*"
+  exclude:
+    labels:
+      - skip-changelog

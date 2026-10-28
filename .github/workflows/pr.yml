@@ -1,0 +1,16 @@
+name: pull request
+
+# mroom checks its own pull requests with its PR checks, from the pull request's copy of them.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    permissions:
+      contents: read
+      pull-requests: write # the type label
+    uses: ./.github/workflows/pr-checks.yml

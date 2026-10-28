@@ -1,0 +1,30 @@
+name: PR type label
+description: >-
+  Labels a pull request by its Conventional Commit title: feat gets the feature label, fix the bug label and any
+  other type the chore label, so the release notes (templates/release.yml) keep their groups without anyone
+  labelling by hand. A title edit moves the label. The token needs pull-requests: write.
+inputs:
+  feature-label:
+    description: The label for a feat title
+    default: type:feature
+  bug-label:
+    description: The label for a fix title
+    default: type:bug
+  chore-label:
+    description: The label for any other type
+    default: type:chore
+  github-token:
+    description: A token that may label the pull request
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - name: Set the type label from the title
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        MROOM_LABEL_FEATURE: ${{ inputs.feature-label }}
+        MROOM_LABEL_BUG: ${{ inputs.bug-label }}
+        MROOM_LABEL_CHORE: ${{ inputs.chore-label }}
+      run: '"$GITHUB_ACTION_PATH/label.sh" "$GITHUB_EVENT_PATH"'

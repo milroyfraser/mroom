@@ -23,8 +23,9 @@ The full design, including how each requirement is measured, is in [docs/design.
 **Pre-alpha, phase 1 of 6 under way.** What exists today: the skeleton (the `mroom` front door,
 `mroom config`, the one reader of `mroom.toml` and `box.env`, `install.sh`, tests and CI) and the first
 part of phase 1: the [box watchdog](#box-watchdog) with its job records, and the
-[regression label](#regression-label) check with its measures. Every other command prints
-`not yet: phase N`. The phases and what each delivers are in
+[regression label](#regression-label) check with its measures. Ahead of its phase, part of phase 4:
+the [PR checks](#pr-checks), with a title check, type labels, release notes and an optional auto-tag.
+Every other command prints `not yet: phase N`. The phases and what each delivers are in
 [section 11 of the design](docs/design.md#11-phases). Expect breaking changes in every `0.x` release.
 
 ## Host requirements
@@ -975,6 +976,106 @@ tools/regressions.sh example/shop 2026-07-01
 # Production problems per release: 0.07 (6 over 85)
 # Time from a release to the first report of a problem: median 21h, longest 6d 2h (6 problems)
 ```
+
+## PR checks
+
+A squash merge makes a pull request's title the commit on the default branch, so the title carries the
+change's type. One reusable workflow checks the title and labels the pull request by it:
+
+| Job | What it does |
+|---|---|
+| `check-title` | fails unless the title is a Conventional Commit: `<type>(<scope>): <subject>`, such as `feat(export): add a CSV export`, with `!` after the type for a breaking change |
+| `type-label` | labels the pull request `type:feature` (feat), `type:bug` (fix) or `type:chore` (any other type), and moves the label when the title changes |
+
+The app calls it from a workflow of its own, pinned to a mroom release (`v0.5.0` below stands for the
+first release that has it):
+
+```yaml
+# .github/workflows/pr-checks.yml
+name: PR checks
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  pr:
+    permissions:
+      contents: read
+      pull-requests: write # the type label
+    uses: milroyfraser/mroom/.github/workflows/pr-checks.yml@v0.5.0
+    # with:
+    #   types: feat fix chore docs refactor test perf style ci build revert   # the default
+    #   require-scope: true                # every title needs a scope, as in fix(SHOP-12)
+    #   subject-pattern: ^[A-Za-z].+$      # the default: the subject starts with a letter
+    #   labels: false                      # the title check alone
+```
+
+A ruleset that requires the title check names it `pr / check-title`: the caller's job, then the called
+one. Both jobs read the pull request from the event file, run mroom at the commit of the called workflow,
+never the pull request's code, and hold no secret. They print no text from the title, so a title cannot
+send a workflow command. `type-label` skips a fork's pull request and Dependabot's, whose token cannot
+label here; Dependabot can label its own (`labels: ["type:chore"]` in `dependabot.yml`). The label names
+are inputs too (`feature-label`, `bug-label`, `chore-label`). Keep `pull-requests: write` even with
+`labels: false`: GitHub checks a called job's permissions before its `if`, so without it the whole
+workflow fails.
+
+Two titles that adopters meet on day one:
+
+- GitHub's Revert button titles a pull request `Revert "feat: x"`, which fails. Edit it to `revert: feat: x`.
+- Dependabot may title its pull requests `Bump x from 1 to 2`, unless `dependabot.yml` gives each update
+  `commit-message: { prefix: "chore", include: "scope" }`, which makes `chore(deps): bump x ...`.
+
+**Release notes.** Copy [templates/release.yml](templates/release.yml) to `.github/release.yml`. GitHub
+then groups a release's generated notes by the labels: regression fixes first (the
+[regression label](#regression-label)), then features, bug fixes and chores. Create the labels once:
+
+```bash
+gh label create type:feature --color 0E8A16
+gh label create type:bug --color D73A4A
+gh label create type:chore --color C5DEF5
+```
+
+### Auto-tag (optional)
+
+Off unless the app calls it. On each push to the default branch, it tags the pushed commit with the next
+version, from the titles merged since the last version tag:
+
+| Merged titles | Bump | From v1.4.2 |
+|---|---|---|
+| any with `!` after the type (a `BREAKING CHANGE:` footer is not read) | major (`breaking-bump: minor` for a minor) | v2.0.0 |
+| a `feat` | minor | v1.5.0 |
+| a `fix` | patch | v1.4.3 |
+| only other types | none, no tag (`other-bump: patch` for a patch) | |
+
+The biggest bump since the last tag wins, so a cancelled run loses no change. It reads each merge's
+title as GitHub writes it, for squash merges and merge commits alike. With no version tag yet it counts
+from 0.0.0; a commit that already has a version tag is left alone.
+
+```yaml
+# .github/workflows/auto-tag.yml
+name: auto-tag
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  tag:
+    permissions:
+      contents: write # to push the tag
+    uses: milroyfraser/mroom/.github/workflows/auto-tag.yml@v0.5.0
+    # with:
+    #   tag-prefix: v          # the default: v1.2.3
+    #   dry-run: true          # say which tag it would push, and push none
+```
+
+The job asks for `contents: write` even in a dry run, so the caller grants it either way.
+
+It pushes an annotated tag with the job token, which starts no workflow, so nothing deploys or releases
+from the tag by itself. A person still publishes the release. A tag ruleset that keeps the job token from
+creating tags makes the push fail: leave the auto-tag's pattern (`v*`) out of that ruleset, or use
+`dry-run`.
 
 ## Development
 
