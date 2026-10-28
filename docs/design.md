@@ -186,13 +186,13 @@ mroom/
     commands/clean-review.md, crap.md
     hooks/hooks.json            SessionStart banner, PreToolUse guard, WorktreeCreate/Remove
   actions/                      composite actions: qa-up, qa-down, qa-reap, qa-browser, pr-status, triage,
-                                deploy-verify, regression-label, ...
+                                deploy-verify, regression-label, pr-title, pr-type-label, auto-tag, ...
   reverb-host/                  a small Laravel app that runs one Reverb for every QA environment, with an app
                                 provider that reads its apps from a file (D16)
   .github/workflows/            reusable workflows (on: workflow_call) that check out mroom at job.workflow_sha
                                 and call its actions from there (section 14, question 1), plus mroom's own CI
   templates/                    copied once by `mroom init`: ci-backend, ci-frontend, ci-e2e, deploy-production,
-                                dependabot, .mcp.json, CLAUDE.md policy block, mroom.toml, hooks/*
+                                dependabot, .mcp.json, CLAUDE.md policy block, mroom.toml, hooks/*, release.yml
   settings/                     settings fragments: base, laravel-vite, forge, tracker-linear
   examples/single-app/, examples/two-folder/   neutral configs (and, later, hooks) for the two layouts of D1
   tests/                        shell tests (offline, fake PATH tools), fixtures
@@ -719,6 +719,7 @@ turned into config:
 | `actions/qa-*`, workflows | the QA environment scripts and workflows | the provisioning of section 8.2 |
 | `reverb-host/` | the dev site's Reverb daemon | one Reverb for every QA environment, its apps read from a file (D16) |
 | `mroom baseline` (QA services) | Garage and Mailpit as run in the phase 2a spikes | pinned binaries with committed checksums; each service's secrets under `forge`'s home |
+| `actions/pr-title`, `pr-type-label`, `auto-tag`, `templates/release.yml` | the title check, the type label and auto-tag workflows, and the release notes' groups | a script of mroom's own checks the title, in place of a third-party action; the types, label names, tag prefix and bumps are workflow inputs, not `mroom.toml` keys; a `!` bumps the major |
 | `actions/pr-status`, `review-findings`, `triage` | the PR status notes, review findings and alert triage | persona name, adapters, constants into config |
 | `templates/ci-*`, `deploy-production` | the backend, frontend and end-to-end CI, and the production deploy | placeholders; the deploy points the `release` branch at the tag |
 | `actions/deploy-verify` | the deploy's fixed sleep and health ping | waits until `app.version_path` reports the tag's commit |
@@ -752,6 +753,10 @@ What the pilot's scripts learned after this table was drawn, which their ports k
   finds uncommitted changes there, or cannot fetch or switch to the branch) gives back a lock it took, never one
   the pull's owner held before it started. An owner's expired lock is taken anew, not renewed, so such a pull
   gives it back too. A failure after the switch keeps the lock, since the site may be half switched.
+- **Tags (`auto-tag`, phase 4).** The auto-tag pushes `vX.Y.Z` with the job token, and a tag pushed with that
+  token starts no workflow. So a production deploy runs only from a release a person publishes, never from an
+  auto-tag. The pilot's deploy also checks the tag's name and that the release's tag is the run's own, and
+  refuses any other; the deploy template will keep that check.
 - **Caches under a trusted trigger (`qa-plan`, phase 2a).** A job that runs a pull request's code under a trigger
   that may write the default branch's caches (`workflow_dispatch`, `push`, `schedule` and the like) sets
   `cache-mode: read`, or the pull request's code can save a cache the default branch's own builds restore.

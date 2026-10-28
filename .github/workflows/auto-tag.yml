@@ -1,0 +1,75 @@
+name: auto-tag
+
+# Off unless an app calls it (README, auto-tag). On a push to the default branch, it tags the pushed commit with
+# the next version from the titles merged since the last version tag (actions/auto-tag). It checks out the app at
+# that commit with every tag and merge, and mroom at the commit of this file. Its job alone may push, and only
+# tags; a tag pushed with the job token starts no workflow, so nothing deploys or releases from it.
+on:
+  workflow_call:
+    inputs:
+      tag-prefix:
+        description: What comes before X.Y.Z in a tag; letters, digits, _ and -, or empty
+        type: string
+        default: v
+      breaking-bump:
+        description: The bump for a breaking change (a ! after the type), major or minor
+        type: string
+        default: major
+      other-bump:
+        description: The bump for any type but feat and fix, none or patch
+        type: string
+        default: none
+      dry-run:
+        description: true to say which tag it would push, and push none
+        type: boolean
+        default: false
+    outputs:
+      tag:
+        description: The tag it pushed, or would push; empty for none
+        value: ${{ jobs.tag.outputs.tag }}
+
+permissions:
+  contents: read
+
+# bash with pipefail, so a script piped into tee fails its step when it fails.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  tag:
+    name: auto-tag
+    # Only for a push to the default branch: a tag counts the merges on it.
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # One at a time, so each run counts from the tag the one before it pushed.
+    concurrency:
+      group: mroom-auto-tag
+      cancel-in-progress: false
+    permissions:
+      contents: write # to push the tag
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
+      - name: Check out the app with every tag and merge
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: app
+          fetch-depth: 0
+      - id: tag
+        uses: ./mroom/actions/auto-tag
+        with:
+          path: app
+          tag-prefix: ${{ inputs.tag-prefix }}
+          breaking-bump: ${{ inputs.breaking-bump }}
+          other-bump: ${{ inputs.other-bump }}
+          dry-run: ${{ inputs.dry-run }}
