@@ -664,8 +664,9 @@ this for each part the box runs:
    (its node, layout, buckets and keys stay), and the Reverb host's apps. Then it installs the builds again.
    It checks every move of a part before it makes any: a name in both places that is not the same file
    stops it, with nothing moved. When `/home` and `/var` are separate filesystems, each move is a copy,
-   which needs room for the data twice over; one cut short stays under a hidden `.<name>.moving` and
-   stops the next run until a person has looked. Run again, it moves nothing.
+   which needs room for the data twice over. Each move goes under a hidden `.<name>.moving` first: the next
+   run finishes one cut short once the old copy is gone, and stops while both are there, for a person to
+   keep the complete one. Run again, it moves nothing.
 4. Put the nginx blocks baseline prints in place of the old ones on `s3.<zone>`, `files.<zone>` and
    `ws.<zone>`: the sockets moved.
 5. Remove `~/.local/share/mroom-services`, which holds only old builds and sockets now.

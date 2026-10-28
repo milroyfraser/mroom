@@ -279,14 +279,22 @@ runs_from() {
 # move_entry <path> <dir>: <path>, a file or a folder, moved into <dir> under its own name. A copy already
 # there that is the same file is taken as an earlier move's, which stopped before removing the old one; any
 # other stops the run. It moves under a hidden name first, and renames that once it is whole, since a move
-# to another filesystem copies: one an earlier run left halfway stops the run too. With MOVE_DRY set, it
-# only checks, and changes nothing.
+# to another filesystem copies, then removes the old one. A hidden one an earlier run left is finished when
+# the old one is gone, which mv removes only once the copy is whole; while both are there, a person decides.
+# With MOVE_DRY set, it only checks, and changes nothing.
 move_entry() {
-  local name="${1##*/}"
-  if ! [ -e "$1" ] && ! [ -L "$1" ]; then return 0; fi
-  if [ -e "$2/.$name.moving" ] || [ -L "$2/.$name.moving" ]; then
-    die "$2/.$name.moving is what an earlier move left halfway: compare it with $(home_short "$1"), remove it, then run this again; nothing changed"
+  local name="${1##*/}" moving="$2/.${1##*/}.moving"
+  [[ "$name" != .*.moving ]] || die "$(home_short "$1") has the name mroom gives a move under way; rename it, then run this again; nothing changed"
+  if [ -e "$moving" ] || [ -L "$moving" ]; then
+    if [ -e "$1" ] || [ -L "$1" ] || [ -e "$2/$name" ] || [ -L "$2/$name" ]; then
+      die "$moving is what an earlier move left halfway, and $(home_short "$1") or $2/$name is still there: keep the complete one (if it is $moving, rename it to $name), remove the others, then run this again; nothing changed"
+    fi
+    [ -z "${MOVE_DRY:-}" ] || return 0
+    mv -T -- "$moving" "$2/$name"
+    MOVED=1
+    return 0
   fi
+  if ! [ -e "$1" ] && ! [ -L "$1" ]; then return 0; fi
   if [ -e "$2/$name" ] || [ -L "$2/$name" ]; then
     if [ -f "$1" ] && ! [ -L "$1" ] && [ -f "$2/$name" ] && ! [ -L "$2/$name" ] && cmp -s "$1" "$2/$name"; then
       [ -n "${MOVE_DRY:-}" ] || rm -f -- "$1"
@@ -300,13 +308,21 @@ move_entry() {
   MOVED=1
 }
 
-# move_contents <old dir> <dir>: each entry of <old dir> moved into <dir>, and <old dir> removed once empty.
+# move_contents <old dir> <dir>: each entry of <old dir> moved into <dir>, and <old dir> removed once empty;
+# and each move into <dir> an earlier run left halfway, finished or refused.
 move_contents() {
-  local entry
+  local entry name
+  while IFS= read -r -d '' entry; do
+    name="${entry##*/.}"
+    move_entry "$1/${name%.moving}" "$2"
+  done < <(find "$2" -mindepth 1 -maxdepth 1 -name '.*.moving' -print0)
   [ -d "$1" ] || return 0
   while IFS= read -r -d '' entry; do move_entry "$entry" "$2"; done < <(find "$1" -mindepth 1 -maxdepth 1 -print0)
   [ -n "${MOVE_DRY:-}" ] || rmdir -- "$1" 2>/dev/null || true
 }
+
+# halfway <dir>...: whether a move into any of them was left halfway.
+halfway() { [ -n "$(find "$@" -mindepth 1 -maxdepth 1 -name '.*.moving' -print -quit 2>/dev/null)" ]; }
 
 # move_all <function>: the moves the function makes, all checked first, so a part either moves whole or not
 # at all.
@@ -378,7 +394,7 @@ setup_mailpit() {
   flock -w "${MROOM_GATE_LOCK_WAIT:-900}" 9 || die "the gate is still changing Mailpit's logins; run this again in a moment"
   # From the home, where it lived before: its mail and its logins, before its build, without which its new
   # unit cannot start, so nothing writes them while they move.
-  if to_move "$old/data" "$SECRETS/mailpit-smtp.passwd" "$SECRETS/mailpit-ui.passwd"; then
+  if to_move "$old/data" "$SECRETS/mailpit-smtp.passwd" "$SECRETS/mailpit-ui.passwd" || halfway "$base/data" "$base/etc"; then
     old_ready mailpit "$port" "$old" "${MAILPIT_UNITS[@]}"
     move_all mailpit_moves
     moved_note Mailpit "$old"
@@ -506,7 +522,8 @@ setup_garage() {
   chmod 700 "$base/builds" "$base/data" "$etc" "$base/meta" "$base/run"
   # From the home, where it lived before: its metadata, its data and its secrets, before its build, without
   # which its new unit cannot start, so nothing writes them while they move. Not while the gate changes a bucket.
-  if to_move "$old/meta" "$old/data" "$SECRETS"/garage-{rpc-secret,admin-token,metrics-token}; then
+  if to_move "$old/meta" "$old/data" "$SECRETS"/garage-{rpc-secret,admin-token,metrics-token} \
+    || halfway "$base/meta" "$base/data" "$etc"; then
     exec 9>"$(mroom_state_dir)/gate-garage.lock"
     flock -w "${MROOM_GATE_LOCK_WAIT:-900}" 9 || die "the gate is still changing Garage's buckets; run this again in a moment"
     old_ready garage "" "$old" "${GARAGE_UNITS[@]}"
@@ -628,7 +645,7 @@ setup_reverb() {
   chmod 700 "$base/builds" "$base/run" "$base/apps"
   # From the home, where it lived before: its apps, before its build, without which its new unit cannot
   # start. Not while the gate changes an app.
-  if to_move "$home_old/apps/apps.json"; then
+  if to_move "$home_old/apps/apps.json" || halfway "$base/apps"; then
     exec 9>"$(mroom_state_dir)/gate-reverb.lock"
     flock -w "${MROOM_GATE_LOCK_WAIT:-900}" 9 || die "the gate is still changing the Reverb host's apps; run this again in a moment"
     old_ready reverb "" "$home_old" "${REVERB_UNITS[@]}"

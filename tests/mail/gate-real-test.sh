@@ -137,6 +137,7 @@ t_the_mail_operations_against_the_real_mailpit() {
   run sudo nsenter -t "$(main_pid mroom-mailpit.service)" -m ls -A /var/lib/mroom/services/mailpit
   expect_out $'builds\ndata\netc\nrun'
   for _ in $(seq 1 40); do active mroom-mail-relay.service && break; sleep 0.25; done
+  expect_true "the relay is not running" active mroom-mail-relay.service
   run sudo nsenter -t "$(main_pid mroom-mail-relay.service)" -m env LC_ALL=C ls -A /var/lib/mroom/services
   expect_out $'mail-relay\nmailpit'
   run sudo nsenter -t "$(main_pid mroom-mailpit.service)" -m ls -A "$HOME"; expect_rc 2

@@ -44,6 +44,7 @@ trap cleanup EXIT
 gate() { run env SSH_ORIGINAL_COMMAND="$1" "$MROOM" gate provision; }
 field() { sed -n "s/^$1=//p" <<<"$2"; }
 garage_run() { echo /var/lib/mroom/services/garage/run; }
+has_text() { case "$1" in *"$2"*) return 0 ;; esac; return 1; }
 
 # s3 <key output> <unix|host:port> <Host> <method> <path> [<body>]: one signed S3 request, with the key
 # bucket-create printed; prints the HTTP status, then the body. The path is sent as given and signed as
@@ -127,11 +128,14 @@ t_the_bucket_operations_against_the_real_garage() {
   expect_out_has "systemd units written: mroom-garage.service"
   run "$MROOM" baseline garage
   expect_rc 0; expect_out_has "garage v2.5.0: installed, SHA-256"
+  local first_out="$out" baseline_out files12 media12 files13 old r pid
   wait_ready
+  # The first run gives Garage its layout if Garage answered in time, else the second does.
   run "$MROOM" baseline garage
-  expect_rc 0; expect_out_has "Garage answers; its layout now holds this node."
+  expect_rc 0; expect_out_has "Garage answers; its layout"
+  expect_true "no run gave Garage its layout" has_text "$first_out$out" "its layout now holds this node."
   expect_out_has "systemd units: installed as this mroom writes them (mroom-garage.service active)."
-  local baseline_out="$out" files12 media12 files13 old r pid
+  baseline_out="$out"
   run "$MROOM" baseline garage; expect_out_has "Garage answers; its layout holds one node."
   run stat -c %a "$(garage_run)"; expect_out 700
   # Its folders: root's above, the box user's below; and Garage, in its own mount namespace, sees only its own.

@@ -545,7 +545,7 @@ t_a_file_in_both_places_stops_the_move() {
   # A move an earlier run left halfway, under its hidden name: nothing changes until a person looks.
   mkdir "$(services)/mailpit/data/.mailpit.db-wal.moving"
   run "$MROOM" baseline mailpit
-  expect_rc 1; expect_err_has "$(services)/mailpit/data/.mailpit.db-wal.moving is what an earlier move left halfway"
+  expect_rc 1; expect_err_has "$(services)/mailpit/data/.mailpit.db-wal.moving is what an earlier move left halfway, and"
   expect_file "$(old)/mailpit/data/mailpit.db"
   rmdir "$(services)/mailpit/data/.mailpit.db-wal.moving"
   run "$MROOM" baseline mailpit
@@ -553,6 +553,13 @@ t_a_file_in_both_places_stops_the_move() {
   expect_no_file "$(secrets)/mailpit-ui.passwd"
   run cat "$(services)/mailpit/data/mailpit.db" "$(services)/mailpit/data/mailpit.db-wal"; expect_out $'mail\nwal'
   run bash -c 'compgen -G "$1/.*.moving" || true' _ "$(services)/mailpit/data"; expect_out ""
+  # A move cut short after the old copy went: the hidden one is whole, and is finished before any build
+  # could start on an empty folder, even with nothing left in the old folder.
+  mv "$(services)/mailpit/data/mailpit.db" "$(services)/mailpit/data/.mailpit.db.moving"
+  run "$MROOM" baseline mailpit
+  expect_rc 0; expect_out_has "Mailpit: its data moved"
+  run cat "$(services)/mailpit/data/mailpit.db"; expect_out mail
+  expect_no_file "$(services)/mailpit/data/.mailpit.db.moving"
 }
 
 t_usage_and_unknown_parts() {
