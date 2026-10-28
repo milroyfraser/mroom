@@ -112,7 +112,7 @@ t_comment_sends_the_body_from_stdin() {
   run bash -c '"$0" tracker comment ENG-12 <"$1"' "$MROOM" "$T/note.md"
   expect_rc 0; expect_err_empty
   expect_true "the comment was not a commentCreate" has "$(query 2)" 'commentCreate(input: {issueId: $i, body: $b})'
-  expect_true "the comment's variables" [ "$(vars 2)" = '{"i":"uuid-issue-1","b":"Fixed in the PR.\nSecond \"line\"."}' ]
+  expect_true "the comment's variables" [ "$(vars 2)" = '{"i":"uuid-issue-1","b":"Fixed in the PR.\nSecond \"line\".\n"}' ]
   expect_true "the answer" json_is "$out" '. == {commented: "ENG-12", url: "https://tracker.example.dev/issue/ENG-12#c1"}'
 }
 
@@ -171,7 +171,7 @@ t_create_files_the_issue_in_the_configured_team() {
   expect_true "the team lookup" [ "$(vars 1)" = '{"k":"ENG"}' ]
   expect_true "the label lookup" [ "$(vars 4)" = '{"n":["bug","found-by-agent"]}' ]
   expect_true "the create's input: $(vars 5)" json_is "$(vars 5)" '.i == {teamId: "uuid-team-1", title: "A new bug",
-    description: "What broke.", stateId: "uuid-state-review", priority: 3, labelIds: ["uuid-label-bug", "uuid-label-ws"]}'
+    description: "What broke.\n", stateId: "uuid-state-review", priority: 3, labelIds: ["uuid-label-bug", "uuid-label-ws"]}'
   expect_true "the create's mutation" has "$(query 5)" 'issueCreate(input: $i)'
   expect_true "the answer" json_is "$out" '. == {created: "ENG-99", url: "https://tracker.example.dev/issue/ENG-99"}'
 }
@@ -237,9 +237,53 @@ t_a_comment_is_never_sent_twice_after_a_gateway_error() {
   expect_true "the comment was sent again ($(calls) calls)" [ "$(calls)" = 2 ]
   reset; world
   answer 200 "$ISSUE"; answer 503 'unavailable'
+  run bash -c 'echo hello | "$0" tracker comment ENG-12' "$MROOM"
+  expect_rc 1; expect_true "a comment was sent again after a 503 ($(calls) calls)" [ "$(calls)" = 2 ]
+  reset; world
+  answer 200 "$ISSUE"; answer 006 x
   answer 200 '{"data":{"commentCreate":{"success":true,"comment":{"url":"u"}}}}'
   run bash -c 'echo hello | "$0" tracker comment ENG-12' "$MROOM"
-  expect_rc 0; expect_true "a 503 (nothing done) was not retried ($(calls) calls)" [ "$(calls)" = 3 ]
+  expect_rc 0; expect_true "a comment that never left was not retried ($(calls) calls)" [ "$(calls)" = 3 ]
+}
+
+t_a_create_is_never_sent_twice_unless_it_never_left() {
+  local code
+  for code in 502 500 000; do
+    reset; world
+    answer 200 '{"data":{"teams":{"nodes":[{"id":"uuid-team-1","key":"ENG"}]}}}'; answer "$code" 'x'
+    run bash -c 'echo body | "$0" tracker create --allow-create --title "A new bug"' "$MROOM"
+    expect_rc 1; expect_true "a create was sent again after $code ($(calls) calls)" [ "$(calls)" = 2 ]
+  done
+  reset; world
+  answer 200 '{"data":{"teams":{"nodes":[{"id":"uuid-team-1","key":"ENG"}]}}}'; answer 007 x
+  answer 200 '{"data":{"issueCreate":{"success":true,"issue":{"identifier":"ENG-99","url":"u"}}}}'
+  run bash -c 'echo body | "$0" tracker create --allow-create --title "A new bug"' "$MROOM"
+  expect_rc 0; expect_true "a create that never connected was not retried ($(calls) calls)" [ "$(calls)" = 3 ]
+}
+
+t_a_body_is_refused_whole_never_cut() {
+  world
+  # 40000 two-byte characters: 80000 bytes, over the limit though fewer characters than it.
+  run bash -c 'printf "é%.0s" $(seq 40000) | LC_ALL=C.UTF-8 "$0" tracker comment ENG-12' "$MROOM"
+  expect_rc 2; expect_err_has "the body is longer than 65536 bytes"
+  run bash -c 'printf "a\0b" | "$0" tracker comment ENG-12' "$MROOM"
+  expect_rc 2; expect_err_has "the body holds a NUL byte"
+  expect_true "Linear was called" [ "$(calls)" = 0 ]
+  answer 200 "$ISSUE"; answer 200 '{"data":{"commentCreate":{"success":true,"comment":{"url":"u"}}}}'
+  run bash -c 'printf "é%.0s" $(seq 30000) | LC_ALL=C.UTF-8 "$0" tracker comment ENG-12' "$MROOM"
+  expect_rc 0
+  local sent; sent="$(sed -n 's/^body=//p' "$T/api/call.2" | jq -r '.variables.b | length')"
+  expect_true "a 60000-byte body was not sent whole (sent $sent characters)" [ "$sent" = 30000 ]
+}
+
+t_a_rate_limit_waits_for_linears_reset_header_up_to_two_minutes() {
+  world; export MROOM_NOW=1700000000
+  answer 400 '{"errors":[{"extensions":{"code":"RATELIMITED"}}]}' 'X-RateLimit-Requests-Reset: 1700000042500'
+  answer 429 '{}' 'Retry-After: 500'
+  answer 200 "$ISSUE"; answer 200 '{"data":{"issue":{"comments":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}'
+  run "$MROOM" tracker get ENG-12
+  expect_rc 0
+  run cat "$T/api/sleep.log"; expect_out $'43\n120'
 }
 
 t_a_graphql_error_fails_with_its_message() {
@@ -291,7 +335,7 @@ t_the_token_never_shows_even_when_echoed_or_traced() {
 t_an_id_must_match_the_pattern() {
   world; answer 200 "$ISSUE"
   run "$MROOM" tracker get OPS-1
-  expect_rc 2; expect_err_has "OPS-1 does not match issues.id_pattern (ENG-[0-9]+)"
+  expect_rc 2; expect_err_has "OPS-1 does not match issues.id_pattern (ENG-[0-9]+;"
   run "$MROOM" tracker get 'ENG-1/../x'
   expect_rc 2; expect_err_has "not an issue id"
   expect_true "Linear was called" [ "$(calls)" = 0 ]
@@ -343,6 +387,9 @@ test_case ratelimited-graphql-error t_a_ratelimited_graphql_error_is_waited_out
 test_case 5xx-fails-after-four t_a_5xx_that_never_clears_fails_after_four_calls
 test_case 4xx-never-retried t_a_4xx_is_never_retried
 test_case comment-never-sent-twice t_a_comment_is_never_sent_twice_after_a_gateway_error
+test_case create-never-sent-twice t_a_create_is_never_sent_twice_unless_it_never_left
+test_case body-refused-whole t_a_body_is_refused_whole_never_cut
+test_case linear-reset-header t_a_rate_limit_waits_for_linears_reset_header_up_to_two_minutes
 test_case graphql-error t_a_graphql_error_fails_with_its_message
 test_case missing-or-empty-token t_a_missing_or_empty_token_fails_clearly_and_calls_nothing
 test_case token-env-from-config t_the_token_env_name_comes_from_config

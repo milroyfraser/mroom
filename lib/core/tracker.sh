@@ -48,34 +48,44 @@ tracker_id_ok() {
   [[ "$id" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { tracker_say "not an issue id: ${id:0:80}"; return 2; }
   pattern="$(tracker_config issues.id_pattern --optional)" || return 1
   if [ -n "$pattern" ] && ! [[ "$id" =~ ^($pattern)$ ]]; then
-    tracker_say "$id does not match issues.id_pattern ($pattern)"
+    tracker_say "$id does not match issues.id_pattern ($pattern; read as a POSIX extended regex here, so no \\d)"
     return 2
   fi
 }
 
-# tracker_body <token>: the body from stdin, on stdout. Refuses an empty one, one over TRACKER_MAX_BODY
-# bytes, and one that holds the token.
+# tracker_body <token>: reads the body from stdin into $API_TMP/body.in, as it is. Refuses an empty one,
+# one over TRACKER_MAX_BODY bytes (counted as bytes, so a long body is refused, never cut short), one with a
+# NUL byte, and one that holds the token. Callers hand the file to jq with --rawfile: jq -R splits a
+# character that crosses its read buffer, which would garble a long non-ASCII body.
 tracker_body() {
   local -
   set +x
-  local body
+  local body size in="$API_TMP/body.in"
   if [ -t 0 ]; then
     tracker_say "the body comes on stdin (for example: < note.md)"
     return 2
   fi
-  body="$(head -c $((TRACKER_MAX_BODY + 1)))"
-  if [ -z "${body//[[:space:]]/}" ]; then
-    tracker_say "the body on stdin is empty"
-    return 2
-  fi
-  if [ "${#body}" -gt "$TRACKER_MAX_BODY" ]; then
+  head -c $((TRACKER_MAX_BODY + 1)) >"$in"
+  size="$(wc -c <"$in")"
+  if [ "$size" -gt "$TRACKER_MAX_BODY" ]; then
+    rm -f "$in"
     tracker_say "the body is longer than $TRACKER_MAX_BODY bytes"
     return 2
   fi
+  if [ "$(tr -d '\000' <"$in" | wc -c)" != "$size" ]; then
+    rm -f "$in"
+    tracker_say "the body holds a NUL byte"
+    return 2
+  fi
+  body="$(cat "$in")"
+  if [ -z "${body//[[:space:]]/}" ]; then
+    rm -f "$in"
+    tracker_say "the body on stdin is empty"
+    return 2
+  fi
   case "$body" in
-    *"$1"*) tracker_say "the body holds the tracker's token; not sent"; return 1 ;;
+    *"$1"*) rm -f "$in"; tracker_say "the body holds the tracker's token; not sent"; return 1 ;;
   esac
-  printf '%s' "$body"
 }
 
 # ---- Linear -------------------------------------------------------------------------------------
@@ -135,6 +145,7 @@ linear_nodes() {
   done
 }
 
+# An issue's first 50 labels: more on one issue is not a case worth a second query.
 LINEAR_ISSUE='id identifier title description url priority priorityLabel createdAt updatedAt
   state { id name type } team { id key } creator { name } assignee { name } labels(first: 50) { nodes { name } }'
 
@@ -183,11 +194,11 @@ linear_issue_get() {
 linear_issue_comment() {
   local -
   set +x
-  local issue body answer vars
+  local issue answer vars
   linear_auth || return 1
-  body="$(tracker_body "$(linear_token)")" || return
+  tracker_body "$(linear_token)" || return
   issue="$(linear_issue "$1")" || return 1
-  vars="$(printf '%s' "$body" | jq -Rsc --arg i "$(jq -r .id <<<"$issue")" '{i: $i, b: .}')" || return 1
+  vars="$(jq -nc --rawfile b "$API_TMP/body.in" --arg i "$(jq -r .id <<<"$issue")" '{i: $i, b: $b}')" || return 1
   answer="$(linear_gql once 'mutation($i: String!, $b: String!) { commentCreate(input: {issueId: $i, body: $b}) { success comment { url } } }' "$vars")" || return 1
   jq -e '.data.commentCreate.success == true' <<<"$answer" >/dev/null || { tracker_say "Linear did not add the comment"; return 1; }
   jq -c --arg id "$(jq -r .identifier <<<"$issue")" '{commented: $id, url: .data.commentCreate.comment.url}' <<<"$answer"
@@ -213,12 +224,12 @@ linear_issue_set_state() {
 linear_issue_create() {
   local -
   set +x
-  local title="$1" state_name="$2" priority="$3" team_key team body states state="" labels="[]" found answer vars
+  local title="$1" state_name="$2" priority="$3" team_key team states state="" labels="[]" found answer vars
   shift 3
   team_key="$(tracker_config issues.team --optional)" || return 1
   [ -n "$team_key" ] || { tracker_say "issues.team is not set, so there is no team to create the issue in"; return 1; }
   linear_auth || return 1
-  body="$(tracker_body "$(linear_token)")" || return
+  tracker_body "$(linear_token)" || return
   team="$(linear_gql safe 'query($k: String!) { teams(filter: {key: {eq: $k}}) { nodes { id key } } }' \
     "$(jq -nc --arg k "$team_key" '{k: $k}')" | jq -r '.data.teams.nodes[0].id // empty')" || return 1
   [ -n "$team" ] || { tracker_say "Linear has no team $team_key (issues.team)"; return 1; }
@@ -238,8 +249,8 @@ linear_issue_create() {
     done
     labels="$(jq -c '[.[].id] | unique' <<<"$labels")"
   fi
-  vars="$(printf '%s' "$body" | jq -Rsc --arg team "$team" --arg t "$title" --arg s "$state" --arg p "$priority" \
-      --argjson l "$labels" '. as $d | {i: ({teamId: $team, title: $t, description: $d}
+  vars="$(jq -nc --rawfile d "$API_TMP/body.in" --arg team "$team" --arg t "$title" --arg s "$state" --arg p "$priority" \
+      --argjson l "$labels" '{i: ({teamId: $team, title: $t, description: $d}
         + (if $s == "" then {} else {stateId: $s} end)
         + (if $p == "" then {} else {priority: ($p | tonumber)} end)
         + (if ($l | length) == 0 then {} else {labelIds: $l} end))}')" || return 1

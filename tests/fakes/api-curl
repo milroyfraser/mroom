@@ -2,7 +2,7 @@
 # A stand-in for curl, for the tracker and error-tracker adapter tests (tests/tracker-test.sh,
 # tests/errors-test.sh). It never touches the network. It answers from $API_FAKE/answers, one
 # "<code> <body file>" line per call in order (the last line repeats); a <body file>.headers file adds
-# response headers. Code 000 fails as a timeout.
+# response headers. Code 000 fails as a timeout, 006 as a host that cannot be resolved, 007 as no connection.
 #
 # For call N it writes $API_FAKE/call.N: the method, the URL, "auth=<the Authorization value it got on
 # stdin>" and, with --data-binary @file, the request body after a "body=" line. It appends every argument
@@ -30,7 +30,11 @@ echo "$n" >"$API_FAKE/n"
 line="$(sed -n "${n}p" "$API_FAKE/answers")"
 [ -n "$line" ] || line="$(tail -n 1 "$API_FAKE/answers")"
 code="${line%% *}" file="$API_FAKE/${line#* }"
-if [ "$code" = 000 ]; then echo "curl: (28) Operation timed out after 30000 milliseconds" >&2; exit 28; fi
+case "$code" in
+  000) echo "curl: (28) Operation timed out after 30000 milliseconds" >&2; exit 28 ;;
+  006) echo "curl: (6) Could not resolve host" >&2; exit 6 ;;
+  007) echo "curl: (7) Failed to connect" >&2; exit 7 ;;
+esac
 { printf 'HTTP/2 %s\r\n' "$code"; if [ -f "$file.headers" ]; then cat "$file.headers"; fi; } >"$headers"
 cat "$file" >"$out"
 printf '%s' "$code"

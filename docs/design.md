@@ -315,8 +315,9 @@ until then a reader passes its own fallback (`mroom config get <key> --default <
   environment's ACL pattern matches another's keys.
 - `tests.database_pattern` contains `{slug}`, so each worktree gets its own database.
 - `issues.url` contains `{id}`.
-- `issues.team` and `errors.org` are plain words (a team key, an organisation slug), and each `token_env` is an
-  environment variable's name in capitals, never one of mroom's (`MROOM_*`) or GitHub's (`GH_*`, `GITHUB_*`).
+- `issues.team` and `errors.org` are plain words (a team key, an organisation slug). Each `token_env` names a
+  variable ending in `_TOKEN` or `_API_KEY`, never one of mroom's, GitHub's, a cloud's or a host's (`MROOM_*`,
+  `GH_*`, `GITHUB_*`, `AWS_*`, `FORGE_*`, `SSH_*`), and the two differ.
 - `issues.id_pattern` and `errors.id_pattern` compile as **Python** regular expressions (`re`), not POSIX ERE;
   patterns used by shell tools later must stay in the common subset.
 - An unknown key warns (with a close match, if any) and is ignored; it never fails.
@@ -377,8 +378,9 @@ Shell function interfaces in `lib/core/`, chosen by config. v1 implements the fi
 | host | `host_sites`, `host_site_create`, `host_daemon_*`, `host_jobs_*`, `host_cert_*`, `host_deploy` | Forge v2 (one client: retries, 429, pagination) | |
 
 The tracker and errors adapters are `lib/core/tracker.sh` and `lib/core/errors.sh`, on the command line as
-`mroom tracker` and `mroom errors`, over one HTTP client (`lib/core/api.sh`: the token on stdin, retries on 429
-and 5xx, never on another 4xx, and a write that adds something never repeated). Each token comes from the
+`mroom tracker` and `mroom errors`, over one HTTP client (`lib/core/api.sh`: the token on stdin, no redirects
+followed, retries on 429 and on 5xx, never on another 4xx, and a write that adds something never repeated
+after a 5xx or a timeout). Each token comes from the
 environment variable its `token_env` names, never from a file, and each host is fixed (`api.linear.app`,
 `<region>.sentry.io`). With `issues.tracker = "none"` or no `[errors]` table, every function returns 3, so a
 skill falls back to the pull request.

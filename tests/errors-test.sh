@@ -15,7 +15,7 @@ skip_unless has_jq "this host has no jq"
 skip_unless has_tomllib "python3 has no tomllib (needs 3.11+)"
 
 BASE="https://us.sentry.io/api/0/organizations/example-org"
-TOKEN="sntrys_fakeTOKEN0123456789abcdef"
+TOKEN="fake-sentry-user-token-0123456789"
 
 # world [<errors table lines>]: the fake curl and sleep, a TMPDIR of the test's own, the token, and a
 # mroom.toml with a Sentry error tracker (or the given [errors] lines; "-" for no table).
@@ -88,7 +88,7 @@ t_search_follows_the_cursor_until_no_more_results() {
   world
   answer 200 "$PROJECTS"
   answer 200 "[$ISSUE]" 'Link: <https://us.sentry.io/x>; rel="previous"; results="false"; cursor="0:0:1", <https://us.sentry.io/x>; rel="next"; results="true"; cursor="0:100:0"'
-  answer 200 "[$ISSUE]" 'Link: <https://us.sentry.io/x>; rel="previous"; results="true"; cursor="0:0:1", <https://us.sentry.io/x>; rel="next"; results="false"; cursor="0:200:0"'
+  answer 200 "[$ISSUE]" 'link: <https://us.sentry.io/x>; rel="previous"; results="true"; cursor="0:0:1", <https://us.sentry.io/x>; rel="next"; results="false"; cursor="0:200:0"'
   run "$MROOM" errors search 'is:unresolved release:"v1.3.0"' --environment production --period 24h --limit 300
   expect_rc 0; expect_err_empty
   expect_true "expected 3 calls, got $(calls)" [ "$(calls)" = 3 ]
@@ -125,6 +125,48 @@ t_resolve_puts_the_status() {
   expect_true "the answer" json_is "$out" '. == {resolved: "SHOP-1A2", status: "resolved"}'
 }
 
+t_search_stops_at_an_empty_page_and_fails_on_a_stuck_cursor() {
+  world
+  answer 200 "$PROJECTS"
+  answer 200 "[$ISSUE]" 'Link: <https://us.sentry.io/x>; rel="next"; results="true"; cursor="0:1:0"'
+  answer 200 '[]' 'Link: <https://us.sentry.io/x>; rel="next"; results="true"; cursor="0:2:0"'
+  answer 200 "[$ISSUE]"
+  run "$MROOM" errors search is:unresolved
+  expect_rc 0; expect_true "the answer" json_is "$out" 'length == 1'
+  expect_true "an empty page did not end the search ($(calls) calls)" [ "$(calls)" = 3 ]
+  reset; world
+  answer 200 "$PROJECTS"
+  answer 200 "[$ISSUE]" 'Link: <https://us.sentry.io/x>; rel="next"; results="true"; cursor="0:1:0"'
+  answer 200 "[$ISSUE]" 'Link: <https://us.sentry.io/x>; rel="next"; results="true"; cursor="0:1:0"'
+  run "$MROOM" errors search is:unresolved
+  expect_rc 1; expect_err_has "the next page's cursor did not move (0:1:0)"
+  expect_true "a stuck cursor looped ($(calls) calls)" [ "$(calls)" = 3 ]
+}
+
+t_resolve_is_retried_after_a_502_and_a_403_scope_check_explains() {
+  world; answer 502 'bad gateway'; answer 200 '{"status":"resolved"}'
+  run "$MROOM" errors resolve 1001
+  expect_rc 0; expect_true "a resolve (same twice) was not retried ($(calls) calls)" [ "$(calls)" = 2 ]
+  reset; world; answer 403 '{"detail":"You do not have permission to perform this action."}'
+  run "$MROOM" errors search x
+  expect_rc 1; expect_err_has "GET $BASE/projects/ -> HTTP 403"
+}
+
+t_a_merged_issue_says_where_it_moved() {
+  world; answer 302 '' "Location: $BASE/issues/2002/"
+  run "$MROOM" errors get 1001
+  expect_rc 1; expect_err_has "HTTP 302: moved to $BASE/issues/2002/ (for an error issue: merged into another"
+  expect_true "a redirect was followed or retried" [ "$(calls)" = 1 ]
+}
+
+t_curl_reads_no_curlrc_and_follows_no_redirect() {
+  world; answer 200 "$ISSUE"; answer 200 "$EVENT"
+  run "$MROOM" errors get 1001; expect_rc 0
+  expect_true "curl's first argument is not -q" [ -z "$(grep -A1 -x -- --call-- "$T/api/argv" | grep -v -x -e --call-- -e -q -e --)" ]
+  expect_true "curl was told to follow redirects" lacks "$(cat "$T/api/argv")" "--location"
+  run grep -c -x -e -L -e --globoff "$T/api/argv"; expect_out 2
+}
+
 t_a_429_or_5xx_is_retried_and_a_4xx_is_not() {
   world; answer 429 '{"detail":"slow"}' 'Retry-After: 2'; answer 503 'down'; answer 200 "$ISSUE"; answer 200 "$EVENT"
   run "$MROOM" errors get 1001
@@ -151,9 +193,9 @@ t_a_missing_token_fails_clearly_and_an_echoed_one_is_cut() {
   export SENTRY_AUTH_TOKEN=""
   run "$MROOM" errors search x; expect_rc 1; expect_err_has "SENTRY_AUTH_TOKEN is not set or is empty"
   expect_true "Sentry was called" [ "$(calls)" = 0 ]
-  world $'provider = "sentry"\norg = "example-org"\ntoken_env = "SHOP_SENTRY_READ"'
-  run "$MROOM" errors get 1001; expect_rc 1; expect_err_has "SHOP_SENTRY_READ is not set"
-  export SHOP_SENTRY_READ="$TOKEN"
+  world $'provider = "sentry"\norg = "example-org"\ntoken_env = "SHOP_SENTRY_TOKEN"'
+  run "$MROOM" errors get 1001; expect_rc 1; expect_err_has "SHOP_SENTRY_TOKEN is not set"
+  export SHOP_SENTRY_TOKEN="$TOKEN"
   answer 401 "{\"detail\":\"Invalid token $TOKEN\"}"
   run "$MROOM" errors get 1001
   expect_rc 1; expect_err_has "Invalid token [token]"
@@ -202,6 +244,10 @@ test_case search-follows-the-cursor t_search_follows_the_cursor_until_no_more_re
 test_case search-stops-at-its-limit t_search_stops_at_its_limit
 test_case search-needs-a-project t_search_refuses_when_the_token_sees_no_project
 test_case resolve-puts-the-status t_resolve_puts_the_status
+test_case search-empty-page-or-stuck-cursor t_search_stops_at_an_empty_page_and_fails_on_a_stuck_cursor
+test_case resolve-retried-and-scope-403 t_resolve_is_retried_after_a_502_and_a_403_scope_check_explains
+test_case merged-issue-redirect t_a_merged_issue_says_where_it_moved
+test_case curl-safe-options t_curl_reads_no_curlrc_and_follows_no_redirect
 test_case retries t_a_429_or_5xx_is_retried_and_a_4xx_is_not
 test_case token t_a_missing_token_fails_clearly_and_an_echoed_one_is_cut
 test_case id-checked t_an_id_must_be_numeric_or_match_the_pattern

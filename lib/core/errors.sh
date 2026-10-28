@@ -11,8 +11,10 @@
 #
 # Every call goes to https://<errors.region>.sentry.io/api/0/organizations/<errors.org>/, never a URL from
 # config, so a changed mroom.toml cannot send the token to another host. The token is the environment
-# variable errors.token_env names (SENTRY_AUTH_TOKEN by default); the adapter reads no file for it. Reading
-# needs Issue & Event: read and Project: read; resolving needs Issue & Event: write too.
+# variable errors.token_env names (SENTRY_AUTH_TOKEN by default); the adapter reads no file for it. It is a
+# user or internal integration token (an organisation auth token cannot read issues). Reading needs Issue &
+# Event: read, and a search Organization: read too (it checks the organisation's projects first); resolving
+# needs Issue & Event: write.
 
 ERRORS_NAME="mroom errors"
 ERRORS_BASE=""
@@ -52,7 +54,7 @@ errors_id_ok() {
   [[ "$id" =~ ^[0-9]+$ ]] && return 0
   pattern="$(errors_config errors.id_pattern --optional)" || return 1
   if [ -n "$pattern" ] && ! [[ "$id" =~ ^($pattern)$ ]]; then
-    errors_say "$id is neither a numeric id nor matches errors.id_pattern ($pattern)"
+    errors_say "$id is neither a numeric id nor matches errors.id_pattern ($pattern; read as a POSIX extended regex here, so no \\d)"
     return 2
   fi
 }
@@ -111,7 +113,7 @@ sentry_issue_get() {
   sentry_call safe GET "/issues/$1/" || return 1
   issue="$(jq -c "$SENTRY_ISSUE_JQ" "$API_TMP/body")" || { errors_say "Sentry: the issue could not be read"; return 1; }
   sentry_call safe GET "/issues/$1/events/latest/" || return 1
-  jq -c --argjson i "$issue" "\$i + {latest_event: $SENTRY_EVENT_JQ}" "$API_TMP/body" \
+  { printf '%s\n' "$issue"; jq -c "$SENTRY_EVENT_JQ" "$API_TMP/body"; } | jq -sc '.[0] + {latest_event: .[1]}' \
     || { errors_say "Sentry: the latest event could not be read"; return 1; }
 }
 
@@ -121,14 +123,14 @@ sentry_issue_get() {
 sentry_scope_ok() {
   sentry_call safe GET "/projects/?per_page=1" || return 1
   jq -e 'type == "array" and length > 0' "$API_TMP/body" >/dev/null 2>&1 && return 0
-  errors_say "Sentry: the token sees no project (it needs Project: read), so a search would prove nothing"
+  errors_say "Sentry: the token sees no project (it needs Organization: read and access to a project), so a search would prove nothing"
   return 1
 }
 
 # sentry_search <query> <environment> <period> <limit>: issues across every project, newest first, up to
 # <limit>, following the Link header's cursor page by page.
 sentry_search() {
-  local query="$1" environment="$2" period="$3" limit="$4" cursor="" pages=0 got=0 per path items=()
+  local query="$1" environment="$2" period="$3" limit="$4" cursor="" pages=0 got=0 per path items=() count next
   sentry_init || return 1
   sentry_scope_ok || return 1
   while :; do
@@ -142,10 +144,14 @@ sentry_search() {
     sentry_call safe GET "$path" || return 1
     jq -e 'type == "array"' "$API_TMP/body" >/dev/null 2>&1 || { errors_say "Sentry: the search answer is not a list"; return 1; }
     items+=("$(jq -c "[.[] | $SENTRY_ISSUE_JQ | del(.tags)]" "$API_TMP/body")")
-    got=$((got + $(jq 'length' "$API_TMP/body")))
-    ((got < limit)) || break
-    cursor="$(sentry_next_cursor)"
-    [ -n "$cursor" ] || break
+    count="$(jq 'length' "$API_TMP/body")"
+    got=$((got + count))
+    # An empty page ends the search even when Sentry says there is more (it can, for filtered results).
+    ((count > 0 && got < limit)) || break
+    next="$(sentry_next_cursor)"
+    [ -n "$next" ] || break
+    [ "$next" != "$cursor" ] || { errors_say "Sentry: the next page's cursor did not move ($next)"; return 1; }
+    cursor="$next"
   done
   printf '%s\n' "${items[@]}" | jq -sc --argjson n "$limit" 'add | .[0:$n]'
 }

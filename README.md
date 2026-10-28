@@ -111,7 +111,7 @@ mroom config keys                          # every key the schema knows
 Strings print raw, lists one item per line, tables of strings as `KEY=value` lines, and `--json` prints
 JSON. `--default` takes the key's type: a number for a number, JSON for a list or table
 (`--default '[]'`). `--optional` prints nothing (`null` with `--json`) and exits 0 for a key that is
-not set, for a key with no default. A missing required key fails with its name and an example line; a wrong type fails
+not set. A missing required key fails with its name and an example line; a wrong type fails
 with the key's name (`get` reports only errors that concern the key it reads, `validate` reports all).
 An unknown key is ignored, and `validate` warns about it, with a suggestion when it looks like a typo.
 Exit codes: `0` success, `1` a config error or a key that is not set, `2` a usage error.
@@ -350,19 +350,24 @@ id_pattern = "SHOP-[A-Z0-9]+"
 token_env = "SENTRY_AUTH_TOKEN"    # the default
 ```
 
-- **Tokens** come only from the environment variable `token_env` names, never from a file. A missing or
-  empty one fails with the variable's name, never its value. The token reaches curl on stdin, never a
+- **Tokens** come only from the environment variable `token_env` names, never from a file. Its name ends
+  in `_TOKEN` or `_API_KEY`, is not one of `MROOM_*`, `GH_*`, `GITHUB_*`, `AWS_*`, `FORGE_*` or `SSH_*`,
+  and the two differ, so a changed `mroom.toml` cannot send another secret. A missing or empty token fails
+  with the variable's name, never its value. The token reaches curl on stdin, never a
   command line, and an answer that echoes it has it cut out of the message.
 - **Hosts are fixed**: `api.linear.app`, and `<region>.sentry.io` for the organisation in `errors.org`.
   No URL comes from config, so a changed `mroom.toml` cannot send a token elsewhere.
 - **Creating an issue** needs `--allow-create`; without it, nothing is sent. It files in `issues.team`
   and uses labels that already exist; mroom never creates a label.
-- **Bodies** come on stdin, so the guard sees the file a body is read from. A body that holds the
-  tracker's token is refused.
-- **Retries**: a 429 (or Linear's `RATELIMITED`) waits for `Retry-After` (up to 120 seconds, else 20),
-  and a 503 is retried. A read, or a write that does the same thing twice (a state, a resolve), is also
-  retried after any other 5xx or no answer. A comment or a create never is, since it may have gone
-  through. No 4xx is retried. At most 4 calls.
+- **Bodies** come on stdin, so the guard sees the file a body is read from, and are sent as they are,
+  up to 64 KiB. A longer one, one with a NUL byte, or one that holds the tracker's token is refused,
+  never cut short.
+- **Retries**: a 429 (or Linear's `RATELIMITED`) waits for `Retry-After`, or Linear's
+  `X-RateLimit-Requests-Reset`, from 1 to 120 seconds (20 when neither is sent). A request that never
+  left (no host, no connection) is retried too. A read, or a write that does the same thing twice (a
+  state, a resolve), is also retried after a 5xx or no answer. A comment or a create never is, since it
+  may have gone through. No other 4xx is retried, and no redirect is followed (a merged Sentry issue
+  says which one it moved to). At most 4 calls.
 - **Lists are read to the end**: a Linear connection page by page, a Sentry search by its `Link`
   cursor up to `--limit`. A page that cannot be read fails the call, so a blip never reads as a short
   list. A search fails, too, when the token sees no project, since Sentry then answers `[]` for anything.
@@ -370,8 +375,9 @@ token_env = "SENTRY_AUTH_TOKEN"    # the default
   (`issues.tracker = "none"`) or no `[errors]` table, so a skill can leave its note on the pull request
   instead.
 
-A token for reading Sentry needs Issue & Event: read and Project: read; `resolve` also needs Issue &
-Event: write.
+Sentry needs a user or internal integration token; an organisation auth token cannot read issues. It
+needs Issue & Event: read, and Organization: read for `search`, which first checks that the token sees
+a project. `resolve` also needs Issue & Event: write.
 
 ## QA gate
 

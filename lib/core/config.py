@@ -196,13 +196,13 @@ def rule_error(key: str, value) -> str | None:
         return f"{key} must contain {{id}}"
     # The adapters send these to a fixed host (lib/core/tracker.sh, errors.sh): keep them plain words.
     if key == "issues.team" and not TEAM_KEY.fullmatch(value):
-        return f"{key} must be a team key of letters, digits, _ and - (got {json.dumps(value)})"
+        return f"{key} must be a team key of capitals, digits and _ (got {json.dumps(value)})"
     if key == "errors.org" and not ORG_SLUG.fullmatch(value):
         return f"{key} must be an organisation slug: lowercase letters, digits, _ and - (got {json.dumps(value)})"
-    if key in ("issues.token_env", "errors.token_env") and (
-            not TOKEN_ENV.fullmatch(value) or value.startswith(("MROOM_", "GH_", "GITHUB_"))):
-        return (f"{key} must be an environment variable's name in capitals, not one of mroom's or GitHub's "
-                f"(got {json.dumps(value)})")
+    if key in TOKEN_ENV_DEFAULTS and (not TOKEN_ENV.fullmatch(value) or value.startswith(TOKEN_ENV_DENIED)
+                                      or "SECRET" in value or "PASSWORD" in value):
+        return (f"{key} must be an environment variable's name in capitals ending in _TOKEN or _API_KEY, and not "
+                f"one of {', '.join(p + '*' for p in TOKEN_ENV_DENIED)} (got {json.dumps(value)})")
     if key in ("issues.id_pattern", "errors.id_pattern"):
         try:
             re.compile(value)
@@ -252,6 +252,11 @@ def check(path: str, data: dict) -> tuple[list[tuple[str, str]], list[str]]:
         problem = type_error(key, kind, value) or rule_error(key, value)
         if problem:
             errors.append((key, problem))
+    # One token for each service: the tracker's must never go to the error tracker, or the other way round.
+    names = {k: flat.get(k, default) for k, default in TOKEN_ENV_DEFAULTS.items()}
+    if len(set(names.values())) < len(names) and isinstance(names["issues.token_env"], str):
+        for k in names:
+            errors.append((k, "issues.token_env and errors.token_env must name different variables"))
     for key, (_, required, _, _) in SCHEMA.items():
         if required and key not in flat:
             errors.append(("", f"{key} is required, for example:\n{example(key)}"))
@@ -341,9 +346,13 @@ DNS_ZONE = re.compile(r"(?=.{1,200}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a
 REPO_DIR = re.compile(r"\.|(?=.{1,200}$)[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*")
 PHP_BINARY = re.compile(r"php(?:[0-9]+(?:\.[0-9]+)?)?")
 DISK = re.compile(r"[a-z][a-z0-9]{0,15}")
-TEAM_KEY = re.compile(r"[A-Za-z0-9_-]{1,32}")
+TEAM_KEY = re.compile(r"[A-Z0-9][A-Z0-9_]{0,31}")
 ORG_SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,49}")
-TOKEN_ENV = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+# A token's variable ends in _TOKEN or _API_KEY, and is none of the box's, GitHub's, a cloud's or a host's,
+# so a changed mroom.toml cannot send another secret (APP_KEY, AWS_SECRET_ACCESS_KEY) to the tracker.
+TOKEN_ENV = re.compile(r"[A-Z][A-Z0-9_]{0,63}(?:_TOKEN|_API_KEY)")
+TOKEN_ENV_DENIED = ("MROOM_", "GH_", "GITHUB_", "AWS_", "FORGE_", "SSH_")
+TOKEN_ENV_DEFAULTS = {"issues.token_env": "LINEAR_API_KEY", "errors.token_env": "SENTRY_AUTH_TOKEN"}
 ENV_PREFIX = re.compile(r"[A-Z][A-Z0-9_]{0,40}")
 PERSONA_DOMAIN = re.compile(r"(?=.{2,200}$)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
 # A persona domain is made up: under a name reserved for that (RFC 2606, 6761), or a subdomain of a domain of
