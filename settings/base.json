@@ -63,10 +63,14 @@
       "Bash(mroom tracker get:*)",
       "Bash(mroom tracker list:*)",
       "Bash(mroom tracker find:*)",
+      "Bash(mroom tracker owned:*)",
       "Bash(mroom tracker backend:*)",
       "Bash(mroom errors get:*)",
       "Bash(mroom errors search:*)",
-      "Bash(mroom errors backend:*)"
+      "Bash(mroom errors new:*)",
+      "Bash(mroom errors backend:*)",
+      "Bash(mroom persona find:*)",
+      "Bash(mroom persona owned:*)"
     ],
     "ask": [
       "Bash(git restore:*)",
@@ -75,7 +79,9 @@
       "Bash(gh release create:*)",
       "Bash(gh release edit:*)",
       "Bash(mroom tracker create:*)",
-      "Bash(mroom errors resolve:*)"
+      "Bash(mroom errors resolve:*)",
+      "Bash(mroom persona create:*)",
+      "Bash(mroom persona comment:*)"
     ],
     "deny": [
       "Bash(git push*--force*)",

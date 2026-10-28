@@ -1,0 +1,156 @@
+name: Alert triage
+
+# The persona's alert triage (design section 11, phase 5; actions/triage). The app calls this workflow from
+# one of its own, on a schedule (every 15 minutes) and workflow_dispatch (README, Alert triage). Both run under
+# the default branch, the only one the persona environment admits, and the jobs check out only the default
+# branch's mroom.toml, and mroom at the commit of this file.
+#
+#   triage      files one tracker issue per new alert key, through the persona's guard (mroom persona).
+#               A scheduled run writes; a dispatch is a dry run unless the caller says otherwise.
+#   alarm       a live run whose triage job failed: pings persona.channel, at most once a UTC day.
+#   switch-off  the tracker did not keep the hidden markers: turns the app's workflow off and asks a person
+#               once. Its own job, so the token that can turn workflows off is never next to triage.
+on:
+  workflow_call:
+    inputs:
+      live:
+        description: true to write; false is a dry run, which prints what it would file and ping
+        type: boolean
+        default: true
+      window-minutes:
+        description: How far back to look, in minutes (a run every 15 minutes looks back 40)
+        type: number
+        default: 40
+    secrets:
+      MROOM_TRACKER_TOKEN:
+        description: The persona's own tracker token (D23)
+        required: false
+      MROOM_ERRORS_TOKEN:
+        description: The error tracker's token, read-only
+        required: false
+      MROOM_CHAT_TOKEN:
+        description: The chat bot's token, for the alarm and the switch-off
+        required: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  triage:
+    name: Alert triage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: persona
+      deployment: false
+    # One triage at a time: a late one waits, rather than racing the dedupe.
+    concurrency:
+      group: mroom-triage
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    outputs:
+      new: ${{ steps.triage.outputs.new }}
+      markers-lost: ${{ steps.triage.outputs.markers-lost }}
+    steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
+      - name: Check out the app's mroom.toml
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: app
+          persist-credentials: false
+          sparse-checkout: /mroom.toml
+          sparse-checkout-cone-mode: false
+      - id: triage
+        uses: ./mroom/actions/triage
+        with:
+          mode: triage
+          config: app/mroom.toml
+          live: ${{ inputs.live && '1' || '' }}
+          window-minutes: ${{ inputs.window-minutes }}
+          tracker-token: ${{ secrets.MROOM_TRACKER_TOKEN }}
+          errors-token: ${{ secrets.MROOM_ERRORS_TOKEN }}
+
+  alarm:
+    name: Alarm
+    needs: triage
+    if: >-
+      always() && inputs.live && needs.triage.result != 'success' && needs.triage.result != 'skipped'
+      && needs.triage.outputs.markers-lost == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: persona
+      deployment: false
+    permissions:
+      actions: read # to name the step that failed
+      contents: read
+    steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
+      - name: Check out the app's mroom.toml
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: app
+          persist-credentials: false
+          sparse-checkout: /mroom.toml
+          sparse-checkout-cone-mode: false
+      - uses: ./mroom/actions/triage
+        with:
+          mode: alarm
+          config: app/mroom.toml
+          live: "1"
+          tracker-token: ${{ secrets.MROOM_TRACKER_TOKEN }}
+          chat-token: ${{ secrets.MROOM_CHAT_TOKEN }}
+
+  switch-off:
+    name: Switch off
+    needs: triage
+    if: always() && needs.triage.outputs.markers-lost != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: persona
+      deployment: false
+    permissions:
+      actions: write # to turn the app's triage workflow off
+      contents: read
+    steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
+      - name: Check out the app's mroom.toml
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: app
+          persist-credentials: false
+          sparse-checkout: /mroom.toml
+          sparse-checkout-cone-mode: false
+      - uses: ./mroom/actions/triage
+        with:
+          mode: switch-off
+          config: app/mroom.toml
+          markers-lost: ${{ needs.triage.outputs.markers-lost }}
+          chat-token: ${{ secrets.MROOM_CHAT_TOKEN }}

@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # chat.sh — the chat adapter (design section 7): chat_post sends one message to the box's log channel, and
-# chat_problem says why it cannot. Sourced after util.sh and load_box.
+# chat_problem says why it cannot. Sourced after util.sh and load_box. chat_send, at the end, is for jobs
+# on a runner, which have no box.
 #
 # v1 talks to Slack as a bot with chat:write, invited to the channel. The token is the SLACK_BOT_TOKEN=...
 # line of ~/.config/mroom/secrets/slack.env, which must belong to the box user with mode 600; only
@@ -49,5 +50,35 @@ chat_post() {
   fi
   [ "$(jq -r '.ok' <<<"$resp" 2>/dev/null)" = true ] && return 0
   CHAT_ERROR="$(jq -r '.error // "an answer without a reason"' <<<"$resp" 2>/dev/null || echo "an answer it could not read")"
+  return 1
+}
+
+# ---- From a runner ------------------------------------------------------------------------------------
+# A job on a GitHub runner has no box config: the persona's jobs (actions/triage) post with the bot token in
+# $SLACK_BOT_TOKEN, a secret of the persona environment (design 8.8), to the channel mroom.toml names
+# (persona.channel). These need api.sh sourced and its private folder made (api_tmp), and not load_box.
+
+# chat_escape <text>: the text with &, < and > escaped, so untrusted text can neither mention anyone, nor
+# @here, nor hide a link.
+chat_escape() {
+  local t="${1//&/&amp;}"
+  t="${t//</&lt;}"
+  printf '%s' "${t//>/&gt;}"
+}
+
+# chat_send <channel> <mrkdwn>: posts one message, through api.sh's client (the token on stdin, never
+# repeated after a timeout). Returns 0 when Slack took it; 1 when it did not, with the reason on stderr.
+chat_send() {
+  local -
+  set +x
+  local token CHAT_AUTH body
+  [[ "$1" =~ ^[CG][A-Z0-9]{8,12}$ ]] || { echo "mroom chat: not a channel id: ${1:0:40}" >&2; return 1; }
+  token="$(api_token SLACK_BOT_TOKEN "chat")" || return 1
+  # shellcheck disable=SC2034  # read by api_call, through its name
+  CHAT_AUTH="Bearer $token"
+  body="$(jq -nc --arg c "$1" --arg t "$2" '{channel: $c, text: $t, unfurl_links: false, unfurl_media: false}')" || return 1
+  api_call "mroom chat" once POST https://slack.com/api/chat.postMessage CHAT_AUTH "$body" || return 1
+  jq -e '.ok == true' "$API_TMP/body" >/dev/null 2>&1 && return 0
+  echo "mroom chat: Slack refused the message: $(jq -r '.error // "an answer without a reason"' "$API_TMP/body" 2>/dev/null || echo "an answer it could not read")" >&2
   return 1
 }
