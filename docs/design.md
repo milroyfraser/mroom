@@ -134,7 +134,8 @@ starts the host's deploy and checks that the new release is live; the host (Forg
   as long as no record is made for `<N>.<zone>` itself. Each API site gets a certificate of its own from Let's
   Encrypt, which checks it over http (port 80 open to the box), since a wildcard certificate for the zone names
   `<N>.<zone>` but not `api.<N>.<zone>`; a frontend's site can clone one instead. Let's Encrypt's weekly limits
-  per registered domain then count each new environment.
+  then count each new environment: per registered domain, and per name, which an environment torn down and brought
+  up again five times in a week reaches first.
 - QA services (section 9), installed by `mroom baseline`, running as `forge` and listening on localhost only. Browsers
   reach the ones they need through nginx on the box, on host names under the zone, with TLS:
   - Garage (D14) when `qa.parity.files` is `same`. Its S3 API gets a host of its own, `s3.<zone>`, because S3

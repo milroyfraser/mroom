@@ -796,20 +796,19 @@ differently):
    `MROOM_QA_SSH_KEY` (the private half of the key the box forces to `mroom gate provision`) and
    `MROOM_QA_ENV_TEMPLATE`. The variables `MROOM_FORGE_ORG`, `MROOM_FORGE_SERVER`, `MROOM_QA_SSH_HOST`,
    `MROOM_QA_SSH_KNOWN_HOSTS` (the box's host key line, as `ssh-keyscan -t ed25519 <host>` prints it, checked
-   against the box's own `/etc/ssh/ssh_host_ed25519_key.pub`) and, when they apply, `MROOM_QA_SSH_USER` (when
-   the box user is not `forge`), `MROOM_QA_CERTIFICATE` (a certificate in Forge to clone onto a frontend's site,
-   such as one for `*.<zone>`; the API's site, `api.<N>.<zone>`, is a level below what that names, so it asks
-   Let's Encrypt, as every site does without it, which checks the site over http: the box answers on port 80
-   for the zone's names) and `MROOM_QA_NGINX_TEMPLATE` (an nginx template for new
-   sites) go in the repository's variables, not the `qa` environment's: none is secret, and every job of the
-   called workflows reads the repository's, while GitHub's docs never say an environment's own reach a called
-   workflow's job that sets `deployment: false`. Until `MROOM_FORGE_SERVER` is set, the workflows tear down and
-   reap nothing, with a warning. The Forge token comes from an account whose only team holds the box, with
-   exactly the scopes these calls need: `server:view`, `site:create`, `site:delete`, `site:meta`,
-   `site:manage-ssl`, `site:manage-nginx`, `site:manage-deploys`, `server:create-daemons` and
-   `server:delete-daemons`. Creating daemons reaches root (design D20), which is why only `qa` holds it. Every
-   name and host the workflows build comes from the default branch's `mroom.toml` (`app.name`, `qa.zone`, the
-   app's folders), and must match the box's `box.env`.
+   against the box's own `/etc/ssh/ssh_host_ed25519_key.pub`) and, when they apply, `MROOM_QA_SSH_USER` (when the
+   box user is not `forge`), `MROOM_QA_CERTIFICATE` (a certificate in Forge to clone onto a frontend's site, such
+   as one for `*.<zone>`; the API's site, `api.<N>.<zone>`, is a level below what that names, so it asks Let's
+   Encrypt, as every site does without it, which checks the site over http: the box answers on port 80 for the
+   zone's names) and `MROOM_QA_NGINX_TEMPLATE` (an nginx template for new sites) go in the repository's
+   variables, not the `qa` environment's: none is secret, and every job of the called workflows reads the
+   repository's, while GitHub's docs never say an environment's own reach a called workflow's job that sets
+   `deployment: false`. Until `MROOM_FORGE_SERVER` is set, the workflows tear down and reap nothing, with a
+   warning. The Forge token comes from an account whose only team holds the box, with exactly the scopes these
+   calls need: `server:view`, `site:create`, `site:delete`, `site:meta`, `site:manage-ssl`, `site:manage-nginx`,
+   `site:manage-deploys`, `server:create-daemons` and `server:delete-daemons`. Creating daemons reaches root
+   (design D20), which is why only `qa` holds it. Every name and host the workflows build comes from the default
+   branch's `mroom.toml` (`app.name`, `qa.zone`, the app's folders), and must match the box's `box.env`.
 2. The label: `gh label create qa --description "Forces a QA environment on; taking it off tears it down"`.
 3. The app's own workflows, which name a plan run started by hand or by a wake `PR #<N>`, so that qa-up can
    tell which pull request it was for:
