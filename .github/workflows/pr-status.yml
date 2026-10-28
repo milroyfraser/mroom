@@ -5,11 +5,12 @@ name: PR status
 # the workflows the note reads, and on workflow_dispatch. Every run rebuilds the note from GitHub, so it does not
 # matter which event woke it, or in what order events came.
 #
-# The chat token lives in the persona environment, which admits the default branch alone (design 8.8). Every
-# trigger the README names runs the default branch's copy of the app's workflow: pull_request_target, not
-# pull_request, whose run takes the pull request's own copy of the calling file. The jobs check out only the
-# default branch's mroom.toml, and mroom at the commit of this file; the pull request is read as data, through the
-# API, never checked out.
+# The chat token lives in the persona environment, which admits the default branch alone (design 8.8). The
+# triggers the README names never run a pull request's own copy of the app's workflow: pull_request_target runs
+# its base branch's copy, and workflow_run and workflow_dispatch the default branch's. The update job runs only
+# for a pull request based on the default branch, so it is always that copy that reaches the environment. The
+# jobs check out only the default branch's mroom.toml, and mroom at the commit of this file; the pull request is
+# read as data, through the API, never checked out.
 #
 #   relay          a qa-up run links no pull request, so its completed event carries none: its run-name ends in
 #                  "PR #<n>", and this starts the app's own PR status workflow for that number
@@ -48,13 +49,13 @@ on:
         type: string
         default: claude / review
       findings-check:
-        description: The review findings check run
+        description: The review findings check run; empty when the app has none
         type: string
         default: Review findings
       browser-check:
-        description: The browser QA check run
+        description: The browser QA check run; empty (the default, until phase 2b) when the app has none
         type: string
-        default: QA (browser)
+        default: ""
       dry-run:
         description: true to print what it would write and ping, and change nothing
         type: boolean
@@ -128,8 +129,11 @@ jobs:
   update:
     name: Update the note
     # A workflow_run with no pull request is a push to the default branch, a fork's pull request or a qa-up run,
-    # which relay takes.
-    if: inputs.pr != '' || github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number
+    # which relay takes. A pull request based on another branch runs that branch's copy of the app's workflow,
+    # which the persona environment refuses: it gets no note.
+    if: >-
+      (inputs.pr != '' || github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number) &&
+      (github.event_name != 'pull_request_target' || github.event.pull_request.base.ref == github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment:

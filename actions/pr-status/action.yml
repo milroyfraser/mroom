@@ -24,11 +24,11 @@ inputs:
     description: The Claude review's check run, as the app's workflow names it (<caller job> / review)
     default: claude / review
   findings-check:
-    description: The review findings check run
+    description: The review findings check run; empty when the app has none
     default: Review findings
   browser-check:
-    description: The browser QA check run
-    default: QA (browser)
+    description: The browser QA check run; empty (the default, until phase 2b) when the app has none
+    default: ""
   qa-workflow:
     description: The app's qa-up workflow file
     default: qa-up.yml

@@ -754,7 +754,10 @@ What the pilot's scripts learned after this table was drawn, which their ports k
 - **One note per pull request (`actions/pr-status`, phase 5).** The note is found by a hidden line under it that
   also holds the pings already sent, and should a person's edit lose that line, by its footer, so it is edited
   in place and never posted again. A ping is recorded in the note before it goes out, so a note that cannot be
-  written sends none, and a lost line records that run's pings unsent: a missed ping, never a repeat. A closed
+  written sends none, and a lost line records that run's pings and the once-per-PR "ready" unsent, so only a
+  failure that goes away and comes back on the same commit could ping twice. Only the repository's own people's
+  pull requests ping anyone. A qa-up run counts for a pull request only when its deploy job names it, since a
+  fork's QA plan sets the run-name qa-up's falls back to. A closed
   pull request's note is final only once GitHub took that edit, and later runs retry the ones that are not. In
   v1 the note lives on the pull request (the tracker `none` of section 7) whatever the tracker; on the issue,
   it comes with the tracker adapter's `issue_comment_upsert`, and the QA environment's error count with the

@@ -18,14 +18,17 @@
 # Pings go to persona.channel and mention the author through the chat user map (persona.chat_users, read from
 # the default branch). A ping goes out when a person must act: CI turned red, the review has blocking findings,
 # the deploy failed, browser QA failed or could not verify, and once per PR "ready for review". None for a
-# draft or a closed PR.
+# draft or a closed PR, nor for one from outside the repository's people: only a PR by its owner, a member or a
+# collaborator, from a branch of the repository itself, pings anyone (on a public repository, anyone can open
+# one).
 #
 # What keeps it to one note, and to at most one ping per change:
 #   - The note is found by its hidden line. Should that line be lost (a person edited the comment), the note
 #     is found by its footer instead and edited in place, never posted again; and since what was sent is lost
-#     with the line, this run's pings are recorded as sent without being sent: a missed ping, never a repeat.
+#     with the line, this run's pings and the once-per-PR "ready" are recorded as sent without being sent. A
+#     failure that comes back later on the same commit could then ping again; anything else is missed.
 #   - Should there be two notes (a create whose answer was lost, and a later run that made another), the oldest
-#     is the note, and the pings either one recorded count as sent.
+#     is the note, the pings any of them recorded count as sent, and the others are edited once to say so.
 #   - A ping is recorded in the note before it goes out. When the note cannot be written, no ping goes out;
 #     when a ping fails after that, it is missed, not retried.
 #   - A closed PR's note shows its final state, and is left alone until the PR reopens. It is marked final only
@@ -42,10 +45,11 @@
 #   MROOM_PR_STATUS_DRY_RUN=1             a dry run even with MROOM_PR_STATUS_LIVE=1
 #   MROOM_PR_STATUS_REVIEWER              the login that posts the Claude review (claude[bot])
 #   MROOM_PR_STATUS_REVIEW_CHECK          the review's check run (claude / review)
-#   MROOM_PR_STATUS_FINDINGS_CHECK        the review findings check run (Review findings)
-#   MROOM_PR_STATUS_BROWSER_CHECK         the browser QA check run (QA (browser))
+#   MROOM_PR_STATUS_FINDINGS_CHECK        the review findings check run (Review findings); empty for none
+#   MROOM_PR_STATUS_BROWSER_CHECK         the browser QA check run (none by default, until phase 2b)
 #   MROOM_PR_STATUS_QA_WORKFLOW           the app's qa-up workflow file (qa-up.yml)
-#   MROOM_PR_STATUS_QA_DEPLOY_JOB         the deploy job in it (QA deploy)
+#   MROOM_PR_STATUS_QA_DEPLOY_JOB         the deploy job in it (QA deploy), which qa-up names
+#                                         "QA deploy · PR #<n>" for the PR it resolved
 #
 # Nothing fails the run: every call has a timeout or a bound, every failure (GitHub's, chat's, a note that
 # could not be saved) is a warning, and the exit status is always 0, but for a usage error (2).
@@ -69,8 +73,9 @@ FOOTER="Edited in place by mroom's pr-status"
 MAX_SENT=200
 REVIEWER="${MROOM_PR_STATUS_REVIEWER:-claude[bot]}"
 REVIEW_CHECK="${MROOM_PR_STATUS_REVIEW_CHECK:-claude / review}"
-FINDINGS_CHECK="${MROOM_PR_STATUS_FINDINGS_CHECK:-Review findings}"
-BROWSER_CHECK="${MROOM_PR_STATUS_BROWSER_CHECK:-QA (browser)}"
+# Set and empty: the app has no such check.
+FINDINGS_CHECK="${MROOM_PR_STATUS_FINDINGS_CHECK-Review findings}"
+BROWSER_CHECK="${MROOM_PR_STATUS_BROWSER_CHECK-}"
 QA_WORKFLOW="${MROOM_PR_STATUS_QA_WORKFLOW:-qa-up.yml}"
 QA_DEPLOY_JOB="${MROOM_PR_STATUS_QA_DEPLOY_JOB:-QA deploy}"
 SLACK_URL=https://slack.com/api/chat.postMessage
@@ -106,8 +111,11 @@ settings() {
   [[ "$REVIEWER" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?$ ]] || { warn "the reviewer is not a GitHub login"; return 1; }
   [[ "$QA_WORKFLOW" =~ ^[A-Za-z0-9._-]{1,100}\.ya?ml$ ]] || { warn "the qa-up workflow is not a workflow file name"; return 1; }
   local check
-  for check in "$REVIEW_CHECK" "$FINDINGS_CHECK" "$BROWSER_CHECK" "$QA_DEPLOY_JOB"; do
+  for check in "$REVIEW_CHECK" "$QA_DEPLOY_JOB"; do
     [[ "$check" =~ ^[^[:cntrl:]]{1,100}$ ]] || { warn "a check or job name must be one line of 1 to 100 characters"; return 1; }
+  done
+  for check in "$FINDINGS_CHECK" "$BROWSER_CHECK"; do
+    [[ "$check" =~ ^[^[:cntrl:]]{0,100}$ ]] || { warn "a check name must be one line of at most 100 characters"; return 1; }
   done
   jq -nc --arg name "$name" --arg channel "$channel" --arg users "$users" --arg agent "$agent" \
     --arg pattern "$pattern" --arg url "$url" --argjson required "$required" --arg reviewer "$REVIEWER" \
@@ -116,17 +124,19 @@ settings() {
       required: $required, reviewer: $reviewer, review_check: $rc, findings_check: $fc, browser_check: $bc}'
 }
 
-# required_checks <base branch> <mroom.toml's list> — {names, from}: the required checks of the rules on the
-# base branch; mroom.toml's pr.required_checks when the rules name none, or ("config-unverified") cannot be
-# read; "unread" when neither gives a list.
+# required_checks <base branch> <mroom.toml's list> — {names, from}: the required checks on the base branch, of
+# its rulesets and of its classic branch protection; mroom.toml's pr.required_checks when those name none, or
+# ("config-unverified") cannot be read; "unread" when neither gives a list.
 required_checks() {
-  local names="" got=false
-  if [[ "$1" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] && names="$(gh api "repos/$REPO/rules/branches/$1" \
-    --jq '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context] | unique' 2>/dev/null)"; then
+  local rules="" classic="" got=false
+  if [[ "$1" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] && rules="$(gh api "repos/$REPO/rules/branches/$1" \
+    --jq '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context]' 2>/dev/null)" \
+    && classic="$(gh api "repos/$REPO/branches/$1" \
+    --jq '[(.protection.required_status_checks // {}) | (.checks[]?.context), (.contexts[]?)]' 2>/dev/null)"; then
     got=true
   fi
-  jq -nc --argjson got "$got" --arg names "$names" --argjson config "$2" '
-    ($names | if . == "" then [] else fromjson end) as $rules
+  jq -nc --argjson got "$got" --arg rules "$rules" --arg classic "$classic" --argjson config "$2" '
+    ([$rules, $classic] | map(if . == "" then [] else fromjson end) | add | unique) as $rules
     | if ($rules | length) > 0 then {names: $rules, from: "ruleset"}
       elif ($config | length) > 0 then {names: $config, from: (if $got then "config" else "config-unverified" end)}
       elif $got then {names: [], from: "none"}
@@ -160,29 +170,39 @@ ping_login() {
   echo "$2"
 }
 
-# qa_runs <pr> — the app's latest qa-up run for the PR, with its deploy job, or null. qa-up runs on
-# workflow_run, or on a dispatch, so GitHub links its run to no PR: its run-name ends in "PR #<n>" (README, QA
-# environments). An app without that workflow has no runs. Fails when GitHub did not answer.
+# qa_run <pr> — the app's latest qa-up run for the PR, with its deploy job, or null. qa-up runs on workflow_run,
+# or on a dispatch, so GitHub links its run to no PR: its run-name ends in "PR #<n>" (README, QA environments).
+# A run-name can come from a fork's own QA plan, though, so a run counts only when its deploy job, which qa-up
+# names after the PR it resolved itself ("QA deploy · PR #<n>"), names this PR. A run whose deploy job names
+# another is passed over; one with no deploy job yet counts while it runs (it can only say "planning"), and once
+# done, as a run that deployed nothing. An app without that workflow has no runs. Fails when GitHub did not answer.
 qa_run() {
-  local runs err id deploy job
-  # The job's name as a jq string: gh's --jq takes no --arg.
-  job="$(jq -Rn --arg j "$QA_DEPLOY_JOB" '$j | tojson' | jq -r .)"
+  local runs err id run jobs deploy job other
+  # The job's names as jq strings: gh's --jq takes no --arg.
+  job="$(jq -n --arg j "$QA_DEPLOY_JOB · PR #$1" '$j')"
+  other="$(jq -n --arg j "$QA_DEPLOY_JOB · PR #" '$j')"
   err="$(mktemp)"
   if ! runs="$(gh api -X GET "repos/$REPO/actions/workflows/$QA_WORKFLOW/runs" -F per_page=100 --jq "
       [.workflow_runs[] | select(.conclusion != \"skipped\")
        | select(([.pull_requests[]?.number] | index($1)) or ((.display_title // \"\") | endswith(\"PR #$1\")))]
-      | sort_by(.created_at) | last | if . == null then null else {id, status, conclusion, html_url} end" 2>"$err")"; then
+      | sort_by(.created_at) | reverse | .[0:5][] | {id, status, conclusion, html_url} | tojson" 2>"$err")"; then
     if grep -q 'HTTP 404' "$err"; then rm -f "$err"; echo null; return 0; fi
     cat "$err" >&2; rm -f "$err"; return 1
   fi
   rm -f "$err"
-  id="$(jq -r '.id // empty' <<<"${runs:-null}")"
-  [ -n "$id" ] || { echo null; return 0; }
-  # The deploy job's own result: the run also holds the plan and what follows the deploy. null when the run
-  # has no such job yet, or its jobs cannot be read.
-  deploy="$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" --jq "[.jobs[] | select(.name == $job or (.name | endswith(\" / \" + $job)))
-    | {status, conclusion, html_url}] | last" 2>/dev/null)" || deploy=null
-  jq -c --argjson d "${deploy:-null}" '.deploy = $d | del(.id)' <<<"$runs"
+  while IFS= read -r run; do
+    id="$(jq -r '.id' <<<"$run")"
+    [[ "$id" =~ ^[0-9]{1,20}$ ]] || continue
+    # Its jobs: the deploy job's own result, since the run also holds the plan and what follows the deploy.
+    jobs="$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" --jq "[.jobs[] | {name, status, conclusion, html_url}]" 2>/dev/null)" || jobs='[]'
+    deploy="$(jq -c "[.[] | select(.name == $job or (.name | endswith(\" / \" + $job)))] | last | if . then del(.name) else null end" <<<"${jobs:-[]}")"
+    if [ "$deploy" = null ] && jq -e "any(.[]; .name | startswith($other) or contains(\" / \" + $other))" <<<"${jobs:-[]}" >/dev/null; then
+      continue
+    fi
+    jq -c --argjson d "$deploy" '.deploy = $d | del(.id)' <<<"$run"
+    return 0
+  done <<<"$runs"
+  echo null
 }
 
 # collect <pr> <settings> — every fact render.jq reads, as one JSON document. The parts go through files: a busy
@@ -191,8 +211,9 @@ collect() {
   local pr="$1" s="$2" tmp sha base author login rc=0 branch
   tmp="$(mktemp -d)"
   {
-    gh api "repos/$REPO/pulls/$pr" --jq '{number, title: (.title // ""), body: (.body // ""), url: .html_url,
-        author_login: .user.login, draft, state, merged, head_sha: .head.sha, head_ref: .head.ref, base_ref: .base.ref}' >"$tmp/pr" \
+    gh api "repos/$REPO/pulls/$pr" --jq "{number, title: (.title // \"\"), body: (.body // \"\"), url: .html_url,
+        author_login: .user.login, draft, state, merged, head_sha: .head.sha, head_ref: .head.ref, base_ref: .base.ref,
+        trusted: ((.author_association | IN(\"OWNER\", \"MEMBER\", \"COLLABORATOR\")) and .head.repo.full_name == \"$REPO\")}" >"$tmp/pr" \
       && sha="$(jq -r .head_sha "$tmp/pr")" && [[ "$sha" =~ ^[0-9a-f]{40}$ ]] \
       && base="$(jq -r .base_ref "$tmp/pr")" && author="$(jq -r .author_login "$tmp/pr")" \
       && branch="${MROOM_DEFAULT_BRANCH:-$(gh api "repos/$REPO" --jq .default_branch)}" \
@@ -220,29 +241,30 @@ collect() {
 render() { jq -L "$MROOM_ROOT/actions/review-findings" -f "$HERE/render.jq"; }
 
 # read_note <pr> — the PR's note, from the facts on stdin: {id, body, found: marker | footer | none, final, sent,
-# dupes}. found is footer for a note whose hidden line was lost or cannot be read; then sent is not known.
+# dupes: [the other notes' ids]}. found is footer when a note's hidden line was lost or cannot be read; sent then
+# holds only what the readable ones recorded. sent keeps the order the keys were recorded in, oldest first.
 read_note() {
   jq -c --arg bot "$BOT" --arg mark "$MARK$1 " --arg footer "$FOOTER" '
+    def ordered: reduce .[] as $k ([]; if index([$k]) then . else . + [$k] end);
     [.comments[] | select(.login == $bot)] as $mine
-    | ($mark | gsub("[.*+?()\\[\\]{}|^$\\\\]"; "\\\(.)")) as $re
+    | ($mark | gsub("(?<c>[.*+?()\\[\\]{}|^$\\\\])"; "\\\(.c)")) as $re
     | [$mine[] | select(.body | contains($mark))
        | . + {state: (first(.body | capture("(^|\n)" + $re + "final=(?<f>[01]) sent=(?<s>[a-z0-9:,-]*) -->$")) // null)}]
-      as $marked
+      | sort_by(.id) as $marked
     | [$mine[] | select((.body | contains($mark) | not) and (.body | contains($footer)))] as $lost
-    | ($marked | sort_by(.id) | first) as $note
-    | if $note != null and ([$marked[] | .state] | all(. != null)) then
-        {id: $note.id, body: $note.body, found: "marker", final: ($note.state.f == "1"),
-         sent: ([$marked[] | .state.s | split(",")[] | select(test("^([0-9a-f]{12}|once):[a-z]+:[a-z-]+$"))] | unique),
-         dupes: (($marked | length) - 1 + ($lost | length))}
-      elif $note != null or ($lost | length) > 0 then
-        (([$note] + $lost) | map(select(. != null)) | sort_by(.id) | first) as $n
-        | {id: $n.id, body: $n.body, found: "footer", final: false, sent: [],
-           dupes: (($marked | length) + ($lost | length) - 1)}
-      else {id: null, body: null, found: "none", final: false, sent: [], dupes: 0} end'
+    | ([$marked[] | .state | select(.) | .s | split(",")[] | select(test("^([0-9a-f]{12}|once):[a-z]+:[a-z-]+$"))] | ordered) as $sent
+    | (($marked + $lost) | sort_by(.id)) as $all
+    | if ($all | length) == 0 then {id: null, body: null, found: "none", final: false, sent: [], dupes: []}
+      elif ($marked | length) > 0 and ([$marked[] | .state] | all(. != null)) then
+        {id: $marked[0].id, body: $marked[0].body, found: "marker", final: ($marked[0].state.f == "1"), sent: $sent,
+         dupes: [($marked[1:] + $lost)[] | .id]}
+      else
+        {id: $all[0].id, body: $all[0].body, found: "footer", final: false, sent: $sent, dupes: [$all[1:][] | .id]}
+      end'
 }
 
-# note_text <render output> <pr> <final> <sent keys as JSON> — the note as it is to be: the rendered body and the
-# hidden line. The once keys always stay; of the others, the newest MAX_SENT.
+# note_text <render output> <pr> <final> <sent keys as JSON, oldest first> — the note as it is to be: the rendered
+# body and the hidden line. The once keys always stay; of the others, the newest MAX_SENT.
 note_text() {
   jq -rn --slurpfile out <(printf '%s' "$1") --arg mark "$MARK$2 " --argjson final "$3" --argjson sent "$4" --argjson max "$MAX_SENT" '
     ([$sent[] | select(startswith("once:"))] + ([$sent[] | select(startswith("once:") | not)] | .[-$max:])) as $keep
@@ -293,7 +315,7 @@ closed_not_final() {
 }
 
 main() {
-  local pr="${1:-}" s facts out note pending keys sent text action live=false channel n alert key
+  local pr="${1:-}" s facts out note pending keys sent text action live=false channel n alert key can_chat id
   [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "pr-status: GITHUB_REPOSITORY (owner/name) is not set" >&2; return 2; }
   if [ "$pr" = --closed-not-final ]; then closed_not_final; return 0; fi
   [[ "$pr" =~ ^[1-9][0-9]{0,8}$ ]] || { echo "usage: pr-status.sh <pr> | --closed-not-final" >&2; return 2; }
@@ -306,27 +328,34 @@ main() {
   note="$(read_note "$pr" <<<"$facts")"
   channel="$(jq -r .channel <<<"$s")"
 
-  # What the note recorded as sent; with its hidden line lost, this run's pings count as sent, unsent.
+  # What the notes recorded as sent; with a hidden line lost, this run's pings and the ready one count as sent,
+  # unsent.
   sent="$(jq -c .sent <<<"$note")"
   if [ "$(jq -r .found <<<"$note")" = footer ]; then
     warn "PR #$pr: the note's hidden line was lost, so what was pinged is not known; this run's pings are recorded, not sent"
-    sent="$(jq -c --slurpfile o <(printf '%s' "$out") '. + [$o[0].alerts[].key] | unique' <<<"$sent")"
+    sent="$(jq -c --slurpfile o <(printf '%s' "$out") '. + [$o[0].alerts[].key, "once:ready:ready"]
+      | reduce .[] as $k ([]; if index([$k]) then . else . + [$k] end)' <<<"$sent")"
   fi
-  [ "$(jq -r .dupes <<<"$note")" = 0 ] || warn "PR #$pr has more than one note; the oldest is kept current"
+  [ "$(jq '.dupes | length' <<<"$note")" = 0 ] || warn "PR #$pr has more than one note; the oldest is kept current"
   pending="$(jq -c --argjson sent "$sent" '[.alerts[] | select(.key as $k | $sent | index($k) | not)]' <<<"$out")"
   n="$(jq length <<<"$pending")"
-  if [ "$n" -gt 0 ] && { [ -z "${SLACK_BOT_TOKEN:-}" ] || [ -z "$channel" ]; }; then
+  # Without a token or a channel nothing is sent, and nothing recorded: the pings go once chat is set up. A dry
+  # run still shows them. (${SLACK_BOT_TOKEN:+x}, so a trace never prints the token.)
+  can_chat=true
+  [ -n "${SLACK_BOT_TOKEN:+x}" ] && [ -n "$channel" ] || can_chat=false
+  if [ "$n" -gt 0 ] && [ "$can_chat" != true ] && [ "$live" = true ]; then
     notice "PR #$pr: no chat token or no persona.channel, so $n ping(s) are not sent"
-    pending='[]'
+    pending='[]' n=0
   fi
-  keys="$(jq -c --argjson p "$pending" '. + [$p[].key]' <<<"$sent")"
+  keys="$(jq -c --argjson p "$pending" '. + [$p[].key] | reduce .[] as $k ([]; if index([$k]) then . else . + [$k] end)' <<<"$sent")"
 
   action="write"
   if [ "$(jq -r .final <<<"$out")" = true ] && [ "$(jq -r '.found == "marker" and .final' <<<"$note")" = true ]; then
     action="none (PR closed, note final)"
   else
     text="$(note_text "$out" "$pr" "$(jq .final <<<"$out")" "$keys")"
-    if [ "$(jq -r .found <<<"$note")" != none ] && [ "$(jq -r .body <<<"$note")" = "$text" ]; then
+    if [ "$(jq -r .found <<<"$note")" != none ] && [ "$(jq -r .body <<<"$note")" = "$text" ] \
+      && [ "$(jq '.dupes | length' <<<"$note")" = 0 ]; then
       action="none (unchanged)"
     elif [ "$(jq -r .found <<<"$note")" = none ]; then
       action=create
@@ -338,10 +367,11 @@ main() {
   if [ "$live" != true ]; then
     [ "${MROOM_PR_STATUS_DRY_RUN:-}" = 1 ] || echo "pr-status: a dry run; only the action (MROOM_PR_STATUS_LIVE=1) writes or pings" >&2
     jq -n --arg action "$action" --arg text "${text:-}" --slurpfile o <(printf '%s' "$out") --argjson pending "$pending" \
-      --argjson sent "$sent" --arg channel "$channel" '
+      --argjson sent "$sent" --arg channel "$channel" --argjson can "$can_chat" '
       $o[0] as $out
       | {note: {action: $action, body: (if $text == "" then null else $text end)}, final: $out.final, draft: $out.draft,
-       chat: {channel: $channel, pings: $pending, already_sent: ([$out.alerts[].key] | map(select(. as $k | $sent | index($k))))}}'
+       chat: {channel: $channel, can_send: $can, pings: $pending,
+              already_sent: ([$out.alerts[].key] | map(select(. as $k | $sent | index($k))))}}'
     return 0
   fi
 
@@ -354,6 +384,12 @@ main() {
     return 0
   }
   notice "PR #$pr: note $([ "$action" = create ] && echo posted || echo edited)"
+  # The other notes, whose keys the note now holds, are edited once to say so: without the hidden line or the
+  # footer, they count no more.
+  for id in $(jq -r '.dupes[]' <<<"$note"); do
+    note_write "$pr" "$id" "_A second copy of this pull request's status note; the first one is kept current._" \
+      || warn "PR #$pr: a second copy of the note was left as it is"
+  done
   while IFS= read -r alert; do
     [ -n "$alert" ] || continue
     key="$(jq -r .key <<<"$alert")"

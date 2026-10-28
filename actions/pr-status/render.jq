@@ -1,7 +1,9 @@
 # render.jq — a pull request's status note, and the chat pings it calls for, from the facts pr-status.sh
 # collects. Pure: no API calls, so tests/pr-status-test.sh runs it on fixtures.
 #
-#   {pr: {number, title, url, author_login, author_name, state, merged, draft, head_sha, head_ref, body},
+#   {pr: {number, title, url, author_login, author_name, state, merged, draft, head_sha, head_ref, body,
+#         trusted},                       trusted: by the repository's owner, a member or a collaborator, from a
+#                                         branch of the repository itself; only such a PR pings anyone
 #    required: {names: [check names], from: ruleset | config | config-unverified | unread | none},
 #    checks: [{id, name, status, conclusion, html_url, title, external_id}],   check runs on the head commit
 #    comments: [{id, login, body, html_url}],                                  the PR's comments, oldest first
@@ -9,6 +11,7 @@
 #                                                       the app's latest qa-up run for this PR, and its deploy job
 #    users: {<GitHub login or commit email>: <chat user id>},
 #    cfg: {name, reviewer, review_check, findings_check, browser_check, id_pattern, issue_url}}
+#                                         an empty findings_check or browser_check: the app has no such check
 #
 # Out: {final, draft, body, alerts: [{key, text}]}.
 #   body    the note (GitHub Markdown): a heading, then one line per section, each naming the commit it refers
@@ -31,10 +34,11 @@ def footer: "Edited in place by mroom's pr-status";
 def sha7: "`\(.[0:7])`";
 def latest($checks; $name): [$checks[] | select(.name == $name)] | max_by(.id);
 
-# Markdown, for the note: an escaped text, with every @ that starts a word broken by a zero-width space, so no
-# text in it mentions anyone; and a link with such a label.
+# Markdown, for the note: an escaped text, with a zero-width space after every @ that does not follow a letter,
+# digit or _ (an address keeps its @), so no text in it mentions anyone, and in every ://, so none is a link of
+# its own; and a link with such a label.
 def md: tostring | gsub("[\r\n\t]+"; " ") | gsub("(?<c>[\\\\`*_\\[\\]<>|#~])"; "\\\(.c)")
-  | gsub("(?<![A-Za-z0-9._%+-])@"; "@\u200b");
+  | gsub("(?<![A-Za-z0-9_])@"; "@\u200b") | gsub("://"; ":\u200b//");
 def mdlink($url; $label): "[\($label | md)](\($url))";
 
 # Slack mrkdwn: an escaped text, and a link with an escaped label (a | would end the label early).
@@ -56,7 +60,7 @@ def issue($pr; $cfg):
        // null)
     | if . == null then null
       else (if ascii_upcase | test("^(\($cfg.id_pattern))$") then ascii_upcase else . end) as $i
-        | {identifier: $i, url: ($cfg.issue_url | sub("\\{id\\}"; $i))}
+        | {identifier: $i, url: ($cfg.issue_url | sub("\\{id\\}"; $i | @uri))}
       end
   end;
 
@@ -94,7 +98,9 @@ def environment($f):
     elif $run != null and $run.status != "completed" and $d.status != "completed" then
       {state: "pending", line: "⏳ deploying · \(mdlink($d.html_url; "run"))"}
     elif $d != null and ($d.conclusion | IN("failure", "timed_out", "startup_failure")) then
+      # Keyed on the commit the comment says failed, when it says so: the head may have moved on since.
       {state: "fail", line: ("❌ deploy failed · \(mdlink($d.html_url; "run"))" + (if $why then " · \(mdlink($why; "comment"))" else "" end)),
+       sha: (if $st == "failed" then qa_commit($c) else null end),
        alert: {outcome: "failed", text: "❌ QA deploy failed", evidence: link($d.html_url; "run"),
                ask: "This branch (build, migration) or the box? Next check: the failing step in \(link($d.html_url; "the run"))."}}
     elif $d != null and $d.conclusion == "cancelled" then
@@ -198,10 +204,13 @@ def review($f):
 # "Not reviewed yet" (neutral) on a PR the review never ran on is "not run", like the review line; anywhere
 # else a neutral is unknown and holds the PR back.
 def findings($f; $review):
-  latest($f.checks; $f.cfg.findings_check) as $run
+  (if $f.cfg.findings_check == "" then null else latest($f.checks; $f.cfg.findings_check) end) as $run
   | ($run.html_url // null) as $url
   | ($run.title // null) as $title
-  | if $run == null then {state: "none", line: "not run (no \($f.cfg.findings_check | md) check on this commit)"}
+  | if $f.cfg.findings_check == "" then {state: "none", line: "not set up"}
+    # The check follows the review: while there is one, its missing check is still to come.
+    elif $run == null and ($review.state != "none") then {state: "pending", line: "⏳ waiting for the \($f.cfg.findings_check | md) check on this commit"}
+    elif $run == null then {state: "none", line: "not run (no \($f.cfg.findings_check | md) check on this commit)"}
     elif $run.status != "completed" then {state: "pending", line: "⏳ checking · \(mdlink($url; "check"))"}
     elif $run.conclusion == "success" then {state: "ok", line: "✅ \(mdlink($url; $title // "none open"))"}
     elif $run.conclusion == "failure" then {state: "fail", line: "🔴 \(mdlink($url; $title // "open findings"))"}
@@ -218,7 +227,7 @@ def findings($f; $review):
 # cannot go out between the deploy and the browser run.
 def browser($f; $env):
   $f.pr as $pr
-  | latest($f.checks; $f.cfg.browser_check) as $run
+  | (if $f.cfg.browser_check == "" then null else latest($f.checks; $f.cfg.browser_check) end) as $run
   | ($pr.url | sub("/pull/[0-9]+$"; "")) as $repo
   | (if $run == null then null
      elif ($run.external_id // "" | tostring | test("^[0-9]{1,20}$")) then "\($repo)/actions/runs/\($run.external_id)"
@@ -228,7 +237,8 @@ def browser($f; $env):
     ($f.qa_run != null and $f.qa_run.status != "completed") as $planning
   | (($env.state == "ok" or $env.state == "pending") or $planning) as $expected
   | ($f.cfg.browser_check | md) as $name
-  | if $run == null and $expected then
+  | if $f.cfg.browser_check == "" then {state: "none", line: "not set up"}
+    elif $run == null and $expected then
       {state: "pending", line: "⏳ waiting for the \($name) check on this commit"}
     elif $run == null then {state: "none", line: "not run (no \($name) check on this commit)"}
     elif $run.status != "completed" then {state: "pending", line: "⏳ running · \(mdlink($run_url; "run"))"}
@@ -290,8 +300,9 @@ def cross_questions($k; $head):
     draft: $draft,
     issue: $issue,
     body: $body,
-    # No pings for a draft or a closed PR. A failure ping ends with the question for the author.
-    alerts: (if $final or $draft then []
+    # No pings for a draft or a closed PR, nor for one from outside the repository's people (on a public
+    # repository, anyone's). A failure ping ends with the question for the author.
+    alerts: (if $final or $draft or ($pr.trusted | not) then []
              else [ $sections[] | select(.alert)
                     | (.sha // $pr.head_sha) as $sha
                     | {key: "\($sha[0:12]):\(.kind):\(.alert.outcome)",

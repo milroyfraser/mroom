@@ -12,6 +12,7 @@ the calls change there, so a second run sees the note the first one wrote:
   commits         {<N>: [{author: {login} | null, commit: {author: {email}}}]}, oldest first
   users           {<login>: {name}}, for users/<login>
   rules           {<branch>: [<rule>]}, as GitHub's rules/branches/<branch> lists them
+  branches        {<branch>: <branch>}, as branches/<branch> gives it (unprotected when absent)
   check_runs      {<sha>: [{id, name, status, conclusion, html_url, external_id, output: {title}}]}
   comments        {<N>: [{id, user: {login}, body, html_url, created_at}]}, oldest first
   runs            {<workflow file>: [{id, status, conclusion, html_url, display_title, created_at,
@@ -125,6 +126,9 @@ def gh(argv):
         data = state["pulls"].get(rest[1]) or not_found()
     elif rest[:1] == ["pulls"] and rest[2:] == ["commits"]:
         data = state.get("commits", {}).get(rest[1], [])[:1 if "per_page=1" in query else 100]
+    elif rest[:1] == ["branches"]:
+        name = "/".join(rest[1:])
+        data = state.get("branches", {}).get(name, {"name": name, "protection": {"enabled": False}})
     elif rest[:2] == ["rules", "branches"]:
         data = state.get("rules", {}).get("/".join(rest[2:]), [])
     elif rest[:1] == ["commits"] and rest[2:] == ["check-runs"]:

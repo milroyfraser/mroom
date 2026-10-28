@@ -27,8 +27,8 @@ world() {
   chmod +x "$T/bin/gh" "$T/bin/curl"
   export PATH="$T/bin:$PATH" TMPDIR="$T/tmp" PRS_STATE="$T/world.json" PRS_LOG="$T/calls.jsonl" PRS_ARGV="$T/argv.jsonl"
   export GITHUB_REPOSITORY=example/shop GH_TOKEN=fake-gh-token MROOM_CONFIG="$T/mroom.toml" MROOM_NOW=1793188800
-  export SLACK_BOT_TOKEN="$CHAT_TOKEN" MROOM_PR_STATUS_LIVE=1
-  unset MROOM_PR_STATUS_DRY_RUN MROOM_DEFAULT_BRANCH
+  export SLACK_BOT_TOKEN="$CHAT_TOKEN" MROOM_PR_STATUS_LIVE=1 MROOM_PR_STATUS_BROWSER_CHECK="QA (browser)"
+  unset MROOM_PR_STATUS_DRY_RUN MROOM_DEFAULT_BRANCH MROOM_PR_STATUS_FINDINGS_CHECK
   : >"$T/calls.jsonl"
   : >"$T/argv.jsonl"
   {
@@ -41,8 +41,9 @@ world() {
   jq -n --arg head "$HEAD" --arg gh "$GH" --arg qa "$QA_READY" '{
     repo: "example/shop", default_branch: "main", next_id: 900,
     pulls: {"42": {number: 42, title: "feat(SHOP-12): a cart", body: "Adds a cart.\n\nIssue: SHOP-12",
-      html_url: "\($gh)/pull/42", user: {login: "dev1"}, draft: false, state: "open", merged: false, closed_at: null,
-      updated_at: "2026-10-28T11:00:00Z", head: {sha: $head, ref: "shop-12-cart"}, base: {ref: "main"}, labels: []}},
+      html_url: "\($gh)/pull/42", user: {login: "dev1"}, author_association: "MEMBER", draft: false, state: "open",
+      merged: false, closed_at: null, updated_at: "2026-10-28T11:00:00Z",
+      head: {sha: $head, ref: "shop-12-cart", repo: {full_name: "example/shop"}}, base: {ref: "main"}, labels: []}},
     commits: {"42": [{author: {login: "dev1"}, commit: {author: {email: "dev1@example.dev"}}},
                      {author: {login: "reviewer9"}, commit: {author: {email: "r9@example.dev"}}}]},
     users: {dev1: {name: "Dev One"}, dev2: {name: "Dev <Two>"}},
@@ -61,7 +62,7 @@ world() {
     runs: {"qa-up.yml": [{id: 9, status: "completed", conclusion: "success", html_url: "\($gh)/actions/runs/9",
       display_title: "QA environment · PR #42", created_at: "2026-10-28T09:00:00Z", pull_requests: []}]},
     jobs: {"9": [{name: "qa / QA paths", status: "completed", conclusion: "success", html_url: "\($gh)/job/8"},
-                 {name: "qa / QA deploy", status: "completed", conclusion: "success", html_url: "\($gh)/job/9"}]},
+                 {name: "qa / QA deploy · PR #42", status: "completed", conclusion: "success", html_url: "\($gh)/job/9"}]},
     contents: {".github/chat-users.json": "{\"dev1\": \"U0000000001\", \"dev2@example.dev\": \"U0000000002\", \"shop-agents\": \"U0000000009\", \"evil\": \"<!channel>\"}"}}' \
     >"$T/world.json"
 }
@@ -161,6 +162,8 @@ required_checks = ["test"]'
   has_json "rules unreadable: mroom.toml's list, said so" "$(line CI) | contains(\"the list is mroom.toml's (the ruleset did not answer)\")"
   world; world_set '.fail = ["GET rules/branches"]'; rendered
   has_json "rules unreadable and no list: unknown, never a pass, not ready" "($(line CI) | startswith(\"- **CI:** ❓ unknown: \")) and .alerts == [] and (.body | startswith(\"⏳\"))"
+  world; world_set '.rules.main = [] | .branches.main = {name: "main", protection: {enabled: true, required_status_checks: {contexts: ["test", "build"], checks: [{context: "test"}, {context: "build"}]}}}'; rendered
+  has_json "classic branch protection's required checks count too" "$(line CI) | contains(\"⏳ 1/2 required pass · 1 not reported yet\")"
   world; world_set '.rules.main = []'; rendered
   has_json "no required checks anywhere: said, and ready" "($(line CI) | startswith(\"- **CI:** no required checks\")) and (.alerts[0].text | contains(\": no required checks, Claude review\"))"
 }
@@ -211,8 +214,18 @@ t_environment() {
   has_json "a passed deploy with no comment: unknown, never a pass, with a question" "($(line Environment) | startswith(\"- **Environment:** ❓ unknown: \")) and .alerts == [] and (.body | contains(\"Open question\"))"
   world; world_set '.comments["42"] |= map(select(.id != 10)) | .jobs["9"][1].conclusion = "skipped"'; check_set '{"name": "QA (browser)", "conclusion": "skipped"}'; rendered
   has_json "the plan said no: not needed, ready" "($(line Environment) | startswith(\"- **Environment:** not needed\")) and $(keys) == [\"once:ready:ready\"]"
-  world; world_set '.runs["qa-up.yml"] += [{id: 7, status: "completed", conclusion: "failure", html_url: "x", display_title: "QA environment · PR #4", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]'; rendered
-  has_json "another PR's run (PR #4 for #42) is not this one's" "$(line Environment) | startswith(\"- **Environment:** ✅\")"
+  world; world_set '.runs["qa-up.yml"] += [{id: 7, status: "completed", conclusion: "failure", html_url: "x", display_title: "QA environment · PR #4", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
+    | .jobs["7"] = [{name: "qa / QA deploy · PR #4", status: "completed", conclusion: "failure", html_url: "x"}]'; rendered
+  has_json "another PR's run (PR #4 for #42) is not this one's" "($(line Environment) | startswith(\"- **Environment:** ✅\")) and $(keys) == [\"once:ready:ready\"]"
+  world; world_set '.runs["qa-up.yml"] += [{id: 7, status: "completed", conclusion: "failure", html_url: "x", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
+    | .jobs["7"] = [{name: "qa / QA deploy · PR #7", status: "completed", conclusion: "failure", html_url: "x"}]'; rendered
+  has_json "a run-name a fork forged: its deploy job names its own PR, so it is passed over" "($(line Environment) | startswith(\"- **Environment:** ✅\")) and $(keys) == [\"once:ready:ready\"]"
+  world; world_set '.runs["qa-up.yml"] += [{id: 7, status: "in_progress", conclusion: null, html_url: "https://github.com/example/shop/actions/runs/7", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
+    | .jobs["7"] = [{name: "qa / QA pull request", status: "in_progress", conclusion: null, html_url: "x"}]'; rendered
+  has_json "a newer run with no deploy job yet: planning" "$(line Environment) | startswith(\"- **Environment:** ⏳ planning · [run](https://github.com/example/shop/actions/runs/7)\")"
+  world; world_set '.jobs["9"][1] += {conclusion: "failure"}'
+  qa_body $'### QA environment\n<!-- mroom-qa: failed -->\n\nThe deploy of `'"$OLD"'` failed. The next push tries again.'; rendered
+  has_json "a failed deploy job, keyed on the commit the comment says failed" "$(keys) == [\"bbbbbbb22222:env:failed\"]"
   world; world_set '.fail = ["GET actions/workflows"]'; rendered
   expect_out ""
   expect_err_has "HTTP 502"
@@ -237,13 +250,19 @@ t_browser() {
   has_json "waiting for a slot: pending, no ping" "($(line "Browser QA") | startswith(\"- **Browser QA:** ⏳\")) and .alerts == []"
   world; check_set '{"name": "QA (browser)", "conclusion": "skipped", "output": {"title": "No browser test needed"}}'; rendered
   has_json "skipped: ready, not needed" "($(line "Browser QA") | startswith(\"- **Browser QA:** not run: No browser test needed\")) and (.alerts[0].text | contains(\"browser QA not needed\"))"
-  world; check_set '{"name": "QA (browser)", "external_id": "x; rm", "html_url": "https://github.com/example/shop/runs/5"}'; rendered
+  world; check_set '{"name": "QA (browser)", "external_id": "1; rm", "html_url": "https://github.com/example/shop/runs/5"}'; rendered
   has_json "an external_id that is no run id: the check's own link" "$(line "Browser QA") | contains(\"[run](https://github.com/example/shop/runs/5)\")"
+  world; unset MROOM_PR_STATUS_BROWSER_CHECK; rendered
+  has_json "no browser check set up (the default): not set up, ready" "($(line "Browser QA") == \"- **Browser QA:** not set up\") and (.alerts[0].text | contains(\"browser QA not run\"))"
 }
 
 t_findings() {
   world; check_set '{"name": "Review findings", "conclusion": "failure", "output": {"title": "1 open finding"}}'; rendered
   has_json "open findings: red, not ready, no ping of their own" "($(line "Review findings") | startswith(\"- **Review findings:** 🔴 [1 open finding]\")) and .alerts == []"
+  world; world_set '.check_runs[.pulls["42"].head.sha] |= map(select(.name != "Review findings"))'; rendered
+  has_json "a review and no findings check yet: waiting, not ready (it follows the review)" "($(line "Review findings") | startswith(\"- **Review findings:** ⏳ waiting for the Review findings check\")) and .alerts == []"
+  world; export MROOM_PR_STATUS_FINDINGS_CHECK=""; rendered
+  has_json "no findings check set up: not set up, ready" "($(line "Review findings") == \"- **Review findings:** not set up\") and $(keys) == [\"once:ready:ready\"]"
   world; check_set '{"name": "Review findings", "status": "in_progress", "conclusion": null}'; rendered
   has_json "checking: not ready" '.alerts == [] and (.body | startswith("⏳"))'
   world; check_set '{"name": "Review findings", "conclusion": "neutral", "output": {"title": "Not reviewed yet"}}'; rendered
@@ -269,11 +288,22 @@ required_checks = ["test", "@team **x** <b>"]'
   check_set '{"name": "QA (browser)", "conclusion": "failure", "output": {"title": "@everyone [x](https://evil.example) `y`"}}'
   pr_set '.pulls["42"].title = "<!here> & <https://evil.example|click>"'; rendered
   has_json "a check name in the note: escaped, no mention" "$(line CI) | contains(\"[@\u200bteam \\\\*\\\\*x\\\\*\\\\* \\\\<b\\\\>](https://github.com/example/shop/runs/30)\")"
-  has_json "a check title in the note: escaped, no link, no mention" "$(line "Browser QA") | contains(\"@\u200beveryone \\\\[x\\\\](https://evil.example) \\\\\`y\\\\\`\")"
+  has_json "a check title in the note: escaped, no link, no mention" "$(line "Browser QA") | contains(\"@\u200beveryone \\\\[x\\\\](https:\u200b//evil.example) \\\\\`y\\\\\`\")"
   has_json "the title in a ping: no broadcast, no link of its own" '[.alerts[].text | contains("&lt;!here&gt; &amp; &lt;https://evil.example¦click&gt;")] | all'
   has_json "no ping holds a raw <!" '[.alerts[].text | contains("<!")] | any | not'
+  world; check_set '{"name": "QA (browser)", "conclusion": "failure", "output": {"title": "-@org/team a+@b x.@c see https://evil.example"}}'; rendered
+  has_json "an @ after any mark but a letter, digit or _ is broken; an address keeps its @; a URL is no link" "$(line "Browser QA") | contains(\"-@\u200borg/team a+@\u200bb x.@\u200bc see https:\u200b//evil.example\")"
   world_set '.pulls["42"].user.login = "dev2"'; rendered
   has_json "an unmapped author is named, escaped" '.alerts[0].text | startswith("Dev &lt;Two&gt; ")'
+}
+
+t_outsiders() {
+  world; pr_set '.pulls["42"].author_association = "CONTRIBUTOR"'; check_set '{"name": "lint", "conclusion": "failure"}'; rendered
+  has_json "an outside author's PR: noted, no pings" '(.body | contains("❌ failing")) and .alerts == []'
+  world; pr_set '.pulls["42"].head.repo.full_name = "someone/shop"'; rendered
+  has_json "a fork's PR, even a member's: no pings" '.alerts == []'
+  world; pr_set '.pulls["42"].head.repo = null'; rendered
+  has_json "a fork that is gone: no pings" '.alerts == []'
 }
 
 t_who() {
@@ -283,7 +313,7 @@ t_who() {
   has_json "by email when the map has no login for them" '.alerts[0].text | startswith("<@U0000000002> ")'
   world_set '.commits["42"][0] = {author: null, commit: {author: {email: "nobody@example.dev"}}}'; rendered
   has_json "a first commit the map does not know: the agents' account's developer" '.alerts[0].text | startswith("<@U0000000009> ")'
-  world_set '.commits["42"] = [{author: {login: "shop-agents"}, commit: {author: {email: "a@example.dev"}}}, {author: {login: "dev1"}, commit: {author: {email: "dev1@example.dev"}}}]'; rendered
+  world_set '.commits["42"] = [{author: {login: "stranger"}, commit: {author: {email: "s@example.dev"}}}, {author: {login: "dev1"}, commit: {author: {email: "dev1@example.dev"}}}]'; rendered
   has_json "a later commit never counts" '.alerts[0].text | startswith("<@U0000000009> ")'
   world; pr_set '.pulls["42"].user.login = "evil"'; rendered
   has_json "a map entry that is not a chat user id is dropped" '.alerts[0].text | startswith("evil ")'
@@ -344,12 +374,19 @@ t_marker_lost() {
   expect_eq "the same comment" "$(notes | jq '.[0].id')" "$id"
   expect_eq "no ping: what was sent is not known" "$(count pings)" 0
   expect_err_has "hidden line was lost"
-  expect_true "the line is back, with this run's pings recorded" grep -q 'sent=aaaaaaa11111:ci:failed -->' <<<"$(note_body)"
+  expect_true "the line is back, with this run's pings recorded" grep -q 'sent=once:ready:ready,aaaaaaa11111:ci:failed -->' <<<"$(note_body)"
   : >"$T/calls.jsonl"; status 42
   expect_eq "and they never go out later" "$(count pings)" 0
-  world_set --argjson id "$id" '(.comments["42"][] | select(.id == $id)).body |= sub("final=0 sent="; "final=9 sent=")'
+  expect_true "and the ready ping is recorded too" grep -q 'sent=once:ready:ready,' <<<"$(note_body)"
+  check_set '{"name": "test", "conclusion": "success"}'; check_set '{"name": "lint", "conclusion": "success"}'
   : >"$T/calls.jsonl"; status 42
-  expect_eq "an unreadable hidden line counts as lost too: no ping, no new note" "$(count pings) $(notes | jq length)" "0 1"
+  expect_eq "so turning ready after the loss pings nobody" "$(count pings)" 0
+  world_set --argjson id "$id" '(.comments["42"][] | select(.id == $id)).body |= sub("final=0 sent=once:ready:ready"; "final=9 sent=once:ready:ready")'
+  comment_add "github-actions[bot]" $'second\n\n<!-- mroom-pr-status pr=42 final=0 sent=bbbbbbb22222:ci:failed -->'
+  check_set '{"name": "lint", "conclusion": "failure"}'
+  : >"$T/calls.jsonl"; status 42
+  expect_eq "an unreadable hidden line counts as lost too: no ping, no new note, the copy superseded" "$(count pings) $(notes | jq length)" "0 1"
+  expect_true "the readable note's keys are kept" grep -q 'bbbbbbb22222:ci:failed' <<<"$(note_body)"
 }
 
 t_two_notes() {
@@ -359,10 +396,15 @@ t_two_notes() {
   local first; first="$(notes | jq '.[0].id')"
   status 42
   expect_eq "no ping either note recorded" "$(count pings)" 0
-  expect_eq "no third note" "$(notes | jq length)" 2
+  expect_eq "no third note, and the second copy holds no hidden line now" "$(notes | jq length)" 1
   expect_true "the oldest is the one kept current, with both notes' keys" \
     jqt --argjson id "$first" '.comments["42"][] | select(.id == $id) | .body | contains("sent=once:ready:ready,aaaaaaa11111:ci:failed -->")' "$T/world.json"
   expect_err_has "more than one note"
+  expect_true "the second copy says so, and holds no hidden line" \
+    jqt --argjson id "$first" '[.comments["42"][] | select(.user.login == "github-actions[bot]" and .id != $id and .id != 10)] | length == 1 and (.[0].body | startswith("_A second copy") and (contains("mroom-pr-status") | not))' "$T/world.json"
+  : >"$T/calls.jsonl"; status 42
+  expect_err_lacks "more than one note"
+  expect_eq "the next run: one note, nothing to write" "$(count writes)" 0
 }
 
 t_other_prs_notes() {
@@ -452,6 +494,9 @@ t_dry_run() {
   expect_err_has "a dry run"
   expect_true "prints what it would do" jqt '.note.action == "create" and (.note.body | contains("<!-- mroom-pr-status pr=42 final=0 sent=once:ready:ready -->")) and (.chat.pings | map(.key)) == ["once:ready:ready"]' <<<"$out"
   expect_eq "writes nothing, pings nobody" "$(count writes) $(count pings)" "0 0"
+  unset SLACK_BOT_TOKEN; status 42
+  expect_true "without a chat token a dry run still shows the pings, and says it could not send them" jqt '(.chat.pings | map(.key)) == ["once:ready:ready"] and (.chat.can_send | not)' <<<"$out"
+  export SLACK_BOT_TOKEN="$CHAT_TOKEN"
   export MROOM_PR_STATUS_LIVE=1 MROOM_PR_STATUS_DRY_RUN=1; status 42
   expect_eq "DRY_RUN wins over LIVE" "$(count writes) $(count pings)" "0 0"
   unset MROOM_PR_STATUS_DRY_RUN; status 42
@@ -483,14 +528,16 @@ channel = "#nope"'
 
 t_sent_trimmed() {
   world
-  local keys; keys="once:ready:ready,$(for i in $(seq 1 250); do printf '%012x:ci:failed,' "$i"; done)"
+  # Recorded newest last, in no hex order: the trim keeps the last recorded, not the last in sort order.
+  local keys; keys="once:ready:ready,$(for i in $(seq 1 250); do printf '%012x:ci:failed,' $(((i * 7919) % 100003)); done)"
   comment_add "github-actions[bot]" $'x\n\n<!-- mroom-pr-status pr=42 final=0 sent='"${keys%,}"' -->'
   check_set '{"name": "lint", "conclusion": "failure"}'; status 42
   local line; line="$(note_body | tail -n1)"
   expect_true "the once key stays" grep -q 'sent=once:ready:ready,' <<<"$line"
   expect_eq "200 others at most, the newest kept" "$(tr ',' '\n' <<<"${line#*sent=}" | grep -c ':ci:')" 200
   expect_true "this run's key is among them" grep -q 'aaaaaaa11111:ci:failed -->' <<<"$line"
-  expect_true "the oldest went" bash -c '! grep -q "000000000001:ci" <<<"$1"' _ "$line"
+  expect_true "the oldest recorded went" bash -c '! grep -q "$(printf "%012x" 7919):ci" <<<"$1"' _ "$line"
+  expect_true "the newest recorded stayed" grep -q "$(printf '%012x' $(((250 * 7919) % 100003))):ci:failed," <<<"$line"
 }
 
 # --- The action and the workflow -----------------------------------------------------------------------------
@@ -501,6 +548,9 @@ t_shape() {
   expect_true "one update per PR at a time, never cancelled" grep -q 'cancel-in-progress: false' "$WF"
   expect_true "checks out the default branch's mroom.toml only" grep -q 'sparse-checkout: /mroom.toml' "$WF"
   expect_true "never the PR's head" bash -c '! grep -qE "head\.(sha|ref)|pull_request\.head" "$1"' _ "$WF"
+  expect_true "a note only for a PR based on the default branch" grep -q "github.event.pull_request.base.ref == github.event.repository.default_branch" "$WF"
+  expect_true "qa-up names its deploy job after the PR it resolved" grep -q 'name: "QA deploy · PR #${{ needs.pr.outputs.number }}"' "$ROOT/.github/workflows/qa-up.yml"
+  expect_true "no browser check by default" bash -c 'grep -A2 "^  browser-check:" "$1" | grep -qx "    default: \"\""' _ "$A/action.yml"
   expect_true "mroom at the commit of this file" grep -q 'ref: ${{ job.workflow_sha }}' <<<"$wf"
   expect_true "live in the action only" grep -q "MROOM_PR_STATUS_LIVE: '1'" "$A/action.yml"
   expect_true "the chat token goes in through env, not a command line" grep -q 'SLACK_BOT_TOKEN: ${{ inputs.chat-token }}' "$A/action.yml"
@@ -518,6 +568,7 @@ test_case browser t_browser
 test_case findings t_findings
 test_case final-and-draft t_final_and_draft
 test_case escaping t_escaping
+test_case outsiders t_outsiders
 test_case who t_who
 test_case one-note-one-ping t_one_note_one_ping
 test_case change-edits-in-place t_change_edits_in_place
