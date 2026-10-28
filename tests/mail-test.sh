@@ -181,9 +181,20 @@ t_mail_user_add_gives_the_environment_a_login_and_restarts_mailpit() {
   expect_true "the API password reached a command line" lacks "$(cat "$T/curl.argv" 2>/dev/null)" "$API_PASSWORD"
   expect_true "the password reached the gate log" lacks "$(gate_log_text)" "$password"
   run stat -c %a "$HOME/.config/mroom/secrets/mailpit-smtp.passwd"; expect_out 600
+  # --rotate: a new password, and a restart, which waits for the Mailpit started a moment ago.
   started=$(now_ms)
-  gate "mail-user-add 12"; expect_rc 0
+  gate "mail-user-add 12 --rotate"; expect_rc 0
+  expect_true "--rotate kept the password" lacks "$out" "$password"
+  password="$(sed -n 's/^MAIL_PASSWORD=//p' <<<"$out")"
   expect_true "the second restart came within a second of the first" at_least $(($(now_ms) - started)) 2000
+  expect_true "a new login did not restart Mailpit" [ "$(cat "$T/pid")" != "$after" ]
+  after="$(cat "$T/pid")"
+  hash="$(sed -n 's/^shop_qa_12://p' "$HOME/.config/mroom/secrets/mailpit-smtp.passwd")"
+  # The same login again, with the same password: the file is as it was, so Mailpit keeps running.
+  gate "mail-user-add 12"; expect_rc 0
+  expect_out_has "MAIL_PASSWORD=$password"
+  expect_true "an unchanged login restarted Mailpit" [ "$(cat "$T/pid")" = "$after" ]
+  run sed -n 's/^shop_qa_12://p' "$HOME/.config/mroom/secrets/mailpit-smtp.passwd"; expect_out "$hash"
   run grep -c '^shop_qa_12:' "$HOME/.config/mroom/secrets/mailpit-smtp.passwd"; expect_out 1
   run bash -c 'compgen -G "$1/.mailpit-smtp.*" || true' _ "$HOME/.config/mroom/secrets"; expect_out ""
   mailpit_down
@@ -195,6 +206,7 @@ t_mail_user_remove_takes_the_login_away() {
   gate "mail-user-add 13"; expect_rc 0
   local before
   gate "mail-user-remove 12"; expect_rc 0; expect_out "mail user shop_qa_12: removed"
+  expect_true "the teardown kept the password" lacks "$(cat "$HOME/.local/state/mroom/qa/shop_qa_12.secrets" 2>/dev/null)" "MAIL_PASSWORD"
   expect_true "the login stayed" lacks "$(logins)" "shop_qa_12:"
   expect_true "another environment's login went" has "$(logins)" "shop_qa_13:"
   expect_true "the placeholder login went" has "$(logins)" "mroom-none:"

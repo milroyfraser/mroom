@@ -1,0 +1,244 @@
+name: QA environment up
+
+# The half of a pull request's QA environment that holds secrets (design 8.2). The app calls this workflow from one
+# of its own (README, QA environments), started when its QA plan run completes (workflow_run) or, for a plan the job
+# token started, by that plan's hand-over job (workflow_dispatch, with the inputs pr and plan_run_id), since such a
+# plan ends with no workflow_run. Either way it runs the default branch's copy of that workflow, every job here
+# checks out the default branch's mroom.toml and mroom at the commit of this file, and the qa environment admits the
+# default branch alone, so no pull request code runs next to the Forge token or the box's SSH key: the pull request
+# is read as data, its changed paths, the frontend its plan built and GitHub's tarball of its commit. The jobs:
+#   pr      which pull request and commit, from GitHub's record of the plan run alone (actions/qa-up/resolve.sh)
+#   plan    the path rules, again, from GitHub's list of the changed files (actions/qa-plan)
+#   deploy  in the qa environment, one at a time per pull request: whether the environment comes up
+#           (actions/qa-up/start.sh), and if so, bringing it up (actions/qa-up/up.sh)
+#   next    for a run the job token started, which ends with no workflow_run either: the app's workflows that
+#           follow this one (next-workflows), started by dispatch
+on:
+  workflow_call:
+    inputs:
+      label:
+        description: The label that forces a QA environment on
+        type: string
+        default: qa
+      plan-workflow:
+        description: The app's QA plan workflow file; a run of any other workflow deploys nothing
+        type: string
+        default: qa-plan.yml
+      next-workflows:
+        description: >-
+          The app's workflows that follow a QA environment coming up, on workflow_run of the app's qa-up workflow:
+          space-separated file names. A qa-up run the job token started ends with no workflow_run, so qa-up then
+          starts each of these itself, with the inputs pr and up_run_id
+        type: string
+        default: ""
+    secrets:
+      MROOM_FORGE_TOKEN:
+        required: true
+      MROOM_QA_SSH_KEY:
+        required: true
+      MROOM_QA_ENV_TEMPLATE:
+        required: false
+    outputs:
+      pr:
+        description: The pull request's number
+        value: ${{ jobs.pr.outputs.number }}
+      sha:
+        description: The commit the environment serves, once it came up
+        value: ${{ jobs.deploy.outputs.sha }}
+      app-url:
+        description: The environment's address for people
+        value: ${{ jobs.deploy.outputs.app-url }}
+      api-url:
+        description: The environment's Laravel app
+        value: ${{ jobs.deploy.outputs.api-url }}
+      refused:
+        description: Why a new environment waits for a slot, when it does
+        value: ${{ jobs.deploy.outputs.refused }}
+
+permissions:
+  contents: read
+
+# bash with pipefail, so a script piped into tee fails its step when it fails.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # A cancelled plan was replaced by a newer push, whose own run follows; a skipped one was for no pull request of
+  # this repository. resolve.sh also reads the build job's own conclusion. Of the event that started this run, only
+  # the plan run's id is taken.
+  pr:
+    name: QA pull request
+    if: >-
+      github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' ||
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      go: ${{ steps.pr.outputs.go }}
+      number: ${{ steps.pr.outputs.number }}
+      sha: ${{ steps.pr.outputs.sha }}
+      built: ${{ steps.pr.outputs.built }}
+      dispatched: ${{ steps.pr.outputs.dispatched }}
+      woken: ${{ steps.pr.outputs.woken }}
+      run-id: ${{ steps.pr.outputs.run_id }}
+      run-url: ${{ steps.pr.outputs.run_url }}
+    steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
+      - name: Which pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.plan_run_id || github.event.workflow_run.id }}
+          DISPATCHED_PR: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.pr || '' }}
+          PLAN_WORKFLOW: ${{ inputs.plan-workflow }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          LABEL: ${{ inputs.label }}
+        run: mroom/actions/qa-up/resolve.sh | tee -a "$GITHUB_OUTPUT"
+
+  plan:
+    name: QA paths
+    needs: pr
+    if: needs.pr.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
+      reason: ${{ steps.scope.outputs.reason }}
+    steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
+      - name: Check out the app's mroom.toml
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: app
+          persist-credentials: false
+          sparse-checkout: /mroom.toml
+          sparse-checkout-cone-mode: false
+      - name: Sort the changed paths
+        id: scope
+        uses: ./mroom/actions/qa-plan
+        with:
+          pr: ${{ needs.pr.outputs.number }}
+          config: app/mroom.toml
+
+  deploy:
+    name: QA deploy
+    needs: [pr, plan]
+    if: needs.pr.outputs.go == 'true' && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: qa
+      deployment: false
+    # Never cancelled: a deploy cut off halfway leaves a half-built environment. The deploys and teardowns of one
+    # pull request share this group and take turns, first in first out, none of them dropped (queue: max), so
+    # none runs beside another; each reads the state it acts on inside the group, and an older push's deploy
+    # that waited behind a newer one stops, since its pull request has moved on (start.sh).
+    concurrency:
+      group: mroom-qa-${{ needs.pr.outputs.number }}
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      actions: read # the QA plan's build
+      contents: read # GitHub's tarball of the commit, and the pull request's mroom.toml
+      pull-requests: write # the QA environment comment
+    outputs:
+      sha: ${{ steps.up.outputs.sha }}
+      app-url: ${{ steps.up.outputs.app-url }}
+      api-url: ${{ steps.up.outputs.api-url }}
+      refused: ${{ steps.up.outputs.refused }}
+    steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
+      - name: Check out the app's mroom.toml
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: app
+          persist-credentials: false
+          sparse-checkout: /mroom.toml
+          sparse-checkout-cone-mode: false
+      - name: Bring the QA environment up
+        id: up
+        uses: ./mroom/actions/qa-up
+        with:
+          pr: ${{ needs.pr.outputs.number }}
+          sha: ${{ needs.pr.outputs.sha }}
+          scope: ${{ needs.plan.outputs.scope }}
+          reason: ${{ needs.plan.outputs.reason }}
+          dispatched: ${{ needs.pr.outputs.dispatched }}
+          woken: ${{ needs.pr.outputs.woken }}
+          built: ${{ needs.pr.outputs.built }}
+          plan-run-id: ${{ needs.pr.outputs.run-id }}
+          plan-run-url: ${{ needs.pr.outputs.run-url }}
+          label: ${{ inputs.label }}
+          config: app/mroom.toml
+          forge-org: ${{ vars.MROOM_FORGE_ORG }}
+          forge-server: ${{ vars.MROOM_FORGE_SERVER }}
+          forge-token: ${{ secrets.MROOM_FORGE_TOKEN }}
+          ssh-host: ${{ vars.MROOM_QA_SSH_HOST }}
+          ssh-user: ${{ vars.MROOM_QA_SSH_USER }}
+          ssh-key: ${{ secrets.MROOM_QA_SSH_KEY }}
+          ssh-known-hosts: ${{ vars.MROOM_QA_SSH_KNOWN_HOSTS }}
+          env-template: ${{ secrets.MROOM_QA_ENV_TEMPLATE }}
+          certificate: ${{ vars.MROOM_QA_CERTIFICATE }}
+          nginx-template: ${{ vars.MROOM_QA_NGINX_TEMPLATE }}
+
+  # A run the job token started (the plan's hand-over) ends with no workflow_run, so a workflow of the app's that
+  # waits for one would never start: this job starts each of next-workflows itself (actions/qa-up/next.sh) once the
+  # deploy ran, whatever it came to, as that workflow_run would have; the follower reads how it went from GitHub's
+  # record of this run. A run a person or a workflow_run started ends with its workflow_run as usual, so this job
+  # skips it. It goes by github.actor, the run's first starter, so a person's re-run of a dispatched run starts them
+  # too: GitHub does not say whether such a re-run ends with a workflow_run, and a follower started twice for one
+  # commit does no harm.
+  next:
+    name: QA next workflows
+    needs: [pr, deploy]
+    if: >-
+      !cancelled() && inputs.next-workflows != '' && github.event_name == 'workflow_dispatch' &&
+      github.actor == 'github-actions[bot]' && (needs.deploy.result == 'success' || needs.deploy.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write # to start the app's workflows
+      contents: read
+    steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
+      - name: Start the workflows that follow qa-up
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ needs.pr.outputs.number }}
+          NEXT: ${{ inputs.next-workflows }}
+          MROOM_QA_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: mroom/actions/qa-up/next.sh "$PR" "$NEXT"

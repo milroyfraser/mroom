@@ -124,6 +124,20 @@ qa_envs() {
       [.[].created | select(. != "")] | min // "-")"' <<<"$sites"
 }
 
+# qa_env_rank <N>: environment N's place, from 1, among the environments with a site Forge is not removing, by the
+# id of each one's first such site: the order Forge made them in. 0 when N has no such site.
+qa_env_rank() {
+  local sites
+  qa_init || return 1
+  sites="$(qa_all_sites)" || return 1
+  jq -rs --arg zone "$QA_ZONE" --arg re "$QA_SITE_RE" --argjson n "$1" '[.[] | . as $site
+      | select(($site.id | tostring) | test("\\A[0-9]{1,15}\\z")) | .attributes
+      | select((.status // "") != "removing") | ((.name // "") | [match($re).captures[].string]) as $m
+      | select(($m | length) == 2 and $m[1] == $zone) | {n: ($m[0] | tonumber), id: ($site.id | tostring | tonumber)}]
+    | group_by(.n) | map({n: .[0].n, first: (map(.id) | min)}) | sort_by(.first) | map(.n) | index($n)
+    | if . == null then 0 else . + 1 end' <<<"$sites"
+}
+
 # qa_delete <path>: deletes a Forge resource; one that is already gone (404) counts as deleted, since a teardown run
 # again, or one beside it, may have deleted it first.
 qa_delete() {
@@ -156,14 +170,31 @@ qa_redelete_stuck() {
   echo "$age"
 }
 
-# qa_processes: "<id> <status> <user>" for each of environment N's Forge background processes: those run as its
-# site user, and any run from a folder in that user's home, such as one Forge started as another user.
-qa_processes() {
+# qa_jobs <path> [all]: environment N's Forge daemons (/background-processes) or scheduled jobs (/scheduled-jobs),
+# one JSON object a line, {id, user, status, command}: those run as its site user, and those that run from one of its
+# folders or whose command names one by its path, wherever they run from and as whomever, such as a daemon of
+# forge's that runs the site's artisan. One of its folders is its home or anything in it, or a path with one of its
+# sites' domains as a whole part; a URL is no path, so a job that only asks a site for a page is not the
+# environment's. With all, every one in the list, which is then one of the environment's own sites'
+# (/sites/<id>/scheduled-jobs).
+qa_jobs() {
   local items
-  items="$(forge_list /background-processes)" || return 1
-  jq -r --arg user "$QA_USER" --arg home "/home/$QA_USER/" 'select(.attributes.user == $user
-    or ((.attributes.directory // "") | startswith($home))) | (.id | tostring) as $id | select($id | test("\\A[0-9]+\\z"))
-    | "\($id) \(.attributes.status // "unknown") \(.attributes.user // "unknown")"' <<<"$items"
+  items="$(forge_list "$1")" || return 1
+  jq -c --arg user "$QA_USER" --arg home "/home/$QA_USER" --arg api "$QA_API" --arg web "$QA_WEB" --arg all "${2:-}" '
+    def ours: . == $home or startswith($home + "/") or (split("/") | any(.[]; . == $api or . == $web));
+    def names_ours: [scan("[^\\s\"\u0027`;|&()<>=]+") | select(startswith("/"))] | any(.[]; ours);
+    select($all == "all" or .attributes.user == $user or ((.attributes.directory // "") | startswith("/") and ours)
+      or ((.attributes.command // "") | names_ours))
+    | (.id | tostring) as $id | select($id | test("\\A[0-9]+\\z"))
+    | {id: $id, user: (.attributes.user // "unknown"), status: (.attributes.status // "unknown"),
+       command: (.attributes.command // "")}' <<<"$items"
+}
+
+# qa_processes: "<id> <status> <user>" for each of environment N's Forge daemons (qa_jobs).
+qa_processes() {
+  local jobs
+  jobs="$(qa_jobs /background-processes)" || return 1
+  jq -r '"\(.id) \(.status) \(.user)"' <<<"$jobs"
 }
 
 # qa_gate_init: the runner's way to the box's gate. MROOM_QA_SSH_KEY is a private key whose line in the box user's
@@ -203,6 +234,25 @@ qa_cleanup() {
   if [ -n "$QA_KEYS" ]; then rm -rf "$QA_KEYS"; QA_KEYS=""; fi
   forge_cleanup
 }
+
+# qa_up_code <url>: <url>/up's HTTP code, asked up to MROOM_QA_UP_TRIES (6) times, MROOM_QA_UP_PAUSE (5) seconds
+# apart, until it answers 200. A site Forge has just made answers 502 for a few seconds, and so does any site on the
+# box while PHP-FPM or nginx reloads for another, so one answer never says an environment is down. Each try waits
+# 20 seconds at most; 000 means nothing answered.
+qa_up_code() {
+  local code=000 tries="${MROOM_QA_UP_TRIES:-6}" pause="${MROOM_QA_UP_PAUSE:-5}" i
+  [[ "$tries" =~ ^[1-9][0-9]?$ ]] || tries=6
+  [[ "$pause" =~ ^[0-9]{1,2}$ ]] || pause=5
+  for ((i = 1; i <= tries; i++)); do
+    code="$(curl -q -s -o /dev/null -m 20 -w '%{http_code}' "$1/up")" || code=000
+    [ "$code" != 200 ] || break
+    if ((i < tries)); then sleep "$pause"; fi
+  done
+  echo "$code"
+}
+
+# qa_mask <value>: on a runner, tells GitHub to hide the value wherever a later line of the log would show it.
+qa_mask() { if [ "${GITHUB_ACTIONS:-}" = true ] && [ -n "$1" ]; then echo "::add-mask::$1"; fi; }
 
 # qa_comment_newest <PR>: the newest of github-actions[bot]'s QA environment comments on the pull request, as
 # {"id", "state", "since", "woken", "was", "updated_at"} on one line, or nothing. Found by its heading, never as the
@@ -252,6 +302,18 @@ qa_comment() {
   fi
 }
 
+# qa_status <state> <text>: what pull request QA_N's QA environment comment is to say. In actions/qa-up, the comment
+# is written by the step after the others, which runs whatever happened before it (report.sh): this leaves it the
+# state and the text, in MROOM_QA_STATUS, its first line the state. Without MROOM_QA_STATUS, as when a script runs
+# on its own, it writes the comment itself.
+qa_status() {
+  if [ -n "${MROOM_QA_STATUS:-}" ]; then
+    printf '%s\n%s\n' "$1" "$2" >"$MROOM_QA_STATUS"
+  elif [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
+    qa_comment "$QA_N" "$1" "$2" </dev/null || echo "::warning::could not update the QA environment comment of pull request $QA_N"
+  fi
+}
+
 # qa_wake <slots>: after a teardown frees slots, starts the app's QA plan workflow (MROOM_QA_PLAN_WORKFLOW,
 # qa-plan.yml) on the default branch for the open pull requests that wait for a slot, the longest waiting first, at
 # most <slots>. It runs in qa-down's wake job, one wake at a time for the whole repository (its concurrency group):
@@ -261,8 +323,9 @@ qa_comment() {
 # at once.
 # The job token's dispatch does start the plan, but nothing after it starts by itself: a run the job token started
 # starts no workflow_run when it ends, and neither does a run that one starts in turn. So each link starts the next
-# itself: the plan dispatches qa-up (.github/workflows/qa-plan.yml, hand-over), and qa-up, started that way, must
-# dispatch whatever follows it in turn, whose workflow_run would never come either.
+# itself: the plan dispatches qa-up (.github/workflows/qa-plan.yml, hand-over), and qa-up, started that way,
+# dispatches the app's workflows that follow it in turn (.github/workflows/qa-up.yml, next-workflows), whose
+# workflow_run would never come either.
 # The cost is bounded: one listing of the 100 newest open pull requests, and one of each one's comments, 100 a page;
 # one older than those is not seen. It lists every open pull request, not the waiting ones alone, since only their
 # comment's hidden line tells those apart, and GitHub's search does not promise to see it. Best-effort: a failure

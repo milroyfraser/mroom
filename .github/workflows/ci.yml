@@ -43,14 +43,25 @@ jobs:
   test:
     name: tests
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The offline suites, but qa-up's, which has a job of its own below: together they took over 6 minutes.
+    timeout-minutes: 10
     steps:
       # With the tags: tests/root-test.sh checks the README's root recipe against lib/root-setup at its tag.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - run: bash --version | head -1 && python3 --version
-      - run: tests/run.sh
+      - run: tests/run.sh --skip qa-up
+
+  test-qa-up:
+    # qa-up's offline suite, the longest, beside the others.
+    name: tests (qa-up)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash --version | head -1 && python3 --version
+      - run: tests/run.sh qa-up
 
   gate-postgres:
     # The gate against the runner's own Postgres, set up as the README says: pg_hba.conf, ownership and

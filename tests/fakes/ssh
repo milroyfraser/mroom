@@ -8,7 +8,10 @@
 # identity file of mode 600 that holds the test's key, $GATE_KEY. As OpenSSH does without -n, it reads its stdin and
 # sends it on, whatever the request: a put's stdin is kept as $GATE/<operation>.in, and any other request's is read
 # and dropped, so a caller in a loop that forgets -n loses the rest of its loop's input. It answers as the gate does
-# for app "shop" (lib/gate), or from $GATE/<operation>.out and $GATE/<operation>.rc when the test wrote them.
+# for app "shop" (lib/gate), or from $GATE/<operation>.out and $GATE/<operation>.rc when the test wrote them; its
+# probe-link links $SITE_OP_INSTALLED, the box's root-owned site-op, which the Forge stand-in serves when nginx
+# follows that link. As the gate does, it records the commit a code-put put in ($GATE/commit-<N>), which env-sha
+# reports and user-clean forgets.
 set -euo pipefail
 printf '%s\n' "$@" >>"$GATE/ssh.argv"
 echo "--" >>"$GATE/ssh.argv"
@@ -49,13 +52,40 @@ if [ -f "$GATE/$op.rc" ] && [ "$(cat "$GATE/$op.rc")" != 0 ]; then
   exit "$(cat "$GATE/$op.rc")"
 fi
 if [ -f "$GATE/$op.out" ]; then cat "$GATE/$op.out"; exit 0; fi
+read -r -a words <<<"$request"
+# The gate's names for environment N of the app shop in the zone qa.example.dev, built here alone (lib/gate builds
+# them from box.env).
+user="shop_qa_$n" api="api-$n.qa.example.dev" web="go-$n.qa.example.dev"
 case "$op" in
-  user-clean) echo "shop_qa_$n: 2 processes stopped, 1 files and IPC objects removed outside its home" ;;
-  db-drop) echo "database shop_qa_$n: dropped" ;;
-  redis-user-remove) echo "redis user shop_qa_$n: removed" ;;
+  db-create) printf 'database %s: created\nDB_DATABASE=%s\nDB_USERNAME=%s\nDB_PASSWORD=db-pw-%s\n' "$user" "$user" "$user" "$n" ;;
+  redis-user-add)
+    printf 'REDIS_USERNAME=%s\nREDIS_PASSWORD=redis-pw-%s\nREDIS_PREFIX=shop:qa%s:\nHORIZON_PREFIX=shop:qa%s:horizon:\n' "$user" "$n" "$n" "$n"
+    printf 'REDIS_HOST=127.0.0.1\nREDIS_PORT=6379\n' ;;
+  mail-user-add)
+    printf 'MAIL_MAILER=smtp\nMAIL_HOST=127.0.0.1\nMAIL_PORT=1025\nMAIL_USERNAME=%s\nMAIL_PASSWORD=mail-pw-%s\n' "$user" "$n" ;;
+  # The same key every time, as the gate keeps it: base64 of 32 bytes, a test's own.
+  app-key) printf 'APP_KEY=base64:%s\n' "$(printf 'app-key-of-environment-%09d' "$n" | base64 -w0)" ;;
+  bucket-create)
+    printf 'BUCKET=shop-qa-%s-%s\nACCESS_KEY_ID=GK%s\nSECRET_ACCESS_KEY=bucket-pw-%s\nREGION=garage\nENDPOINT=https://s3.qa.example.dev\nPATH_STYLE=true\n' \
+      "$n" "${words[2]}" "${words[2]}" "${words[2]}"
+    if [ "${words[3]:-}" = public ]; then printf 'URL=https://files.qa.example.dev/shop-qa-%s-%s\n' "$n" "${words[2]}"; fi ;;
+  probe-link) printf 'sha256=%s\ntarget=/usr/local/libexec/mroom/site-op\n' "$(sha256sum <"$SITE_OP_INSTALLED" | cut -d' ' -f1)" ;;
+  code-put) printf '%s\n' "${words[2]}" >"$GATE/commit-$n"; echo "$api: 12 entries unpacked, 0 .env skipped" ;;
+  env-sha)
+    # As the gate, which runs site-op as the site user: before Forge has made the site there may be no such user.
+    if jq -e --arg name "$api" 'any(.sites[]?; .name == $name and .status == "installing")' "$FORGE_STATE" >/dev/null 2>&1; then
+      echo "mroom gate: env-sha $n: there is no user $user; qa-up creates the site first" >&2
+      exit 1
+    fi
+    printf 'env=missing\ncommit=%s\n' "$(cat "$GATE/commit-$n" 2>/dev/null || echo none)" ;;
+  dist-put) echo "$web: 3 entries unpacked, 0 .env skipped" ;;
+  env-put) printf 'env=%s\n' "$(printf '%s' "$(cat "$GATE/env-put.in")" | sha256sum | cut -d' ' -f1)" ;;
+  user-clean) rm -f "$GATE/commit-$n"; echo "$user: 2 processes stopped, 1 files and IPC objects removed outside its home" ;;
+  db-drop) echo "database $user: dropped" ;;
+  redis-user-remove) echo "redis user $user: removed" ;;
   redis-clear) echo "redis shop:qa$n: 3 keys deleted" ;;
-  mail-user-remove) echo "mail user shop_qa_$n: removed" ;;
-  mail-clear) echo "mail of shop_qa_$n: 2 deleted" ;;
+  mail-user-remove) echo "mail user $user: removed" ;;
+  mail-clear) echo "mail of $user: 2 deleted" ;;
   bucket-drop) echo "bucket shop-qa-$n-files: dropped, 4 objects deleted" ;;
   *) echo "mroom gate: refused: provision may not run '$op'" >&2; exit 1 ;;
 esac

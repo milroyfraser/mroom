@@ -106,6 +106,13 @@ class Admin(Handler):
         if path == "/v2/ListBuckets":
             return self.reply(200, [{"id": bid, "created": "2026-10-26T00:00:00Z", "globalAliases": [b["alias"]],
                                      "localAliases": []} for bid, b in buckets.items()])
+        if path == "/v2/GetKeyInfo":
+            k = keys.get(query.get("id", ""))
+            if k is None:
+                return self.reply(404, {"code": "NoSuchKey", "message": "Key not found"})
+            return self.reply(200, {"accessKeyId": query["id"], "name": k["name"], "expired": False,
+                                    "buckets": [{"id": b, "globalAliases": [buckets[b]["alias"]], "permissions": perm}
+                                                for b, perm in k["perms"].items() if b in buckets]})
         if path == "/v2/ListKeys":
             return self.reply(200, [{"id": k, "name": v["name"], "expired": False} for k, v in keys.items()])
         if path == "/v2/CreateKey":

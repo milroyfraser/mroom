@@ -12,6 +12,9 @@ users, never as root:
   site-op env-put api-<N>.<zone> <backend_dir>                the backend's .env, on stdin
   site-op env-sha api-<N>.<zone> <backend_dir>                the SHA-256 of the backend's .env, or "missing"
   site-op signin-code api-<N>.<zone> <backend_dir> <php> <email>   a sign-in code from the app
+  site-op probe-link api-<N>.<zone> <backend_dir>             a link to this root-owned file at the web root,
+  site-op probe-link go-<N>.<zone>                            which nginx must refuse to serve; prints the file's
+                                                              SHA-256 and path
   site-op clean                                               stops this user's processes and deletes its
                                                               files outside its home
 
@@ -814,6 +817,38 @@ def clean() -> None:
     print(report)
 
 
+PROBE = "mroom-symlink-probe"
+
+
+def probe_link(domain: str, backend: str | None) -> None:
+    """A link, at the site's web root, to this file: root's own and readable by all. nginx runs as the box user and
+    follows links unless the site's config says disable_symlinks if_not_owner (D17): qa-up asks for the link, before
+    any of the pull request's code is in the site, and refuses to go on when what comes back is this file, by the
+    SHA-256 printed here with its path. The web root is made if the site has none yet; the next put replaces the
+    tree, and the link with it."""
+    kind = "go" if backend is None else "api"
+    root = site_root(domain, kind)
+    folder = "." if backend is None else tree_path(backend_dir(backend), "public")
+    target = os.path.realpath(sys.argv[0])
+    st = os.stat(target)
+    if UNDER_SUDO and (st.st_uid != 0 or not st.st_mode & stat.S_IROTH):
+        raise Refused(f"{target} is not root's and readable by all, so the probe would prove nothing")
+    with open(target, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    if through_link(root, folder):
+        raise Refused(f"{folder} goes through a link")
+    web = os.path.join(root, folder)
+    os.makedirs(web, mode=0o755, exist_ok=True)
+    tmp = os.path.join(web, f".{PROBE}.{uuid.uuid4().hex[:8]}")
+    os.symlink(target, tmp)
+    try:
+        os.replace(tmp, os.path.join(web, PROBE))
+    except BaseException:
+        remove(tmp)
+        raise
+    print(f"{digest} {target}")
+
+
 def main(argv: list[str]) -> int:
     os.umask(0o022)
     for signum in STOP_SIGNALS:
@@ -829,10 +864,14 @@ def main(argv: list[str]) -> int:
             env_sha(argv[1], argv[2])
         elif len(argv) == 5 and argv[0] == "signin-code":
             signin_code(argv[1], argv[2], argv[3], argv[4])
+        elif len(argv) == 3 and argv[0] == "probe-link":
+            probe_link(argv[1], argv[2])
+        elif len(argv) == 2 and argv[0] == "probe-link":
+            probe_link(argv[1], None)
         elif argv == ["clean"]:
             clean()
         else:
-            raise Refused("usage: site-op unpack code|dist ... | env-put ... | env-sha ... | signin-code ... | clean")
+            raise Refused("usage: site-op unpack code|dist ... | env-put ... | env-sha ... | signin-code ... | probe-link ... | clean")
     except Refused as e:
         print(f"site-op: {e}", file=sys.stderr)
         return 1

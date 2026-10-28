@@ -8,22 +8,26 @@
 QA_KEY=$'-----BEGIN OPENSSH PRIVATE KEY-----\nnot-a-real-key\n-----END OPENSSH PRIVATE KEY-----'
 NOW=1793102400 # 2026-10-27 12:00 UTC
 
-# qa_world: the fakes, an app named shop with the zone qa.example.dev, and an empty Forge.
+# qa_world: the fakes, an app named shop with the zone qa.example.dev, and an empty Forge. Called again in a test, it
+# starts that world afresh.
 qa_world() {
+  rm -rf "$T/gate" "$T/gh" "$T/forge.log" "$T/order.log" "$T/github-output" "$T"/up-codes*
   mkdir -p "$T/bin" "$T/gate" "$T/gh" "$T/tmp"
   # shellcheck disable=SC2016  # the fakes' own $1, $@ and $T
   printf '#!/bin/sh\nexec python3 -I "%s" "$@"\n' "$ROOT/tests/fakes/forge.py" >"$T/bin/curl"
   # shellcheck disable=SC2016
   printf '#!/bin/sh\necho "$1" >>"$T/sleep.log"\n' >"$T/bin/sleep"
   chmod +x "$T/bin/curl" "$T/bin/sleep"
-  ln -s "$ROOT/tests/fakes/gh" "$T/bin/gh"
-  ln -s "$ROOT/tests/fakes/ssh" "$T/bin/ssh"
+  ln -sfn "$ROOT/tests/fakes/gh" "$T/bin/gh"
+  ln -sfn "$ROOT/tests/fakes/ssh" "$T/bin/ssh"
   echo '{"sites": [], "processes": []}' >"$T/forge.json"
   printf '[app]\nname = "shop"\n\n[qa]\nzone = "qa.example.dev"\n' >"$T/mroom.toml"
   echo '[]' >"$T/gh/prs.json"
   export T PATH="$T/bin:$PATH" TMPDIR="$T/tmp" MROOM_NOW="$NOW"
   export FORGE_STATE="$T/forge.json" FORGE_LOG="$T/forge.log" ORDER_LOG="$T/order.log" GATE="$T/gate"
   export GATE_KEY="$QA_KEY" GH_FAKE="$T/gh"
+  # The box's site-op, root's, which the gate's probe-link links into a web root: this release's.
+  export SITE_OP_INSTALLED="$ROOT/lib/site-op"
   export MROOM_CONFIG="$T/mroom.toml" MROOM_FORGE_ORG=acme MROOM_FORGE_SERVER=42 MROOM_FORGE_TOKEN=fake-forge-token
   export MROOM_QA_SSH_HOST=box.example.dev MROOM_QA_SSH_KEY="$QA_KEY"
   export MROOM_QA_SSH_KNOWN_HOSTS="box.example.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAInotarealkey"
@@ -53,12 +57,55 @@ site() {
   forge_set ".sites += [$item]"
 }
 
-# process <id> <user> <directory> [<status>]: a background process on the fake Forge.
+# made_site <id> <N> <api|web> <web root> [<PHP version>]: a site Forge made for environment N earlier, as Forge lists
+# one: isolated in the home of the environment's user, its web root absolute, and with a PHP version a PHP site.
+made_site() {
+  local name user item
+  user="$(site_user "$2")"
+  if [ "$3" = api ]; then name="$(api_host "$2")"; else name="$(web_host "$2")"; fi
+  item="$(jq -nc --argjson id "$1" --arg name "$name" --arg user "$user" --arg web "/home/$user/$name${4%/}" \
+    --arg php "${5:-}" '{id: $id, name: $name, status: "installed", user: $user, isolated: true,
+      created_at: "2026-10-26T12:00:00Z", root_directory: "/home/\($user)/\($name)", web_directory: $web,
+      php_version: (if $php == "" then null else "PHP \($php)" end)}')"
+  forge_set ".sites += [$item]"
+}
+
+# pr_now <N> <state> <head> [<draft> [<labels as JSON>]]: the pull request as GitHub has it now (gh pr view).
+pr_now() {
+  jq -n --argjson n "$1" --arg state "$2" --arg sha "$3" --argjson draft "${4:-false}" --argjson labels "${5:-[]}" \
+    '{number: $n, state: $state, headRefOid: $sha, isDraft: $draft, isCrossRepository: false,
+      labels: ($labels | map({name: .}))}' >"$GH_FAKE/pr-$1.json"
+}
+
+# pr_toml <commit> [<toml>]: the pull request's mroom.toml at that commit, as GitHub gives it; the default branch's
+# when no other is given.
+pr_toml() {
+  mkdir -p "$GH_FAKE/contents-$1"
+  if [ "$#" -ge 2 ]; then printf '%s\n' "$2" >"$GH_FAKE/contents-$1/mroom.toml"; else cp "$MROOM_CONFIG" "$GH_FAKE/contents-$1/mroom.toml"; fi
+}
+
+# code_went_in <N> [<commit>]: environment N's code went in earlier, as the gate records it (tests/fakes/ssh).
+code_went_in() { printf '%s\n' "${2:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" >"$GATE/commit-$1"; }
+
+# process <id> <user> <directory> [<status> [<command>]]: a background process on the fake Forge.
 process() {
   local item
   item="$(jq -nc --argjson id "$1" --arg user "$2" --arg dir "$3" --arg status "${4:-running}" \
-    '{id: $id, user: $user, directory: $dir, status: $status, command: "php artisan queue:work", processes: 1}')"
+    --arg command "${5:-php artisan queue:work}" \
+    '{id: $id, user: $user, directory: $dir, status: $status, command: $command, processes: 1}')"
   forge_set ".processes += [$item]"
+}
+
+# job <id> <user> <command> [<site id>]: a scheduled job on the fake Forge: the server's, or that site's own.
+job() {
+  local item
+  item="$(jq -nc --argjson id "$1" --arg user "$2" --arg command "$3" \
+    '{id: $id, user: $user, command: $command, status: "installed", frequency: "minutely", cron: "* * * * *"}')"
+  if [ -n "${4:-}" ]; then
+    forge_set "(.sites[] | select(.id == $4) | .jobs) += [$item]"
+  else
+    forge_set ".jobs += [$item]"
+  fi
 }
 
 # comment <PR> <id> <login> <body> [<updated_at>]: a comment on the pull request, for the fake GitHub.

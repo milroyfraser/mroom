@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317,SC2016  # t_* run through test_case; a $ in single quotes is for eval, later
 # Tests for the gate's Garage operations (bucket-create, bucket-drop): a bucket per environment and file disk,
-# a key that reaches it alone and is new on every create, website access only for a public disk, and a drop
+# a key that reaches it alone, kept from one create to the next until --rotate, website access only for a public
+# disk, and a drop
 # that finds every bucket and key of the environment by name and empties each bucket with a key of its own,
 # which goes when the drop ends. Offline:
 # tests/fakes/garage.py plays Garage's admin and S3 APIs on Unix sockets, and the gate's real curl and
@@ -78,15 +79,35 @@ t_bucket_create_makes_a_bucket_and_a_key_for_it_alone() {
   run state; run jq -c '.buckets' <<<"$out"; expect_out '{"shop-qa-12-files":{"website":false,"objects":[]}}'
   expect_true "the admin token reached a command line" lacks "$(cat "$T/curl.argv")" "$TOKEN"
   expect_true "the secret reached the gate log" lacks "$(gate_log_text)" "$secret"
-  # Again: a new key, the old one gone, the bucket and its files kept.
+  # Again: the same key, so the running app's still works, and the bucket and its files kept.
   first="$key"
   seed shop-qa-12-files keep.txt
   gate "bucket-create 12 files"; expect_rc 0
-  key="$(field ACCESS_KEY_ID "$out")"
-  expect_true "the key was not replaced" [ "$key" != "$first" ]
+  expect_out_has $'ACCESS_KEY_ID='"$first"$'\nSECRET_ACCESS_KEY='"$secret"
   run state
   run jq -r '[.keys[] | select(.name == "shop-qa-12-files")] | length' <<<"$out"; expect_out 1
   run state; run jq -c '.buckets["shop-qa-12-files"].objects' <<<"$out"; expect_out '["keep.txt"]'
+  expect_true "the secret reached the gate log" lacks "$(gate_log_text)" "$secret"
+  # --rotate: a new key, and the old one gone.
+  gate "bucket-create 12 files --rotate"; expect_rc 0
+  key="$(field ACCESS_KEY_ID "$out")"
+  expect_true "--rotate kept the key" [ "$key" != "$first" ]
+  run state
+  run jq -r '[.keys[] | select(.name == "shop-qa-12-files") | .name] | length' <<<"$out"; expect_out 1
+  expect_true "the old key is left" eval '! jq -e --arg k "$first" ".keys[\$k]" <<<"$(state)" >/dev/null'
+  # A key Garage no longer has, deleted by someone, is replaced, and so is the kept one of another name.
+  admin "/v2/DeleteKey?id=$key" '{}' >/dev/null
+  gate "bucket-create 12 files"; expect_rc 0
+  expect_true "a key Garage lost was given out" [ "$(field ACCESS_KEY_ID "$out")" != "$key" ]
+  # One a stopped request left beside the kept one goes.
+  admin /v2/CreateKey '{"name": "shop-qa-12-files"}' >/dev/null
+  key="$(field ACCESS_KEY_ID "$out")"
+  gate "bucket-create 12 files"; expect_rc 0; expect_out_has "ACCESS_KEY_ID=$key"
+  run state
+  run jq -r '[.keys[] | select(.name == "shop-qa-12-files")] | length' <<<"$out"; expect_out 1
+  for words in "bucket-create 12 files --rotate x" "bucket-create 12 --rotate" "bucket-create 12 files --again"; do
+    gate "$words"; expect_rc 1
+  done
 }
 
 t_a_public_disk_gets_website_access_and_a_url() {
@@ -129,6 +150,9 @@ t_bucket_drop_empties_and_deletes_every_bucket_and_key_of_the_environment() {
   run grep -c '^s3 DELETE /shop-qa-12-.* login=good$' "$T/garage.log"; expect_out 1209
   expect_true "a key's slash went unencoded" grep -qxF 's3 DELETE /shop-qa-12-files/%2F%2Ftwo login=good' "$T/garage.log"
   gate "bucket-drop 12"; expect_rc 0; expect_out "environment 12 has no buckets, so nothing to drop"
+  # The keys the gate kept for its disks went with them.
+  expect_true "a dropped environment's keys are still kept" eval '! grep -q "^BUCKET_" "$HOME/.local/state/mroom/qa/shop_qa_12.secrets" 2>/dev/null'
+  expect_true "another environment's keys went" grep -q '^BUCKET_KEY_files=' "$HOME/.local/state/mroom/qa/shop_qa_13.secrets"
   gate "bucket-drop 1"; expect_rc 0; expect_out "bucket shop-qa-1-files: dropped, 1 objects deleted"
   run state; run jq -c '.buckets | keys' <<<"$out"; expect_out '["shop-qa-13-files"]'
 }

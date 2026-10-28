@@ -94,6 +94,54 @@ t_the_reaper_holds_no_ssh_key() {
   expect_true "qa-reap takes the SSH key" eval '! grep -q "SSH_KEY" "$W/qa-reap.yml" "$ROOT/actions/qa-reap/action.yml"'
 }
 
+t_deploys_queue_in_the_pull_requests_group_too() {
+  local deploy
+  deploy="$(job "$W/qa-up.yml" deploy)"
+  expect_true "the deploy's group is not the pull request's" has "$deploy" '      group: mroom-qa-${{ needs.pr.outputs.number }}'
+  expect_true "a deploy can be cancelled by its group" has "$deploy" "      cancel-in-progress: false"
+  expect_true "a newer run can cancel a waiting deploy" has "$deploy" "      queue: max"
+}
+
+t_qa_up_takes_only_the_plan_runs_id_from_its_event() {
+  local pr
+  pr="$(job "$W/qa-up.yml" pr)"
+  expect_true "the run id does not come from the dispatch or the workflow_run" grep -qF \
+    "RUN_ID: \${{ github.event_name == 'workflow_dispatch' && github.event.inputs.plan_run_id || github.event.workflow_run.id }}" <<<"$pr"
+  # Nothing else of the event is read: no branch, commit, title or pull request it claims.
+  expect_true "qa-up reads more of the workflow_run event than the run's id and conclusion" \
+    eval '! grep -o "github\.event\.workflow_run\.[a-z_]*" "$W/qa-up.yml" | grep -v -x -e "github.event.workflow_run.id" -e "github.event.workflow_run.conclusion"'
+  expect_true "the deploy downloads from another run than the one resolve.sh checked" \
+    has "$(job "$W/qa-up.yml" deploy)" '          plan-run-id: ${{ needs.pr.outputs.run-id }}'
+  expect_true "the plan's build job is not named after the commit it built" \
+    has "$(job "$W/qa-plan.yml" build)" '    name: QA build ${{ needs.pr.outputs.sha }}'
+  expect_true "the plan's build job checks out another commit than its name says" \
+    has "$(job "$W/qa-plan.yml" build)" '          ref: ${{ needs.pr.outputs.sha }}'
+}
+
+t_the_workflows_after_qa_up_are_started_only_for_a_run_the_job_token_started() {
+  local next
+  next="$(job "$W/qa-up.yml" next)"
+  expect_true "the next job runs for more than a dispatch" grep -qF "github.event_name == 'workflow_dispatch'" <<<"$next"
+  expect_true "the next job runs for a person's dispatch" grep -qF "github.actor == 'github-actions[bot]'" <<<"$next"
+  expect_true "the next job goes by who re-ran qa-up" eval '! grep -q triggering_actor <<<"$next"'
+  # Whenever the deploy ran, whatever it came to, as the workflow_run would have; not when it was skipped.
+  expect_true "the next job runs only when the environment came up" eval '! grep -q app-url <<<"$next"'
+  expect_true "the next job does not run whenever the deploy ran" \
+    grep -qF "(needs.deploy.result == 'success' || needs.deploy.result == 'failure')" <<<"$next"
+  expect_true "the next job runs when the run was cancelled" grep -qF '!cancelled() &&' <<<"$next"
+  expect_true "the next job does not hand next.sh the pull request and the list" \
+    has "$next" '        run: mroom/actions/qa-up/next.sh "$PR" "$NEXT"'
+  expect_true "the next job runs another mroom's next.sh" has "$next" '          ref: ${{ job.workflow_sha }}'
+}
+
+t_the_comment_comes_from_a_step_that_always_runs() {
+  local action="$ROOT/actions/qa-up/action.yml" report
+  report="$(awk '/^    - id: report$/ { on = 1 } on' "$action")"
+  expect_true "the report step does not always run" has "$report" "      if: always()"
+  run grep -c -x '        MROOM_QA_STATUS: ${{ runner.temp }}/mroom-qa-up.status' "$action"; expect_out 3
+  expect_true "the build is downloaded from another run" grep -qF 'run-id: ${{ inputs.plan-run-id }}' "$action"
+}
+
 t_each_action_passes_its_inputs_and_runs_scripts_it_has() {
   local action input script
   for action in "$ROOT"/actions/qa-*/action.yml; do
@@ -114,5 +162,9 @@ test_case one-wake-at-a-time t_one_wake_at_a_time_after_a_teardown_that_freed_a_
 test_case bash-pipefail t_every_run_step_is_bash_with_pipefail
 test_case hand-over-guard t_the_hand_over_is_only_for_a_plan_the_job_token_started
 test_case reaper-no-ssh t_the_reaper_holds_no_ssh_key
+test_case deploys-queue t_deploys_queue_in_the_pull_requests_group_too
+test_case event-values-ignored t_qa_up_takes_only_the_plan_runs_id_from_its_event
+test_case next-guard t_the_workflows_after_qa_up_are_started_only_for_a_run_the_job_token_started
+test_case comment-always t_the_comment_comes_from_a_step_that_always_runs
 test_case action-inputs t_each_action_passes_its_inputs_and_runs_scripts_it_has
 finish
