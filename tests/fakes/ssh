@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# A stand-in for ssh to the box's gate, for the QA action tests (tests/qa-*-test.sh). The box forces
+# `mroom gate provision` on the key, which reads the request from SSH_ORIGINAL_COMMAND: here the last argument.
+#
+# It logs every argument to $GATE/ssh.argv and the request to $GATE/gate.log (and as "gate <request>" to
+# $ORDER_LOG, when it is set, which the Forge stand-in writes too), one line each. It refuses unless ssh was asked
+# for batch mode, no config file (-F /dev/null), no agent, a strict host key check against a known_hosts file, and an
+# identity file of mode 600 that holds the test's key, $GATE_KEY. As OpenSSH does without -n, it reads its stdin and
+# sends it on, whatever the request: a put's stdin is kept as $GATE/<operation>.in, and any other request's is read
+# and dropped, so a caller in a loop that forgets -n loses the rest of its loop's input. It answers as the gate does
+# for app "shop" (lib/gate), or from $GATE/<operation>.out and $GATE/<operation>.rc when the test wrote them.
+set -euo pipefail
+printf '%s\n' "$@" >>"$GATE/ssh.argv"
+echo "--" >>"$GATE/ssh.argv"
+request="${*: -1}"
+op="${request%% *}" n="$(cut -d' ' -f2 <<<"$request")"
+
+batch="" strict="" known="" key="" agent="" config="" no_stdin=""
+while [ "$#" -gt 1 ]; do
+  case "$1" in
+    -o)
+      case "$2" in
+        BatchMode=yes) batch=1 ;;
+        StrictHostKeyChecking=yes) strict=1 ;;
+        IdentityAgent=none) agent=1 ;;
+        UserKnownHostsFile=*) known="${2#UserKnownHostsFile=}" ;;
+      esac
+      shift 2 ;;
+    -i) key="$2"; shift 2 ;;
+    -F) [ "$2" != /dev/null ] || config=1; shift 2 ;;
+    -n) no_stdin=1; shift ;;
+    *) shift ;;
+  esac
+done
+if [ -z "$batch" ] || [ -z "$strict" ] || [ -z "$agent" ] || [ -z "$config" ] || [ ! -s "$known" ] \
+  || [ "$(stat -c %a "$key" 2>/dev/null)" != 600 ] || [ "$(cat "$key" 2>/dev/null)" != "$GATE_KEY" ]; then
+  echo "fake ssh: not batch mode, no config file, no agent, a strict host key check and the test's key, mode 600" >&2
+  exit 255
+fi
+
+echo "$request" >>"$GATE/gate.log"
+if [ -n "${ORDER_LOG:-}" ]; then echo "gate $request" >>"$ORDER_LOG"; fi
+case "$op" in
+  code-put | dist-put | env-put) if [ -n "$no_stdin" ]; then : >"$GATE/$op.in"; else cat >"$GATE/$op.in"; fi ;;
+  *) [ -n "$no_stdin" ] || cat >/dev/null ;;
+esac
+if [ -f "$GATE/$op.rc" ] && [ "$(cat "$GATE/$op.rc")" != 0 ]; then
+  echo "mroom gate: $op $n: failing, as the test asked" >&2
+  exit "$(cat "$GATE/$op.rc")"
+fi
+if [ -f "$GATE/$op.out" ]; then cat "$GATE/$op.out"; exit 0; fi
+case "$op" in
+  user-clean) echo "shop_qa_$n: 2 processes stopped, 1 files and IPC objects removed outside its home" ;;
+  db-drop) echo "database shop_qa_$n: dropped" ;;
+  redis-user-remove) echo "redis user shop_qa_$n: removed" ;;
+  redis-clear) echo "redis shop:qa$n: 3 keys deleted" ;;
+  mail-user-remove) echo "mail user shop_qa_$n: removed" ;;
+  mail-clear) echo "mail of shop_qa_$n: 2 deleted" ;;
+  bucket-drop) echo "bucket shop-qa-$n-files: dropped, 4 objects deleted" ;;
+  *) echo "mroom gate: refused: provision may not run '$op'" >&2; exit 1 ;;
+esac

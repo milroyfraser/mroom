@@ -220,6 +220,8 @@ version_path = "/version"          # returns {"release": "<tag>", "commit": "<sh
 [app.build]
 frontend = "pnpm build"
 frontend_env = { VITE_REVERB_APP_KEY = "env:REVERB_APP_KEY" }   # in QA, mroom sets the key from the PR (D16)
+frontend_dist = "dist"             # where the build writes, in the folder it runs in: frontend_dir, or for "."
+                                   # (Vite inside Laravel) backend_dir, where the default is public/build
 after_deploy = ["config:clear", "route:cache"]   # artisan commands
 daemons = ["horizon", "reverb"]          # QA skips reverb: mroom's Reverb host serves it (D16)
 queues = ["default", "mail"]
@@ -244,6 +246,8 @@ ttl_days = 5
 template_database = "qa_template"
 persona_domain = ".test"           # sign-in codes are only ever read for these addresses
 db_read_allowlist = []             # REQUIRED when browser QA is on: tables and columns the agent may read
+hidden_paths = []                  # the plan's path rules: paths no user can see, beyond mroom's own rules
+visible_paths = []                 # paths a user can see, whatever the rules say (shell patterns, * matches /)
 
 [qa.parity]                        # how QA runs each production service (section 9); defaults shown
 database = "seeded"                # seeded (factories) | snapshot (opt-in masked copy, section 9)
@@ -356,9 +360,12 @@ Invariants, each with a test:
    holds: on GitHub, only the agents' account (D22).
 2. **QA provisioning keeps PR code away from every secret:**
    - `qa-plan` (`pull_request`, no secrets): scope the change with path rules, build the frontend from the PR with
-     public values only, upload `dist/` and `plan.json` as artifacts. A Claude step that judges whether a user
-     could notice the change runs later, in a job with default-branch code, boxed as in 8.5, reading the diff as
-     data.
+     public values only, upload `dist/` as an artifact; qa-up scopes the change again itself, since nothing a job
+     that ran PR code leaves can be trusted. A Claude step that judges whether a user could notice the change
+     runs later, in a job with default-branch code, boxed as in 8.5, reading the diff as data.
+   - A job that runs PR code under a trusted trigger sets `cache-mode: read`. A dispatch from the default branch
+     (a person's, or a wake's) runs qa-plan under that branch, whose caches `workflow_dispatch` may write, so
+     without it the PR's code could leave a poisoned cache for the default branch's own builds.
    - `qa-up` (`workflow_run` on qa-plan, environment `qa`, default-branch code only): create the site and the
      environment's services, write `.env` through the gate (`env-put`, as the site user, so nothing follows a link
      the PR's code left there), fetch the PR's tree by commit (GitHub's tarball, as data) and send it
@@ -707,6 +714,25 @@ What the pilot's scripts learned after this table was drawn, which their ports k
   finds uncommitted changes there, or cannot fetch or switch to the branch) gives back a lock it took, never one
   the pull's owner held before it started. An owner's expired lock is taken anew, not renewed, so such a pull
   gives it back too. A failure after the switch keeps the lock, since the site may be half switched.
+- **Caches under a trusted trigger (`qa-plan`, phase 2a).** A job that runs a pull request's code under a trigger
+  that may write the default branch's caches (`workflow_dispatch`, `push`, `schedule` and the like) sets
+  `cache-mode: read`, or the pull request's code can save a cache the default branch's own builds restore.
+- **Finding runs (phase 2a).** A lookup of a workflow's runs, such as whether a deploy for a pull request is
+  running or which of its runs is the newest, finds them by workflow and by run name, never filtered by event: a
+  run started by `workflow_dispatch` is as much a run of that workflow as one started by `workflow_run`, and a
+  filter on the usual event hides it.
+- **Chains of runs (phase 2a).** A run started with the job token (`GITHUB_TOKEN`) starts no `workflow_run` when it
+  ends, and neither does a run it dispatches in turn. So in a chain the token started, each link dispatches the
+  next itself, all the way down: a woken plan dispatches qa-up, and qa-up dispatches what follows it. A workflow
+  that waits on `workflow_run` of a link also accepts that dispatch, or never runs for such a chain.
+- **One picker at a time (qa-down, phase 2a).** A step that picks the next item off a shared list and marks it,
+  such as the wake that gives a freed slot to the pull request that waited longest, runs in a concurrency group
+  of its own: two side by side each read the list before either marks it, and pick the same item. Three teardowns
+  the reaper started at once woke one pull request three times, and the other two slots went unused.
+- **What a re-run reads (qa-down, phase 2a).** "Re-run failed jobs" keeps the outputs of the jobs that passed;
+  "Re-run all jobs" runs them again, against a world the first attempt changed. A job whose answer the first
+  attempt's own work spoils, such as a check that finds no site once the teardown deleted them, takes what the
+  first attempt left in a place it does not change, such as the comment's hidden line.
 
 ## 13. Before publishing
 

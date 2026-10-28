@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# A stand-in for the GitHub CLI, for the QA action tests (tests/qa-*-test.sh). It answers from files in $GH_FAKE
+# and logs each call that changes something to $GH_FAKE/gh.log, one line each:
+#
+#   gh api --paginate repos/<repo>/issues/<N>/comments --jq <filter>   comments-<N>.json (a list), filtered
+#   gh api -X PATCH repos/<repo>/issues/comments/<id> --input -        "PATCH <id> <body>"; edits the comment
+#   gh api -X POST repos/<repo>/issues/<N>/comments --input -          "POST <N> <body>"; adds the comment
+#   gh api --paginate repos/<repo>/pulls/<N>/files --jq <filter>       files-<N>.json (a list), filtered
+#   gh pr list --repo <repo> ... --json ... --jq <filter>              prs.json, filtered; its arguments go to reads.log
+#   gh workflow run <file> --repo <repo> [--ref <branch>] -f k=v...    "dispatch <file> <branch> k=v..."
+#   gh pr view <N> --repo <repo> --json ... [--jq <filter>]            pr-<N>.json, filtered
+#
+# A body is logged with its newlines as \n. With $GH_FAKE/down, every call fails as GitHub being unreachable; with
+# $GH_FAKE/patch-fails-<id>, an edit of that comment fails; with $GH_FAKE/dispatch-fails, every dispatch does.
+set -euo pipefail
+shopt -s nullglob
+log() { printf '%s\n' "$*" >>"$GH_FAKE/gh.log"; }
+if [ -f "$GH_FAKE/down" ]; then echo "error connecting to api.github.com" >&2; exit 1; fi
+
+# filter <file> <jq filter>: the file's list through the filter, as gh --jq prints it.
+filter() { jq -r "$2" "$1"; }
+jqf="" method=GET path="" args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --jq) jqf="$2"; shift 2 ;;
+    -X) method="$2"; shift 2 ;;
+    --paginate) shift ;;
+    --input) shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+
+case "${args[0]} ${args[1]:-}" in
+  "api repos/"*)
+    path="${args[1]}"
+    case "$method $path" in
+      GET\ repos/*/pulls/*/files)
+        n="${path%/files}"; n="${n##*/}"
+        filter "$GH_FAKE/files-$n.json" "${jqf:-.}"
+        ;;
+      GET\ repos/*/issues/*/comments*)
+        printf 'list %s\n' "$path" >>"$GH_FAKE/reads.log"
+        path="${path%%\?*}"
+        n="${path%/comments}"; n="${n##*/}"
+        file="$GH_FAKE/comments-$n.json"
+        [ -f "$file" ] || echo '[]' >"$file"
+        filter "$file" "${jqf:-.}"
+        ;;
+      PATCH\ repos/*/issues/comments/*)
+        id="${path##*/}" body="$(jq -r .body)"
+        if [ -f "$GH_FAKE/patch-fails-$id" ]; then echo "gh: Server Error (HTTP 502)" >&2; exit 1; fi
+        log "PATCH $id ${body//$'\n'/\\n}"
+        for file in "$GH_FAKE"/comments-*.json; do
+          jq --argjson id "$id" --arg b "$body" 'map(if .id == $id then .body = $b | .updated_at = "2026-10-27T12:00:00Z" else . end)' \
+            "$file" >"$file.new" && mv "$file.new" "$file"
+        done
+        ;;
+      POST\ repos/*/issues/*/comments)
+        n="${path%/comments}"; n="${n##*/}" body="$(jq -r .body)"
+        log "POST $n ${body//$'\n'/\\n}"
+        file="$GH_FAKE/comments-$n.json"
+        [ -f "$file" ] || echo '[]' >"$file"
+        jq --arg b "$body" '. + [{id: (900 + length), user: {login: "github-actions[bot]"}, body: $b,
+          updated_at: "2026-10-27T12:00:00Z"}]' "$file" >"$file.new" && mv "$file.new" "$file"
+        ;;
+      *) echo "fake gh: unexpected $method $path" >&2; exit 1 ;;
+    esac
+    ;;
+  "pr view")
+    [ -f "$GH_FAKE/pr-${args[2]}.json" ] || { echo "no pull request ${args[2]}" >&2; exit 1; }
+    filter "$GH_FAKE/pr-${args[2]}.json" "${jqf:-.}"
+    ;;
+  "pr list")
+    printf '%s\n' "${args[*]}" >>"$GH_FAKE/reads.log"
+    filter "$GH_FAKE/prs.json" "${jqf:-.}"
+    ;;
+  "workflow run")
+    file="${args[2]}" ref="(default)" fields=""
+    for ((i = 3; i < ${#args[@]}; i++)); do
+      case "${args[i]}" in
+        --ref) ref="${args[i + 1]}" ;;
+        -f) fields+=" ${args[i + 1]}" ;;
+      esac
+    done
+    if [ -f "$GH_FAKE/dispatch-fails" ]; then echo "could not create workflow dispatch event: HTTP 422" >&2; exit 1; fi
+    log "dispatch $file $ref${fields}"
+    ;;
+  *) echo "fake gh: unexpected ${args[*]}" >&2; exit 1 ;;
+esac
