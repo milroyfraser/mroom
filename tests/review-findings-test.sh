@@ -207,9 +207,14 @@ t_refusals_and_failures() {
 
 t_large_comments_go_through_stdin() {
   world
-  local big
-  big="$(head -c 300000 /dev/zero | tr '\0' 'x')"
-  list <(review 2026-01-01T00:00:00Z "$FULL_RED"$'\n\n'"$big" "$HEAD") <(comment dev 2026-01-02T00:00:00Z "$big") >"$FAKE/comments.json"
+  # Over Linux's 128 KiB limit on one argument and macOS's 1 MiB for them all; the fixture is made from files
+  # for the same reason.
+  head -c 700000 /dev/zero | tr '\0' 'x' >"$T/big"
+  jq -n --rawfile big "$T/big" --arg red "$FULL_RED" --arg head "$HEAD" '[
+    {login: "claude[bot]", created_at: "2026-01-01T00:00:00Z", html_url: "https://gh/c/1",
+     body: ($red + "\n\n" + $big + "\n\n<!-- claude-review sha=\($head) -->")},
+    {login: "dev", created_at: "2026-01-02T00:00:00Z", html_url: "https://gh/c/2", body: $big}]' >"$FAKE/comments.json"
+  expect_true "the fixture is not large" [ "$(wc -c <"$FAKE/comments.json")" -gt 1400000 ]
   REVIEW_FINDINGS_DRY_RUN=1 script 7; expect_rc 0
   verdict "a large comment" '.conclusion == "failure"'
 }
