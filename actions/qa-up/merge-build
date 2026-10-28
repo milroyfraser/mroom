@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""merge-build <tarball> <build folder> <path in the tree> — GitHub's tarball of a commit with the frontend built from
+it put inside, gzipped, on stdout (actions/qa-up/up.sh). For Vite inside the Laravel app, whose build Laravel serves
+from the tree itself (public/build): the gate's code-put then unpacks both, as the site user (D17).
+
+It copies the tarball member by member and never unpacks it, so its one top folder, named after the commit, stays,
+and so do GitHub's global pax header and every member's mode. Members already at <path>, a build committed to the
+repository, are left out, and the build's files and folders go there instead, with ordinary modes. The build holds
+only files and folders, as up.sh checks first; anything else in it is refused here too.
+"""
+
+import os
+import stat
+import sys
+import tarfile
+
+
+def plain(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    """A build entry as the site gets it: no owner of the runner's, and ordinary modes."""
+    info.uid = info.gid = 0
+    info.uname = info.gname = ""
+    info.mode = 0o755 if info.isdir() else 0o644
+    return info
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 3:
+        print("usage: merge-build <tarball> <build folder> <path in the tree>", file=sys.stderr)
+        return 2
+    source, build, inner = argv
+    inner = inner.strip("/").removeprefix("./")
+    if not inner or ".." in inner.split("/"):
+        print(f"merge-build: '{inner[:80]}' is not a path inside the tree", file=sys.stderr)
+        return 2
+    # Opening the tarball reads its first member, and with it GitHub's global header, which the copy keeps.
+    with tarfile.open(source, "r:gz") as src, tarfile.open(
+            fileobj=sys.stdout.buffer, mode="w|gz", format=tarfile.PAX_FORMAT, pax_headers=src.pax_headers) as out:
+        target = None
+        for member in src:
+            if target is None:
+                target = member.name.split("/", 1)[0] + "/" + inner
+            if member.name == target or member.name.startswith(target + "/"):
+                continue
+            out.addfile(member, src.extractfile(member) if member.isfile() else None)
+        if target is None:
+            print("merge-build: the tarball is empty", file=sys.stderr)
+            return 1
+        for folder, folders, files in os.walk(build):
+            folders.sort()
+            # os.walk lists a link to a folder among the folders, and does not go into it: refused, not dropped.
+            if any(os.path.islink(os.path.join(folder, f)) for f in folders):
+                print("merge-build: the build holds something other than files and folders", file=sys.stderr)
+                return 1
+            rel = os.path.relpath(folder, build)
+            arc = target if rel == "." else f"{target}/{rel}"
+            for path, name in [(folder, arc)] + [(os.path.join(folder, f), f"{arc}/{f}") for f in sorted(files)]:
+                mode = os.lstat(path).st_mode
+                if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+                    print("merge-build: the build holds something other than files and folders", file=sys.stderr)
+                    return 1
+                out.add(path, arcname=name, recursive=False, filter=plain)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

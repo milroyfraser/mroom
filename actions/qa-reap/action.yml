@@ -1,0 +1,45 @@
+name: QA environment reap
+description: >-
+  Starts a teardown, the app's qa-down workflow with the reason ttl, for every QA environment older than
+  qa.ttl_days, with or without the qa label (design 8.2). Each teardown then takes its pull request's concurrency
+  group, wakes a waiting pull request when it frees a slot, and can be re-run on its own. A site Forge has been
+  removing for half an hour gets the delete again, with a warning. It needs the Forge token, and no SSH key. Run it
+  only from a job in the qa environment that checks out the default branch alone (.github/workflows/qa-reap.yml).
+inputs:
+  config:
+    description: The app's mroom.toml, checked out from the default branch
+    default: mroom.toml
+  down-workflow:
+    description: The app's QA environment down workflow file, started for each environment past its time
+    default: qa-down.yml
+  forge-org:
+    description: The Forge organisation
+    required: true
+  forge-server:
+    description: The Forge server id of the box; empty while the qa environment is not set up, which reaps nothing
+    default: ""
+  forge-token:
+    description: The qa environment's Forge token
+    required: true
+  github-token:
+    description: A token that may start workflows
+    default: ${{ github.token }}
+outputs:
+  started:
+    description: How many teardowns it started
+    value: ${{ steps.reap.outputs.started }}
+runs:
+  using: composite
+  steps:
+    - id: reap
+      name: Reap the QA environments past their time
+      shell: bash
+      env:
+        MROOM_CONFIG: ${{ inputs.config }}
+        MROOM_QA_DOWN_WORKFLOW: ${{ inputs.down-workflow }}
+        MROOM_QA_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        MROOM_FORGE_ORG: ${{ inputs.forge-org }}
+        MROOM_FORGE_SERVER: ${{ inputs.forge-server }}
+        MROOM_FORGE_TOKEN: ${{ inputs.forge-token }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: '"$GITHUB_ACTION_PATH/reap.sh"'

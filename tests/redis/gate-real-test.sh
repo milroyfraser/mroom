@@ -3,7 +3,8 @@
 # The gate against a real Redis (the image in MROOM_TEST_REDIS_IMAGE, redis:8 by default), set up as the
 # README's "QA gate" section says: what a fake redis-cli cannot show. Each environment's user reaches only
 # its own prefix, may run no module command and none of the commands that act on the whole server, yet may
-# run what a Laravel app sends; a new password replaces the old one and closes old connections; users
+# run what a Laravel app sends; a second request keeps the password and its connections, and --rotate gives a new
+# password that replaces the old one and closes old connections; users
 # survive a restart; redis-clear deletes exactly the prefix's keys, even one whose name holds a newline.
 # CI only: it needs Docker, so tests/run.sh does not pick it up.
 set -euo pipefail
@@ -194,7 +195,7 @@ XADD shop:qa12:pulse * k v
 XRANGE shop:qa12:pulse - +
 NEEDED
 
-  # A second request: a new password, the old one refused, and its open connections closed.
+  # A second request: the same password, and the connections open under it stay open.
   as shop_qa_12 "$pw12" SUBSCRIBE shop:qa12:events >/dev/null 2>&1 &
   sub=$!
   for _ in $(seq 1 20); do
@@ -202,8 +203,14 @@ NEEDED
     if grep -q 'user=shop_qa_12' <<<"$clients"; then break; fi
     sleep 0.5
   done
-  old="$pw12"
   gate "redis-user-add 12"; expect_rc 0
+  take_password
+  expect_true "a second request changed the password" [ "$password" = "$pw12" ]
+  sleep 1
+  expect_true "a second request closed a connection of the unchanged user" kill -0 "$sub"
+  # --rotate: a new password, the old one refused, and its open connections closed.
+  old="$pw12"
+  gate "redis-user-add 12 --rotate"; expect_rc 0
   take_password; pw12="$password"
   expect_true "the old password still signs in" cannot shop_qa_12 "$old" PING
   expect_true "the new password does not sign in" can shop_qa_12 "$pw12" PING

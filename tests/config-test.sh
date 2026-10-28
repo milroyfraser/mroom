@@ -183,6 +183,65 @@ id_pattern = "(SHOP"'
   expect_err_has "issues.id_pattern is not a valid regular expression"
 }
 
+t_qa_rules() {
+  toml '[app]
+name = "shop"
+backend_dir = "../api"
+frontend_dir = "web/./x"
+
+[app.build]
+frontend_dist = "."
+
+[qa]
+zone = "QA.example.dev"
+hidden_paths = "tests/*"'
+  run "$MROOM" config validate; expect_rc 1
+  expect_err_has 'app.backend_dir must be . or a folder inside the repository, with no . or .. part (got "../api")'
+  expect_err_has 'app.frontend_dir must be . or a folder inside the repository'
+  expect_err_has 'app.build.frontend_dist must be a folder inside the frontend'
+  expect_err_has 'qa.zone must be a lowercase DNS zone, such as qa.example.dev (got "QA.example.dev")'
+  expect_err_has "qa.hidden_paths must be a list of strings"
+  toml '[app]
+name = "shop"
+backend_dir = "api"
+frontend_dir = ""
+
+[app.build]
+frontend_dist = "public/build"
+
+[qa]
+zone = "qa.example.dev"
+visible_paths = ["web/src/content/*"]'
+  run "$MROOM" config validate; expect_rc 0
+  run "$MROOM" config get app.frontend_dir; expect_out ""
+  run "$MROOM" config get qa.visible_paths; expect_out "web/src/content/*"
+  run "$MROOM" config get app.frontend_dir --default .; expect_out ""
+  run "$MROOM" config get app.build.frontend_dist --default ..; expect_rc 2
+  toml '[app]
+name = "shop"
+
+[qa]
+disks = { files = "AWS_", "Media-Disk" = "MEDIA_", logs = "aws" }
+public_disks = ["public_files"]'
+  run "$MROOM" config validate; expect_rc 1
+  expect_err_has 'qa.disks has a disk name that is not [a-z][a-z0-9]{0,15}: "Media-Disk"'
+  expect_err_has 'qa.public_disks has a disk name that is not [a-z][a-z0-9]{0,15}: "public_files"'
+  toml '[app]
+name = "shop"
+
+[qa]
+disks = { logs = "aws" }'
+  run "$MROOM" config validate; expect_rc 1; expect_err_has 'qa.disks.logs must be the prefix of env names, such as AWS_ (got "aws")'
+  toml '[app]
+name = "shop"
+
+[qa]
+disks = { files = "AWS_", media = "MEDIA_" }
+public_disks = ["media"]'
+  run "$MROOM" config validate; expect_rc 0
+  run "$MROOM" config get qa.disks; expect_out $'files=AWS_\nmedia=MEDIA_'
+}
+
 t_shape_errors() {
   toml 'app = "shop"'
   run "$MROOM" config validate; expect_rc 1; expect_err_has "app must be a table ([app])"
@@ -220,6 +279,7 @@ test_case get-errors-scoped-to-key t_get_errors_scoped_to_key
 test_case default-takes-the-key-type t_default_takes_the_key_type
 test_case type-errors t_type_errors
 test_case rules t_rules
+test_case qa-rules t_qa_rules
 test_case shape-errors t_shape_errors
 test_case bad-toml t_bad_toml
 test_case keys-and-help t_keys_and_help

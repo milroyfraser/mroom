@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""nginx-conf <guard|check|includes> [--spa] — reads an nginx config Forge gave on stdin (actions/qa-up/up.sh; D17).
+
+Forge's site config (GET sites/<id>/nginx) is a fragment, site.conf, which each of the site's domains includes inside
+its own server block (GET sites/<id>/domains/<id>/nginx). A directive at the top of the fragment, outside any block,
+is therefore one of the server's own. nginx runs as the box user and follows links: with disable_symlinks
+if_not_owner at that level, it follows one only when the link and its target have one owner, so code put into the
+site cannot link to another user's file and have nginx serve it.
+
+  guard     prints the fragment with disable_symlinks if_not_owner at its top level, unless it has it there already;
+            with --spa, a path the site does not have serves /index.html (try_files ... =404 becomes /index.html)
+  check     exits 0 when the fragment has disable_symlinks if_not_owner at its top level, outside any comment and
+            block, and no other disable_symlinks anywhere; with --spa, also a try_files that ends in /index.html in
+            location /. Says what is missing on stderr otherwise
+  includes  for a domain's server block: exits 0 when every server block at its top level includes the site's
+            site.conf, right inside it, and none sets a disable_symlinks of its own, which would override the
+            fragment's or clash with it; a server block that served the site without the fragment would have no
+            guard
+
+It parses the config as nginx does, word by word: a # starts a comment outside quotes, and braces open and close
+blocks, so a directive in a comment, or one inside a location, never counts as the server's.
+"""
+
+import sys
+
+GUARD = "disable_symlinks if_not_owner;"
+NOTE = "# mroom: follow a link only when it and its target have one owner (design D17).\n"
+
+
+def statements(text: str) -> list[tuple[int, list[str], list[str]]]:
+    """Each directive as (depth, its words, the words of the blocks around it), and each block's opening too."""
+    out: list[tuple[int, list[str], list[str]]] = []
+    stack: list[str] = []
+    words: list[str] = []
+    word = ""
+    quote = ""
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if quote:
+            if c == "\\" and i + 1 < len(text):
+                word += text[i + 1]
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+            else:
+                word += c
+        elif c in "\"'":
+            quote = c
+        elif c == "#":
+            while i < len(text) and text[i] != "\n":
+                i += 1
+            if word:
+                words.append(word)
+                word = ""
+            continue
+        elif c.isspace() or c in ";{}":
+            if word:
+                words.append(word)
+                word = ""
+            if c == ";":
+                out.append((len(stack), words, list(stack)))
+                words = []
+            elif c == "{":
+                out.append((len(stack), words + ["{"], list(stack)))
+                stack.append(" ".join(words))
+                words = []
+            elif c == "}":
+                if not stack:
+                    raise ValueError("a } with no block to close")
+                stack.pop()
+                words = []
+        else:
+            word += c
+        i += 1
+    if quote or stack or word or words:
+        raise ValueError("the config ends inside a quote, a block or a directive")
+    return out
+
+
+def guarded(text: str) -> bool:
+    found = [(d, w) for d, w, _ in statements(text) if w and w[0] == "disable_symlinks"]
+    return found == [(0, ["disable_symlinks", "if_not_owner"])]
+
+
+def spa_ok(text: str) -> bool:
+    return any(w[:1] == ["try_files"] and w[-1] == "/index.html" and blocks == ["location /"]
+               for _, w, blocks in statements(text))
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] not in ("guard", "check", "includes") or argv[1:] not in ([], ["--spa"]):
+        print("usage: nginx-conf <guard|check|includes> [--spa]", file=sys.stderr)
+        return 2
+    text = sys.stdin.read()
+    spa = argv[1:] == ["--spa"]
+    try:
+        if argv[0] == "guard":
+            want = text
+            if not guarded(want):
+                want = NOTE + GUARD + "\n\n" + want
+            if spa and not spa_ok(want):
+                want = want.replace("try_files $uri $uri/ =404;", "try_files $uri $uri/ /index.html;")
+            statements(want)
+            sys.stdout.write(want)
+            return 0
+        if argv[0] == "check":
+            if not guarded(text):
+                print("no disable_symlinks if_not_owner at the top of the site's config, alone", file=sys.stderr)
+                return 1
+            if spa and not spa_ok(text):
+                print("no try_files that sends a path the site does not have to /index.html", file=sys.stderr)
+                return 1
+            return 0
+        parsed = statements(text)
+        # Each server block at the top, and whether it includes site.conf right inside it: inside a location or an if
+        # it would not be the server's own.
+        servers: list[bool] = []
+        for depth, w, blocks in parsed:
+            if depth == 0 and w == ["server", "{"]:
+                servers.append(False)
+            elif (servers and blocks == ["server"] and len(w) == 2 and w[0] == "include"
+                  and w[1].endswith("/site.conf")):
+                servers[-1] = True
+        if not servers or not all(servers):
+            print("the domain's server block does not include the site's site.conf", file=sys.stderr)
+            return 1
+        if any(w[:1] == ["disable_symlinks"] for _, w, _ in parsed):
+            print("the domain's server block sets disable_symlinks of its own", file=sys.stderr)
+            return 1
+        return 0
+    except ValueError as e:
+        print(f"the config does not parse: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

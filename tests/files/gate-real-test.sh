@@ -4,7 +4,8 @@
 # mroom baseline garage downloads the pinned build and checks its SHA-256, its unit is installed by running,
 # as root, the very script it prints, from a home under /home as on a box, and baseline sets up its layout.
 # The test then checks:
-# - each environment's key reaches its own bucket and no other;
+# - each environment's key reaches its own bucket and no other, and is kept from one create to the next until
+#   --rotate replaces it;
 # - a public disk's files are served on its website endpoint, a private one's are not;
 # - through an nginx made from the configs baseline prints, S3 signatures still hold and the files host
 #   finds the bucket in the path;
@@ -215,9 +216,14 @@ t_the_bucket_operations_against_the_real_garage() {
   r="$(web 127.0.0.1:8081 files.qa.example.test /shop-qa-12-media/docs/)"
   expect_true "a folder's index is not served: $r" [ "$(body_of "$r")" = docs12 ]
 
-  # A new key replaces the old one, and the files stay.
+  # The same request again keeps the key, so the running app's still reads.
   old="$files12"
-  gate "bucket-create 12 files"; expect_rc 0; files12="$out"
+  gate "bucket-create 12 files"; expect_rc 0
+  expect_true "a second bucket-create changed the key" [ "$(field ACCESS_KEY_ID "$out")" = "$(field ACCESS_KEY_ID "$old")" ]
+  r="$(s3 "$old" "$(garage_run)/s3.sock" garage.invalid GET /shop-qa-12-files/a.txt)"
+  expect_true "the kept key no longer reads: $r" [ "$(body_of "$r")" = hello12 ]
+  # --rotate: a new key replaces the old one, and the files stay.
+  gate "bucket-create 12 files --rotate"; expect_rc 0; files12="$out"
   r="$(s3 "$old" "$(garage_run)/s3.sock" garage.invalid GET /shop-qa-12-files/a.txt)"
   expect_true "an old key still works: $r" [ "$(status_of "$r")" = 403 ]
   r="$(s3 "$files12" "$(garage_run)/s3.sock" garage.invalid GET /shop-qa-12-files/a.txt)"

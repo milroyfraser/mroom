@@ -8,6 +8,7 @@
 # - each environment sends with its own login through it, and mail with no login, a wrong one or a forged
 #   tag gets nowhere;
 # - mail-read returns only an environment's own mail, and mail-clear deletes only it;
+# - the same login again keeps its password and Mailpit running, and --rotate gives a new one;
 # - a burst of new logins restarts Mailpit as often as it needs;
 # - while the relay restarts, or is stopped, nothing else can take the port;
 # - a removed login stops working.
@@ -142,6 +143,19 @@ t_the_mail_operations_against_the_real_mailpit() {
   pw12="$(field MAIL_PASSWORD "$out")"
   gate "mail-user-add 13"; expect_rc 0
   pw13="$(field MAIL_PASSWORD "$out")"
+  # The same login again keeps its password, and Mailpit, which every environment's mail goes through, keeps
+  # running; --rotate gives a new password, which takes a restart.
+  local mailpit_pid old12
+  mailpit_pid="$(main_pid mroom-mailpit.service)"
+  gate "mail-user-add 12"; expect_rc 0
+  expect_true "a second mail-user-add changed the password" [ "$(field MAIL_PASSWORD "$out")" = "$pw12" ]
+  expect_true "an unchanged login restarted Mailpit" [ "$(main_pid mroom-mailpit.service)" = "$mailpit_pid" ]
+  old12="$pw12"
+  gate "mail-user-add 12 --rotate"; expect_rc 0
+  pw12="$(field MAIL_PASSWORD "$out")"
+  expect_true "--rotate kept the password" [ "$pw12" != "$old12" ]
+  expect_true "a new login did not restart Mailpit" [ "$(main_pid mroom-mailpit.service)" != "$mailpit_pid" ]
+  expect_true "the rotated password still sends" eval '! can_send shop_qa_12 "$old12" ada@example.test rotated'
 
   expect_true "mail went without a login" eval '! can_send - - ada@example.test anonymous'
   expect_true "mail went with a wrong password" eval '! can_send shop_qa_12 "$pw13" ada@example.test wrong'
@@ -254,8 +268,8 @@ s = socket.create_server(("127.0.0.1", 1025)); time.sleep(60)' mroom-ci-root-lis
   gate "mail-user-remove 12"; expect_rc 0
   expect_true "a removed login could still send" eval '! can_send shop_qa_12 "$pw12" ada@example.test after'
   expect_true "the other login stopped working" can_send shop_qa_13 "$pw13" ada@example.test still13
-  # A new password replaces the old one.
-  gate "mail-user-add 13"; expect_rc 0
+  # A new password, which --rotate gives, replaces the old one.
+  gate "mail-user-add 13 --rotate"; expect_rc 0
   expect_true "an old password still worked" eval '! can_send shop_qa_13 "$pw13" ada@example.test old13'
   expect_true "the new password does not work" can_send shop_qa_13 "$(field MAIL_PASSWORD "$out")" ada@example.test new13
   expect_true "systemd stopped running Mailpit" active mroom-mailpit.service

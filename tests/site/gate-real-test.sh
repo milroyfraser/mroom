@@ -2,8 +2,9 @@
 # shellcheck disable=SC2317,SC2016  # t_* run through test_case; a $ in single quotes is for eval, later
 # The gate's site operations with real users, sudo and PHP-FPM, set up as the README says: what the fake
 # sudo cannot show. A box user holding nothing but the one sudoers line plays forge; Forge-style isolated
-# users own the sites, and site-op is a root-owned copy. site-op unpacks as the site user and keeps .env and
-# storage; env-put replaces a planted link; a hostile tarball changes nothing; signin-code runs the app's
+# users own the sites, and site-op is a root-owned copy. probe-link links that copy into a web root as the site
+# user, and a copy another user owns refuses to; site-op unpacks as the site user and keeps .env and storage;
+# env-put replaces a planted link; a hostile tarball changes nothing; signin-code runs the app's
 # artisan; user-clean leaves a real PHP-FPM pool's workers (their master replaces them) but stops everything
 # else and removes the user's files, and reports what keeps coming back; and the sudoers line gives the box
 # user nothing more. It runs as a user with sudo (CI's runner) or as root in a container with sudo-rs.
@@ -124,7 +125,27 @@ PY
 t_the_site_operations_with_real_users_and_sudo() {
   set_up
   repo_tarball
-  local box_env n
+  local box_env n probe
+
+  # Before any code: the site user links the root-owned site-op into each web root, and the gate names that file.
+  gate "probe-link 13 api"; expect_rc 0
+  expect_out "sha256=$(sha256sum /usr/local/libexec/mroom/site-op | cut -d' ' -f1)"$'\n'"target=/usr/local/libexec/mroom/site-op"
+  probe="$(site 13)/backend/public/mroom-symlink-probe"
+  run sudo stat -c '%U %F' "$probe"; expect_out "shop_qa_13 symbolic link"
+  run sudo readlink "$probe"; expect_out /usr/local/libexec/mroom/site-op
+  gate "probe-link 13 web"; expect_rc 0
+  run sudo readlink "/home/shop_qa_13/go-13.$ZONE/mroom-symlink-probe"; expect_out /usr/local/libexec/mroom/site-op
+  # Only a site-op of root's links itself: a link to a file of another user's, such as a copy the box user owns,
+  # would prove nothing about nginx refusing a site user's link to another owner's file.
+  local notroot
+  notroot="$(mktemp -d /tmp/mroom-site-op.XXXXXX)"
+  chmod 755 "$notroot"
+  sudo cp /usr/local/libexec/mroom/site-op "$notroot/site-op"
+  sudo chown "$BOX_USER" "$notroot/site-op"
+  sudo chmod 755 "$notroot/site-op"
+  run sudo -u shop_qa_13 "$notroot/site-op" probe-link "go-13.$ZONE"
+  expect_rc 1; expect_err_has "is not root's and readable by all, so the probe would prove nothing"
+  sudo rm -rf "$notroot"
 
   gate "code-put 12 $COMMIT" <"$T/code.tgz"
   expect_rc 0; expect_out "api-12.$ZONE: 3 entries unpacked, 1 .env skipped"

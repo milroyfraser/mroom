@@ -3,8 +3,8 @@
 # The gate against a real Postgres (16 or later), set up as the README's "QA gate" section says: what a
 # fake psql cannot show. pg_hba.conf lets the gate in and keeps each environment's role to its own
 # database; the template's objects change hands; a PR cannot keep its database from being dropped; a role
-# taken out of its group is put back. CI only: it needs sudo and a Postgres it may reconfigure (the
-# runner's own), so tests/run.sh does not pick it up.
+# taken out of its group is put back; a second request keeps the password and --rotate replaces it. CI only: it
+# needs sudo and a Postgres it may reconfigure (the runner's own), so tests/run.sh does not pick it up.
 set -euo pipefail
 SUITE=gate-real
 # shellcheck source=tests/lib.sh
@@ -88,9 +88,13 @@ t_the_gate_on_a_real_postgres() {
   expect_true "env 13 cannot use its database" can shop_qa_13 "$pw13" shop_qa_13 "SELECT 1"
   expect_true "env 12 reached env 13's database" cannot shop_qa_12 "$pw12" shop_qa_13 "SELECT 1"
 
-  # A second request: a new password, the old one refused, the data kept.
-  old="$pw12"
+  # A second request: the same password, which still signs in, and the data kept.
   gate "db-create 12"; expect_rc 0; expect_out_has "database shop_qa_12: exists"
+  expect_true "a second request changed the password" [ "$(password_of "$out")" = "$pw12" ]
+  expect_true "the kept password no longer signs in" can shop_qa_12 "$pw12" shop_qa_12 "SELECT 1"
+  # --rotate: a new password, the old one refused, the data kept.
+  old="$pw12"
+  gate "db-create 12 --rotate"; expect_rc 0; expect_out_has "database shop_qa_12: exists"
   pw12="$(password_of "$out")"
   expect_true "the old password still works" cannot shop_qa_12 "$old" shop_qa_12 "SELECT 1"
   run as shop_qa_12 "$pw12" shop_qa_12 "SELECT count(*) FROM notes"; expect_rc 0; expect_out 0

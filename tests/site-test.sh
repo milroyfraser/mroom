@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317,SC2016  # t_* run through test_case; a $ in single quotes is for eval, later
-# Tests for the gate's site operations (code-put, dist-put, env-put, env-sha, signin-code, user-clean) and
+# Tests for the gate's site operations (code-put, dist-put, env-put, env-sha, signin-code, probe-link, user-clean) and
 # lib/site-op, which does their work as the site's user. Offline: a fake sudo checks the gate's arguments,
 # then runs the real site-op as the test's own user, with HOME at a fake site home and MROOM_SITE_OP_USER
 # naming the site user it plays. Hostile tarballs are made with Python's tarfile, since tar will not write
@@ -395,6 +395,46 @@ t_signin_code_does_not_wait_on_what_the_app_leaves_running() {
   expect_true "the child kept running" eval '! pgrep -f "sleep 31.7" >/dev/null'
 }
 
+t_probe_link_puts_a_link_to_site_op_at_each_web_root() {
+  world
+  local api="$T/homes/shop_qa_12/$SITE/backend/public" web="$T/homes/shop_qa_12/$WEB"
+  # Before any code: the api site's web root is made, and the link goes in it, to the installed site-op.
+  gate provision "probe-link 12 api"
+  expect_rc 0
+  expect_out "sha256=$(sha256sum "$T/libexec/site-op" | cut -d' ' -f1)"$'\n'"target=$T/libexec/site-op"
+  run readlink "$api/mroom-symlink-probe"; expect_out "$T/libexec/site-op"
+  gate provision "probe-link 12 web"
+  expect_rc 0
+  run readlink "$web/mroom-symlink-probe"; expect_out "$T/libexec/site-op"
+  # Again: the same link, replaced, and nothing else left beside it.
+  gate provision "probe-link 12 api"; expect_rc 0
+  run bash -c 'ls -A "$1" | sort' _ "$api"; expect_out "mroom-symlink-probe"
+  # The next put replaces the tree, and the link goes with it.
+  repo_tarball
+  put
+  expect_rc 0
+  expect_no_file "$api/mroom-symlink-probe"
+  # A web root reached through a link, which the PR's code could have left, is refused.
+  rm -rf "$api"
+  ln -s /tmp "$api"
+  gate provision "probe-link 12 api"; expect_rc 1; expect_err_has "goes through a link"
+  gate provision "probe-link 12 both"; expect_rc 1; expect_err_has "its second argument is api or web"
+  gate provision "probe-link 12"; expect_rc 1
+  # Only a QA site's own user puts it, in its own site.
+  site_op shop_qa_12 probe-link api-13.qa.example.test backend; expect_rc 1; expect_err_has "is not this environment's api-12 site"
+  site_op forge probe-link "$WEB"; expect_rc 1; expect_err_has "forge is not a QA site's isolated user"
+  # What site-op says is passed on only as a file's SHA-256 and path: a release whose site-op says anything else.
+  mkdir -p "$T/release"
+  cp -R "$ROOT/bin" "$ROOT/lib" "$T/release/"
+  sed -i 's/^    print(f"{digest} {target}")$/    print("linked it")/' "$T/release/lib/site-op"
+  grep -q '^    print("linked it")$' "$T/release/lib/site-op" || fail "the other site-op was not written"
+  chmod u+w "$T/libexec" "$T/libexec/site-op"
+  cp "$T/release/lib/site-op" "$T/libexec/site-op"
+  chmod 555 "$T/libexec/site-op" "$T/libexec"
+  run env SSH_ORIGINAL_COMMAND="probe-link 12 web" "$T/release/bin/mroom" gate provision
+  expect_rc 1; expect_err_has "site-op named no file and SHA-256"
+}
+
 t_user_clean_runs_only_as_a_qa_sites_user() {
   world
   mkdir -p "$HOME/.local/state/mroom/qa"
@@ -404,8 +444,11 @@ t_user_clean_runs_only_as_a_qa_sites_user() {
   gate provision "user-clean 12"; expect_rc 1; expect_err_has "is not a QA site's isolated user"
   gate provision "user-clean 99"; expect_rc 0; expect_out "no user shop_qa_99, so nothing to clean"
   echo "$COMMIT" >"$HOME/.local/state/mroom/qa/shop_qa_99.commit"
+  printf 'DB_PASSWORD=%048d\nAPP_KEY=base64:kept\n' 0 >"$HOME/.local/state/mroom/qa/shop_qa_99.secrets"
   gate provision "user-clean 99"; expect_rc 0
   expect_no_file "$HOME/.local/state/mroom/qa/shop_qa_99.commit"
+  # The app key goes with the site user; the database's password goes with the database.
+  run cat "$HOME/.local/state/mroom/qa/shop_qa_99.secrets"; expect_out "DB_PASSWORD=$(printf '%048d' 0)"
 }
 
 t_the_gate_checks_the_site_user_and_the_installed_helper() {
@@ -462,6 +505,7 @@ test_case own-sites-only t_site_op_works_only_on_its_own_environments_sites
 test_case dist-put t_dist_put_replaces_the_web_folder
 test_case signin-code t_signin_code_comes_from_the_app_for_persona_addresses_only
 test_case signin-code-children t_signin_code_does_not_wait_on_what_the_app_leaves_running
+test_case probe-link t_probe_link_puts_a_link_to_site_op_at_each_web_root
 test_case user-clean t_user_clean_runs_only_as_a_qa_sites_user
 test_case gate-checks t_the_gate_checks_the_site_user_and_the_installed_helper
 test_case one-request-per-environment t_one_site_request_at_a_time_per_environment

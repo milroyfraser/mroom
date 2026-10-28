@@ -59,6 +59,9 @@ SCHEMA = {
     "app.build.frontend": ("str", False, 'frontend = "npm run build"', "frontend build command"),
     "app.build.frontend_env": ("map", False, 'frontend_env = { VITE_APP_KEY = "env:APP_KEY" }',
                                "environment for the frontend build"),
+    "app.build.frontend_dist": ("str", False, 'frontend_dist = "dist"',
+                                "where the frontend build writes, inside its folder: dist, or public/build "
+                                "for Vite inside the Laravel app"),
     "app.build.after_deploy": ("list", False, 'after_deploy = ["config:clear"]',
                                "artisan commands after a deploy"),
     "app.build.daemons": ("list", False, 'daemons = ["horizon"]', "daemons restarted after a deploy"),
@@ -82,6 +85,13 @@ SCHEMA = {
                           "sign-in codes are only ever read for these addresses"),
     "qa.db_read_allowlist": ("list", False, 'db_read_allowlist = ["users.email"]',
                              "tables and columns browser QA may read; required once browser QA exists"),
+    "qa.visible_paths": ("list", False, 'visible_paths = ["web/src/content/*"]',
+                         "paths a user can see, whatever the QA plan's own rules say; shell patterns"),
+    "qa.hidden_paths": ("list", False, 'hidden_paths = ["app/Console/*"]',
+                        "paths no user can see, for the QA plan; shell patterns"),
+    "qa.disks": ("map", False, 'disks = { s3 = "AWS_" }',
+                 "a bucket for each file disk in QA, and the prefix of the disk's env names (AWS_BUCKET, ...)"),
+    "qa.public_disks": ("list", False, 'public_disks = ["public"]', "the disks of qa.disks whose files are public"),
     "qa.parity.database": (("seeded", "snapshot"), False, 'database = "seeded"',
                            "seeded (factories) | snapshot (opt-in masked copy)"),
     "qa.parity.mail": (("catcher", "log"), False, 'mail = "catcher"',
@@ -178,6 +188,25 @@ def rule_error(key: str, value) -> str | None:
             re.compile(value)
         except re.error as exc:
             return f"{key} is not a valid regular expression: {exc}"
+    # QA builds host names, Forge paths and folders inside the PR's tree from these (design 8.2, D17).
+    if key == "qa.zone" and not DNS_ZONE.fullmatch(value):
+        return f"{key} must be a lowercase DNS zone, such as qa.example.dev (got {json.dumps(value)})"
+    if key in ("app.backend_dir", "app.frontend_dir") and not (REPO_DIR.fullmatch(value) or (
+            key == "app.frontend_dir" and value == "")):
+        return f"{key} must be . or a folder inside the repository, with no . or .. part (got {json.dumps(value)})"
+    if key == "app.build.frontend_dist" and (value == "." or not REPO_DIR.fullmatch(value)):
+        return f"{key} must be a folder inside the frontend's, with no . or .. part (got {json.dumps(value)})"
+    # The gate takes a disk's name as one word (lib/gate, bucket-create), and qa-up writes its env names.
+    if key == "qa.disks":
+        for disk, prefix in value.items():
+            if not DISK.fullmatch(disk):
+                return f"{key} has a disk name that is not [a-z][a-z0-9]{{0,15}}: {json.dumps(disk)}"
+            if not ENV_PREFIX.fullmatch(prefix):
+                return f"{key}.{disk} must be the prefix of env names, such as AWS_ (got {json.dumps(prefix)})"
+    if key == "qa.public_disks":
+        for disk in value:
+            if not DISK.fullmatch(disk):
+                return f"{key} has a disk name that is not [a-z][a-z0-9]{{0,15}}: {json.dumps(disk)}"
     return None
 
 
@@ -200,7 +229,7 @@ def check(path: str, data: dict) -> tuple[list[tuple[str, str]], list[str]]:
             warnings.append(f"unknown key {key} (ignored){tip}")
             continue
         kind = SCHEMA[key][0]
-        problem = type_error(key, kind, value) or (rule_error(key, value) if kind == "str" else None)
+        problem = type_error(key, kind, value) or rule_error(key, value)
         if problem:
             errors.append((key, problem))
     for key, (_, required, _, _) in SCHEMA.items():
@@ -291,6 +320,8 @@ PG_NAME = re.compile(r"[a-z][a-z0-9_]{0,62}")
 DNS_ZONE = re.compile(r"(?=.{1,200}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
 REPO_DIR = re.compile(r"\.|(?=.{1,200}$)[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*")
 PHP_BINARY = re.compile(r"php(?:[0-9]+(?:\.[0-9]+)?)?")
+DISK = re.compile(r"[a-z][a-z0-9]{0,15}")
+ENV_PREFIX = re.compile(r"[A-Z][A-Z0-9_]{0,40}")
 PERSONA_DOMAIN = re.compile(r"(?=.{2,200}$)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
 # A persona domain is made up: under a name reserved for that (RFC 2606, 6761), or a subdomain of a domain of
 # your own (three labels or more), so never a public suffix such as .com, .co.uk or .github.io, where real
@@ -452,7 +483,7 @@ def coerce_default(key: str, raw: str):
             value = json.loads(raw)
         except ValueError:
             raise UsageError(f"--default for {key} must be JSON, for example {sample}") from None
-    problem = type_error(key, kind, value) or (rule_error(key, value) if kind == "str" else None)
+    problem = type_error(key, kind, value) or rule_error(key, value)
     if problem:
         raise UsageError(f"--default: {problem}")
     return value
