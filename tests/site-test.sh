@@ -149,6 +149,27 @@ t_code_put_replaces_the_tree_and_keeps_env_and_storage() {
   expect_true "the put is not logged" has "$(gate_log_text)" "code-put 12: $COMMIT into $SITE"
 }
 
+# The version file is the gate's, never the tree's: a PR's own version.json, naming another commit or a link to a
+# file it should not read, is replaced, and env-sha reports what the gate recorded, whatever the site writes later.
+t_the_version_file_is_the_gates() {
+  world; repo_tarball
+  local top="$T/src/example-shop-${COMMIT:0:7}" other=ffffffffffffffffffffffffffffffffffffffff
+  printf '{"release": "v9.9.9", "commit": "%s"}\n' "$other" >"$top/backend/version.json"
+  tar -czf "$T/code.tgz" -C "$T/src" "example-shop-${COMMIT:0:7}"
+  put; expect_rc 0
+  run cat "$(site)/backend/version.json"; expect_out "{\"release\": null, \"commit\": \"$COMMIT\"}"
+  # A link inside the tree, which the data filter lets through (one to an absolute path refuses the tarball).
+  rm "$top/backend/version.json"; ln -s ../README.md "$top/backend/version.json"
+  tar -czf "$T/code.tgz" -C "$T/src" "example-shop-${COMMIT:0:7}"
+  put; expect_rc 0
+  expect_true "the version file is a link" eval '[ ! -L "$(site)/backend/version.json" ]'
+  run cat "$(site)/README.md"; expect_out readme
+  run cat "$(site)/backend/version.json"; expect_out "{\"release\": null, \"commit\": \"$COMMIT\"}"
+  # The site's code may write the file later: env-sha does not read it.
+  printf '{"release": null, "commit": "%s"}\n' "$other" >"$(site)/backend/version.json"
+  gate provision "env-sha 12"; expect_rc 0; expect_out_has "commit=$COMMIT"
+}
+
 t_a_second_put_replaces_the_first() {
   world; repo_tarball; put; expect_rc 0
   rm "$T/src/example-shop-${COMMIT:0:7}/README.md"
@@ -491,6 +512,7 @@ t_one_site_request_at_a_time_per_environment() {
 }
 
 test_case code-put t_code_put_replaces_the_tree_and_keeps_env_and_storage
+test_case version-file t_the_version_file_is_the_gates
 test_case second-put t_a_second_put_replaces_the_first
 test_case failed-step t_a_failed_step_puts_everything_back
 test_case concurrent-writes t_a_put_survives_the_sites_own_writes
