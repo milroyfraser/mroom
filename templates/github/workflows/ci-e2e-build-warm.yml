@@ -18,6 +18,8 @@ on:
       # With Vite inside Laravel this is every file: each merge runs, and finds the build cached when
       # its inputs did not change.
       - '<<app.frontend_dir>>/**'
+      # In the build's key: a backend dependency change must warm the build again.
+      - '<<app.backend_dir>>/composer.lock'
       - '.github/actions/e2e-frontend-build/**'
       - '.github/actions/setup-frontend/**'
       - '.github/workflows/ci-e2e-build-warm.yml'

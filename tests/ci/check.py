@@ -272,7 +272,7 @@ def check_required_checks_report(files):
 
 def check_concurrency(files):
     # By pull request number: two forks' branches of the same name must not cancel each other's runs.
-    for name in REQUIRED:
+    for name in [rel.split("/", 1)[1] for rel in files if rel.startswith("workflows/")]:
         group = str((files[f"workflows/{name}"][0].get("concurrency") or {}).get("group", ""))
         if group != "${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}":
             problem(f"{name}: the concurrency group {group!r} is not per pull request")
@@ -303,6 +303,10 @@ def check_e2e_build(files):
     if build.get("if") != "steps.restore.outputs.cache-hit != 'true'":
         problem("the e2e build is not skipped when it was restored")
     warm, _ = files["workflows/ci-e2e-build-warm.yml"]
+    paths = (on(warm).get("push") or {}).get("paths") or []
+    for part in ("<<app.frontend_dir>>/**", "<<app.backend_dir>>/composer.lock", ".github/actions/e2e-frontend-build/**"):
+        if part not in paths:
+            problem(f"ci-e2e-build-warm.yml does not warm again when {part} changes, though it is in the build's key")
     step = warm["jobs"]["build"]["steps"][-1]
     if not uses(step, "./.github/actions/e2e-frontend-build") or (step.get("with") or {}).get("save") != "${{ " + DEFAULT + " }}":
         problem("ci-e2e-build-warm.yml does not save the build, on the default branch only")

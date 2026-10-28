@@ -966,7 +966,7 @@ Things to know:
 - The vitest reporter needs vitest 3 or later.
 - `ci-e2e.yml` waits for Laravel's `/up` route (Laravel 11 and later), and expects Playwright in the backend
   folder's Node lockfile, as Pest's browser plugin has it: the backend folder needs a `package.json`.
-- GitHub turns off a scheduled workflow after 60 days with no activity in the repository. Turn the weekly
+- In a public repository, GitHub turns off a scheduled workflow after 60 days with no activity. Turn the weekly
   cache warm back on in the Actions tab if that happens.
 
 **Placeholders.** A `<<key>>` is filled from `mroom.toml` or the repository; a `<<fill:name>>` is a value

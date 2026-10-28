@@ -21,10 +21,10 @@ runs:
   steps:
     # The key holds everything the build reads: the frontend's source (minus tests), public assets,
     # index.html, the config files at the frontend's top (vite.config.*, tsconfig*), its env files, the
-    # package file, lockfile and .npmrc, this file (the build command and its env), and Node's
-    # major.minor version, and composer.lock (a build inside Laravel may read vendor/). Add any other
-    # input the build reads, or a stale build is restored. With Vite inside Laravel that includes every
-    # folder Tailwind scans for classes, such as app/**/*.php.
+    # package file, lockfile and .npmrc, this file (the build command and its env), Node's
+    # major.minor version and the backend's composer.lock (a build inside Laravel may read vendor/).
+    # Add any other input the build reads, or a stale build is restored. With Vite inside Laravel that
+    # includes every folder Tailwind scans for classes, such as app/**/*.php.
     - name: Read the Node version
       id: node
       shell: bash
