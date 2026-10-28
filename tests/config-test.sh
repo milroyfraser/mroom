@@ -183,6 +183,54 @@ id_pattern = "(SHOP"'
   expect_err_has "issues.id_pattern is not a valid regular expression"
 }
 
+t_workflow_keys() {
+  toml '[app]
+name = "shop"
+
+[issues]
+state_started = "Doing; rm"
+state_review = "In Review "
+
+[release]
+production_url = "https://app.example.dev/up"
+tag_prefix = "Release_"'
+  run "$MROOM" config validate; expect_rc 1
+  expect_err_has 'issues.state_started must be a state'"'"'s name'
+  expect_err_has 'issues.state_review must be a state'"'"'s name'
+  expect_err_has 'release.production_url must be an https origin'
+  expect_err_has 'release.tag_prefix must be empty or lowercase letters'
+  local bad
+  for bad in http://app.example.dev https://app.example.dev/ 'https://app.example.dev?x=1' https://localhost \
+      'https://user@app.example.dev' 'https://App.Example.dev' https://app.example.dev:99999 https://app.example.dev:0; do
+    toml "[app]
+name = \"shop\"
+[release]
+production_url = \"$bad\""
+    run "$MROOM" config validate; expect_rc 1; expect_err_has 'release.production_url must be an https origin'
+  done
+  toml '[app]
+name = "shop"
+
+[issues]
+state_started = "In Progress"
+state_review = "In_Review-2"
+
+[release]
+production_url = "https://app.example.dev:8443"
+tag_prefix = ""'
+  run "$MROOM" config validate; expect_rc 0
+  sed -i 's/^state_started = .*/state_started = ""/' "$T/mroom.toml"
+  run "$MROOM" config validate; expect_rc 1; expect_err_has 'issues.state_started must be a state'
+  sed -i 's/^state_started = .*/state_started = "In Progress"/' "$T/mroom.toml"
+  run "$MROOM" config get issues.state_review; expect_out "In_Review-2"
+  run "$MROOM" config get release.tag_prefix; expect_rc 0; expect_out ""
+  run "$MROOM" config get release.production_url; expect_out "https://app.example.dev:8443"
+  toml '[app]
+name = "shop"'
+  run "$MROOM" config get issues.state_started --default "In Progress"; expect_out "In Progress"
+  run "$MROOM" config get release.production_url --optional; expect_rc 0; expect_out ""
+}
+
 t_optional_prints_nothing_for_an_unset_key() {
   toml '[app]
 name = "shop"
@@ -347,6 +395,7 @@ test_case default-takes-the-key-type t_default_takes_the_key_type
 test_case type-errors t_type_errors
 test_case rules t_rules
 test_case optional t_optional_prints_nothing_for_an_unset_key
+test_case workflow-keys t_workflow_keys
 test_case adapter-rules t_adapter_rules
 test_case qa-rules t_qa_rules
 test_case shape-errors t_shape_errors
