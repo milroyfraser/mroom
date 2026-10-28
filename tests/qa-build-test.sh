@@ -2,7 +2,8 @@
 # shellcheck disable=SC2317  # the t_* functions run indirectly, through test_case
 # Tests for the QA plan's frontend build (actions/qa-plan/build.sh): what it builds where for each layout of an app,
 # and that the build gets the environment's public values and nothing else: env:<KEY> for a value qa-up writes
-# into the .env, empty for any other, a plain value as it is. Offline: npm and pnpm are fakes that say how they ran.
+# into the .env, empty for any other, a plain value as it is; the Reverb app's, from the pull request's number, only
+# when the environment broadcasts with Reverb. Offline: npm and pnpm are fakes that say how they ran.
 set -euo pipefail
 SUITE=qa-build
 # shellcheck source=tests/lib.sh
@@ -71,6 +72,29 @@ frontend_env = { VITE_API = "env:APP_URL", VITE_CLIENT = "env:CLIENT_URL", VITE_
   run cat "$T/tools.log"; expect_out $'npm ci (in /web)\nnpm run build (in /web)'
 }
 
+t_the_reverb_settings_come_from_the_pull_request() {
+  local echo='frontend_env = { VITE_REVERB_APP_KEY = "env:REVERB_APP_KEY", VITE_REVERB_HOST = "env:REVERB_HOST", VITE_REVERB_PORT = "env:REVERB_PORT", VITE_REVERB_SCHEME = "env:REVERB_SCHEME", VITE_REVERB_SECRET = "env:REVERB_APP_SECRET" }'
+  # Broadcasting with Reverb, the default: the app's key from the pull request, as the gate makes it, and the
+  # box's Reverb host. Its secret is never one of them.
+  app $'frontend_dir = "web"\n\n[app.build]\nfrontend = "npm run build"\n'"$echo"
+  mkdir -p "$T/app/web"
+  run "$BUILD" run 7 "$T/app"
+  expect_rc 0; expect_out_has "VITE_REVERB_SECRET reads REVERB_APP_SECRET, which is not one of a QA environment's public values"
+  run cat "$T/build.env"
+  expect_out "VITE_REVERB_APP_KEY=$(reverb_app 7)"$'\nVITE_REVERB_HOST=ws.qa.example.dev\nVITE_REVERB_PORT=443\nVITE_REVERB_SCHEME=https\nVITE_REVERB_SECRET='
+  # To the log: none of them, and the build is told why each is empty.
+  rm -f "$T/build.env"
+  printf '\n[qa.parity]\nbroadcast = "log"\n' >>"$T/app/mroom.toml"
+  run "$BUILD" run 7 "$T/app"
+  expect_rc 0; expect_out_has "VITE_REVERB_APP_KEY reads REVERB_APP_KEY, which is not one of a QA environment's public values"
+  run cat "$T/build.env"
+  expect_out $'VITE_REVERB_APP_KEY=\nVITE_REVERB_HOST=\nVITE_REVERB_PORT=\nVITE_REVERB_SCHEME=\nVITE_REVERB_SECRET='
+  # A setting mroom.toml does not allow fails the build.
+  printf '%s\n' "$(sed 's/broadcast = "log"/broadcast = "pusher"/' "$T/app/mroom.toml")" >"$T/app/mroom.toml"
+  run "$BUILD" run 7 "$T/app"
+  expect_rc 1; expect_err_has "mroom.toml could not say how the environment broadcasts (qa.parity.broadcast)"
+}
+
 t_vite_inside_laravel_gets_the_api_host_for_both() {
   app $'[app.build]\nfrontend = "npm run build"\nfrontend_env = { VITE_CLIENT = "env:CLIENT_URL", VITE_COOKIES = "env:SESSION_DOMAIN" }'
   run env OUT=public/build "$BUILD" run 12 "$T/app"
@@ -105,6 +129,7 @@ t_a_bad_name_or_number_is_refused() {
 
 test_case layouts t_what_each_layout_builds
 test_case public-values-only t_the_build_gets_public_values_only
+test_case reverb-from-the-pr t_the_reverb_settings_come_from_the_pull_request
 test_case vite-inside-laravel t_vite_inside_laravel_gets_the_api_host_for_both
 test_case pnpm t_pnpm_installs_from_the_lockfile
 test_case writes-nothing t_a_build_that_writes_nothing_fails

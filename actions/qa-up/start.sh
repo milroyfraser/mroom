@@ -11,10 +11,9 @@
 # pull request whose label came off, or whose change no longer reaches users, gets no environment. A draft comes up
 # only when it already has one, when it is started by hand, or when the label forces it; its next plan, once it is
 # ready for review, decides again. And it does not come up, with a comment that says why, when the QA build failed,
-# when mroom.toml asks for what qa-up cannot do yet (qa.parity.broadcast = "same"), or when the pull request's
-# mroom.toml puts the frontend elsewhere than the default branch's, which qa-up deploys by. A comment that said the
-# pull request waits for a slot says it no longer does, when the environment is not coming up for want of a change
-# users could notice.
+# or when the pull request's mroom.toml puts the frontend elsewhere than the default branch's, which qa-up deploys by.
+# A comment that said the pull request waits for a slot says it no longer does, when the environment is not coming up
+# for want of a change users could notice.
 #
 # Environment: PR, SHA, SCOPE, REASON, DISPATCHED, WOKEN and BUILT (true or false), PLAN_RUN_URL, LABEL (qa),
 # MROOM_QA_STATUS (where the comment's state and text go, for report.sh), and as down.sh's for Forge and GitHub.
@@ -84,14 +83,6 @@ fi
 if ! is_true BUILT; then
   start=false why="the QA build failed, so there is nothing to deploy"
   qa_status failed "The QA build of \`$SHA\` failed, so nothing was deployed${PLAN_RUN_URL:+ ([run]($PLAN_RUN_URL))}. The next push tries again."
-  out
-fi
-
-# What qa-up cannot do yet: it says so, and the job stays green, since nothing is wrong with the pull request.
-broadcast="$(qa_config qa.parity.broadcast same)" || exit 1
-if [ "$broadcast" = same ]; then
-  start=false why="qa.parity.broadcast is \"same\", which qa-up does not wire in yet"
-  qa_status skipped "No QA environment yet: this app's mroom.toml sets qa.parity.broadcast = \"same\", which needs mroom's Reverb host. The host exists, but qa-up does not wire environments into it yet. Until it does, set qa.parity.broadcast = \"log\" on the default branch to get QA environments."
   out
 fi
 

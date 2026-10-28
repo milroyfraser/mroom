@@ -54,7 +54,8 @@ t_value_shapes() {
   run "$MROOM" config get app.build.daemons; expect_out $'horizon\nreverb'
   run "$MROOM" config get app.build.daemons --json; expect_out '["horizon", "reverb"]'
   run "$MROOM" config get qa.max_envs; expect_out "5"
-  run "$MROOM" config get app.build.frontend_env; expect_out "VITE_REVERB_APP_KEY=env:REVERB_APP_KEY"
+  run "$MROOM" config get app.build.frontend_env
+  expect_out $'VITE_REVERB_APP_KEY=env:REVERB_APP_KEY\nVITE_REVERB_HOST=env:REVERB_HOST\nVITE_REVERB_PORT=env:REVERB_PORT\nVITE_REVERB_SCHEME=env:REVERB_SCHEME'
   run "$MROOM" config get app.name --json; expect_out '"bookings"'
   run "$MROOM" config get app.build; expect_rc 2; expect_err_has "app.build is a table; use --json"
   run "$MROOM" config get app.build --json; expect_rc 0; expect_out_has '"daemons": ["horizon", "reverb"]'

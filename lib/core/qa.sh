@@ -7,15 +7,16 @@
 # Environment N is pull request N. Its names are built here from mroom.toml (app.name, qa.zone, and the app's
 # folders), and must match what a person set in the box's box.env (MROOM_APP_NAME, MROOM_QA_ZONE,
 # MROOM_QA_BACKEND_DIR), where the gate builds the same ones: the Laravel app's site api.<N>.<zone> and a frontend of
-# its own's <N>.<zone>, both in the home of the Forge isolated user <app>_qa_<N> (D17). Before mroom 0.5.0 they were
-# api-<N>.<zone> and go-<N>.<zone>: an environment brought up then is still found, counted and torn down by them.
+# its own's <N>.<zone>, both in the home of the Forge isolated user <app>_qa_<N> (D17), and its app on the box's
+# Reverb host, <app>-qa-<N> (D16). Before mroom 0.5.0 the sites were api-<N>.<zone> and go-<N>.<zone>: an environment
+# brought up then is still found, counted and torn down by them.
 #
 # Forge is the one source of truth for whether an environment exists: its api or frontend site, whichever is left.
 # A read that fails is retried and then fails the caller, so an API blip never reads as "no environment". The pull
 # request's comment is for people, and for qa_wake.
 
 QA_APP="" QA_ZONE="" QA_BACKEND="" QA_FRONTEND="" QA_N="" QA_USER="" QA_API="" QA_WEB="" QA_KEYS=""
-QA_OLD_API="" QA_OLD_WEB=""
+QA_OLD_API="" QA_OLD_WEB="" QA_REVERB=""
 QA_HEADING='### QA environment'
 
 # qa_say <message>: one line on stderr.
@@ -57,13 +58,14 @@ qa_separate_frontend() { [ -n "$QA_FRONTEND" ] && [ "$QA_FRONTEND" != . ]; }
 
 # qa_names <N>: environment N's names: QA_N, QA_USER (its sites' Unix user, which is also its database, role,
 # Redis user and mail login on the box), QA_API and QA_WEB (its sites' domains: the Laravel app's, and a frontend of
-# its own's), and QA_OLD_API and QA_OLD_WEB, the names mroom gave them before 0.5.0, by which an environment
-# brought up then is still found and torn down.
+# its own's), QA_OLD_API and QA_OLD_WEB, the names mroom gave them before 0.5.0, by which an environment brought up
+# then is still found and torn down, and QA_REVERB, its Reverb app's id and key, which the gate's reverb-app-add
+# builds the same way: public, so qa-plan builds the frontend with it, and the pull request's alone.
 qa_names() {
   qa_number "$1" || { qa_say "an environment number is 1 to 999999999"; return 1; }
   qa_init || return 1
   QA_N="$1" QA_USER="${QA_APP}_qa_$1" QA_API="api.$1.$QA_ZONE" QA_WEB="$1.$QA_ZONE"
-  QA_OLD_API="api-$1.$QA_ZONE" QA_OLD_WEB="go-$1.$QA_ZONE"
+  QA_OLD_API="api-$1.$QA_ZONE" QA_OLD_WEB="go-$1.$QA_ZONE" QA_REVERB="${QA_APP}-qa-$1"
   # The box's limit for a user name (README, QA gate): an app name of 19 characters or fewer always fits.
   ((${#QA_USER} <= 32)) || { qa_say "$QA_USER is longer than a user name may be (32); shorten app.name"; return 1; }
 }
@@ -85,7 +87,14 @@ QA_SITE_RE='\A(?:api\.|api-|go-)?([1-9][0-9]{0,8})\.(.+)\z'
 # and not the ones of before mroom 0.5.0 (<user>_session, <user>_xsrf): a browser keeps a cookie of those, set for the
 # whole zone, until it expires, and sends it ahead of the environment's own of the same name, of which PHP reads
 # only the first.
+# With qa.parity.broadcast = "same" (the default), the environment broadcasts with an app of its own on the box's
+# Reverb host, and that app's settings that are not secret come too, as the gate's reverb-app-add gives them: its id
+# and key, QA_REVERB, and the host, ws.<zone>, on port 443 over https. So the plan decides from mroom.toml alone
+# whether the frontend gets them, and builds it without asking the gate. Fails when mroom.toml cannot say how the
+# environment broadcasts.
 qa_public_env() {
+  local broadcast
+  broadcast="$(qa_config qa.parity.broadcast same)" || return 1
   printf 'APP_URL=https://%s\n' "$QA_API"
   printf 'SESSION_COOKIE=%s_sid\nXSRF_COOKIE_NAME=%s_csrf\n' "$QA_USER" "$QA_USER"
   if qa_separate_frontend; then
@@ -93,6 +102,10 @@ qa_public_env() {
     printf 'CORS_ALLOWED_ORIGINS=https://%s\nSANCTUM_STATEFUL_DOMAINS=%s,%s\n' "$QA_WEB" "$QA_WEB" "$QA_API"
   else
     printf 'CLIENT_URL=https://%s\nSESSION_DOMAIN=null\n' "$QA_API"
+  fi
+  if [ "$broadcast" = same ]; then
+    printf 'REVERB_APP_ID=%s\nREVERB_APP_KEY=%s\nREVERB_HOST=ws.%s\nREVERB_PORT=443\nREVERB_SCHEME=https\n' \
+      "$QA_REVERB" "$QA_REVERB" "$QA_ZONE"
   fi
 }
 

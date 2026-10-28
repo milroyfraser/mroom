@@ -13,8 +13,9 @@
 # app.build.frontend (the command; unset, nothing is built) and app.build.frontend_dist (where the build writes,
 # inside that folder: dist for a frontend of its own, public/build for Vite inside Laravel, by default).
 # app.build.frontend_env sets the build's environment: env:<KEY> is the environment's own value of KEY that is
-# not secret, the one qa-up writes into its .env (lib/core/qa.sh, qa_public_env: APP_URL, CLIENT_URL and the
-# cookies' names and domain); any other env:<KEY> is empty, since a build that runs a pull request's code holds
+# not secret, the one qa-up writes into its .env (lib/core/qa.sh, qa_public_env: APP_URL, CLIENT_URL, the cookies'
+# names and domain, and, when the environment broadcasts with Reverb, its Reverb app's id and key and the Reverb
+# host's name, port and scheme); any other env:<KEY> is empty, since a build that runs a pull request's code holds
 # nothing secret; and a plain value is used as it is, so it is public too.
 set -euo pipefail
 
@@ -57,8 +58,9 @@ fi
 if [ -z "$dist" ]; then echo "nothing to build: no app.build.frontend, or app.frontend_dir is empty"; exit 0; fi
 
 # The build's environment: the public values of this environment, and the plain values mroom.toml gives.
+values="$(qa_public_env)" || { qa_say "mroom.toml could not say how the environment broadcasts (qa.parity.broadcast)"; exit 1; }
 declare -A public=()
-while IFS='=' read -r key value; do public["$key"]="$value"; done < <(qa_public_env)
+while IFS='=' read -r key value; do public["$key"]="$value"; done <<<"$values"
 vars=()
 while IFS= read -r line; do
   [ -n "$line" ] || continue
