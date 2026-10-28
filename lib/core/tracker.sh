@@ -156,7 +156,7 @@ linear_nodes() {
 
 # An issue's first 50 labels: more on one issue is not a case worth a second query.
 LINEAR_ISSUE='id identifier title description url branchName priority priorityLabel createdAt updatedAt
-  state { id name type } team { id key } creator { name } assignee { name } labels(first: 50) { nodes { name } }'
+  state { id name type } team { id key } creator { name } assignee { name isMe } labels(first: 50) { nodes { name } }'
 
 # linear_issue <id>: the issue's fields (LINEAR_ISSUE) as JSON. Fails when there is no such issue.
 linear_issue() {
@@ -195,6 +195,7 @@ linear_issue_get() {
     {identifier: $i.identifier, title: $i.title, url: $i.url, branch: $i.branchName,
      state: $i.state.name, state_type: $i.state.type,
      team: $i.team.key, priority: $i.priority, creator: $i.creator.name, assignee: $i.assignee.name,
+     assigned_to_me: ($i.assignee.isMe // false),
      labels: [$i.labels.nodes[].name], created_at: $i.createdAt, updated_at: $i.updatedAt,
      description: ($i.description // ""),
      comments: ([.[] | select(. != null) | {by: (.user.name // "an integration"), at: .createdAt, body}] | sort_by(.at))}' \
@@ -230,8 +231,9 @@ linear_issue_set_state() {
   jq -c '.data.issueUpdate.issue | {identifier, state: .state.name, changed: true}' <<<"$answer"
 }
 
-# linear_issue_list <mine 0|1> <open 0|1> <label or ""> <limit>: issues, in issues.team when it is set, as
-# one JSON list: by priority (urgent first, none last), then the most recently updated first.
+# linear_issue_list <mine 0|1> <open 0|1> <label or ""> <limit>: the <limit> most recently updated issues, in
+# issues.team when it is set, as one JSON list sorted by priority (urgent first, none last), then the most
+# recently updated first. An issue older than the first <limit> is not in the list.
 linear_issue_list() {
   local mine="$1" open="$2" label="$3" limit="$4" team_key filter nodes
   team_key="$(tracker_config issues.team --optional)" || return 1
@@ -307,15 +309,18 @@ issue_get() {
 
 # issue_list [--mine] [--open] [--label <name>] [--limit <n>]: issues in issues.team (or the whole
 # workspace when it is not set): --mine those assigned to the token's user, --open those not done or
-# canceled, --label those with that label (any case). At most --limit (50 by default, 250 at most).
+# canceled, --label those with that label (any case). The --limit most recently updated (50 by default,
+# 250 at most), then sorted by priority.
 issue_list() {
   local mine=0 open=0 label="" limit=50 backend
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --mine) mine=1; shift ;;
       --open) open=1; shift ;;
-      --label) label="${2-}"; shift 2 || { tracker_say "--label takes a value"; return 2; } ;;
-      --limit) limit="${2-}"; shift 2 || { tracker_say "--limit takes a value"; return 2; } ;;
+      --label | --limit)
+        if [ "$#" -lt 2 ] || [[ "$2" == --* ]]; then tracker_say "$1 takes a value"; return 2; fi
+        if [ "$1" = --label ]; then label="$2"; else limit="$2"; fi
+        shift 2 ;;
       *) tracker_say "list: unknown option '$1'"; return 2 ;;
     esac
   done

@@ -311,9 +311,9 @@ will merge them into the app's settings:
 
 | Fragment | For |
 |---|---|
-| `base.json` | every app: git, gh and tracker reads, pushes, releases and filing an issue ask, merges, approvals, force-pushes and secret reads denied |
+| `base.json` | every app: git, gh and tracker reads allowed; pushes, releases, filing an issue and resolving an error ask; merges, approvals, force-pushes and secret reads denied |
 | `laravel-vite.json` | Laravel and Vite: tests, linters and builds allowed; migrations, seeds and tinker ask |
-| `forge.json` | Forge: `forge-api GET` allowed; the Forge CLI and its tokens denied |
+| `forge.json` | Forge: `forge-api GET` allowed, `forge-api --secret` asks; the Forge CLI and its tokens denied |
 | `tracker-linear.json` | a Linear tracker: GitHub issue writes denied |
 
 The merge joins every list. Claude Code checks deny first, then ask, then allow, so an `allow` rule
@@ -327,7 +327,7 @@ The workflow skills of phase 3 reach the issue tracker and the error tracker thr
 
 ```bash
 mroom tracker get SHOP-12                    # title, state, labels, branch, description, every comment
-mroom tracker list --mine --open             # my open issues, by priority; --label lesson for a label
+mroom tracker list --mine --open             # my 50 latest open issues, by priority; or --label lesson
 mroom tracker comment SHOP-12 < note.md      # adds a comment; the body comes on stdin
 mroom tracker state SHOP-12 "In Review"      # the team's state of that name, in any case
 mroom tracker create --allow-create --title "Checkout fails" --state Triage --label bug < body.md
@@ -358,8 +358,9 @@ token_env = "SENTRY_AUTH_TOKEN"    # the default
   command line, and an answer that echoes it has it cut out of the message.
 - **Hosts are fixed**: `api.linear.app`, and `<region>.sentry.io` for the organisation in `errors.org`.
   No URL comes from config, so a changed `mroom.toml` cannot send a token elsewhere.
-- **Listing** needs `--mine` or `--label`, so it never reads a whole backlog, and stops at `--limit`
-  (50, at most 250). It lists in `issues.team` when that is set.
+- **Listing** needs `--mine` or `--label`, so it never reads a whole backlog. It takes the `--limit`
+  (50, at most 250) most recently updated issues, in `issues.team` when that is set, then sorts
+  them by priority. `get` says whether the issue is assigned to the token's user (`assigned_to_me`).
 - **Creating an issue** needs `--allow-create`; without it, nothing is sent. It files in `issues.team`
   and uses labels that already exist, of that team or the whole workspace (not a parent team's); mroom
   never creates a label.
@@ -426,7 +427,8 @@ The settings fragment `base.json` allows the adapters' reads (`mroom tracker get
 `backend`; `mroom errors get`, `search`, `backend`) and asks before `mroom tracker create` and
 `mroom errors resolve`. `tests/skills-test.sh` checks the skills as a contract: their frontmatter,
 that every `mroom` command, skill and key they name exists, the rules above, the release's draft and
-question, and that none names a host, an address, an id or a person.
+question, and that none names a host, an IP address, an id or an email address. Names of people and
+projects come from `$MROOM_PRIVATE_WORDS`, a file of patterns kept outside the repository.
 
 Not here yet: `fix-issue` and `blast-radius` (later in phase 3), the principle skills (named in the
 skills, read when installed), and `verify-app` with `qa-engineer` (phase 2b).

@@ -30,18 +30,25 @@ release. A person checks the draft and publishes it on GitHub.
 
 1. The default branch: `gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`. Then
    `git fetch --tags origin <default>`.
-2. **The last release:** `gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName'`.
-   A draft is not a release.
+2. **The last release:** what production runs. With `release.production_url` set,
+   `curl -s <production_url><version_path>` reports its `release` (`app.version_path`, `/version`
+   by default). Otherwise, or when that fails, the newest published release:
+   `gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName'`. A draft is not a
+   release. Drop `release.tag_prefix` from the tag to get its version.
 3. **The version.** If the repository tags the default branch on every merge (`vX.Y.Z`), take the
-   newest: `git describe --tags --abbrev=0 --match 'v[0-9]*' origin/<default>`, and check that it
-   points at `origin/<default>`. Otherwise work it out from the Conventional Commits since the last
+   newest: `git describe --tags --abbrev=0 --match 'v[0-9]*' origin/<default>`. If it does not
+   point at `origin/<default>`, the newest merge has no tag yet: wait for it, or stop and say so.
+   Otherwise work it out from the Conventional Commits since the last
    release: a breaking change (`!` or `BREAKING CHANGE`) bumps the major, a `feat` the minor, any
    other change the patch. If it is not newer than the last release, stop: there is nothing to
    release.
 4. **The tag:** `release.tag_prefix` (empty by default) and then the version, such as `v1.4.0` or
    `release-v1.4.0`. It goes on the version's commit.
-5. **CI:** `gh run list --commit <sha>` must be green for every check in `pr.required_checks`. If
-   not, stop and say which.
+5. **CI:** the checks on the version's commit must be green:
+   `gh api repos/{owner}/{repo}/commits/<sha>/check-runs --jq '.check_runs[] | [.name, .conclusion] | @tsv'`.
+   If one failed or is still running, stop and say which. A check in `pr.required_checks` that runs
+   only on pull requests (a title check, say) is not on this commit; the default branch's ruleset
+   already required it on each merged PR.
 6. **What ships:** `git log --format='%h %s' <last release tag>..<sha>`, one line per merged PR.
 
 ## 2. Flag what needs the person's eye
@@ -89,11 +96,12 @@ Still a draft means it was not published: ask again, or stop.
 2. `gh run watch <id>` for each. If one fails, report the failing step from
    `gh run view <id> --log-failed`, and stop. A rollback is the person's decision.
 3. **The version:** `curl -s <production_url><version_path>` must report the release's tag and its
-   commit (`release.production_url` and `app.version_path`, `/version` by default). Without
-   `release.production_url`, say that the check was skipped.
-4. **The error tracker:** new issues since the deploy,
-   `mroom errors search 'is:unresolved firstSeen:-2h' --environment production --period 24h`.
-   List any, with their counts. When `mroom errors` exits 3, there is no error tracker: say so.
+   commit. Without `release.production_url`, say that the check was skipped.
+4. **The error tracker:** issues first seen since the deploy started, for example
+   `mroom errors search 'is:unresolved firstSeen:-2h' --environment production --period 24h`, with
+   the window set from the deploy run's start, and the error tracker's name for production (often
+   `production`). List any, with their counts. When `mroom errors` exits 3, there is no error
+   tracker: say so.
 5. For each production step flagged in step 2, **remind** the person. Never run it.
 
 ## 6. Report

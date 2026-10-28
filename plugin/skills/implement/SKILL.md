@@ -10,8 +10,9 @@ argument is the task in the person's words, or an open PR to carry on.
 
 **Principles.** A `principle-…` (or `typescript-best-practices`) name in parentheses closes a
 one-line summary of a skill. When that step applies, Read that skill's `SKILL.md` in full before
-acting on it: the summary says when, the file says how. If the skill is not installed, go on
-without it.
+acting on it: the summary says when, the file says how. Skills sit next to this skill's own
+folder in the mroom plugin, or in the app's `.claude/skills/`. If the skill is not installed, go
+on without it.
 
 ## Rules
 
@@ -29,10 +30,11 @@ tracker step and put its note on the pull request instead: in the body, or with 
 ## 0. Preconditions
 
 1. `mroom tracker get <id>`: title, state, labels, branch, description and comments. Stop if its
-   `state_type` is `completed` or `canceled`, or if it is not in `mroom tracker list --mine --open`
-   (it is not yours).
+   `state_type` is `completed` or `canceled`, or if `assigned_to_me` is false (it is not yours),
+   unless the person asked you to work it.
 2. **Design gate.** If the issue is a new screen or a changed flow (see `/mroom:refine`, Design), it
-   needs an approved design: a `Design approved:` comment after its last `Design for review:` one.
+   needs an approved design: a `Design approved by` comment after its last `Design for review:`
+   one.
    Otherwise stop and tell the person to run `/mroom:deliver <id> --design`. Never build against a
    design that is not approved.
 3. Work in a worktree of your own, never in a checkout another session can switch.
@@ -59,6 +61,9 @@ With no tracker, use `<type>/<short-slug>`, such as `fix/empty-seat-override`.
 Check `git status -sb` before every commit. Never commit on the default branch.
 
 ## 2. Implement
+
+For a Design `no` issue, first comment the decisions you made on the issue
+(`mroom tracker comment <id> < decisions.md`), so a person can see them before review.
 
 Follow the app's `CLAUDE.md` files. Migrations are expand then contract, so a rollback stays safe.
 Run the app's formatters after editing (for Laravel, `vendor/bin/pint --dirty`).
@@ -105,7 +110,7 @@ get stopped, and work that lives only in a worktree is stranded, where nobody ca
    title of step 5, and a body that links the issue: its id and its link (`issues.url`, with the
    id in place of `{id}`). With no tracker, the body holds the task instead.
 2. Push after every later commit too.
-3. Mark it ready (`gh pr ready <pr>`) only at hand-off (step 6).
+3. Mark it ready (`gh pr ready <pr>`) only when the work is done (step 6).
 
 ## 5. Pull request
 

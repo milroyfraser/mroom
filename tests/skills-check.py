@@ -114,10 +114,16 @@ FORBIDDEN = [
     (r"git\s+push\b[^`\n]*(--force|\s-f\b|--tags|--follow-tags|--mirror|\s\+)", "a force or tag push"),
     (r"gh\s+issue\s+(create|comment|edit|close)", "a GitHub issue write (the tracker is mroom tracker)"),
     (r"gh\s+api\b[^`\n]*(-X|--method)\s*(POST|PUT|PATCH|DELETE)", "a gh api write"),
+    (r"gh\s+api\b[^`\n]*\s(-f|-F|--field|--raw-field|--input)\b", "a gh api write (a field makes it a POST)"),
+    (r"gh\s+api\s+graphql\b[^`\n]*mutation", "a GraphQL mutation"),
+    (r"(?i)\b(linear|sentry|forge)\b[^.\n]{0,30}\bMCP\b|\bMCP\b[^.\n]{0,30}\b(linear|sentry|forge)\b",
+     "a tracker, error-tracker or Forge MCP server"),
     (r"api\.linear\.app|linear\.app/|sentry\.io|forge\.laravel\.com", "a tracker, error-tracker or Forge host"),
     (r"\bmcp__|\b(list_issues|get_issue|save_comment|save_issue|list_issue_labels|list_issue_statuses|update_issue)\b",
      "a tracker or error-tracker MCP tool"),
-    (r"(cat|less|head|tail|source|\.)\s+[^`\n]*(\.env\b(?!\.example)|forge-token|\.ssh/|credentials)", "a secret read"),
+    # Any command that names a secret file: cat, grep, sed, jq, source, an editor ...
+    (r"\b[a-z][a-z0-9_-]*\s+[^`\n]*?(?<![\w-])(\.env\b(?!\.example)|forge-token\b|\.ssh/|\.credentials|secrets/)",
+     "a secret read"),
     (r"\bforge\s+(deploy|env|tinker|ssh)", "the Forge CLI"),
     (r"--dangerously|bypassPermissions|--no-verify", "skipping a permission or a hook"),
 ]
@@ -134,6 +140,9 @@ for label, (name, kind, meta, body, text) in sorted(docs.items()):
     for pattern, what in FORBIDDEN:
         hits = [m.group(0) for m in re.finditer(pattern, text)]
         say(not hits, f"{label} runs no {what} ({hits[:3]})")
+    bad_edits = [s for s in spans if re.match(r"gh release edit \S", s)
+                 and re.search(r"--(draft|latest|prerelease|tag|target)\b", s)]
+    say(not bad_edits, f"{label}: gh release edit changes only the notes ({bad_edits[:2]})")
     curls = [s for s in spans if re.search(r"\b(curl|wget|http)\b", s) and not s.startswith("http")]
     curl_ok = all(re.fullmatch(r"curl -s <production_url><version_path>", s) for s in curls)
     say(curl_ok and (not curls or name == "release"),
@@ -167,7 +176,10 @@ for label, (name, kind, meta, body, text) in sorted(docs.items()):
         hits = re.findall(pattern, text)
         say(not hits, f"{label} names no {what} ({hits[:3]})")
     hosts = re.findall(r"https?://([^/\s)`\"'>]+)", text)
-    say(all(h in ("github.com",) or h.endswith(".example.dev") or h in ("<production_url>",) for h in hosts),
+    # Bare host names too, with no scheme (go.shop-corp.io).
+    hosts += re.findall(r"(?<![\w./@-])((?:[a-z0-9-]+\.)+(?:dev|io|app|com|net|org|co|ai|cloud|sh))\b", text)
+    say(all(h.rstrip(".") == "github.com" or h.rstrip(".").endswith("example.dev") or h == "<production_url>"
+            for h in hosts),
         f"{label} links only github.com or an example host ({hosts})")
     words = os.environ.get("MROOM_PRIVATE_WORDS")
     if words:

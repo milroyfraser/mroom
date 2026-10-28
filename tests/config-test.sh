@@ -189,7 +189,7 @@ name = "shop"
 
 [issues]
 state_started = "Doing; rm"
-state_review = ""
+state_review = "In Review "
 
 [release]
 production_url = "https://app.example.dev/up"
@@ -201,7 +201,7 @@ tag_prefix = "Release_"'
   expect_err_has 'release.tag_prefix must be empty or lowercase letters'
   local bad
   for bad in http://app.example.dev https://app.example.dev/ 'https://app.example.dev?x=1' https://localhost \
-      'https://user@app.example.dev' 'https://App.Example.dev'; do
+      'https://user@app.example.dev' 'https://App.Example.dev' https://app.example.dev:99999 https://app.example.dev:0; do
     toml "[app]
 name = \"shop\"
 [release]

@@ -208,7 +208,7 @@ def rule_error(key: str, value) -> str | None:
     if key == "errors.org" and not ORG_SLUG.fullmatch(value):
         return f"{key} must be an organisation slug: lowercase letters, digits, _ and - (got {json.dumps(value)})"
     if key in ("issues.state_started", "issues.state_review") and not STATE_NAME.fullmatch(value):
-        return f"{key} must be a state's name: letters, digits, spaces, - and _, at most 40 (got {json.dumps(value)})"
+        return f"{key} must be a state's name: words of letters, digits, - and _, one space apart, at most 40 (got {json.dumps(value)})"
     # The release skill reads this origin's version path, so it is an https origin and nothing more.
     if key == "release.production_url" and not HTTPS_ORIGIN.fullmatch(value):
         return f"{key} must be an https origin such as https://app.example.dev, with no path (got {json.dumps(value)})"
@@ -364,8 +364,8 @@ PHP_BINARY = re.compile(r"php(?:[0-9]+(?:\.[0-9]+)?)?")
 DISK = re.compile(r"[a-z][a-z0-9]{0,15}")
 TEAM_KEY = re.compile(r"[A-Z0-9][A-Z0-9_]{0,31}")
 ORG_SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,49}")
-STATE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _-]{0,39}")
-HTTPS_ORIGIN = re.compile(r"https://(?=[^/]{1,200}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?::[0-9]{1,5})?")
+STATE_NAME = re.compile(r"(?=.{1,40}$)[A-Za-z0-9_-]+(?: [A-Za-z0-9_-]+)*")
+HTTPS_ORIGIN = re.compile(r"https://(?=[^/]{1,200}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?")
 TAG_PREFIX = re.compile(r"(?:[a-z][a-z0-9-]{0,15})?")
 # A token's variable ends in _TOKEN or _API_KEY, and is none of the box's, GitHub's, a cloud's or a host's,
 # so a changed mroom.toml cannot send another secret (APP_KEY, AWS_SECRET_ACCESS_KEY) to the tracker.

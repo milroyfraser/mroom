@@ -78,12 +78,22 @@ t_get_reads_the_issue_and_every_page_of_comments() {
   expect_true "the issue was not read right" json_is "$out" '.identifier == "ENG-12" and .title == "Checkout fails"
     and .state == "Todo" and .state_type == "unstarted" and .team == "ENG" and .priority == 2 and .labels == ["bug"]
     and .description == "It breaks." and .assignee == null and .creator == "Sam Example"
-    and .branch == "sam/eng-12-checkout-fails"'
+    and .branch == "sam/eng-12-checkout-fails" and .assigned_to_me == false'
   expect_true "the comments were not read right" json_is "$out" '.comments == [
     {by: "Sam Example", at: "2026-01-01T01:00:00Z", body: "first"},
     {by: "an integration", at: "2026-01-01T02:00:00Z", body: "second"}]'
   expect_true "the token leaked" token_nowhere
   expect_true "a file was left in TMPDIR" tmp_empty
+}
+
+t_get_says_whether_the_issue_is_mine() {
+  world
+  answer 200 "$(printf '%s' "$ISSUE" | sed 's/"assignee":null/"assignee":{"name":"Sam Example","isMe":true}/')"
+  answer 200 '{"data":{"issue":{"comments":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}'
+  run "$MROOM" tracker get ENG-12
+  expect_rc 0
+  expect_true "the query does not ask whether the assignee is the token's user" has "$(query 1)" 'assignee { name isMe }'
+  expect_true "assigned_to_me" json_is "$out" '.assignee == "Sam Example" and .assigned_to_me == true'
 }
 
 t_an_oauth_token_goes_as_a_bearer_token() {
@@ -430,6 +440,8 @@ t_list_refuses_an_unbounded_or_bad_request() {
   run "$MROOM" tracker list --mine --limit 251; expect_rc 2; expect_err_has "--limit is 1 to 250"
   run "$MROOM" tracker list --mine --limit 1x; expect_rc 2
   run "$MROOM" tracker list --label; expect_rc 2; expect_err_has "--label takes a value"
+  run "$MROOM" tracker list --label --mine; expect_rc 2; expect_err_has "--label takes a value"
+  run "$MROOM" tracker list --mine --limit; expect_rc 2; expect_err_has "--limit takes a value"
   run "$MROOM" tracker list --label $'a\tb'; expect_rc 2; expect_err_has "control character"
   run "$MROOM" tracker list --mine --all; expect_rc 2; expect_err_has "unknown option '--all'"
   expect_true "Linear was called" [ "$(calls)" = 0 ]
@@ -468,6 +480,7 @@ t_usage_errors() {
 reset() { rm -rf "$T/api"; }
 
 test_case get-reads-the-issue-and-every-page-of-comments t_get_reads_the_issue_and_every_page_of_comments
+test_case get-says-whether-mine t_get_says_whether_the_issue_is_mine
 test_case an-oauth-token-goes-as-a-bearer-token t_an_oauth_token_goes_as_a_bearer_token
 test_case a-page-with-no-list-fails t_a_page_with_no_list_fails_rather_than_reading_short
 test_case comment-sends-the-body-from-stdin t_comment_sends_the_body_from_stdin

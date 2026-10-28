@@ -3,6 +3,9 @@
     "allow": [
       "Bash(forge-api GET:*)"
     ],
+    "ask": [
+      "Bash(forge-api --secret:*)"
+    ],
     "deny": [
       "Bash(forge:*)",
       "Bash(cat ~/.forge-token)",

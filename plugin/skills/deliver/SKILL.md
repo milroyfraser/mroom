@@ -10,7 +10,8 @@ Issues live in the tracker that `issues.tracker` names. Read and write them only
 (the task, the design link, the notes).
 
 **Principles.** A `principle-…` name in parentheses closes a one-line summary of a skill. When that
-step applies, Read that skill's `SKILL.md` in full before acting on it. If the skill is not
+step applies, Read that skill's `SKILL.md` in full before acting on it. Skills sit next to this
+skill's own folder in the mroom plugin, or in the app's `.claude/skills/`. If the skill is not
 installed, go on without it.
 
 ## Rules
@@ -21,19 +22,22 @@ installed, go on without it.
 - Never touch production. Never read secrets, tokens or credential files.
 - Never add the `qa` label. It is a person's switch.
 - Push early: after the first commit, push and open a draft PR linked to the issue
-  (`/mroom:implement` step 4). Mark it ready only at hand-off.
+  (`/mroom:implement` step 4). Mark it ready only when the work is done (`/mroom:implement` step 6).
 
 ## Routing
 
 | Invocation | Action |
 |---|---|
 | `/mroom:deliver` | Run `/mroom:refine`. |
-| `/mroom:deliver <id>` | The design gate (below) if the issue needs a design, then `/mroom:implement <id>`. |
+| `/mroom:deliver <id>` | The design gate (below) if needed, then `/mroom:implement <id>`. |
 | `/mroom:deliver <id> --design` | The design gate only. Stop after approval; build nothing. |
-| `/mroom:deliver <id> --no-design` | Treat the issue as Design `no` and go straight to `/mroom:implement`. |
-| `/mroom:deliver --designs` | The design gate for every issue `/mroom:refine` tags `needed`, one at a time, asking once per design. |
+| `/mroom:deliver <id> --no-design` | Design `no`: straight to `/mroom:implement`. |
+| `/mroom:deliver --designs` | The design gate for each `needed` issue, one at a time. |
 | `/mroom:deliver <id>` with earlier work | Resume (below). |
-| `/mroom:deliver correct…` (a batch from `/mroom:refine`) | Read the `correct` skill in full, and follow it through `/mroom:implement`'s branch and PR. |
+| `/mroom:deliver correct…` | A batch from `/mroom:refine`: the `correct` skill (below). |
+
+For a `correct…` batch, Read `../correct/SKILL.md` (next to this skill's folder) in full, and
+follow it through `/mroom:implement`'s branch and PR.
 
 ## Resume: carry on where a stopped session left off
 
@@ -62,8 +66,9 @@ End with one line per issue: PR link, CI, the QA result for the head commit, tra
 what the person still has to do (merge, release, a manual step).
 
 If the same issue parked twice for the same reason, or CI failed on a test that passes when run
-alone, Read the `correct` skill. Either fix the class now, or report it as a lesson that names both
-times. Filing a `lesson` issue needs the person's OK first (`mroom tracker create --allow-create`).
+alone, Read `../correct/SKILL.md` (next to this skill's folder). Either fix the class now, or report
+it as a lesson that names both times. Filing a `lesson` issue needs the person's OK first
+(`mroom tracker create --allow-create`). When `mroom tracker` exits 3, put the lesson in the PR body.
 
 ## Can this session draw?
 
@@ -74,7 +79,7 @@ Check that this session **lists the Artifact tool**. If it does not, stop and te
 The design source is Claude Design canvases (the Artifact tool, intent `design`).
 
 1. **Does it need a design?** A new screen or a changed flow does. A fix inside an existing
-   pattern does not: comment the decisions on the issue and build. `--design` forces it.
+   pattern does not: `/mroom:implement` comments the decisions on the issue and builds. `--design` forces it.
 2. **Draw.** Call Artifact with `action: "quickstart"` and `intent: "design"`, then load
    `artifact-design`. Use the app's design system, and its `DESIGN.md` if it has one.
    - One canvas per issue (or per group of related issues).
@@ -89,7 +94,8 @@ The design source is Claude Design canvases (the Artifact tool, intent `design`)
    is `Design for review: <canvas link>`, then the decisions worth the person's eye and the
    assumptions made. When `mroom tracker` exits 3, put it in the PR body instead.
 4. **Ask once** with `AskUserQuestion`: approve / approve with changes / later.
-   - **approve:** comment `Design approved: <canvas link>`.
+   - **approve:** comment `Design approved by <the person's name>: <canvas link>`. It records
+     their answer to this question; never write it without one.
    - **approve with changes:** redraw, post again, ask again.
    - **later:** leave it. The issue is parked, and the next run resumes it.
 5. With `--design`, stop here. Otherwise go on to `/mroom:implement`, which refuses to build

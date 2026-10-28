@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # tracker — the tracker adapter on the command line (design section 7), for the workflow skills.
 #
-#   mroom tracker get <id>                  the issue: title, state, labels, branch, description, every comment
+#   mroom tracker get <id>                  the issue: title, state, labels, branch, whether it is assigned to
+#                                           the token's user, description, every comment
 #   mroom tracker list [--mine] [--open] [--label <name>] [--limit 50]
 #                                           issues in issues.team: assigned to the token's user, not done or
-#                                           canceled, with a label; needs --mine or --label; by priority
+#                                           canceled, with a label; needs --mine or --label; the --limit most
+#                                           recently updated, then by priority
 #   mroom tracker comment <id> < body       adds the comment on stdin
 #   mroom tracker state <id> <state name>   moves the issue to the team's state of that name (any case)
 #   mroom tracker create --allow-create --title <title> [--state <name>] [--priority 0-4]
