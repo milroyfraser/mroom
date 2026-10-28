@@ -215,14 +215,15 @@ t_the_env_holds_the_environments_own_values() {
     MAIL_ENCRYPTION=null AWS_BUCKET=shop-qa-7-files AWS_ACCESS_KEY_ID=GKfiles \
     AWS_SECRET_ACCESS_KEY=bucket-pw-files AWS_DEFAULT_REGION=garage AWS_ENDPOINT=https://s3.qa.example.dev \
     AWS_USE_PATH_STYLE_ENDPOINT=true MEDIA_BUCKET=shop-qa-7-media MEDIA_URL=https://files.qa.example.dev/shop-qa-7-media \
-    BROADCAST_CONNECTION=log APP_ENV=qa APP_DEBUG=false "APP_KEY=$APP_KEY" \
-    "APP_URL=https://$API" "CLIENT_URL=https://$WEB" "SESSION_DOMAIN=.$WEB" SESSION_COOKIE=shop_qa_7_session \
-    XSRF_COOKIE_NAME=shop_qa_7_xsrf "CORS_ALLOWED_ORIGINS=https://$WEB" "SANCTUM_STATEFUL_DOMAINS=$WEB,$API" \
+    BROADCAST_CONNECTION=log APP_ENV=qa APP_DEBUG=false SESSION_SECURE_COOKIE=true "APP_KEY=$APP_KEY" \
+    "APP_URL=https://$API" "CLIENT_URL=https://$WEB" "SESSION_DOMAIN=.$WEB" SESSION_COOKIE=shop_qa_7_sid \
+    XSRF_COOKIE_NAME=shop_qa_7_csrf "CORS_ALLOWED_ORIGINS=https://$WEB" "SANCTUM_STATEFUL_DOMAINS=$WEB,$API" \
     CACHE_PREFIX=shop_qa_7_cache_; do
     expect_true ".env lacks $line" has_line "$sent" "$line"
   done
   # The session and XSRF cookies are for .7.qa.example.dev, the environment's two hosts: not for the zone, whose other
-  # environments' hosts and shared Garage and Reverb hosts would get them, and not secure-only by mroom's say.
+  # environments' hosts and shared Garage and Reverb hosts would get them. Their names are not those of before mroom
+  # 0.5.0, whose cookies a browser may still hold for the whole zone.
   local host domain
   domain="$(sed -n 's/^SESSION_DOMAIN=//p' <<<"$sent")"
   for host in "$(web_host 17)" "$(api_host 17)" "$(web_host 70)" "$(api_host 1)" s3.qa.example.dev files.qa.example.dev \
@@ -231,7 +232,8 @@ t_the_env_holds_the_environments_own_values() {
   done
   expect_true "the cookies of environment 7 miss its own hosts" gets_cookie "$API" "$domain"
   expect_true "the cookies of environment 7 miss its own hosts" gets_cookie "$WEB" "$domain"
-  expect_true "mroom made the cookies secure-only" lacks "$sent" "SESSION_SECURE_COOKIE"
+  expect_true "the cookies have the names of before 0.5.0" lacks "$sent" "_session"
+  expect_true "the cookies have the names of before 0.5.0" lacks "$sent" "_xsrf"
   # The template's own key, password, TLS and environment are replaced, never kept beside mroom's; a private disk
   # has no URL.
   run grep -c -e '^APP_KEY=' -e '^DB_PASSWORD=' -e '^MAIL_ENCRYPTION=' -e '^APP_ENV=' <<<"$sent"; expect_out 4
@@ -537,12 +539,28 @@ t_an_environment_of_the_old_names_is_torn_down_not_refreshed() {
   expect_err_has "environment 7 was brought up as $(old_api_host 7), a name mroom gave QA sites before 0.5.0. Tear it down (gh workflow run qa-down.yml -f pr_number=7), and the next deploy brings it up as $WEB and $API"
   run forge_writes; expect_out ""
   run gate_log; expect_out ""
-  run gh_log; expect_out_has "mroom-qa: failed"
+  # The comment says why and how, and not that the next push tries again: it would be refused as well.
+  run gh_log; expect_out_has "mroom-qa: failed"; expect_out_has "was brought up as $(old_api_host 7)"
+  expect_true "the comment says the next push tries again" lacks "$out" "The next push tries again"
   # Its frontend's site alone is enough.
   app "$TWO" api/artisan=php
   site 51 "$(old_web_host 7)" installed
   up
   expect_rc 1; expect_err_has "environment 7 was brought up as $(old_web_host 7)"
+  # It is refused first, before a site of the new names that Forge is removing is waited for or deleted again.
+  app "$TWO" api/artisan=php
+  site 54 "$API" removing "$(ago 86400)" "$(ago 7200)"
+  site 55 "$(old_web_host 7)" installed
+  forge_set '.sites[0].remove_reads = -1'
+  up
+  expect_rc 1; expect_err_has "environment 7 was brought up as $(old_web_host 7)"
+  run forge_writes; expect_out ""
+  expect_true "the run waited before it refused" lacks "$out" "waiting for it to go"
+  # An app with no frontend of its own comes up at its one host.
+  app $'[app]\nname = "shop"\n\n[qa]\nzone = "qa.example.dev"\n\n[qa.parity]\nbroadcast = "log"\nmail = "log"\nfiles = "local"' artisan=php
+  site 53 "$(old_api_host 7)" installed
+  up
+  expect_rc 1; expect_err_has "and the next deploy brings it up as $API"
   # One Forge is still removing, as a teardown leaves it, is waited for, and the environment comes up under the new
   # names.
   app "$TWO" api/artisan=php

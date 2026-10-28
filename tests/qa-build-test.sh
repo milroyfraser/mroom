@@ -67,7 +67,7 @@ frontend_env = { VITE_API = "env:APP_URL", VITE_CLIENT = "env:CLIENT_URL", VITE_
   expect_out_has "built web/dist"
   run cat "$T/build.env"
   # The cookies are for the environment's own two hosts.
-  expect_out "VITE_API=https://$(api_host 7)"$'\n'"VITE_CLIENT=https://$(web_host 7)"$'\n'"VITE_COOKIES=.$(web_host 7)"$'\nVITE_MODE=qa\nVITE_PAYMENTS=\n'"VITE_XSRF=$(site_user 7)_xsrf"
+  expect_out "VITE_API=https://$(api_host 7)"$'\n'"VITE_CLIENT=https://$(web_host 7)"$'\n'"VITE_COOKIES=.$(web_host 7)"$'\nVITE_MODE=qa\nVITE_PAYMENTS=\n'"VITE_XSRF=$(site_user 7)_csrf"
   run cat "$T/tools.log"; expect_out $'npm ci (in /web)\nnpm run build (in /web)'
 }
 

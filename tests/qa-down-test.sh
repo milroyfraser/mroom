@@ -290,21 +290,22 @@ t_the_check_reads_forge_and_changes_nothing() {
 
 t_an_environment_of_the_old_names_comes_down_too() {
   qa_world
-  # Brought up before mroom 0.5.0, as api-7 and go-7, with a worker of its own and a daemon of forge's that runs
-  # from its old frontend's folder.
+  # Brought up before mroom 0.5.0, as api-7 and go-7, with a worker of its own and daemons of forge's that run from
+  # folders of its old names.
   site 11 "$(old_api_host 7)" installed
   site 12 "$(old_web_host 7)" installed
   site 13 "$(api_host 70)" installed
   process 5 "$(site_user 7)" "/home/$(site_user 7)/$(old_api_host 7)/."
   process 6 forge "/var/www/$(old_web_host 7)"
+  process 8 forge "/var/www/$(old_api_host 7)"
   run "$CHECK" 7; expect_rc 0; expect_out "state=present"
   run "$DOWN" 7 --reason closed --state present
   expect_rc 0; expect_out_has "environment 7: removed"
   expect_out_has "==> Site $(old_api_host 7)"$'\n'"    deleted site 11"
   expect_out_has "==> Site $(old_web_host 7)"$'\n'"    deleted site 12"
   run order
-  expect_out $'forge DELETE /background-processes/5\nforge DELETE /background-processes/6\ngate user-clean 7
-forge DELETE /sites/11\nforge DELETE /sites/12\n'"gate ${BOX_SIDE//$'\n'/$'\ngate '}"
+  expect_out $'forge DELETE /background-processes/5\nforge DELETE /background-processes/6\nforge DELETE /background-processes/8
+gate user-clean 7\nforge DELETE /sites/11\nforge DELETE /sites/12\n'"gate ${BOX_SIDE//$'\n'/$'\ngate '}"
   run jq -r '[.sites[] | select(.status != "removing") | .id] | join(",")' "$FORGE_STATE"; expect_out "13"
   run freed; expect_out true
   # Its frontend's site alone, as a teardown that stopped halfway leaves it, is the environment still; and once Forge

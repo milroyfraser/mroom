@@ -468,7 +468,7 @@ and runs it, which installs the `parts` named:
 ```bash
 set -euo pipefail
 v=v0.5.0
-sum=f8ffea08eb1c747825231b0cd5bd070d0262a0b77e5719fb946da20c2734cecc
+sum=bd54e1d19f2255fb4dabadc9890b349daf4c24e7e8b3e3711647180767e08d0a
 user=forge
 parts=(site-op mailpit garage reverb)
 smtp_port=1025

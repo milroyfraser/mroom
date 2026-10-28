@@ -5,9 +5,9 @@
 # commit and the frontend qa-plan built, which the gate unpacks as the environment's own site user. Each step checks
 # its own resource, so a run that stopped halfway is repaired by the next. In order:
 #   1. refuses what it cannot do yet, and a build that holds anything but files and folders, before anything is made
-#   2. waits for a site of the environment that Forge is still removing, sending the delete again when it is stuck,
-#      and refuses an environment brought up under the names of before mroom 0.5.0, which its teardown removes;
-#      then, for a new environment (one whose code never went in, by the gate's record), counts the others: from
+#   2. refuses an environment brought up under the names of before mroom 0.5.0, which its teardown removes; waits
+#      for a site of the environment that Forge is still removing, sending the delete again when it is stuck; then,
+#      for a new environment (one whose code never went in, by the gate's record), counts the others: from
 #      qa.max_envs (5) on, it waits for a slot, and it counts again once its site is made, giving way to one that
 #      made its first site before it: its sites deleted, and waited for until Forge has them gone
 #   3. the api site, api.<N>.<zone>, and for a frontend of its own the site <N>.<zone>: Forge isolated sites in the
@@ -66,13 +66,16 @@ umask 077
 
 WORK="" DONE=""
 output() { if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "$1" >>"$GITHUB_OUTPUT"; fi; }
-# die <why>: stops the run, and leaves the why for the comment, also from a subshell.
+# die <why>: stops the run, and leaves the why for the comment, also from a subshell. die_teardown <why>: the same,
+# for an environment only its teardown can fix, so the comment does not say that the next push tries again.
 die() { if [ -n "$WORK" ]; then printf '%s' "$1" >"$WORK/failed"; fi; qa_say "$1"; exit 1; }
+die_teardown() { if [ -n "$WORK" ]; then : >"$WORK/teardown"; fi; die "$1"; }
 on_exit() {
-  local why=""
+  local why="" next="The next push tries again; a half-built environment goes when the pull request closes."
   if [ -n "$WORK" ] && [ -f "$WORK/failed" ]; then why="$(cat "$WORK/failed")"; fi
+  if [ -n "$WORK" ] && [ -f "$WORK/teardown" ]; then next=""; fi
   if [ "$1" != 0 ] && [ -z "$DONE" ]; then
-    qa_status failed "The deploy of \`$sha\` failed${why:+: $why}${RUN_URL:+ ([run]($RUN_URL))}. The next push tries again; a half-built environment goes when the pull request closes."
+    qa_status failed "The deploy of \`$sha\` failed${why:+: $why}${RUN_URL:+ ([run]($RUN_URL))}.${next:+ $next}"
   fi
   qa_cleanup
   if [ -n "$WORK" ]; then rm -rf "$WORK"; fi
@@ -154,19 +157,24 @@ site_id() {
 
 # 2. A site of this environment that Forge is still removing (a teardown just before this push) is waited for, so
 # the environment is made fresh; a removing site is never refreshed or counted. An environment brought up before
-# mroom 0.5.0 has its sites at api-<N>.<zone> and go-<N>.<zone>: one of them being removed is waited for too, and one
-# that is not is refused, not refreshed under the names of now beside it. Its teardown removes it, by hand or when
-# the pull request closes, its label comes off or its time is up, and the next deploy brings it up as new.
+# mroom 0.5.0 has its sites at api-<N>.<zone> and go-<N>.<zone>: one of them that Forge is not removing is refused
+# first, before anything is sent or waited for, and is not refreshed under the names of now beside it. Its teardown
+# removes it, by hand or when the pull request closes, its label comes off or its time is up, and the next deploy
+# brings it up as new. One of them being removed is waited for too.
+declare -A found=()
 for domain in "$QA_API" "$QA_WEB" "$QA_OLD_API" "$QA_OLD_WEB"; do
-  site="$(forge_site "$domain")" || die "Forge's site $domain could not be read"
-  if [ "$(jq -r '.attributes.status // ""' <<<"${site:-null}")" != removing ]; then
-    case "$domain" in
-      "$QA_OLD_API" | "$QA_OLD_WEB")
-        [ -z "$site" ] || die "environment $n was brought up as $domain, a name mroom gave QA sites before 0.5.0. Tear it down (gh workflow run qa-down.yml -f pr_number=$n), and the next deploy brings it up as $QA_WEB and $QA_API"
-        ;;
-    esac
-    continue
-  fi
+  found[$domain]="$(forge_site "$domain")" || die "Forge's site $domain could not be read"
+done
+new_names="$QA_API"
+if qa_separate_frontend; then new_names="$QA_WEB and $QA_API"; fi
+for domain in "$QA_OLD_API" "$QA_OLD_WEB"; do
+  site="${found[$domain]}"
+  [ -z "$site" ] || [ "$(jq -r '.attributes.status // ""' <<<"$site")" = removing ] \
+    || die_teardown "environment $n was brought up as $domain, a name mroom gave QA sites before 0.5.0. Tear it down (gh workflow run qa-down.yml -f pr_number=$n), and the next deploy brings it up as $new_names"
+done
+for domain in "$QA_API" "$QA_WEB" "$QA_OLD_API" "$QA_OLD_WEB"; do
+  site="${found[$domain]}"
+  [ "$(jq -r '.attributes.status // ""' <<<"${site:-null}")" = removing ] || continue
   minutes="$(qa_redelete_stuck "$site")"
   [ -z "$minutes" ] || echo "==> $domain had been removing for $minutes minutes; sent the delete again"
   echo "==> $domain is still being removed; waiting for it to go"
@@ -284,7 +292,7 @@ site_ready() {
     die "$1's web root is ${web:0:120}, not $want; delete the site in Forge and run again"
   fi
   if [ "$2" != / ] && [ "$(jq -r '.attributes.php_version // ""' <<<"$site")" != "PHP $php" ]; then
-    die "$1 runs $(jq -r '.attributes.php_version // "an unknown PHP"' <<<"$site" | cut -c1-20), and app.php is $php. A site's PHP version is set when it is made: tear the environment down (gh workflow run qa-down.yml -f pr_number=$n), and the next deploy makes it with PHP $php"
+    die_teardown "$1 runs $(jq -r '.attributes.php_version // "an unknown PHP"' <<<"$site" | cut -c1-20), and app.php is $php. A site's PHP version is set when it is made: tear the environment down (gh workflow run qa-down.yml -f pr_number=$n), and the next deploy makes it with PHP $php"
   fi
 }
 
@@ -592,6 +600,8 @@ keep APP_KEY
 set_env APP_ENV qa
 # Off: the hosts are public, and a debug page shows the environment's settings.
 set_env APP_DEBUG false
+# The hosts answer over https alone, so the cookies never go over http, not even to Forge's redirect on port 80.
+set_env SESSION_SECURE_COOKIE true
 while IFS= read -r line; do set_env "${line%%=*}" "${line#*=}"; done < <(qa_public_env)
 set_env CACHE_PREFIX "${QA_USER}_cache_"
 # Entry by entry, so a quoted value of several lines stays whole (actions/qa-up/env-merge).

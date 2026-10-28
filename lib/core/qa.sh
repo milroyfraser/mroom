@@ -81,10 +81,13 @@ QA_SITE_RE='\A(?:api\.|api-|go-)?([1-9][0-9]{0,8})\.(.+)\z'
 # frontend with, and part of what qa-up writes into the environment's .env. A separate frontend, at <N>.<zone>, reads
 # the session and XSRF cookies the Laravel app at api.<N>.<zone> sets, so they are set for .<N>.<zone>: no other
 # environment's host is under it, and neither are the zone's shared hosts, Garage's and the Reverb host's (design
-# 8.7). An app with no frontend of its own keeps them on its one host. Their names are the environment's own too.
+# 8.7). An app with no frontend of its own keeps them on its one host. Their names are the environment's own too,
+# and not the ones of before mroom 0.5.0 (<user>_session, <user>_xsrf): a browser keeps a cookie of those, set for the
+# whole zone, until it expires, and sends it ahead of the environment's own of the same name, of which PHP reads
+# only the first.
 qa_public_env() {
   printf 'APP_URL=https://%s\n' "$QA_API"
-  printf 'SESSION_COOKIE=%s_session\nXSRF_COOKIE_NAME=%s_xsrf\n' "$QA_USER" "$QA_USER"
+  printf 'SESSION_COOKIE=%s_sid\nXSRF_COOKIE_NAME=%s_csrf\n' "$QA_USER" "$QA_USER"
   if qa_separate_frontend; then
     printf 'CLIENT_URL=https://%s\nSESSION_DOMAIN=.%s\n' "$QA_WEB" "$QA_WEB"
     printf 'CORS_ALLOWED_ORIGINS=https://%s\nSANCTUM_STATEFUL_DOMAINS=%s,%s\n' "$QA_WEB" "$QA_WEB" "$QA_API"

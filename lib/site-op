@@ -128,7 +128,7 @@ def site_root(domain: str, kind: str) -> str:
     """The folder of this environment's api site (api.<N>.<zone>) or a frontend of its own's (<N>.<zone>, kind web)
     in this user's home, a real folder of its own."""
     n = environment()
-    prefix = f"api.{n}." if kind == "api" else f"{n}."
+    prefix = {"api": f"api.{n}.", "web": f"{n}."}[kind]
     if not (DOMAIN.fullmatch(domain) and domain.startswith(prefix)):
         raise Refused(f"'{domain[:60]}' is not this environment's {prefix}<zone> site")
     root = os.path.join(home(), domain)

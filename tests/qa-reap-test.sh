@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317  # the t_* functions run indirectly, through test_case
-# Tests for the QA reaper (actions/qa-reap/reap.sh): every environment past qa.ttl_days, found by its api or its go
+# Tests for the QA reaper (actions/qa-reap/reap.sh): every environment past qa.ttl_days, found by its API's or its frontend's
 # site, gets a teardown of its own (the app's qa-down workflow, reason ttl); one whose time Forge does not give counts
 # as past it; one Forge is removing is skipped, and a site of it stuck removing gets the delete again, with a warning;
 # a Forge that cannot be read fails the run; it needs no SSH key. Offline: Forge and GitHub are fakes.
@@ -29,7 +29,7 @@ t_each_environment_past_its_time_gets_a_teardown() {
   site 2 "$(web_host 1)" installed "$(ago $((9 * DAY)))"
   site 3 "$(api_host 3)" installed "$(ago "$DAY")"
   site 4 s3.qa.example.dev installed "$(ago $((90 * DAY)))"
-  site 5 "$(api_host 8 qa.other.dev)" installed "$(ago $((9 * DAY)))"
+  site 5 "$(api_host 8 qa.other.example.dev)" installed "$(ago $((9 * DAY)))"
   site 6 "$(api_host 09)" installed "$(ago $((9 * DAY)))"
   # Only its frontend's site is left, after a teardown that stopped halfway.
   site 7 "$(web_host 12)" installed "$(ago $((9 * DAY)))"
@@ -55,7 +55,7 @@ t_an_environment_of_the_old_names_is_reaped_too() {
   site 2 "$(old_web_host 5)" installed "$(ago $((9 * DAY)))"
   site 3 "$(old_api_host 6)" installed "$(ago "$DAY")"
   site 4 "$(old_api_host 7)" removing "$(ago $((9 * DAY)))" "$(ago 10800)"
-  site 5 "$(old_api_host 8 qa.other.dev)" installed "$(ago $((9 * DAY)))"
+  site 5 "$(old_api_host 8 qa.other.example.dev)" installed "$(ago $((9 * DAY)))"
   forge_set '.remove_reads = -1'
   run "$REAP"
   expect_rc 0; expect_out_has "started the teardown of 2 environment(s)"

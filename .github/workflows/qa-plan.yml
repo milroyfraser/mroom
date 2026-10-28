@@ -1,14 +1,14 @@
 name: QA plan
 
-# The half of a pull request's QA environment that runs the pull request's code, so it holds no secret (design
-# 8.2). The app calls this workflow from one of its own on pull_request and workflow_dispatch (README, QA
-# environments). Its first job reads the pull request's head commit, and the build job, named after that commit,
-# sorts the changed paths (actions/qa-plan), before any of the pull request's code runs, into the run's summary;
-# then it builds the frontend for <N>.<zone> with public values only (actions/qa-plan/build.sh) and keeps it as the
-# mroom-qa-dist artifact. When this run completes, qa-up starts (workflow_run), which runs the default branch's
-# workflow and mroom's actions at their pinned commit, takes the build as data to copy and sorts the paths again
-# itself, since nothing a run of the pull request's code leaves can be trusted. Only qa-up uses the qa environment,
-# which admits the default branch alone.
+# The half of a pull request's QA environment that runs the pull request's code, so it holds no secret (design 8.2).
+# The app calls this workflow from one of its own on pull_request and workflow_dispatch (README, QA environments).
+# Its first job reads the pull request's head commit, and the build job, named after that commit, sorts the changed
+# paths (actions/qa-plan), before any of the pull request's code runs, into the run's summary; then it builds the
+# frontend with public values only (actions/qa-plan/build.sh), for <N>.<zone>, or for api.<N>.<zone> when Vite builds
+# inside the Laravel app, and keeps it as the mroom-qa-dist artifact. When this run completes, qa-up starts
+# (workflow_run), which runs the default branch's workflow and mroom's actions at their pinned commit, takes the
+# build as data to copy and sorts the paths again itself, since nothing a run of the pull request's code leaves can
+# be trusted. Only qa-up uses the qa environment, which admits the default branch alone.
 #
 # A run started with the job token, as a wake starts it for a pull request that waited for a slot, starts no
 # workflow_run when it ends: the hand-over job then starts the app's qa-up workflow itself, naming this run. The
