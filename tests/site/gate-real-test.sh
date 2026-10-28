@@ -31,7 +31,7 @@ trap cleanup EXIT
 
 as_box() { sudo -u "$BOX_USER" "$@"; }
 gate() { run sudo -u "$BOX_USER" env SSH_ORIGINAL_COMMAND="$1" /opt/mroom/bin/mroom gate provision; }
-site() { echo "/home/shop_qa_$1/api-$1.$ZONE"; }
+site() { echo "/home/shop_qa_$1/api.$1.$ZONE"; }
 pool_workers() { pgrep -c -u shop_qa_12 -f 'pool shop_qa_12' || true; }
 
 # set_up: users, mroom where any user can read it (as an installed release is), site-op owned by root,
@@ -55,7 +55,7 @@ set_up() {
   printf 'MROOM_APP_NAME=shop\nMROOM_QA_ZONE=%s\nMROOM_QA_BACKEND_DIR=backend\nMROOM_QA_PHP=php\n' "$ZONE" \
     | as_box tee "/home/$BOX_USER/.config/mroom/box.env" >/dev/null
   for n in 12 13; do
-    sudo -u "shop_qa_$n" mkdir -p "$(site "$n")/backend/storage/app" "/home/shop_qa_$n/go-$n.$ZONE"
+    sudo -u "shop_qa_$n" mkdir -p "$(site "$n")/backend/storage/app" "/home/shop_qa_$n/$n.$ZONE"
     printf 'APP_KEY=base64:live%s\n' "$n" | sudo -u "shop_qa_$n" tee "$(site "$n")/backend/.env" >/dev/null
     printf 'uploaded\n' | sudo -u "shop_qa_$n" tee "$(site "$n")/backend/storage/app/photo.jpg" >/dev/null
     printf 'old\n' | sudo -u "shop_qa_$n" tee "$(site "$n")/old-file" >/dev/null
@@ -134,7 +134,7 @@ t_the_site_operations_with_real_users_and_sudo() {
   run sudo stat -c '%U %F' "$probe"; expect_out "shop_qa_13 symbolic link"
   run sudo readlink "$probe"; expect_out /usr/local/libexec/mroom/site-op
   gate "probe-link 13 web"; expect_rc 0
-  run sudo readlink "/home/shop_qa_13/go-13.$ZONE/mroom-symlink-probe"; expect_out /usr/local/libexec/mroom/site-op
+  run sudo readlink "/home/shop_qa_13/13.$ZONE/mroom-symlink-probe"; expect_out /usr/local/libexec/mroom/site-op
   # Only a site-op of root's links itself: a link to a file of another user's, such as a copy the box user owns,
   # would prove nothing about nginx refusing a site user's link to another owner's file.
   local notroot
@@ -143,12 +143,12 @@ t_the_site_operations_with_real_users_and_sudo() {
   sudo cp /usr/local/libexec/mroom/site-op "$notroot/site-op"
   sudo chown "$BOX_USER" "$notroot/site-op"
   sudo chmod 755 "$notroot/site-op"
-  run sudo -u shop_qa_13 "$notroot/site-op" probe-link "go-13.$ZONE"
+  run sudo -u shop_qa_13 "$notroot/site-op" probe-link "13.$ZONE"
   expect_rc 1; expect_err_has "is not root's and readable by all, so the probe would prove nothing"
   sudo rm -rf "$notroot"
 
   gate "code-put 12 $COMMIT" <"$T/code.tgz"
-  expect_rc 0; expect_out "api-12.$ZONE: 3 entries unpacked, 1 .env skipped"
+  expect_rc 0; expect_out "api.12.$ZONE: 3 entries unpacked, 1 .env skipped"
   run sudo stat -c %U "$(site 12)/backend/public/index.php"; expect_out shop_qa_12
   run sudo cat "$(site 12)/backend/.env"; expect_out "APP_KEY=base64:live12"
   run sudo cat "$(site 12)/backend/storage/app/photo.jpg"; expect_out uploaded
@@ -192,7 +192,7 @@ t_the_site_operations_with_real_users_and_sudo() {
   printf 'x\n' >"$T/dist/assets/app.js"
   tar -czf "$T/dist.tgz" -C "$T/dist" .
   gate "dist-put 12" <"$T/dist.tgz"; expect_rc 0
-  run sudo stat -c %U "/home/shop_qa_12/go-12.$ZONE/assets/app.js"; expect_out shop_qa_12
+  run sudo stat -c %U "/home/shop_qa_12/12.$ZONE/assets/app.js"; expect_out shop_qa_12
 
   # user-clean: environment 12 has a PHP-FPM pool, a stray process and files outside its home; environment
   # 13 has a process and a file too. The pool's workers stay, everything else of 12's goes, 13 is untouched.

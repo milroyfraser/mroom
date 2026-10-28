@@ -555,7 +555,8 @@ sockets there, and its backend sends its events there. Create it as a site in Fo
 and put this in place of the site's location blocks (Forge's nginx runs as $user, who alone can open the
 socket). Its ^~ keeps any of Forge's "location ~" blocks left in place from taking a path. A socket stays
 open while either side speaks within its timeout: Reverb pings a quiet one every minute. Cookies stay out:
-Reverb reads none, and every environment's would count toward its limit on a request's size.
+Reverb reads none, and one set for the whole zone, as environments' were before mroom 0.5.0, would count toward
+its limit on a request's size.
 
 ws.$zone, WebSockets and Reverb's HTTP API for every QA environment:
 

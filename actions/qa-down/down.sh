@@ -138,9 +138,12 @@ fi
 qa_show "$out"
 
 STEP="its sites"
-for domain in "$QA_API" "$QA_WEB"; do
-  echo "==> Site $domain"
+# By the names of now and of before mroom 0.5.0, so an environment brought up then goes too; an old name is said
+# only when Forge has a site by it.
+for domain in "$QA_API" "$QA_WEB" "$QA_OLD_API" "$QA_OLD_WEB"; do
   site="$(forge_site "$domain")"
+  case "$domain" in "$QA_OLD_API" | "$QA_OLD_WEB") [ -n "$site" ] || continue ;; esac
+  echo "==> Site $domain"
   status="$(jq -r '.attributes.status // ""' <<<"${site:-null}")"
   id="$(jq -r '.id // ""' <<<"${site:-null}")"
   if [ -z "$site" ]; then

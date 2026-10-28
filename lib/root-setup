@@ -24,7 +24,7 @@ set -euo pipefail
 
 ROOT_SETUP_REPO="milroyfraser/mroom"
 # The SHA-256 of this release's lib/site-op; tests/root-test.sh fails while it is another file's.
-SITE_OP_SHA256="174b019328ccbed2477565825070db6158308b9a6f010fc27ca1189614e62bb9"
+SITE_OP_SHA256="155c5b206dd942ea0b3b071d70a8fc484f48b6f05414046e684dc83fc35f9b76"
 # The units name this python and this php, which root's own PATH also finds first on Ubuntu.
 PYTHON=/usr/bin/python3
 PHP=/usr/bin/php

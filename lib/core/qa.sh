@@ -6,14 +6,16 @@
 #
 # Environment N is pull request N. Its names are built here from mroom.toml (app.name, qa.zone, and the app's
 # folders), and must match what a person set in the box's box.env (MROOM_APP_NAME, MROOM_QA_ZONE,
-# MROOM_QA_BACKEND_DIR), where the gate builds the same ones: the sites api-<N>.<zone> and go-<N>.<zone>, both
-# in the home of the Forge isolated user <app>_qa_<N> (D17).
+# MROOM_QA_BACKEND_DIR), where the gate builds the same ones: the Laravel app's site api.<N>.<zone> and a frontend of
+# its own's <N>.<zone>, both in the home of the Forge isolated user <app>_qa_<N> (D17). Before mroom 0.5.0 they were
+# api-<N>.<zone> and go-<N>.<zone>: an environment brought up then is still found, counted and torn down by them.
 #
-# Forge is the one source of truth for whether an environment exists: its api or go site, whichever is left. A read
-# that fails is retried and then fails the caller, so an API blip never reads as "no environment". The pull
+# Forge is the one source of truth for whether an environment exists: its api or frontend site, whichever is left.
+# A read that fails is retried and then fails the caller, so an API blip never reads as "no environment". The pull
 # request's comment is for people, and for qa_wake.
 
 QA_APP="" QA_ZONE="" QA_BACKEND="" QA_FRONTEND="" QA_N="" QA_USER="" QA_API="" QA_WEB="" QA_KEYS=""
+QA_OLD_API="" QA_OLD_WEB=""
 QA_HEADING='### QA environment'
 
 # qa_say <message>: one line on stderr.
@@ -41,7 +43,7 @@ qa_now() { date -u -d "@$(mroom_now)" +%Y-%m-%dT%H:%M:%SZ; }
 qa_temp() { mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/mroom-qa.XXXXXX"; }
 
 # qa_init: the app's name, the QA zone and the app's folders, from mroom.toml. app.frontend_dir is a folder for a
-# separate frontend (it gets the go site), . for Vite inside the Laravel app, and empty for no frontend.
+# separate frontend (it gets the site <N>.<zone>), . for Vite inside the Laravel app, and empty for no frontend.
 qa_init() {
   [ -z "$QA_APP" ] || return 0
   QA_APP="$(qa_config app.name)" || return 1
@@ -50,15 +52,18 @@ qa_init() {
   QA_FRONTEND="$(qa_config app.frontend_dir .)" || return 1
 }
 
-# qa_separate_frontend: whether the app has a frontend of its own, served from the go site.
+# qa_separate_frontend: whether the app has a frontend of its own, served from the site <N>.<zone>.
 qa_separate_frontend() { [ -n "$QA_FRONTEND" ] && [ "$QA_FRONTEND" != . ]; }
 
 # qa_names <N>: environment N's names: QA_N, QA_USER (its sites' Unix user, which is also its database, role,
-# Redis user and mail login on the box), QA_API and QA_WEB (its sites' domains).
+# Redis user and mail login on the box), QA_API and QA_WEB (its sites' domains: the Laravel app's, and a frontend of
+# its own's), and QA_OLD_API and QA_OLD_WEB, the names mroom gave them before 0.5.0, by which an environment
+# brought up then is still found and torn down.
 qa_names() {
   qa_number "$1" || { qa_say "an environment number is 1 to 999999999"; return 1; }
   qa_init || return 1
-  QA_N="$1" QA_USER="${QA_APP}_qa_$1" QA_API="api-$1.$QA_ZONE" QA_WEB="go-$1.$QA_ZONE"
+  QA_N="$1" QA_USER="${QA_APP}_qa_$1" QA_API="api.$1.$QA_ZONE" QA_WEB="$1.$QA_ZONE"
+  QA_OLD_API="api-$1.$QA_ZONE" QA_OLD_WEB="go-$1.$QA_ZONE"
   # The box's limit for a user name (README, QA gate): an app name of 19 characters or fewer always fits.
   ((${#QA_USER} <= 32)) || { qa_say "$QA_USER is longer than a user name may be (32); shorten app.name"; return 1; }
 }
@@ -67,19 +72,24 @@ qa_names() {
 # an option.
 QA_WORKFLOW_RE='^[A-Za-z0-9_][A-Za-z0-9._-]*\.ya?ml$'
 
-# QA_SITE_RE: qa_names read backwards, for jq: a site name's environment number and zone, as its two captures. Every
-# name of an environment's sites is built in qa_names and read back with this, and nowhere else.
-QA_SITE_RE='\A(?:api|go)-([1-9][0-9]{0,8})\.(.+)\z'
+# QA_SITE_RE: qa_names read backwards, for jq: a site name's environment number and zone, as its two captures, for
+# the names of now (api.<N>.<zone>, <N>.<zone>) and of before 0.5.0 (api-<N>.<zone>, go-<N>.<zone>). Every name of an
+# environment's sites is built in qa_names and read back with this, and nowhere else.
+QA_SITE_RE='\A(?:api\.|api-|go-)?([1-9][0-9]{0,8})\.(.+)\z'
 
 # qa_public_env: environment N's settings that are not secret, as KEY=value lines: what qa-plan builds the
-# frontend with, and part of what qa-up writes into the environment's .env. Every environment's hosts share the
-# zone, so the cookies have names of their own (design 8.7). A separate frontend reads the session and XSRF
-# cookies from its own host, so they are set for the whole zone.
+# frontend with, and part of what qa-up writes into the environment's .env. A separate frontend, at <N>.<zone>, reads
+# the session and XSRF cookies the Laravel app at api.<N>.<zone> sets, so they are set for .<N>.<zone>: no other
+# environment's host is under it, and neither are the zone's shared hosts, Garage's and the Reverb host's (design
+# 8.7). An app with no frontend of its own keeps them on its one host. Their names are the environment's own too,
+# and not the ones of before mroom 0.5.0 (<user>_session, <user>_xsrf): a browser keeps a cookie of those, set for the
+# whole zone, until it expires, and sends it ahead of the environment's own of the same name, of which PHP reads
+# only the first.
 qa_public_env() {
   printf 'APP_URL=https://%s\n' "$QA_API"
-  printf 'SESSION_COOKIE=%s_session\nXSRF_COOKIE_NAME=%s_xsrf\n' "$QA_USER" "$QA_USER"
+  printf 'SESSION_COOKIE=%s_sid\nXSRF_COOKIE_NAME=%s_csrf\n' "$QA_USER" "$QA_USER"
   if qa_separate_frontend; then
-    printf 'CLIENT_URL=https://%s\nSESSION_DOMAIN=.%s\n' "$QA_WEB" "$QA_ZONE"
+    printf 'CLIENT_URL=https://%s\nSESSION_DOMAIN=.%s\n' "$QA_WEB" "$QA_WEB"
     printf 'CORS_ALLOWED_ORIGINS=https://%s\nSANCTUM_STATEFUL_DOMAINS=%s,%s\n' "$QA_WEB" "$QA_WEB" "$QA_API"
   else
     printf 'CLIENT_URL=https://%s\nSESSION_DOMAIN=null\n' "$QA_API"
@@ -102,18 +112,19 @@ qa_all_sites() {
   return 1
 }
 
-# qa_env_state: present when environment N's api or go site exists and is not being removed, removing when all
-# that is left of them is being removed, absent otherwise.
+# qa_env_state: present when one of environment N's sites, by its names of now or of before 0.5.0, exists and is not
+# being removed, removing when all that is left of them is being removed, absent otherwise.
 qa_env_state() {
   local sites
   sites="$(qa_all_sites)" || return 1
-  jq -rs --arg api "$QA_API" --arg web "$QA_WEB" '[.[] | .attributes | select(.name == $api or .name == $web) | .status]
+  jq -rs --arg api "$QA_API" --arg web "$QA_WEB" --arg old_api "$QA_OLD_API" --arg old_web "$QA_OLD_WEB" '[.[]
+    | .attributes | select(.name == $api or .name == $web or .name == $old_api or .name == $old_web) | .status]
     | if any(. != "removing") then "present" elif length > 0 then "removing" else "absent" end' <<<"$sites"
 }
 
-# qa_envs: "<N> <present|removing> <created_at>" for every environment, from its api or go site, whichever is left: a
-# teardown that deleted one of them and stopped still leaves an environment. created_at is its oldest site's, or -
-# when Forge gives none.
+# qa_envs: "<N> <present|removing> <created_at>" for every environment, from its api or frontend site, whichever is
+# left, by the names of now or of before 0.5.0: a teardown that deleted one of them and stopped still leaves an
+# environment. created_at is its oldest site's, or - when Forge gives none.
 qa_envs() {
   local sites
   qa_init || return 1
@@ -180,8 +191,9 @@ qa_redelete_stuck() {
 qa_jobs() {
   local items
   items="$(forge_list "$1")" || return 1
-  jq -c --arg user "$QA_USER" --arg home "/home/$QA_USER" --arg api "$QA_API" --arg web "$QA_WEB" --arg all "${2:-}" '
-    def ours: . == $home or startswith($home + "/") or (split("/") | any(.[]; . == $api or . == $web));
+  jq -c --arg user "$QA_USER" --arg home "/home/$QA_USER" --arg all "${2:-}" \
+    --argjson sites "$(jq -nc --args '$ARGS.positional' "$QA_API" "$QA_WEB" "$QA_OLD_API" "$QA_OLD_WEB")" '
+    def ours: . == $home or startswith($home + "/") or (split("/") | any(.[]; IN($sites[])));
     def names_ours: [scan("[^\\s\"\u0027`;|&()<>=]+") | select(startswith("/"))] | any(.[]; ours);
     select($all == "all" or .attributes.user == $user or ((.attributes.directory // "") | startswith("/") and ours)
       or ((.attributes.command // "") | names_ours))

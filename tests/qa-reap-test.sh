@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317  # the t_* functions run indirectly, through test_case
-# Tests for the QA reaper (actions/qa-reap/reap.sh): every environment past qa.ttl_days, found by its api or its go
-# site, gets a teardown of its own (the app's qa-down workflow, reason ttl); one whose time Forge does not give counts
-# as past it; one Forge is removing is skipped, and a site of it stuck removing gets the delete again, with a warning;
-# a Forge that cannot be read fails the run; it needs no SSH key. Offline: Forge and GitHub are fakes.
+# Tests for the QA reaper (actions/qa-reap/reap.sh): every environment past qa.ttl_days, found by its API's or its
+# frontend's site, gets a teardown of its own (the app's qa-down workflow, reason ttl); one whose time Forge does not
+# give counts as past it; one Forge is removing is skipped, and a site of it stuck removing gets the delete again,
+# with a warning; a Forge that cannot be read fails the run; it needs no SSH key. Offline: Forge and GitHub are
+# fakes.
 set -euo pipefail
 SUITE=qa-reap
 # shellcheck source=tests/lib.sh
@@ -29,9 +30,9 @@ t_each_environment_past_its_time_gets_a_teardown() {
   site 2 "$(web_host 1)" installed "$(ago $((9 * DAY)))"
   site 3 "$(api_host 3)" installed "$(ago "$DAY")"
   site 4 s3.qa.example.dev installed "$(ago $((90 * DAY)))"
-  site 5 "$(api_host 8 qa.other.dev)" installed "$(ago $((9 * DAY)))"
+  site 5 "$(api_host 8 qa.other.example.dev)" installed "$(ago $((9 * DAY)))"
   site 6 "$(api_host 09)" installed "$(ago $((9 * DAY)))"
-  # Only its go site is left, after a teardown that stopped halfway.
+  # Only its frontend's site is left, after a teardown that stopped halfway.
   site 7 "$(web_host 12)" installed "$(ago $((9 * DAY)))"
   # Forge gives no time for it.
   site 8 "$(api_host 13)" installed
@@ -48,6 +49,24 @@ dispatch qa-down.yml main pr_number=13 reason=ttl'
   expect_no_file "$GATE/gate.log"
 }
 
+t_an_environment_of_the_old_names_is_reaped_too() {
+  reaper_world
+  # Environments brought up before mroom 0.5.0, as api-<N> and go-<N>.
+  site 1 "$(old_api_host 4)" installed "$(ago $((9 * DAY)))"
+  site 2 "$(old_web_host 5)" installed "$(ago $((9 * DAY)))"
+  site 3 "$(old_api_host 6)" installed "$(ago "$DAY")"
+  site 4 "$(old_api_host 7)" removing "$(ago $((9 * DAY)))" "$(ago 10800)"
+  site 5 "$(old_api_host 8 qa.other.example.dev)" installed "$(ago $((9 * DAY)))"
+  forge_set '.remove_reads = -1'
+  run "$REAP"
+  expect_rc 0; expect_out_has "started the teardown of 2 environment(s)"
+  expect_out_has "environment 7: Forge is already removing it; skipped"
+  run dispatches
+  expect_out $'dispatch qa-down.yml main pr_number=4 reason=ttl\ndispatch qa-down.yml main pr_number=5 reason=ttl'
+  # A site of the old names stuck removing gets the delete again too.
+  run forge_writes; expect_out "DELETE /sites/4"
+}
+
 t_an_environment_forge_is_removing_is_skipped_and_a_stuck_site_deleted_again() {
   reaper_world
   site 2 "$(api_host 2)" removing "$(ago $((9 * DAY)))"
@@ -57,7 +76,8 @@ t_an_environment_forge_is_removing_is_skipped_and_a_stuck_site_deleted_again() {
   forge_set '.remove_reads = -1'
   run "$REAP"
   expect_rc 0; expect_out_has "environment 2: Forge is already removing it; skipped"
-  # Removing for 3 hours, or 2 for a go site, gets the delete again; for 5 minutes, or with no time to tell, it does not.
+  # Removing for 3 hours, or 2 for a frontend's site, gets the delete again; for 5 minutes, or with no time to tell,
+  # it does not.
   expect_out_has "::warning::environment 6: $(api_host 6) had been removing for 180 minutes, so the delete went again"
   expect_out_has "::warning::environment 9: $(web_host 9) had been removing for 120 minutes"
   expect_true "a site removing for 5 minutes was warned about" lacks "$out" "environment 7: $(api_host 7)"
@@ -79,7 +99,7 @@ dispatch qa-down.yml main pr_number=3 reason=ttl'
 
 t_an_environments_age_is_its_oldest_sites() {
   reaper_world
-  # A go site made 9 days ago, and an api site made again yesterday: the environment is 9 days old.
+  # A frontend's site made 9 days ago, and an api site made again yesterday: the environment is 9 days old.
   site 1 "$(api_host 4)" installed "$(ago "$DAY")"
   site 2 "$(web_host 4)" installed "$(ago $((9 * DAY)))"
   run "$REAP"
@@ -133,6 +153,7 @@ t_a_qa_environment_not_set_up_has_nothing_to_reap() {
 }
 
 test_case each-past-its-time t_each_environment_past_its_time_gets_a_teardown
+test_case old-names-reaped t_an_environment_of_the_old_names_is_reaped_too
 test_case removing-and-stuck t_an_environment_forge_is_removing_is_skipped_and_a_stuck_site_deleted_again
 test_case three-teardowns t_three_environments_past_their_time_get_three_teardowns
 test_case age-of-oldest-site t_an_environments_age_is_its_oldest_sites

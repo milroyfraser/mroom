@@ -116,24 +116,24 @@ t_the_reverb_operations_against_the_real_host() {
 
   # From its two sites only, where its sockets stay open; from another site the host refuses and closes one, and
   # an app no one added does not exist.
-  run client open "$(sock)" "$key12" https://go-12.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
+  run client open "$(sock)" "$key12" https://12.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
   expect_true "its own site's socket was closed: $out" eval '[ "$(tail -n1 <<<"$out")" = open ]'
-  run client open "$(sock)" "$key12" https://api-12.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
-  run client open "$(sock)" "$key12" https://go-13.qa.example.test; expect_out_has 'Origin not allowed'
+  run client open "$(sock)" "$key12" https://api.12.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
+  run client open "$(sock)" "$key12" https://13.qa.example.test; expect_out_has 'Origin not allowed'
   expect_true "a refused socket stayed open: $out" eval '[ "$(tail -n1 <<<"$out")" = closed ]'
-  run client open "$(sock)" shop-qa-14 https://go-14.qa.example.test; expect_out_has 'Application does not exist'
+  run client open "$(sock)" shop-qa-14 https://14.qa.example.test; expect_out_has 'Application does not exist'
   expect_true "an unknown app's socket stayed open: $out" eval '[ "$(tail -n1 <<<"$out")" = closed ]'
 
   # An event its backend sends, signed with its secret, reaches its sockets; another's secret is refused.
-  listen_for "$(sock)" "$key12" https://go-12.qa.example.test orders
+  listen_for "$(sock)" "$key12" https://12.qa.example.test orders
   run client send "$(sock)" shop-qa-12 "$key12" "$secret12" orders shipped '{"id":7}'; expect_out 200
   run heard; expect_out_has 'event shipped {"id":7}'
   run client send "$(sock)" shop-qa-12 "$key12" "$secret13" orders shipped '{}'; expect_out 401
 
   # A client event between two of app 12's sockets arrives, though app 13 was served between the sender's
   # subscribe and its event: Reverb 1.12.0 alone would look the channel up in app 13's.
-  listen_for "$(sock)" "$key12" https://go-12.qa.example.test chat
-  client whisper "$(sock)" "$key12" https://go-12.qa.example.test chat client-typing '{"x":1}' "$T/whisper.go" \
+  listen_for "$(sock)" "$key12" https://12.qa.example.test chat
+  client whisper "$(sock)" "$key12" https://12.qa.example.test chat client-typing '{"x":1}' "$T/whisper.go" \
     >"$T/whisper.out" 2>&1 &
   WHISPER_PID=$!
   for _ in $(seq 1 100); do if grep -qx ready "$T/whisper.out"; then break; fi; sleep 0.1; done
@@ -170,15 +170,15 @@ t_the_reverb_operations_against_the_real_host() {
   } >"$T/nginx/nginx.conf"
   nginx -p "$T/nginx" -c "$T/nginx/nginx.conf" 2>"$T/nginx/start.err" || { cat "$T/nginx/nginx.conf" "$T/nginx/start.err" >&2; exit 1; }
   sleep 0.5
-  run client open 127.0.0.1:8082 "$key12" https://go-12.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
-  listen_for 127.0.0.1:8082 "$key12" https://go-12.qa.example.test orders
+  run client open 127.0.0.1:8082 "$key12" https://12.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
+  listen_for 127.0.0.1:8082 "$key12" https://12.qa.example.test orders
   run client send 127.0.0.1:8082 shop-qa-12 "$key12" "$secret12" orders packed '"box 3"'; expect_out 200
   run heard; expect_out_has 'event packed "box 3"'
 
   # A removed app opens no socket; the other environment's keeps working, and nothing restarted.
   gate "reverb-app-remove 12"; expect_rc 0
-  run client open "$(sock)" "$key12" https://go-12.qa.example.test; expect_out_has 'Application does not exist'
-  run client open "$(sock)" "$key13" https://go-13.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
+  run client open "$(sock)" "$key12" https://12.qa.example.test; expect_out_has 'Application does not exist'
+  run client open "$(sock)" "$key13" https://13.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
   expect_out_has open
   expect_true "the host restarted" [ "$(main_pid)" = "$pid" ]
 
@@ -187,8 +187,8 @@ t_the_reverb_operations_against_the_real_host() {
   sleep 1.5
   wait_ready
   expect_true "systemd did not start it again" [ "$(main_pid)" != "$pid" ]
-  run client open "$(sock)" "$key13" https://go-13.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
-  listen_for "$(sock)" "$key13" https://go-13.qa.example.test orders
+  run client open "$(sock)" "$key13" https://13.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
+  listen_for "$(sock)" "$key13" https://13.qa.example.test orders
   run client send "$(sock)" shop-qa-13 "$key13" "$secret13" orders shipped '{"id":8}'; expect_out 200
   run heard; expect_out_has 'event shipped {"id":8}'
   # Reverb's errors reach the journal: the refused origin above is one. Nothing else went wrong.
@@ -205,7 +205,7 @@ t_the_reverb_operations_against_the_real_host() {
   expect_out_has "Reverb host answers; its apps file holds 1."
   expect_true "the host did not restart" [ "$(main_pid)" != "$pid" ]
   run bash -c 'ls "$1" | wc -l' _ "$(reverb_dir)/builds"; expect_out 2
-  run client open "$(sock)" "$key13" https://go-13.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
+  run client open "$(sock)" "$key13" https://13.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
   run "$MROOM" baseline reverb
   expect_rc 0; expect_out_has "matches this mroom"
   run bash -c 'ls "$1" | wc -l' _ "$(reverb_dir)/builds"; expect_out 1
