@@ -467,8 +467,8 @@ and runs it, which installs the `parts` named:
 <!-- root-recipe: tests/root-test.sh checks sum against lib/root-setup, and runs this block -->
 ```bash
 set -euo pipefail
-v=v0.4.0
-sum=7a50f8014b0b6582f922efa6f7224f1f1d8d9bfd10caa82d32a95712906e6c9c
+v=v0.5.0
+sum=f8ffea08eb1c747825231b0cd5bd070d0262a0b77e5719fb946da20c2734cecc
 user=forge
 parts=(site-op mailpit garage reverb)
 smtp_port=1025

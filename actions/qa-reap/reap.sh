@@ -45,7 +45,7 @@ while read -r n state created; do
   qa_names "$n"
   if [ "$state" = removing ]; then
     echo "environment $n: Forge is already removing it; skipped"
-    for domain in "$QA_API" "$QA_WEB"; do
+    for domain in "$QA_API" "$QA_WEB" "$QA_OLD_API" "$QA_OLD_WEB"; do
       site="$(forge_site "$domain" </dev/null)"
       minutes="$(qa_redelete_stuck "${site:-null}" </dev/null)" || minutes=""
       if [ -n "$minutes" ]; then

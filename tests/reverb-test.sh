@@ -91,7 +91,7 @@ REVERB_PORT=443
 REVERB_SCHEME=https"
   run apps '.apps | length'; expect_out 1
   run jq -c --arg s "$secret" '.apps[0] | [.app_id, .key, (.secret == $s), .allowed_origins, .max_connections, .accept_client_events_from]' "$(apps_file)"
-  expect_out '["shop-qa-12","shop-qa-12",true,["api-12.qa.example.test","go-12.qa.example.test"],100,"members"]'
+  expect_out '["shop-qa-12","shop-qa-12",true,["api.12.qa.example.test","12.qa.example.test"],100,"members"]'
   run stat -c %a "$(apps_file)"; expect_out 600
   run cat "$HOME/.local/state/mroom/gate.log"
   expect_out_has "reverb-app-add 12: shop-qa-12 ready"

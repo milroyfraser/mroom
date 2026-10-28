@@ -121,7 +121,7 @@ if [ "$theirs" != "$ours" ]; then
   out
 fi
 
-# What the plan built: a frontend of its own goes to the go site, and Vite's build inside the Laravel app goes into
+# What the plan built: a frontend of its own goes to its own site, and Vite's build inside the Laravel app goes into
 # the code put.
 if [ -n "$(qa_config app.build.frontend "")" ] && [ -n "$QA_FRONTEND" ]; then dist=true; fi
 out

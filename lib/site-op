@@ -7,13 +7,13 @@ users, never as root:
 
   forge ALL=(%isolated) NOPASSWD: /usr/local/libexec/mroom/site-op
 
-  site-op unpack code api-<N>.<zone> <backend_dir> <commit>   the PR's tree: GitHub's tarball, on stdin
-  site-op unpack dist go-<N>.<zone>                           the frontend's built files: a tarball, on stdin
-  site-op env-put api-<N>.<zone> <backend_dir>                the backend's .env, on stdin
-  site-op env-sha api-<N>.<zone> <backend_dir>                the SHA-256 of the backend's .env, or "missing"
-  site-op signin-code api-<N>.<zone> <backend_dir> <php> <email>   a sign-in code from the app
-  site-op probe-link api-<N>.<zone> <backend_dir>             a link to this root-owned file at the web root,
-  site-op probe-link go-<N>.<zone>                            which nginx must refuse to serve; prints the file's
+  site-op unpack code api.<N>.<zone> <backend_dir> <commit>   the PR's tree: GitHub's tarball, on stdin
+  site-op unpack dist <N>.<zone>                              the frontend's built files: a tarball, on stdin
+  site-op env-put api.<N>.<zone> <backend_dir>                the backend's .env, on stdin
+  site-op env-sha api.<N>.<zone> <backend_dir>                the SHA-256 of the backend's .env, or "missing"
+  site-op signin-code api.<N>.<zone> <backend_dir> <php> <email>   a sign-in code from the app
+  site-op probe-link api.<N>.<zone> <backend_dir>             a link to this root-owned file at the web root,
+  site-op probe-link <N>.<zone>                               which nginx must refuse to serve; prints the file's
                                                               SHA-256 and path
   site-op clean                                               stops this user's processes and deletes its
                                                               files outside its home
@@ -125,10 +125,12 @@ def home() -> str:
 
 
 def site_root(domain: str, kind: str) -> str:
-    """The folder of this environment's api- or go- site in this user's home, a real folder of its own."""
+    """The folder of this environment's api site (api.<N>.<zone>) or a frontend of its own's (<N>.<zone>, kind web)
+    in this user's home, a real folder of its own."""
     n = environment()
-    if not (DOMAIN.fullmatch(domain) and domain.startswith(f"{kind}-{n}.")):
-        raise Refused(f"'{domain[:60]}' is not this environment's {kind}-{n} site")
+    prefix = f"api.{n}." if kind == "api" else f"{n}."
+    if not (DOMAIN.fullmatch(domain) and domain.startswith(prefix)):
+        raise Refused(f"'{domain[:60]}' is not this environment's {prefix}<zone> site")
     root = os.path.join(home(), domain)
     try:
         st = os.lstat(root)
@@ -513,7 +515,7 @@ def swap(root: str, staging: str) -> None:
 
 
 def unpack(kind: str, domain: str, backend: str | None, commit: str | None) -> None:
-    root = site_root(domain, "api" if kind == "code" else "go")
+    root = site_root(domain, "api" if kind == "code" else "web")
     if kind == "code":
         backend = backend_dir(backend)
         if not COMMIT.fullmatch(commit):
@@ -826,7 +828,7 @@ def probe_link(domain: str, backend: str | None) -> None:
     any of the pull request's code is in the site, and refuses to go on when what comes back is this file, by the
     SHA-256 printed here with its path. The web root is made if the site has none yet; the next put replaces the
     tree, and the link with it."""
-    kind = "go" if backend is None else "api"
+    kind = "web" if backend is None else "api"
     root = site_root(domain, kind)
     folder = "." if backend is None else tree_path(backend_dir(backend), "public")
     target = os.path.realpath(sys.argv[0])

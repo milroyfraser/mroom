@@ -5,22 +5,24 @@
 # commit and the frontend qa-plan built, which the gate unpacks as the environment's own site user. Each step checks
 # its own resource, so a run that stopped halfway is repaired by the next. In order:
 #   1. refuses what it cannot do yet, and a build that holds anything but files and folders, before anything is made
-#   2. waits for a site of the environment that Forge is still removing, sending the delete again when it is stuck;
+#   2. waits for a site of the environment that Forge is still removing, sending the delete again when it is stuck,
+#      and refuses an environment brought up under the names of before mroom 0.5.0, which its teardown removes;
 #      then, for a new environment (one whose code never went in, by the gate's record), counts the others: from
 #      qa.max_envs (5) on, it waits for a slot, and it counts again once its site is made, giving way to one that
 #      made its first site before it: its sites deleted, and waited for until Forge has them gone
-#   3. the api site, and the go site for a frontend of its own: Forge isolated sites in the home of the user
-#      <app>_qa_<N>, each with a certificate (one that failed is deleted and asked for again, once; one installed but
-#      not active is enabled), and nginx's disable_symlinks if_not_owner at the top of its config, which each of its
-#      domains includes in its server block: checked on every run, after Forge has applied it, before any code goes
-#      in. The go site also serves index.html for a path it does not have. A site's PHP version is set when it is
-#      made: a site that runs another than app.php is refused, since it needs making again
+#   3. the api site, api.<N>.<zone>, and for a frontend of its own the site <N>.<zone>: Forge isolated sites in the
+#      home of the user <app>_qa_<N>, each with a certificate (one that failed is deleted and asked for again,
+#      once; one installed but not active is enabled), and nginx's disable_symlinks if_not_owner at the top of its
+#      config, which each of its domains includes in its server block: checked on every run, after Forge has
+#      applied it, before any code goes in. The frontend's site also serves index.html for a path it does not have.
+#      A site's PHP version is set when it is made: a site that runs another than app.php is refused, since it
+#      needs making again
 #   4. any daemon or scheduled job of the environment that does not run as its site user is deleted, and nothing goes
 #      on while one is left: it would run the pull request's code as that user, forge or root (D20). Then the proof
 #      that nginx refuses a link to another owner's file: the gate links the box's root-owned site-op into each web
 #      root, and what the link answers must not be that file
 #   5. the code: GitHub's tarball of the commit through the gate's code-put, with Vite's build inside the Laravel
-#      app put into it; a frontend of its own goes to the go site through dist-put
+#      app put into it; a frontend of its own goes to its own site through dist-put
 #   6. the environment's services through the gate: its database and role, Redis user, mail login and a bucket for
 #      each file disk, as [qa.parity] says, and its app key. The gate keeps their passwords and the key, so each
 #      deploy gets the same ones and its users stay signed in
@@ -29,16 +31,16 @@
 #   8. Forge's deploy, whose script refuses to run as any user but the site user, pulls nothing, and runs the app's
 #      qa-deploy and qa-fixtures hooks or their defaults; then one queue worker, which also refuses any other user,
 #      kept only when Forge's record names the site user, and made again when its command changed
-#   9. https://api-<N>.<zone>/up, asked until it answers 200; only then is the commit said to be deployed (sha)
+#   9. https://api.<N>.<zone>/up, asked until it answers 200; only then is the commit said to be deployed (sha)
 # What the pull request's QA environment comment is to say goes to qa_status: ready, waiting for a slot, or failed,
 # and why.
 #
 # Environment: as down.sh's, and MROOM_QA_ENV_TEMPLATE (the shared .env: third-party test-mode keys, no app key and
-# no credentials for the box), MROOM_QA_DIST (the folder of qa-plan's build), MROOM_QA_CERTIFICATE (a wildcard
-# certificate to clone; without it, each site gets its own from Let's Encrypt), MROOM_QA_NGINX_TEMPLATE (an nginx
-# template for new sites), MROOM_QA_STATUS (lib/core/qa.sh, qa_status) and RUN_URL (this run, for the comment).
-# Writes sha, app_url, api_url and refused to GITHUB_OUTPUT. Exit codes: 0 up, or waiting for a slot; 1 failed; 2 a
-# usage error.
+# no credentials for the box), MROOM_QA_DIST (the folder of qa-plan's build), MROOM_QA_CERTIFICATE (a certificate to
+# clone onto a frontend's site, such as one for *.<zone>; the API's site, which no certificate for *.<zone> names,
+# and every site without it, gets its own from Let's Encrypt), MROOM_QA_NGINX_TEMPLATE (an nginx template for new
+# sites), MROOM_QA_STATUS (lib/core/qa.sh, qa_status) and RUN_URL (this run, for the comment). Writes sha, app_url,
+# api_url and refused to GITHUB_OUTPUT. Exit codes: 0 up, or waiting for a slot; 1 failed; 2 a usage error.
 set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
@@ -151,10 +153,20 @@ site_id() {
 }
 
 # 2. A site of this environment that Forge is still removing (a teardown just before this push) is waited for, so
-# the environment is made fresh; a removing site is never refreshed or counted.
-for domain in "$QA_API" "$QA_WEB"; do
-  site="$(forge_site "$domain")"
-  [ "$(jq -r '.attributes.status // ""' <<<"${site:-null}")" = removing ] || continue
+# the environment is made fresh; a removing site is never refreshed or counted. An environment brought up before
+# mroom 0.5.0 has its sites at api-<N>.<zone> and go-<N>.<zone>: one of them being removed is waited for too, and one
+# that is not is refused, not refreshed under the names of now beside it. Its teardown removes it, by hand or when
+# the pull request closes, its label comes off or its time is up, and the next deploy brings it up as new.
+for domain in "$QA_API" "$QA_WEB" "$QA_OLD_API" "$QA_OLD_WEB"; do
+  site="$(forge_site "$domain")" || die "Forge's site $domain could not be read"
+  if [ "$(jq -r '.attributes.status // ""' <<<"${site:-null}")" != removing ]; then
+    case "$domain" in
+      "$QA_OLD_API" | "$QA_OLD_WEB")
+        [ -z "$site" ] || die "environment $n was brought up as $domain, a name mroom gave QA sites before 0.5.0. Tear it down (gh workflow run qa-down.yml -f pr_number=$n), and the next deploy brings it up as $QA_WEB and $QA_API"
+        ;;
+    esac
+    continue
+  fi
   minutes="$(qa_redelete_stuck "$site")"
   [ -z "$minutes" ] || echo "==> $domain had been removing for $minutes minutes; sent the delete again"
   echo "==> $domain is still being removed; waiting for it to go"
@@ -304,8 +316,10 @@ primary_domain() {
   echo "$domain"
 }
 
-# certificate <site id> <domain id>: an active certificate on the domain, cloned from MROOM_QA_CERTIFICATE (and
-# enabled) or from Let's Encrypt, waited for, since the site's health is asked over https. One that failed (its
+# certificate <site id> <domain id> [clone]: an active certificate on the domain, from Let's Encrypt, or with clone
+# cloned from MROOM_QA_CERTIFICATE (and enabled) when that is set: for the frontend's site, <N>.<zone>, which a
+# certificate for *.<zone> names, while api.<N>.<zone> is a level below it. Waited for, since the site's health is
+# asked over https. One that failed (its
 # status failed, or failed-<why>, as one from Let's Encrypt can when the domain does not answer yet) is deleted,
 # waited for until Forge has it gone, and asked for again, once; failing again, it needs a person. One installed but
 # not active, such as a clone Forge did not enable, is enabled through its actions, once. Another is asked for only
@@ -313,7 +327,7 @@ primary_domain() {
 certificate() {
   local site="$1" base="/sites/$1/domains/$2/certificates" body certs failed inactive asked=0 waited=0 enabled=" "
   local limit="${MROOM_QA_CERT_WAIT:-300}"
-  if [[ "${MROOM_QA_CERTIFICATE:-}" =~ ^[0-9]+$ ]]; then
+  if [ "${3:-}" = clone ] && [[ "${MROOM_QA_CERTIFICATE:-}" =~ ^[0-9]+$ ]]; then
     body="$(jq -nc --argjson id "$MROOM_QA_CERTIFICATE" '{type: "clone", enable: true, clone: {certificate_id: $id}}')"
   else
     body='{"type":"letsencrypt","letsencrypt":{"verification_method":"http-01","key_type":"ecdsa"}}'
@@ -411,7 +425,7 @@ if qa_separate_frontend; then
   web_id="$SITE_ID"
   site_ready "$QA_WEB" /
   web_domain="$(primary_domain "$web_id")"
-  certificate "$web_id" "$web_domain"
+  certificate "$web_id" "$web_domain" clone
   guard_nginx "$web_id" "$web_domain" --spa
 fi
 
@@ -578,8 +592,6 @@ keep APP_KEY
 set_env APP_ENV qa
 # Off: the hosts are public, and a debug page shows the environment's settings.
 set_env APP_DEBUG false
-# The hosts answer over https alone.
-set_env SESSION_SECURE_COOKIE true
 while IFS= read -r line; do set_env "${line%%=*}" "${line#*=}"; done < <(qa_public_env)
 set_env CACHE_PREFIX "${QA_USER}_cache_"
 # Entry by entry, so a quoted value of several lines stays whole (actions/qa-up/env-merge).

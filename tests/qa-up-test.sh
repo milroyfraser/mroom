@@ -66,6 +66,9 @@ state() { jq -r "$1" "$FORGE_STATE"; }
 env_sent() { cat "$GATE/env-put.in"; }
 has_line() { grep -qxF -- "$2" <<<"$1"; }
 has_text() { case "$1" in *"$2"*) return 0 ;; esac; return 1; }
+# gets_cookie <host> <cookie domain>: whether a cookie set for that domain goes to the host: the domain itself, or a
+# host whose name ends in . and the domain (RFC 6265; a leading dot of the domain is ignored).
+gets_cookie() { local d="${2#.}"; [ "$1" = "$d" ] || [[ "$1" == *".$d" ]]; }
 members() { tar -tzf "$1" | sort; }
 API="$(api_host 7)" WEB="$(web_host 7)"
 
@@ -96,8 +99,8 @@ forge PUT /sites/101/deployments/script\nforge POST /sites/101/deployments\nforg
   # The commit is said to be deployed only now, at the end.
   run cat "$GITHUB_OUTPUT"; expect_out "sha=$SHA"$'\n'"app_url=https://$WEB"$'\n'"api_url=https://$API"
   run cat "$FORGE_UP.log"; expect_out 200
-  # The link to the box's site-op, put before any code: not served. The api site's app answers 404, and the go site's
-  # single-page fallback 200 with its index.html: neither is the linked file.
+  # The link to the box's site-op, put before any code: not served. The api site's app answers 404, and the
+  # frontend's site's single-page fallback 200 with its index.html: neither is the linked file.
   run cat "$FORGE_UP.probe"; expect_out $'404\n200'
 }
 
@@ -164,7 +167,7 @@ t_a_link_nginx_still_serves_stops_the_deploy() {
   expect_err_has "https://$API served a link to a root-owned file, so nginx follows links it must not (D17), and no code goes in"
   run gate_log; expect_out "probe-link 7 api"
   run gh_log; expect_out_has "mroom-qa: failed"
-  # The go site is proved too.
+  # The frontend's site is proved too.
   app "$TWO" api/artisan=php
   forge_set ".probe_follows = \"$WEB\""
   up
@@ -212,12 +215,23 @@ t_the_env_holds_the_environments_own_values() {
     MAIL_ENCRYPTION=null AWS_BUCKET=shop-qa-7-files AWS_ACCESS_KEY_ID=GKfiles \
     AWS_SECRET_ACCESS_KEY=bucket-pw-files AWS_DEFAULT_REGION=garage AWS_ENDPOINT=https://s3.qa.example.dev \
     AWS_USE_PATH_STYLE_ENDPOINT=true MEDIA_BUCKET=shop-qa-7-media MEDIA_URL=https://files.qa.example.dev/shop-qa-7-media \
-    BROADCAST_CONNECTION=log APP_ENV=qa APP_DEBUG=false SESSION_SECURE_COOKIE=true "APP_KEY=$APP_KEY" \
-    "APP_URL=https://$API" "CLIENT_URL=https://$WEB" SESSION_DOMAIN=.qa.example.dev SESSION_COOKIE=shop_qa_7_session \
+    BROADCAST_CONNECTION=log APP_ENV=qa APP_DEBUG=false "APP_KEY=$APP_KEY" \
+    "APP_URL=https://$API" "CLIENT_URL=https://$WEB" "SESSION_DOMAIN=.$WEB" SESSION_COOKIE=shop_qa_7_session \
     XSRF_COOKIE_NAME=shop_qa_7_xsrf "CORS_ALLOWED_ORIGINS=https://$WEB" "SANCTUM_STATEFUL_DOMAINS=$WEB,$API" \
     CACHE_PREFIX=shop_qa_7_cache_; do
     expect_true ".env lacks $line" has_line "$sent" "$line"
   done
+  # The session and XSRF cookies are for .7.qa.example.dev, the environment's two hosts: not for the zone, whose other
+  # environments' hosts and shared Garage and Reverb hosts would get them, and not secure-only by mroom's say.
+  local host domain
+  domain="$(sed -n 's/^SESSION_DOMAIN=//p' <<<"$sent")"
+  for host in "$(web_host 17)" "$(api_host 17)" "$(web_host 70)" "$(api_host 1)" s3.qa.example.dev files.qa.example.dev \
+    ws.qa.example.dev qa.example.dev; do
+    expect_true "the cookies of environment 7 reach $host" eval '! gets_cookie "$host" "$domain"'
+  done
+  expect_true "the cookies of environment 7 miss its own hosts" gets_cookie "$API" "$domain"
+  expect_true "the cookies of environment 7 miss its own hosts" gets_cookie "$WEB" "$domain"
+  expect_true "mroom made the cookies secure-only" lacks "$sent" "SESSION_SECURE_COOKIE"
   # The template's own key, password, TLS and environment are replaced, never kept beside mroom's; a private disk
   # has no URL.
   run grep -c -e '^APP_KEY=' -e '^DB_PASSWORD=' -e '^MAIL_ENCRYPTION=' -e '^APP_ENV=' <<<"$sent"; expect_out 4
@@ -442,7 +456,8 @@ t_a_new_environment_waits_for_a_slot() {
 t_a_site_forge_is_still_making_is_new() {
   app "$TWO" api/artisan=php
   made_site 5 7 api /api/public 8.4
-  forge_set '.sites[-1] += {status: "installing", install_reads: 5}'
+  # Installing for the run's first reads of Forge, up to its look at whether the environment is new.
+  forge_set '.sites[-1] += {status: "installing", install_reads: 8}'
   up
   expect_rc 0; expect_out_has "environment 7: up at https://$WEB"
   # Nothing is asked of the gate about it: before Forge has made a site, the gate may know no site user.
@@ -510,6 +525,50 @@ t_giving_way_outlasts_a_delete_forge_drops() {
   up
   expect_rc 1; expect_err_has "Forge did not remove site 102, made past qa.max_envs, though its delete went twice"
   run gate_log; expect_out ""
+}
+
+t_an_environment_of_the_old_names_is_torn_down_not_refreshed() {
+  # Brought up before mroom 0.5.0, as api-7: no site goes up beside it under the new names, and its teardown says how.
+  app "$TWO" api/artisan=php
+  made_site 50 7 api /api/public 8.4
+  forge_set ".sites[-1].name = \"$(old_api_host 7)\""
+  up
+  expect_rc 1
+  expect_err_has "environment 7 was brought up as $(old_api_host 7), a name mroom gave QA sites before 0.5.0. Tear it down (gh workflow run qa-down.yml -f pr_number=7), and the next deploy brings it up as $WEB and $API"
+  run forge_writes; expect_out ""
+  run gate_log; expect_out ""
+  run gh_log; expect_out_has "mroom-qa: failed"
+  # Its frontend's site alone is enough.
+  app "$TWO" api/artisan=php
+  site 51 "$(old_web_host 7)" installed
+  up
+  expect_rc 1; expect_err_has "environment 7 was brought up as $(old_web_host 7)"
+  # One Forge is still removing, as a teardown leaves it, is waited for, and the environment comes up under the new
+  # names.
+  app "$TWO" api/artisan=php
+  site 52 "$(old_api_host 7)" removing "$(ago 86400)" "$(ago 60)"
+  forge_set '.sites[-1].remove_reads = 5'
+  up
+  expect_rc 0; expect_out_has "$(old_api_host 7) is still being removed; waiting for it to go"
+  expect_out_has "environment 7: up at https://$WEB"
+  run state '[.sites[].name] | join(",")'; expect_out "$API,$WEB"
+  # A look at the environment's sites that fails stops the run, before anything is made.
+  app "$TWO" api/artisan=php
+  forge_set '.fail["GET /sites"] = 500'
+  up
+  expect_rc 1; expect_err_has "Forge's site $API could not be read"
+  run forge_writes; expect_out ""
+  run gate_log; expect_out ""
+}
+
+t_an_environment_of_the_old_names_holds_a_slot() {
+  app "$TWO" api/artisan=php
+  site 1 "$(api_host 1)" installed
+  site 2 "$(web_host 2)" installed
+  site 3 "$(old_api_host 3)" installed
+  up
+  expect_rc 0; expect_out_has "::warning::All 3 QA environments are in use, so this pull request waits for a slot."
+  run forge_writes; expect_out ""
 }
 
 t_a_site_that_is_not_isolated_or_of_another_user_is_refused() {
@@ -721,12 +780,15 @@ t_up_is_asked_again_after_a_502_and_fails_when_it_stays_down() {
 
 t_certificates_are_asked_for_and_a_failed_one_again_once() {
   app "$TWO" api/artisan=php
-  # A wildcard certificate to clone, which Forge enables only when asked to.
+  # A wildcard certificate to clone, which Forge enables only when asked to: onto the frontend's site, which it
+  # names. The API's site is a level below it, so asks Let's Encrypt.
   export MROOM_QA_CERTIFICATE=55
   up
   expect_rc 0
-  run grep -c '^POST /sites/101/domains/1010/certificates {"type":"clone","enable":true,"clone":{"certificate_id":55}}$' "$FORGE_LOG"
+  run grep -c '^POST /sites/103/domains/1030/certificates {"type":"clone","enable":true,"clone":{"certificate_id":55}}$' "$FORGE_LOG"
   expect_out 1
+  run grep -c '^POST /sites/101/domains/1010/certificates {"type":"letsencrypt",' "$FORGE_LOG"; expect_out 1
+  run grep -c '^POST /sites/[0-9]*/domains/[0-9]*/certificates {"type":"clone"' "$FORGE_LOG"; expect_out 1
   # From Let's Encrypt: one that fails is deleted and asked for again.
   unset MROOM_QA_CERTIFICATE
   app "$TWO" api/artisan=php
@@ -759,16 +821,16 @@ t_certificates_are_asked_for_and_a_failed_one_again_once() {
   export MROOM_QA_CERTIFICATE=55
   forge_set '.clone_enable_ignored = true'
   up
-  expect_rc 0; expect_out_has "enabled certificate 102"
-  run grep -c '^POST /sites/101/domains/1010/certificates/102/actions {"action":"enable"}$' "$FORGE_LOG"; expect_out 1
+  expect_rc 0; expect_out_has "enabled certificate 104"
+  run grep -c '^POST /sites/103/domains/1030/certificates/104/actions {"action":"enable"}$' "$FORGE_LOG"; expect_out 1
   # One whose enable Forge ignores is waited for, neither enabled again nor asked for anew, until the wait ends.
   app "$TWO" api/artisan=php
   forge_set '.clone_enable_ignored = true | .enable_ignored = true'
   export MROOM_QA_CERT_WAIT=30
   up
-  expect_rc 1; expect_err_has "site 101 had no active certificate after 30s"
-  run grep -c '^POST /sites/101/domains/1010/certificates/102/actions ' "$FORGE_LOG"; expect_out 1
-  run grep -c '^POST /sites/101/domains/1010/certificates ' "$FORGE_LOG"; expect_out 1
+  expect_rc 1; expect_err_has "site 103 had no active certificate after 30s"
+  run grep -c '^POST /sites/103/domains/1030/certificates/104/actions ' "$FORGE_LOG"; expect_out 1
+  run grep -c '^POST /sites/103/domains/1030/certificates ' "$FORGE_LOG"; expect_out 1
 }
 
 t_a_site_forge_is_removing_is_waited_for() {
@@ -838,6 +900,8 @@ test_case worker-made-again t_a_worker_whose_command_changed_is_made_again
 test_case php-mismatch t_a_site_made_with_another_php_is_refused
 test_case web-root-elsewhere t_a_site_whose_web_root_is_elsewhere_is_refused
 test_case waits-for-a-slot t_a_new_environment_waits_for_a_slot
+test_case old-names-up t_an_environment_of_the_old_names_is_torn_down_not_refreshed
+test_case old-names-slot t_an_environment_of_the_old_names_holds_a_slot
 test_case not-isolated t_a_site_that_is_not_isolated_or_of_another_user_is_refused
 test_case broadcast-not-yet t_broadcast_same_is_not_yet
 test_case build-with-a-link t_a_build_with_a_link_is_refused_before_anything_is_made
