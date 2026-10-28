@@ -462,7 +462,7 @@ $M")" false null)"
   run "$MROOM" tracker find sentry:1001
   expect_rc 0; expect_err_empty
   expect_true "expected 1 call, got $(calls)" [ "$(calls)" = 1 ]
-  expect_true "the find query" has "$(query 1)" 'issues(first: 50, after: $after, filter: $f, orderBy: createdAt)'
+  expect_true "the find query" has "$(query 1)" 'issues(first: 50, after: $after, filter: $f, orderBy: createdAt, includeArchived: true)'
   expect_true "the query does not read the description" has "$(query 1)" 'description createdAt'
   expect_true "the filter: $(vars 1)" [ "$(vars 1)" = '{"f":{"description":{"contains":"<!-- mroom-alert key=sentry:1001"},"team":{"key":{"eq":"ENG"}}}}' ]
   expect_true "the answer: $out" json_is "$out" '. == [{identifier: "ENG-7", title: "Issue ENG-7",

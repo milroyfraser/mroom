@@ -8,7 +8,7 @@
 #                                           canceled, with a label; needs --mine or --label; the --limit most
 #                                           recently updated, then by priority
 #   mroom tracker find <alert key>          the issues whose description holds the persona's marker for an
-#                                           alert key, such as sentry:1001; every state, the oldest first
+#                                           alert key, such as sentry:1001; every state, archived too, the oldest first
 #   mroom tracker comment <id> < body       adds the comment on stdin
 #   mroom tracker state <id> <state name>   moves the issue to the team's state of that name (any case)
 #   mroom tracker create --allow-create --title <title> [--state <name>] [--priority 0-4]

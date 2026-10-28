@@ -1,8 +1,9 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2016  # GraphQL variables ($id) are not the shell's
-# tracker.sh — the tracker adapter (design section 7): read an issue, list issues, find the issues that hold
-# an alert's marker, comment on one, set its state, and create one, on the tracker mroom.toml names (issues.tracker). Sourced after api.sh by lib/tracker, never
-# run on its own; needs bash 5, curl, jq and python3 3.11. The caller sets MROOM_ROOT.
+# tracker.sh — the tracker adapter (design section 7): read an issue, list issues, find the issues
+# that hold an alert's marker, comment on one, set its state, and create one, on the tracker
+# mroom.toml names (issues.tracker). Sourced after api.sh by lib/tracker, never run on its own; needs
+# bash 5, curl, jq and python3 3.11. The caller sets MROOM_ROOT.
 #
 # v1 backends: linear, and none (no tracker: every operation returns 3, so a skill leaves its note on the
 # pull request instead). Each function takes the command line's words and prints JSON on stdout.
@@ -255,15 +256,15 @@ linear_issue_list() {
 # linear_issue_find <marker>: the issues, in issues.team when it is set, whose description holds the marker.
 # Linear's search is a plain substring match, so the marker for sentry:10 also finds sentry:1001's issues:
 # each description is checked again here, and kept only when the marker ends there (" -->"), or goes on
-# with a later alert's ":". One JSON list, the issue filed first at the top. Every page is read, so the
-# oldest is never cut off.
+# with a later alert's ":". One JSON list, the issue filed first at the top. Every page is read, archived
+# issues too, so the oldest is never cut off.
 linear_issue_find() {
   local marker="$1" team_key filter nodes
   team_key="$(tracker_config issues.team --optional)" || return 1
   linear_auth || return 1
   filter="$(jq -nc --arg team "$team_key" --arg m "$marker" '{description: {contains: $m}}
     + (if $team == "" then {} else {team: {key: {eq: $team}}} end)')" || return 1
-  nodes="$(linear_nodes 'query($f: IssueFilter, $after: String) { issues(first: 50, after: $after, filter: $f, orderBy: createdAt) { nodes { identifier title url branchName description createdAt state { name type } creator { name } labels(first: 50) { nodes { name } } } pageInfo { hasNextPage endCursor } } }' \
+  nodes="$(linear_nodes 'query($f: IssueFilter, $after: String) { issues(first: 50, after: $after, filter: $f, orderBy: createdAt, includeArchived: true) { nodes { identifier title url branchName description createdAt state { name type } creator { name } labels(first: 50) { nodes { name } } } pageInfo { hasNextPage endCursor } } }' \
     "$(jq -nc --argjson f "$filter" '{f: $f}')" .data.issues)" || return 1
   printf '%s\n' "$nodes" | jq -sc --arg m "$marker" '[.[] | select(. != null)
     | select((.description // "") as $d | ($d | contains($m + " -->")) or ($d | contains($m + ":")))
@@ -366,7 +367,8 @@ issue_list() {
 
 # issue_find_by_marker <key>: the issues whose description holds the persona's hidden marker for an alert
 # key, `<!-- mroom-alert key=<key> -->` (a later alert adds `:<kind>:...` after the key). The key is the
-# error tracker's name and the error issue's numeric id, such as sentry:1001. Every state, the oldest first;
+# error tracker's name and the error issue's numeric id, such as sentry:1001. Every state, archived too,
+# the oldest first;
 # an empty list when none holds it.
 issue_find_by_marker() {
   [ "$#" = 1 ] || { tracker_say "usage: find <alert key, such as sentry:1001>"; return 2; }

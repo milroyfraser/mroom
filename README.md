@@ -367,8 +367,8 @@ token_env = "SENTRY_AUTH_TOKEN"    # the default
   error issue's numeric id, and a later alert adds `:<kind>:...` after the id. Linear's search is a
   substring match, so `find` checks each description again and keeps an issue only when the marker
   ends there or goes on with `:`; the marker for `sentry:100` never finds `sentry:1001`'s issue. It
-  reads every page, in `issues.team` when that is set, and lists the issues in every state, the
-  first filed at the top.
+  reads every page, in `issues.team` when that is set, and lists the issues in every state,
+  archived ones too, the first filed at the top.
 - **Creating an issue** needs `--allow-create`; without it, nothing is sent. It files in `issues.team`
   and uses labels that already exist, of that team or the whole workspace (not a parent team's); mroom
   never creates a label.
@@ -402,7 +402,7 @@ that Claude Code reads; in a session they are `/mroom:<name>`.
 | `/mroom:refine` | lists my open issues, tags each with a Design value, and runs `/mroom:implement` on the ones I confirm |
 | `/mroom:deliver <id>` | a design gate when the issue needs one (a canvas, approved in a comment), then `/mroom:implement`; resumes stopped work |
 | `/mroom:implement <id>` | one issue to a PR in review: a worktree, the change, the affected tests, a draft PR, CI and QA on the PR's environment, then stop |
-| `/mroom:fix-issue <error id>` | one error issue to a fix in review: reads the error and its latest event, finds the issue the persona filed (`mroom tracker find`), works on a branch that names both ids, reproduces the error with a failing test before it fixes it, and links the error issue only through a `Fixes <error id>` line on the fixing commit; never resolves it |
+| `/mroom:fix-issue <error id>` | one error issue to a fix in review: reads the error and its latest event, finds the issue the persona filed (`mroom tracker find`), works on a branch that names both ids, reproduces the error with a failing test before it fixes it, and links the error issue only through `Fixes <error id>` lines, on the fixing commit and in the PR body; never resolves it |
 | `/mroom:release` | only when a person asks: what ships, what to watch, the notes, one question, then a **draft** release that the person publishes; then a read-only watch of the deploy |
 | `/mroom:correct` | finds a mistake agents repeat, and adds the highest check that stops it (adapted from pstack, MIT) |
 | `/mroom:forge` | Forge through `forge-api` only: reads free, writes asked first, secrets never printed |
@@ -438,7 +438,8 @@ The settings fragment `base.json` allows the adapters' reads (`mroom tracker get
 that every `mroom` command, skill and key they name exists, the rules above, the release's draft and
 question, that no skill resolves an error issue, and that none names a host, an IP address, an id or
 an email address. For `fix-issue` it also checks that the branch names both ids, that a failing test
-comes before the fix, that the only link is the `Fixes` line, and that it stops at a PR in review. Names of people and
+comes before the fix, that the only link is the `Fixes` lines, and that it stops at a PR in review.
+Names of people and
 projects come from `$MROOM_PRIVATE_WORDS`, a file of patterns kept outside the repository.
 
 Not here yet: `blast-radius` (later in phase 3), the principle skills (named in the

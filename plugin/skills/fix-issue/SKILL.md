@@ -10,8 +10,8 @@ or its link. Optional second argument: the tracker issue that tracks it, such as
 person filed one.
 
 This is `/mroom:implement` with the error tracker in front. **Read its `SKILL.md` in full first**
-(next to this skill's folder). Its rules apply here too. From the fix to the hand-off, follow its
-steps 2 to 7, with the additions below. Where the two differ, this file wins.
+(next to this skill's folder). Its rules apply here too. Follow its steps 0 to 7, with the changes
+below. Where the two differ, this file wins.
 
 **Principles.** A `principle-…` name in parentheses closes a one-line summary of a skill. When that
 step applies, Read that skill's `SKILL.md` in full first. If it is not installed, go on without it.
@@ -42,25 +42,31 @@ the body, or with `gh pr comment`.
 1. `mroom errors get <error id>`: the title, culprit, level and status; its counts (`count`,
    `user_count`); first and last seen; its first and last release; its top tags, environments
    among them; and its latest event: the message, the release, the environment and the in-app
-   frames of the exception.
+   frames of the exception. The frame that threw is the last one in
+   `latest_event.exception[].frames`.
+   - From here on, `<error id>` is its `short_id`, and its link is its `permalink`. Only the
+     marker key (step 2) uses the numeric `id`.
 2. **Stop and say why** when:
-   - it is resolved or ignored, and has had no events since;
+   - its `status` is `resolved` or `ignored`;
    - all its events come from a QA or dev environment, never production (its `environment` tag).
      It belongs to the PR or branch that environment ran;
-   - the default branch already fixes it. Read the top in-app frame's code there (`git fetch`,
+   - the default branch already fixes it. Read the code of the frame that threw there (`git fetch`,
      then `git log -L` on its lines). Name the commit, and the release if one has shipped it.
-3. **Find the cause before you plan the fix:** which input, state or timing makes the top in-app
-   frame throw, and where the system first went wrong (`principle-fix-root-causes`). The counts say
+3. **Find the cause before you plan the fix:** which input, state or timing makes that frame
+   throw, and where the system first went wrong (`principle-fix-root-causes`). The counts say
    how bad it is: events, users, and since which release.
 
 ## 2. The tracker issue
 
 1. **Find the issue the persona filed.** Its description holds a hidden marker per alert:
    `<!-- mroom-alert key=<provider>:<numeric id> -->`, with `:<kind>:…` after the id for a later
-   alert. The key is the error tracker's name and the `id` from step 1, such as `sentry:1001`.
+   alert. The key is `errors.provider` (`mroom config get errors.provider`), a `:`, and the
+   numeric `id` from step 1, such as `sentry:1001`.
    - `mroom tracker find <key>`. It checks each description again, so a longer id's issue never
      counts, and lists the issues that hold the marker, the first filed at the top.
    - If several are open, take the first filed, and name the others.
+   - If none of them is open (the error came back after a fix), stop. Name them all, and ask the
+     person whether to reopen the latest one or file a new one.
    - When the person gave a tracker id, use it instead. Read it with `mroom tracker get <id>`, and
      go on only when its description names this error issue (its short id or its link), or holds
      its marker. Otherwise stop and say so.
@@ -69,10 +75,7 @@ the body, or with `gh pr comment`.
    filed: the persona assigns no one.
 3. **None:** ask the person to file one, or to give its id. A `fix` PR needs its tracker issue, so
    stop until they do.
-4. **Mark it started:** `mroom tracker state <id> "$(mroom config get issues.state_started --default 'In Progress')"`.
-   Then `mroom tracker comment <id> < started.md`: the error issue's link, the cause in two
-   sentences, and the branch.
-5. **Other error issues on the same tracker issue:** check whether the same fix covers them. Each
+4. **Other error issues on the same tracker issue:** check whether the same fix covers them. Each
    one it covers gets its own `Fixes` line (step 4); name any it leaves open.
 
 ## 3. The worktree
@@ -85,22 +88,27 @@ Then follow `/mroom:implement` step 1 with this branch instead of the issue's ow
 then a worktree of its own, and work only there. The tracker still links the branch through the
 issue id in its name.
 
+Its step 1.4 moves the issue to the started state. Then also
+`mroom tracker comment <id> < started.md`: the error issue's link, the cause in two sentences, and
+the branch.
+
 ## 4. Reproduce, then fix
 
 1. **Reproduce first.** Write a test that fails the way the event did: the same exception from the
-   same frame, with the event's inputs rebuilt from factories. Run it and see it fail before you
-   fix anything.
+   same frame, with the event's inputs rebuilt from factories. Run it and see it fail before
+   you fix anything.
    - For a frontend error, render the component or call the hook in the state the event shows.
    - If you cannot reproduce it, say in the PR what you tried, and fix only what the evidence shows.
 2. **Then fix it** where the system first went wrong, as `/mroom:implement` step 2 says. Run the
    test again and see it pass.
 3. **Commit.** End the message of the commit that fixes it with `Fixes <error id>` on a line of its
-   own, before any trailers. This is the only link to the error issue.
+   own, before any trailers. These lines are the only link to the error issue.
    - The error tracker's SCM integration links the commit to the issue as soon as the branch is
      pushed, and may assign the issue to the commit's author. So never put the line on a commit
      that does not fix the issue.
    - A merge commit, or a squash merge that keeps the commits' messages, takes the line to the
-     default branch.
+     default branch. A squash merge that uses the PR's description takes the PR body's line
+     (step 5).
    - The error tracker resolves the issue only when a release that holds the commit is created
      with its commits attached.
 
@@ -109,13 +117,14 @@ issue id in its name.
 `/mroom:implement` steps 4 and 5, plus:
 
 - **Title:** `fix(<issue id>): <what no longer fails>`, such as
-  `fix(SHOP-123): accept a NUL byte in a run's JSON`.
-- **Body:** next to the issue link, the error issue: `Errors: <error id> <its link>`. The summary
-  says what users hit (events, users, since which release), the cause and the fix.
+  `fix(SHOP-123): accept a NUL byte in a run's JSON`. With no tracker: `fix(<error id>): …`.
+- **Body:** next to the issue link, the error issue: `Errors: <error id> <its link>`. Then
+  `Fixes <error id>` on a line of its own, for a squash merge that uses the PR's description.
+  The summary says what users hit (events, users, since which release), the cause and the fix.
 - **Regression:** when a change in a published release caused it, fill `Breaks:` with that
   release's tag and add the `regression` label.
   - Find the commit that brought the bug in with `git log -L` on the frame's lines.
-  - The release is the earliest one in `gh release list` whose tag holds that commit
+  - The release is the earliest one in `gh release list --limit 200` whose tag holds that commit
     (`git merge-base --is-ancestor <commit> <tag>`). A tag with no release does not count.
   - Leave `Breaks:` and the label out when the error is older than that release, when the cause is
     data or an outside service, or when you cannot find the commit.

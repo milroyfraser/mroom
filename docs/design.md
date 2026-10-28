@@ -65,9 +65,10 @@ Commits do not show a person's work, because agents make almost all of them.
   against the description), works in a worktree whose branch names both ids, and reproduces the error with a failing
   test before it fixes it. It links the error issue to the fix through the repository's SCM integration: a
   `Fixes <id>` line on the fixing commit, which reaches the default branch in a merge commit, or in a squash merge
-  that keeps the commits' messages. The error tracker links the commit as soon as it is pushed, but resolves the
-  issue only when a release that contains the commit has its commits attached, which is why the deploy template
-  attaches them (phase 4). Principle skills named at the step that needs them.
+  that keeps the commits' messages, and the same line in the PR body, for a squash merge that uses it. The error
+  tracker links the commit as soon as it is pushed, but resolves the issue only when a release that contains the
+  commit has its commits attached, which is why the deploy template attaches them (phase 4). Principle skills named at
+  the step that needs them.
 - **Guardrails**: agents never merge, approve, deploy, release or read secrets; enforced by a command parser,
   not only prefix rules, and gated by GitHub, where only people's approvals count and a person approves each
   deploy (D22).
@@ -395,19 +396,21 @@ environment variable its `token_env` names, never from a file, and each host is 
 `<region>.sentry.io`). With `issues.tracker = "none"` or no `[errors]` table, every function returns 3, so a
 skill falls back to the pull request.
 
-The workflow skills (`plugin/skills/`: refine, deliver, implement, fix-issue, release, correct, forge) reach the
-trackers only through these two commands, never an API or an MCP server of their own. Each writes to the
-tracker only the state of the issue it works and comments on it, and asks a person before it files an
-issue. A design waiting for approval is a comment (`Design for review: <link>`, then
-`Design approved by <name>: <link>`), not a label. `tests/skills-test.sh` checks each skill against this contract.
+The workflow skills (`plugin/skills/`: refine, deliver, implement, fix-issue, release, correct, forge)
+reach the trackers only through these two commands, never an API or an MCP server of their own. Each
+writes to the tracker only the state of the issue it works and comments on it, and asks a person before
+it files an issue. A design waiting for approval is a comment (`Design for review: <link>`, then
+`Design approved by <name>: <link>`), not a label. `tests/skills-test.sh` checks each skill against this
+contract.
 
 `issue_find_by_marker` (`mroom tracker find <key>`) lists the issues whose description holds the
 persona's hidden marker for an alert, `<!-- mroom-alert key=<provider>:<numeric id> -->`, with
 `:<kind>:...` after the id for a later alert (phase 5 writes it). The tracker's search is a substring
-match, so the adapter checks each description again and keeps an issue only when the marker ends
-there or goes on with `:`. `/fix-issue` reads it, and makes no tracker write beyond the state and
-comments of that issue. `issue_comment_upsert`, `issue_owned_by_bot` and `attach_image` wait for the
-persona (phase 5) and browser QA (phase 2b).
+match, so the adapter checks each description again and keeps an issue only when the marker ends there
+or goes on with `:`. It reads archived issues too. Phase 5 must check that the tracker keeps the marker
+in a description it stores, the way GitHub Issues must be checked first. `/fix-issue` reads it, and
+makes no tracker write beyond the state and comments of that issue. `issue_comment_upsert`,
+`issue_owned_by_bot` and `attach_image` wait for the persona (phase 5) and browser QA (phase 2b).
 
 `errors_issue_get` gives an error issue with its latest event, its counts and its first release.
 `errors_issue_resolve` needs a token with write access, which only the persona's own profile or a person holds
