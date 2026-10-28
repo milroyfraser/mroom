@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317,SC2016  # t_* run through test_case; a $ in single quotes is for eval, later
 # The gate's Garage operations against the real Garage, run the way a box runs it: what a fake cannot show.
-# mroom baseline garage downloads the pinned build and checks its SHA-256, its unit is installed by running,
-# as root, the very script it prints, from a home under /home as on a box, and baseline sets up its layout.
+# This release's lib/root-setup, run as root as the root recipe runs it, makes the services' folders and
+# installs Garage's unit, then mroom baseline garage downloads the pinned build and checks its SHA-256, from a
+# home under /home as on a box, and sets up its layout. Garage's unit binds only folders of the box user's own
+# in folders root owns, and Garage sees no other service's folders.
 # The test then checks:
 # - each environment's key reaches its own bucket and no other, and is kept from one create to the next until
 #   --rotate replaces it;
@@ -33,6 +35,7 @@ cleanup() {
   sudo systemctl disable --now mroom-garage.service >/dev/null 2>&1 || true
   sudo rm -f /etc/systemd/system/mroom-garage.service
   sudo systemctl daemon-reload || true
+  sudo rm -r /var/lib/mroom/services 2>/dev/null || true
   [ -z "$CI_HOME" ] || rm -rf "$CI_HOME"
   rm -rf "$TOP"
 }
@@ -40,7 +43,8 @@ trap cleanup EXIT
 
 gate() { run env SSH_ORIGINAL_COMMAND="$1" "$MROOM" gate provision; }
 field() { sed -n "s/^$1=//p" <<<"$2"; }
-garage_run() { echo "$HOME/.local/share/mroom-services/garage/run"; }
+garage_run() { echo /var/lib/mroom/services/garage/run; }
+has_text() { case "$1" in *"$2"*) return 0 ;; esac; return 1; }
 
 # s3 <key output> <unix|host:port> <Host> <method> <path> [<body>]: one signed S3 request, with the key
 # bucket-create printed; prints the HTTP status, then the body. The path is sent as given and signed as
@@ -115,19 +119,39 @@ t_the_bucket_operations_against_the_real_garage() {
   export HOME="$CI_HOME"
   mkdir -p "$HOME/.config/mroom"
   printf 'MROOM_APP_NAME=shop\nMROOM_QA_ZONE=qa.example.test\n' >"$HOME/.config/mroom/box.env"
+  # Another service's folder, there before Garage starts, which Garage must not see.
+  sudo install -d -m 755 /var/lib/mroom/services/other
+  # The root recipe first: this release's lib/root-setup, run as root, makes the folders and installs the unit.
+  run sudo bash "$ROOT/lib/root-setup" --user "$(id -un)" garage
+  expect_rc 0
+  expect_out_has "service folders made in /var/lib/mroom/services, for $(id -un): garage/builds garage/data garage/etc garage/meta garage/run"
+  expect_out_has "systemd units written: mroom-garage.service"
   run "$MROOM" baseline garage
   expect_rc 0; expect_out_has "garage v2.5.0: installed, SHA-256"
-  expect_out_has "To be installed or updated: mroom-garage.service."
-  # Install the unit as the root recipe does: this release's lib/root-setup, run as root.
-  run sudo bash "$ROOT/lib/root-setup" --user "$(id -un)" --home "$HOME" garage
-  expect_rc 0; expect_out_has "systemd units written: mroom-garage.service"
+  local first_out="$out" baseline_out files12 media12 files13 old r pid
   wait_ready
+  # The first run gives Garage its layout if Garage answered in time, else the second does.
   run "$MROOM" baseline garage
-  expect_rc 0; expect_out_has "Garage answers; its layout now holds this node."
+  expect_rc 0; expect_out_has "Garage answers; its layout"
+  expect_true "no run gave Garage its layout" has_text "$first_out$out" "its layout now holds this node."
   expect_out_has "systemd units: installed as this mroom writes them (mroom-garage.service active)."
-  local baseline_out="$out" files12 media12 files13 old r
+  baseline_out="$out"
   run "$MROOM" baseline garage; expect_out_has "Garage answers; its layout holds one node."
   run stat -c %a "$(garage_run)"; expect_out 700
+  # Its folders: root's above, the box user's below; and Garage, in its own mount namespace, sees only its own.
+  run stat -c '%U %a' /var/lib/mroom /var/lib/mroom/services /var/lib/mroom/services/garage
+  expect_out $'root 755\nroot 755\nroot 755'
+  run stat -c '%U %a' /var/lib/mroom/services/garage/meta; expect_out "$(id -un) 700"
+  pid="$(systemctl show -p MainPID --value mroom-garage.service)"
+  run sudo nsenter -t "$pid" -m ls -A /var/lib/mroom/services; expect_out garage
+  run sudo nsenter -t "$pid" -m ls -A /var/lib/mroom/services/garage; expect_out $'builds\ndata\netc\nmeta\nrun'
+  run sudo nsenter -t "$pid" -m ls -A "$HOME"; expect_rc 2
+  sudo rmdir /var/lib/mroom/services/other
+  # The recipe again: nothing changes, and Garage keeps running.
+  run sudo bash "$ROOT/lib/root-setup" --user "$(id -un)" garage
+  expect_rc 0; expect_out_has "service folders: garage/builds garage/data garage/etc garage/meta garage/run already in"
+  expect_out_has "systemd units: mroom-garage.service already as this release writes them"
+  expect_true "the recipe restarted Garage" [ "$(systemctl show -p MainPID --value mroom-garage.service)" = "$pid" ]
 
   gate "bucket-create 12 files"; expect_rc 0; files12="$out"
   gate "bucket-create 12 media public"; expect_rc 0; media12="$out"
@@ -247,7 +271,7 @@ t_the_bucket_operations_against_the_real_garage() {
   r="$(s3 "$files13" "$(garage_run)/s3.sock" garage.invalid PUT /shop-qa-13-files/c.txt hello13)"
   expect_true "another environment's bucket went: $r" [ "$(status_of "$r")" = 200 ]
   run bash -c 'printf "Authorization: Bearer %s\n" "$(cat "$1")" | curl -q -s --unix-socket "$2" --header @- http://localhost/v2/ListKeys' _ \
-    "$HOME/.config/mroom/secrets/garage-admin-token" "$(garage_run)/admin.sock"
+    /var/lib/mroom/services/garage/etc/garage-admin-token "$(garage_run)/admin.sock"
   run jq -r '[.[].name] | sort | join(" ")' <<<"$out"; expect_out "shop-qa-1-files shop-qa-13-files"
   gate "bucket-drop 1"; expect_rc 0; expect_out "bucket shop-qa-1-files: dropped, 0 objects deleted"
 }
