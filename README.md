@@ -1162,7 +1162,7 @@ job:
 # .github/workflows/review-findings.yml, after its findings job
   status:
     needs: findings
-    if: always() && needs.findings.result != 'skipped'
+    if: always() && needs.findings.result != 'skipped' && (github.event_name != 'issue_comment' || github.event.issue.pull_request)
     permissions: { actions: write, checks: read, contents: read, issues: write, pull-requests: write }
     uses: milroyfraser/mroom/.github/workflows/pr-status.yml@v0.5.0
     with:

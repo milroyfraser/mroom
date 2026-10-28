@@ -68,6 +68,9 @@ BOT='github-actions[bot]'
 MARK='<!-- mroom-pr-status pr='
 # The words render.jq ends the note with (its footer), by which a note whose hidden line was lost is found.
 FOOTER="Edited in place by mroom's pr-status"
+# The line render.jq ends a note with, and the start of its heading: a comment the footer fallback takes over
+# must hold both, so a bot comment that only quotes the words is never taken for a note.
+FOOTER_LINE="<sub>$FOOTER; each line names the commit it refers to.</sub>"
 # The keys the hidden line keeps: the "once" ones, and the newest of the others. An older key is for a commit
 # long gone, whose pings cannot come again.
 MAX_SENT=200
@@ -174,13 +177,13 @@ ping_login() {
 # or on a dispatch, so GitHub links its run to no PR: its run-name ends in "PR #<n>" (README, QA environments).
 # A run-name can come from a fork's own QA plan, though, so a run counts only when its deploy job, which qa-up
 # names after the PR it resolved itself ("QA deploy · PR #<n>"), names this PR. A run whose deploy job names
-# another is passed over; one with no deploy job yet counts while it runs (it can only say "planning"), and once
-# done, as a run that deployed nothing. An app without that workflow has no runs. Fails when GitHub did not answer.
+# another PR is passed over, and so is one whose jobs cannot be read. A run whose deploy job names none (qa-up
+# resolved no PR to deploy, and skipped it), or that has none yet, counts as one that deploys nothing: while it
+# runs it can only say "planning", and once done, the QA environment comment speaks. A fork's own QA plan can
+# make such a run, which can say no more than that. An app without that workflow has no runs. Fails when GitHub
+# did not answer.
 qa_run() {
-  local runs err id run jobs deploy job other
-  # The job's names as jq strings: gh's --jq takes no --arg.
-  job="$(jq -n --arg j "$QA_DEPLOY_JOB · PR #$1" '$j')"
-  other="$(jq -n --arg j "$QA_DEPLOY_JOB · PR #" '$j')"
+  local runs err id run jobs deploy
   err="$(mktemp)"
   if ! runs="$(gh api -X GET "repos/$REPO/actions/workflows/$QA_WORKFLOW/runs" -F per_page=100 --jq "
       [.workflow_runs[] | select(.conclusion != \"skipped\")
@@ -194,11 +197,15 @@ qa_run() {
     id="$(jq -r '.id' <<<"$run")"
     [[ "$id" =~ ^[0-9]{1,20}$ ]] || continue
     # Its jobs: the deploy job's own result, since the run also holds the plan and what follows the deploy.
-    jobs="$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" --jq "[.jobs[] | {name, status, conclusion, html_url}]" 2>/dev/null)" || jobs='[]'
-    deploy="$(jq -c "[.[] | select(.name == $job or (.name | endswith(\" / \" + $job)))] | last | if . then del(.name) else null end" <<<"${jobs:-[]}")"
-    if [ "$deploy" = null ] && jq -e "any(.[]; .name | startswith($other) or contains(\" / \" + $other))" <<<"${jobs:-[]}" >/dev/null; then
-      continue
-    fi
+    jobs="$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" --jq "[.jobs[] | {name, status, conclusion, html_url}]" 2>/dev/null)" \
+      && [ -n "$jobs" ] || continue
+    # A called workflow's job is "<caller job> / <its name>".
+    deploy="$(jq -c --arg p "$QA_DEPLOY_JOB · PR #" --arg n "$1" '
+      [.[] | (.name | split(" / ") | last) as $name
+       | select($name | startswith($p) and (.[($p | length):] | test("^[0-9]{1,9}$")))
+       | . + {pr: $name[($p | length):]}] | last
+      | if . == null then null elif .pr == $n then del(.name, .pr) else "other" end' <<<"$jobs")" || continue
+    [ "$deploy" != '"other"' ] || continue
     jq -c --argjson d "$deploy" '.deploy = $d | del(.id)' <<<"$run"
     return 0
   done <<<"$runs"
@@ -229,9 +236,9 @@ collect() {
       && qa_run "$pr" >"$tmp/qa" \
       && jq -n --slurpfile pr "$tmp/pr" --slurpfile user "$tmp/user" --slurpfile required "$tmp/required" \
         --slurpfile checks "$tmp/checks" --slurpfile comments "$tmp/comments" --slurpfile qa "$tmp/qa" \
-        --slurpfile users "$tmp/users" --argjson s "$s" --arg login "$login" '
+        --slurpfile users "$tmp/users" --argjson s "$s" --arg login "$login" --arg branch "$branch" '
         {pr: ($pr[0] | .author_login = $login | .author_name = (if $user[0].name == "" then $login else $user[0].name end)),
-         required: $required[0], checks: $checks, comments: $comments, qa_run: $qa[0], users: $users[0],
+         default_branch: $branch, required: $required[0], checks: $checks, comments: $comments, qa_run: $qa[0], users: $users[0],
          cfg: ($s | {name, reviewer, review_check, findings_check, browser_check, id_pattern, issue_url})}'
   } || rc=1
   rm -rf "$tmp"
@@ -244,14 +251,15 @@ render() { jq -L "$MROOM_ROOT/actions/review-findings" -f "$HERE/render.jq"; }
 # dupes: [the other notes' ids]}. found is footer when a note's hidden line was lost or cannot be read; sent then
 # holds only what the readable ones recorded. sent keeps the order the keys were recorded in, oldest first.
 read_note() {
-  jq -c --arg bot "$BOT" --arg mark "$MARK$1 " --arg footer "$FOOTER" '
+  jq -c --arg bot "$BOT" --arg mark "$MARK$1 " --arg footer "$FOOTER_LINE" '
     def ordered: reduce .[] as $k ([]; if index([$k]) then . else . + [$k] end);
     [.comments[] | select(.login == $bot)] as $mine
     | ($mark | gsub("(?<c>[.*+?()\\[\\]{}|^$\\\\])"; "\\\(.c)")) as $re
     | [$mine[] | select(.body | contains($mark))
        | . + {state: (first(.body | capture("(^|\n)" + $re + "final=(?<f>[01]) sent=(?<s>[a-z0-9:,-]*) -->$")) // null)}]
       | sort_by(.id) as $marked
-    | [$mine[] | select((.body | contains($mark) | not) and (.body | contains($footer)))] as $lost
+    | [$mine[] | select((.body | contains($mark) | not) and (.body | split("\n") | any(. == $footer))
+        and (.body | test("^\\S+ \\*\\*[A-Za-z0-9 _-]+\u0027s notes\\*\\* · ")))] as $lost
     | ([$marked[] | .state | select(.) | .s | split(",")[] | select(test("^([0-9a-f]{12}|once):[a-z]+:[a-z-]+$"))] | ordered) as $sent
     | (($marked + $lost) | sort_by(.id)) as $all
     | if ($all | length) == 0 then {id: null, body: null, found: "none", final: false, sent: [], dupes: []}
@@ -324,6 +332,11 @@ main() {
   s="$(settings)" || return 0
   facts="$(collect "$pr" "$s")" || { warn "could not read PR #$pr from GitHub; the next event tries again"; return 0; }
   if [ "$(jq -r .pr.author_login <<<"$facts")" = "dependabot[bot]" ]; then notice "PR #$pr is Dependabot's"; return 0; fi
+  # Its own events run its base branch's copy of the app's workflow, which the persona environment refuses: a note
+  # it could not keep current is none at all.
+  if [ "$(jq -r '.pr.base_ref == .default_branch' <<<"$facts")" != true ]; then
+    notice "PR #$pr is based on another branch than the default; it gets no note"; return 0
+  fi
   out="$(render <<<"$facts")" || { warn "could not render PR #$pr"; return 0; }
   note="$(read_note "$pr" <<<"$facts")"
   channel="$(jq -r .channel <<<"$s")"
@@ -350,7 +363,7 @@ main() {
   keys="$(jq -c --argjson p "$pending" '. + [$p[].key] | reduce .[] as $k ([]; if index([$k]) then . else . + [$k] end)' <<<"$sent")"
 
   action="write"
-  if [ "$(jq -r .final <<<"$out")" = true ] && [ "$(jq -r '.found == "marker" and .final' <<<"$note")" = true ]; then
+  if [ "$(jq -r .final <<<"$out")" = true ] && [ "$(jq -r '.found == "marker" and .final and (.dupes | length) == 0' <<<"$note")" = true ]; then
     action="none (PR closed, note final)"
   else
     text="$(note_text "$out" "$pr" "$(jq .final <<<"$out")" "$keys")"

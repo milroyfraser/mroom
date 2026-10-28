@@ -204,7 +204,7 @@ t_environment() {
   world; qa_body "${QA_READY//$HEAD/$OLD}"; rendered
   has_json "an environment of an older commit: shown, not ready, with a question" "($(line Environment) | startswith(\"- **Environment:** ⚠️\") and endswith(\"\`bbbbbbb\`\")) and .alerts == [] and (.body | contains(\"the environment serves \`bbbbbbb\`, the head is \`aaaaaaa\`\"))"
   world; qa_body $'### QA environment\n<!-- mroom-qa: failed -->\n\nThe deploy of `'"$OLD"'` failed: the migration. The next push tries again.'
-  world_set '.jobs["9"][1].conclusion = "skipped"'; rendered
+  world_set '.jobs["9"][1] += {name: "qa / QA deploy · PR #", conclusion: "skipped"}'; rendered
   has_json "a failed environment, said by the comment: keyed on its commit" "($(line Environment) | startswith(\"- **Environment:** ❌ deploy failed · [why]\")) and $(keys) == [\"bbbbbbb22222:env:failed\"]"
   world; qa_body $'### QA environment\n<!-- mroom-qa: removed -->\n\nRemoved: closed.'; world_set '.runs["qa-up.yml"] = []'; rendered
   has_json "removed: says so, and does not hold the PR" "($(line Environment) == \"- **Environment:** removed · [why](https://github.com/example/shop/pull/42#c10)\") and $(keys) == [\"once:ready:ready\"]"
@@ -212,14 +212,29 @@ t_environment() {
   has_json "no plan and no environment: not requested, ready" "($(line Environment) == \"- **Environment:** not requested (no QA plan has run on this PR)\") and (.alerts[0].text | contains(\"browser QA not needed\"))"
   world; world_set '.comments["42"] |= map(select(.id != 10))'; rendered
   has_json "a passed deploy with no comment: unknown, never a pass, with a question" "($(line Environment) | startswith(\"- **Environment:** ❓ unknown: \")) and .alerts == [] and (.body | contains(\"Open question\"))"
-  world; world_set '.comments["42"] |= map(select(.id != 10)) | .jobs["9"][1].conclusion = "skipped"'; check_set '{"name": "QA (browser)", "conclusion": "skipped"}'; rendered
+  world; world_set '.comments["42"] |= map(select(.id != 10)) | .jobs["9"][1] += {name: "qa / QA deploy · PR #", conclusion: "skipped"}'; check_set '{"name": "QA (browser)", "conclusion": "skipped"}'; rendered
   has_json "the plan said no: not needed, ready" "($(line Environment) | startswith(\"- **Environment:** not needed\")) and $(keys) == [\"once:ready:ready\"]"
   world; world_set '.runs["qa-up.yml"] += [{id: 7, status: "completed", conclusion: "failure", html_url: "x", display_title: "QA environment · PR #4", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
     | .jobs["7"] = [{name: "qa / QA deploy · PR #4", status: "completed", conclusion: "failure", html_url: "x"}]'; rendered
   has_json "another PR's run (PR #4 for #42) is not this one's" "($(line Environment) | startswith(\"- **Environment:** ✅\")) and $(keys) == [\"once:ready:ready\"]"
   world; world_set '.runs["qa-up.yml"] += [{id: 7, status: "completed", conclusion: "failure", html_url: "x", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
     | .jobs["7"] = [{name: "qa / QA deploy · PR #7", status: "completed", conclusion: "failure", html_url: "x"}]'; rendered
-  has_json "a run-name a fork forged: its deploy job names its own PR, so it is passed over" "($(line Environment) | startswith(\"- **Environment:** ✅\")) and $(keys) == [\"once:ready:ready\"]"
+  has_json "a run whose deploy job names another PR is passed over" "($(line Environment) | startswith(\"- **Environment:** ✅\")) and $(keys) == [\"once:ready:ready\"]"
+  world; world_set '.runs["qa-up.yml"] += [{id: 7, status: "completed", conclusion: "success", html_url: "x", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
+    | .jobs["7"] = [{name: "qa / QA pull request", status: "completed", conclusion: "success", html_url: "x"}, {name: "qa / QA deploy · PR #", status: "completed", conclusion: "skipped", html_url: "x"}]'; rendered
+  has_json "a run-name a fork forged deploys nothing: the comment speaks, no ping" "($(line Environment) | startswith(\"- **Environment:** ✅\")) and $(keys) == [\"once:ready:ready\"]"
+  world; world_set '.jobs["9"][1].conclusion = "failure"
+    | .runs["qa-up.yml"] += [{id: 7, status: "completed", conclusion: "success", html_url: "x", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
+    | .jobs["7"] = [{name: "qa / QA deploy · PR #", status: "completed", conclusion: "skipped", html_url: "x"}]'; rendered
+  has_json "the newest run deployed nothing, an older one failed: the newest counts, no ping" "($(line Environment) | startswith(\"- **Environment:** ✅\")) and $(keys) == [\"once:ready:ready\"]"
+  world; world_set '.jobs["9"][1].conclusion = "failure"
+    | .runs["qa-up.yml"] += [range(10; 16) as $i | {id: $i, status: "completed", conclusion: "success", html_url: "x",
+        display_title: "QA environment · PR #\($i)", created_at: "2026-10-28T11:\($i):00Z", pull_requests: []}]
+    | .jobs += ([range(10; 16) as $i | {key: "\($i)", value: [{name: "qa / QA deploy · PR #\($i)", status: "completed", conclusion: "success", html_url: "x"}]}] | from_entries)'
+  rendered
+  has_json "other PRs' newer runs do not crowd this PR's out" "$(keys) == [\"aaaaaaa11111:env:failed\"]"
+  world; world_set '.fail = ["GET actions/runs/9/jobs"]'; qa_body $'### QA environment\n<!-- mroom-qa: failed -->\n\nThe deploy failed.'; rendered
+  has_json "a run whose jobs cannot be read is passed over" "$(line Environment) | startswith(\"- **Environment:** ❌ deploy failed · [why]\")"
   world; world_set '.runs["qa-up.yml"] += [{id: 7, status: "in_progress", conclusion: null, html_url: "https://github.com/example/shop/actions/runs/7", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
     | .jobs["7"] = [{name: "qa / QA pull request", status: "in_progress", conclusion: null, html_url: "x"}]'; rendered
   has_json "a newer run with no deploy job yet: planning" "$(line Environment) | startswith(\"- **Environment:** ⏳ planning · [run](https://github.com/example/shop/actions/runs/7)\")"
@@ -291,8 +306,8 @@ required_checks = ["test", "@team **x** <b>"]'
   has_json "a check title in the note: escaped, no link, no mention" "$(line "Browser QA") | contains(\"@\u200beveryone \\\\[x\\\\](https:\u200b//evil.example) \\\\\`y\\\\\`\")"
   has_json "the title in a ping: no broadcast, no link of its own" '[.alerts[].text | contains("&lt;!here&gt; &amp; &lt;https://evil.example¦click&gt;")] | all'
   has_json "no ping holds a raw <!" '[.alerts[].text | contains("<!")] | any | not'
-  world; check_set '{"name": "QA (browser)", "conclusion": "failure", "output": {"title": "-@org/team a+@b x.@c see https://evil.example"}}'; rendered
-  has_json "an @ after any mark but a letter, digit or _ is broken; an address keeps its @; a URL is no link" "$(line "Browser QA") | contains(\"-@\u200borg/team a+@\u200bb x.@\u200bc see https:\u200b//evil.example\")"
+  world; check_set '{"name": "QA (browser)", "conclusion": "failure", "output": {"title": "-@org/team a+@b x.@c see https://evil.example or www.evil.example"}}'; rendered
+  has_json "an @ after any mark but a letter, digit or _ is broken; an address keeps its @; a URL is no link" "$(line "Browser QA") | contains(\"-@\u200borg/team a+@\u200bb x.@\u200bc see https:\u200b//evil.example or www\u200b.evil.example\")"
   world_set '.pulls["42"].user.login = "dev2"'; rendered
   has_json "an unmapped author is named, escaped" '.alerts[0].text | startswith("Dev &lt;Two&gt; ")'
 }
@@ -405,6 +420,22 @@ t_two_notes() {
   : >"$T/calls.jsonl"; status 42
   expect_err_lacks "more than one note"
   expect_eq "the next run: one note, nothing to write" "$(count writes)" 0
+}
+
+t_not_a_note() {
+  world
+  comment_add "github-actions[bot]" $'Welcome! You wrote: Edited in place by mroom\'s pr-status'
+  status 42
+  expect_true "a bot comment that quotes the footer is left alone" \
+    jqt '.comments["42"][] | select(.body == "Welcome! You wrote: Edited in place by mroom'"'"'s pr-status")' "$T/world.json"
+  expect_eq "and a note of its own is posted, with its ping" "$(notes | jq length) $(count pings)" "1 1"
+}
+
+t_other_base() {
+  world; pr_set '.pulls["42"].base.ref = "release"'
+  status 42; expect_rc 0
+  expect_err_has "based on another branch than the default"
+  expect_eq "no note, no ping" "$(count writes) $(count pings)" "0 0"
 }
 
 t_other_prs_notes() {
@@ -575,6 +606,8 @@ test_case change-edits-in-place t_change_edits_in_place
 test_case marker-lost t_marker_lost
 test_case two-notes t_two_notes
 test_case other-prs-notes t_other_prs_notes
+test_case not-a-note t_not_a_note
+test_case other-base t_other_base
 test_case write-fails t_write_fails
 test_case lost-answer t_lost_answer
 test_case ping-fails t_ping_fails
