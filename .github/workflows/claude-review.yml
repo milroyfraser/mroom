@@ -1,0 +1,122 @@
+name: Claude review
+
+# One full Claude review of a pull request, then follow-ups that only re-check the earlier blocking findings
+# and look for new blocking ones (actions/claude-review/prepare.sh says why). The app calls it on pull_request
+# (README, Claude review). The scope job decides whether to review: not a fork's pull request, and only when a
+# changed file is in the paths the app lists. The review job holds the secret, so it never checks out or runs
+# the pull request's code: it checks out the app's default branch, for its CLAUDE.md, its review guide and the
+# code around the change, and mroom at the commit of this file. The reviewer reads the diff through gh, as data.
+on:
+  workflow_call:
+    inputs:
+      paths:
+        description: The paths a change must touch to be reviewed, one pattern per line (empty is every path)
+        type: string
+        default: ""
+      review-guide:
+        description: The app's review guide or review command, a file on the default branch (empty is none)
+        type: string
+        default: ""
+      review-guide-paths:
+        description: The paths the review guide covers, one pattern per line (empty is every reviewed path)
+        type: string
+        default: ""
+      reviewer:
+        description: The GitHub login that posts the review, which finds the earlier ones
+        type: string
+        default: claude[bot]
+      allowed-bots:
+        description: Bots whose pull requests are reviewed too, separated by commas
+        type: string
+        default: claude[bot],github-actions[bot]
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        description: A Claude Code OAuth token; this or ANTHROPIC_API_KEY
+        required: false
+      ANTHROPIC_API_KEY:
+        description: An Anthropic API key; this or CLAUDE_CODE_OAUTH_TOKEN
+        required: false
+
+permissions:
+  contents: read
+
+# bash with pipefail, so a script piped into another fails its step when it fails.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  scope:
+    name: scope
+    # A fork's pull request never gets the secret, whatever the caller's trigger; neither does Dependabot's.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      pull-requests: read # the changed files
+    outputs:
+      review: ${{ steps.scope.outputs.review }}
+      guide: ${{ steps.scope.outputs.guide }}
+    steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
+      - name: Match the changed files
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MROOM_REVIEW_PATHS: ${{ inputs.paths }}
+          MROOM_REVIEW_GUIDE: ${{ inputs.review-guide }}
+          MROOM_REVIEW_GUIDE_PATHS: ${{ inputs.review-guide-paths }}
+        run: mroom/actions/claude-review/scope.sh "$GITHUB_EVENT_PATH" >>"$GITHUB_OUTPUT"
+
+  review:
+    name: review
+    needs: scope
+    if: >-
+      needs.scope.outputs.review == 'true' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # One review per pull request at a time: a newer push cancels the review of an older one.
+    concurrency:
+      group: mroom-claude-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write # to post the review and fold the earlier ones
+      issues: read
+      id-token: write # the Claude GitHub app's token
+    steps:
+      # The default branch, never the pull request's head: this job holds the secret.
+      - name: Check out the default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mroom
+          persist-credentials: false
+      - uses: ./.mroom/actions/claude-review
+        with:
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          reviewer: ${{ inputs.reviewer }}
+          allowed-bots: ${{ inputs.allowed-bots }}
+          review-guide: ${{ inputs.review-guide }}
+          guide-applies: ${{ needs.scope.outputs.guide }}
+          review-guide-paths: ${{ inputs.review-guide-paths }}

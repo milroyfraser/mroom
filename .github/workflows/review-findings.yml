@@ -1,0 +1,67 @@
+name: Review findings
+
+# A check run on the pull request's head commit, red while the latest Claude review (claude-review.yml) has
+# open 🔴 blocking findings, or while a "Review findings and how each was resolved" table has a row with
+# neither ✅ nor ➖ (actions/review-findings). The app calls it on pull_request_target, issue_comment and
+# workflow_run of its review workflow (README, Review findings). Every run rereads the comments, so which
+# event woke it does not matter.
+#
+# It reads the pull request only as data, through the API, and checks out mroom alone, at the commit of this
+# file: never the app, never the pull request's head. It holds no secret, but its token can write checks, so
+# the caller's triggers all run the default branch's copy of the calling workflow.
+on:
+  workflow_call:
+    inputs:
+      reviewer:
+        description: The GitHub login that posts the Claude review
+        type: string
+        default: claude[bot]
+      check-name:
+        description: The check run's name
+        type: string
+        default: Review findings
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    name: check
+    # issue_comment: only a pull request's comments (an issue's have no pull_request), and only one that is or
+    # was a review or a findings table, so the pull request's other comments wake nothing. contains ignores
+    # case.
+    if: >-
+      github.event_name != 'issue_comment' || (
+        github.event.issue.pull_request && (
+          github.event.comment.user.login == inputs.reviewer ||
+          contains(github.event.comment.body, 'how each was resolved') ||
+          contains(github.event.changes.body.from, 'how each was resolved')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    # Reads the pull request and its comments; checks: write is its only write, to post the check run.
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      checks: write
+    # One evaluation per pull request at a time; a newer event's run replaces an older one, which only rereads
+    # the same comments. A workflow_run with no pull request in the event groups by its commit.
+    concurrency:
+      group: mroom-review-findings-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_sha }}
+      cancel-in-progress: true
+    steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
+      - uses: ./mroom/actions/review-findings
+        with:
+          reviewer: ${{ inputs.reviewer }}
+          check-name: ${{ inputs.check-name }}

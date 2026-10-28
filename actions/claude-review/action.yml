@@ -1,0 +1,88 @@
+name: Claude review
+description: >-
+  Gives a pull request one full Claude review, then follow-ups that only re-check the earlier blocking findings
+  and look for new blocking ones. Run it from mroom's claude-review workflow, which checks out the app's
+  default branch, never the pull request, and decides whether to run (scope.sh). The reviewer reads the pull
+  request's diff and text through gh, as data. The pinned action and its tool allowlist are one block here,
+  kept as tight as they are: reading files, reading issues and pull requests, and commenting.
+inputs:
+  claude-code-oauth-token:
+    description: A Claude Code OAuth token; this or anthropic-api-key
+    default: ""
+  anthropic-api-key:
+    description: An Anthropic API key; this or claude-code-oauth-token
+    default: ""
+  reviewer:
+    description: The GitHub login that posts the review, which finds the earlier ones
+    default: claude[bot]
+  allowed-bots:
+    description: Bots whose pull requests are reviewed too, separated by commas
+    default: claude[bot],github-actions[bot]
+  review-guide:
+    description: The app's review guide or review command, a file on the default branch
+    default: ""
+  guide-applies:
+    description: true when the pull request touches the guide's paths (scope.sh)
+    default: "false"
+  review-guide-paths:
+    description: The paths the guide covers, one pattern per line, named in the prompt
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Check the token
+      shell: bash
+      env:
+        HAS_OAUTH: ${{ inputs.claude-code-oauth-token != '' }}
+        HAS_KEY: ${{ inputs.anthropic-api-key != '' }}
+      run: |
+        if [ "$HAS_OAUTH" != true ] && [ "$HAS_KEY" != true ]; then
+          echo "::error title=Claude review::Pass the CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY secret to the workflow."
+          exit 1
+        fi
+
+    - name: Find the previous review
+      id: prev
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        MROOM_REVIEWER: ${{ inputs.reviewer }}
+      run: '"$GITHUB_ACTION_PATH/prepare.sh" .claude-review >>"$GITHUB_OUTPUT"'
+
+    - name: Fold the earlier reviews
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        MROOM_REVIEWER: ${{ inputs.reviewer }}
+      run: '"$GITHUB_ACTION_PATH/hide.sh" .claude-review/comments.json'
+
+    - name: Write the prompt
+      id: prompt
+      shell: bash
+      env:
+        MODE: ${{ steps.prev.outputs.mode }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        MROOM_DIR: .claude-review
+        MROOM_GUIDE_APPLIES: ${{ inputs.guide-applies }}
+        MROOM_REVIEW_GUIDE: ${{ inputs.review-guide }}
+        MROOM_REVIEW_GUIDE_PATHS: ${{ inputs.review-guide-paths }}
+      run: |
+        prompt="$("$GITHUB_ACTION_PATH/prompt.sh")"
+        delimiter="mroom-prompt-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+        printf 'prompt<<%s\n%s\n%s\n' "$delimiter" "$prompt" "$delimiter" >>"$GITHUB_OUTPUT"
+
+    # Pinned by commit. Agent mode (a prompt is given) checks out no branch; on a pull request it restores
+    # .claude/, CLAUDE.md and .mcp.json from the base branch before Claude starts.
+    - name: Run the Claude review
+      uses: anthropics/claude-code-action@925afb53776cf1a2b738c6bdbed37b4d4000ef13 # v1.0.262, Claude Code 2.1.310
+      with:
+        claude_code_oauth_token: ${{ inputs.claude-code-oauth-token }}
+        anthropic_api_key: ${{ inputs.anthropic-api-key }}
+        allowed_bots: ${{ inputs.allowed-bots }}
+        prompt: ${{ steps.prompt.outputs.prompt }}
+        claude_args: '--allowed-tools "Read,Grep,Glob,Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
