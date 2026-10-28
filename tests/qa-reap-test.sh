@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317  # the t_* functions run indirectly, through test_case
-# Tests for the QA reaper (actions/qa-reap/reap.sh): every environment past qa.ttl_days, found by its API's or its frontend's
-# site, gets a teardown of its own (the app's qa-down workflow, reason ttl); one whose time Forge does not give counts
-# as past it; one Forge is removing is skipped, and a site of it stuck removing gets the delete again, with a warning;
-# a Forge that cannot be read fails the run; it needs no SSH key. Offline: Forge and GitHub are fakes.
+# Tests for the QA reaper (actions/qa-reap/reap.sh): every environment past qa.ttl_days, found by its API's or its
+# frontend's site, gets a teardown of its own (the app's qa-down workflow, reason ttl); one whose time Forge does not
+# give counts as past it; one Forge is removing is skipped, and a site of it stuck removing gets the delete again,
+# with a warning; a Forge that cannot be read fails the run; it needs no SSH key. Offline: Forge and GitHub are
+# fakes.
 set -euo pipefail
 SUITE=qa-reap
 # shellcheck source=tests/lib.sh

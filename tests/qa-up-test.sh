@@ -405,6 +405,9 @@ t_a_site_made_with_another_php_is_refused() {
   expect_rc 1
   expect_err_has "$API runs PHP 8.3, and app.php is 8.4. A site's PHP version is set when it is made: tear the environment down (gh workflow run qa-down.yml -f pr_number=7)"
   run gate_log; expect_out "env-sha 7"
+  # Only a teardown fixes it, so the comment does not say that the next push tries again.
+  run gh_log; expect_out_has "mroom-qa: failed"; expect_out_has "runs PHP 8.3"
+  expect_true "the comment says the next push tries again" lacks "$out" "The next push tries again"
 }
 
 t_a_site_whose_web_root_is_elsewhere_is_refused() {
@@ -554,8 +557,8 @@ t_an_environment_of_the_old_names_is_torn_down_not_refreshed() {
   forge_set '.sites[0].remove_reads = -1'
   up
   expect_rc 1; expect_err_has "environment 7 was brought up as $(old_web_host 7)"
-  run forge_writes; expect_out ""
   expect_true "the run waited before it refused" lacks "$out" "waiting for it to go"
+  run forge_writes; expect_out ""
   # An app with no frontend of its own comes up at its one host.
   app $'[app]\nname = "shop"\n\n[qa]\nzone = "qa.example.dev"\n\n[qa.parity]\nbroadcast = "log"\nmail = "log"\nfiles = "local"' artisan=php
   site 53 "$(old_api_host 7)" installed
