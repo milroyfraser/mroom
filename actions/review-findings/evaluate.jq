@@ -11,8 +11,9 @@
 #   blocking findings, counted by findings.jq's blocking_count;
 # - the latest comment with a "Review findings and how each was resolved" table has a row that is not
 #   resolved. Only the pull request's author and the repository's owners, members and collaborators
-#   (the comment's author_association) count: on a public repository anyone may comment. A row is resolved when ANY of its cells has ✅ or
-#   ➖: the table's columns vary between sessions, so the status column is not looked up by name.
+#   (the comment's author_association) count: on a public repository anyone may comment. A row is
+#   resolved when ANY of its cells has ✅ or ➖: the table's columns vary between sessions, so the status
+#   column is not looked up by name.
 # A review whose format blocking_count doesn't recognise gives neutral (unknown, not red), unless the
 # table alone already makes it red. No review and no table at all is neutral too, "Not reviewed yet":
 # nothing was checked, so it is never a pass.
