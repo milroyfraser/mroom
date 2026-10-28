@@ -34,7 +34,7 @@ def latest($checks; $name): [$checks[] | select(.name == $name)] | max_by(.id);
 # Markdown, for the note: an escaped text, with every @ that starts a word broken by a zero-width space, so no
 # text in it mentions anyone; and a link with such a label.
 def md: tostring | gsub("[\r\n\t]+"; " ") | gsub("(?<c>[\\\\`*_\\[\\]<>|#~])"; "\\\(.c)")
-  | gsub("(?<![A-Za-z0-9._%+-])@"; "@​");
+  | gsub("(?<![A-Za-z0-9._%+-])@"; "@\u200b");
 def mdlink($url; $label): "[\($label | md)](\($url))";
 
 # Slack mrkdwn: an escaped text, and a link with an escaped label (a | would end the label early).
@@ -94,7 +94,7 @@ def environment($f):
     elif $run != null and $run.status != "completed" and $d.status != "completed" then
       {state: "pending", line: "⏳ deploying · \(mdlink($d.html_url; "run"))"}
     elif $d != null and ($d.conclusion | IN("failure", "timed_out", "startup_failure")) then
-      {state: "fail", line: "❌ deploy failed · \(mdlink($d.html_url; "run"))" + (if $why then " · \(mdlink($why; "comment"))" else "" end),
+      {state: "fail", line: ("❌ deploy failed · \(mdlink($d.html_url; "run"))" + (if $why then " · \(mdlink($why; "comment"))" else "" end)),
        alert: {outcome: "failed", text: "❌ QA deploy failed", evidence: link($d.html_url; "run"),
                ask: "This branch (build, migration) or the box? Next check: the failing step in \(link($d.html_url; "the run"))."}}
     elif $d != null and $d.conclusion == "cancelled" then

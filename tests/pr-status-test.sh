@@ -268,8 +268,8 @@ required_checks = ["test", "@team **x** <b>"]'
   world_set '.fail = ["GET rules/branches"] | .check_runs[.pulls["42"].head.sha] += [{id: 30, name: "@team **x** <b>", status: "completed", conclusion: "failure", html_url: "https://github.com/example/shop/runs/30"}]'
   check_set '{"name": "QA (browser)", "conclusion": "failure", "output": {"title": "@everyone [x](https://evil.example) `y`"}}'
   pr_set '.pulls["42"].title = "<!here> & <https://evil.example|click>"'; rendered
-  has_json "a check name in the note: escaped, no mention" "$(line CI) | contains(\"[@​team \\\\*\\\\*x\\\\*\\\\* \\\\<b\\\\>](https://github.com/example/shop/runs/30)\")"
-  has_json "a check title in the note: escaped, no link, no mention" "$(line "Browser QA") | contains(\"@​everyone \\\\[x\\\\](https://evil.example) \\\\\`y\\\\\`\")"
+  has_json "a check name in the note: escaped, no mention" "$(line CI) | contains(\"[@\u200bteam \\\\*\\\\*x\\\\*\\\\* \\\\<b\\\\>](https://github.com/example/shop/runs/30)\")"
+  has_json "a check title in the note: escaped, no link, no mention" "$(line "Browser QA") | contains(\"@\u200beveryone \\\\[x\\\\](https://evil.example) \\\\\`y\\\\\`\")"
   has_json "the title in a ping: no broadcast, no link of its own" '[.alerts[].text | contains("&lt;!here&gt; &amp; &lt;https://evil.example¦click&gt;")] | all'
   has_json "no ping holds a raw <!" '[.alerts[].text | contains("<!")] | any | not'
   world_set '.pulls["42"].user.login = "dev2"'; rendered
