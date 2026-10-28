@@ -964,6 +964,10 @@ Things to know:
   (`shivammathur/setup-php`, `pnpm/action-setup`) on the default branch, where caches are written; pin
   them to a commit if that matters more to you than easy updates.
 - The vitest reporter needs vitest 3 or later.
+- `ci-e2e.yml` waits for Laravel's `/up` route (Laravel 11 and later), and expects Playwright in the backend
+  folder's Node lockfile, as Pest's browser plugin has it: the backend folder needs a `package.json`.
+- GitHub turns off a scheduled workflow after 60 days with no activity in the repository. Turn the weekly
+  cache warm back on in the Actions tab if that happens.
 
 **Placeholders.** A `<<key>>` is filled from `mroom.toml` or the repository; a `<<fill:name>>` is a value
 config cannot know, and a person fills it. When a folder is `.` and a `/` follows the placeholder, both go:
@@ -990,7 +994,7 @@ supported yet: the Node steps would build their paths from the repository's root
 | `<<fill:e2e_suite>>` | the phpunit suite of the browser tests, which the backend shards leave out |
 | `<<fill:measured_times>>` | each suite's measured time and the date, as a comment for the next rebalance |
 | `<<fill:frontend_lint>>` | the frontend's lint, format and type checks, such as `pnpm lint && pnpm exec tsc --noEmit` |
-| `<<fill:frontend_src>>` | the frontend's source folder inside its own: `src` for a separate SPA, `resources` for Vite inside Laravel |
+| `<<fill:frontend_src>>` | the frontend's source folder inside its own: `src` for a separate SPA, `resources` for Vite inside Laravel (then add the other folders Tailwind scans to the build's key) |
 | `<<fill:e2e_build>>` | the build without source maps but minified, with the env it needs, such as `VITE_API_URL=http://127.0.0.1:8000 pnpm exec vite build --sourcemap false` |
 | `<<fill:e2e_command>>` | the browser tests, failing when none are found, such as `php artisan test --testsuite=Browser --fail-on-empty-test-suite` |
 

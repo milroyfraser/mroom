@@ -17,6 +17,9 @@ RENDER="$ROOT/tests/ci/render.py"
 
 has_yaml() { python3 -c 'import yaml' >/dev/null 2>&1; }
 has_node() { command -v node >/dev/null 2>&1; }
+# Each test runs with its own HOME, so keep the real one's user site: a PyYAML from `pip install --user`.
+PYTHONUSERBASE="$(python3 -m site --user-base 2>/dev/null || true)"
+export PYTHONUSERBASE
 
 # shape <check>: one check of tests/ci/check.py passes.
 shape() { run python3 "$CHECK" "$1" "$ROOT"; expect_rc 0; }
@@ -245,7 +248,7 @@ skip_unless has_tomllib "python3 has no tomllib (3.11+)"
 test_case single-app t_the_single_app_example_renders
 test_case two-folder t_the_two_folder_example_renders
 test_case no-frontend t_an_app_with_no_frontend_is_refused
+test_case unfilled t_an_unfilled_placeholder_fails_the_render
 skip_unless has_node "no node, which runs the vitest reporter"
 test_case reporter t_the_vitest_reporter_writes_each_files_phases
-test_case unfilled t_an_unfilled_placeholder_fails_the_render
 finish

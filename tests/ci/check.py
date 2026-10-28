@@ -296,7 +296,7 @@ def check_e2e_build(files):
     restore = next((s for s in steps if uses(s, "actions/cache/restore")), {})
     key = str((restore.get("with") or {}).get("key", ""))
     for part in ("'.github/actions/e2e-frontend-build/action.yml'", "node${{ steps.node.outputs.version }}",
-                 "'<<app.frontend_dir>>/<<pm.lockfile>>'", "'!<<app.frontend_dir>>/<<fill:frontend_src>>/**/*.test.*'"):
+                 "'<<app.frontend_dir>>/<<pm.lockfile>>'", "'<<app.backend_dir>>/composer.lock'", "'!<<app.frontend_dir>>/<<fill:frontend_src>>/**/*.test.*'"):
         if part not in key:
             problem(f"the e2e build's key lacks {part}")
     build = next((s for s in steps if s.get("name") == "Build the frontend"), {})

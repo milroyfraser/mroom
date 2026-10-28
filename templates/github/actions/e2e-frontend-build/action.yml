@@ -22,7 +22,9 @@ runs:
     # The key holds everything the build reads: the frontend's source (minus tests), public assets,
     # index.html, the config files at the frontend's top (vite.config.*, tsconfig*), its env files, the
     # package file, lockfile and .npmrc, this file (the build command and its env), and Node's
-    # major.minor version. Add any other input the build reads, or a stale build is restored.
+    # major.minor version, and composer.lock (a build inside Laravel may read vendor/). Add any other
+    # input the build reads, or a stale build is restored. With Vite inside Laravel that includes every
+    # folder Tailwind scans for classes, such as app/**/*.php.
     - name: Read the Node version
       id: node
       shell: bash
@@ -33,7 +35,7 @@ runs:
       uses: actions/cache/restore@v6
       with:
         path: <<app.frontend_dir>>/<<app.build.frontend_dist>>
-        key: ${{ runner.os }}-e2e-dist-node${{ steps.node.outputs.version }}-${{ hashFiles('<<app.frontend_dir>>/<<fill:frontend_src>>/**', '!<<app.frontend_dir>>/<<fill:frontend_src>>/**/__tests__/**', '!<<app.frontend_dir>>/<<fill:frontend_src>>/**/*.test.*', '!<<app.frontend_dir>>/<<fill:frontend_src>>/**/*.spec.*', '<<app.frontend_dir>>/public/**', '!<<app.frontend_dir>>/<<app.build.frontend_dist>>/**', '<<app.frontend_dir>>/index.html', '<<app.frontend_dir>>/*.ts', '<<app.frontend_dir>>/*.js', '<<app.frontend_dir>>/*.mjs', '<<app.frontend_dir>>/package.json', '<<app.frontend_dir>>/tsconfig*.json', '<<app.frontend_dir>>/.env*', '<<app.frontend_dir>>/.npmrc', '<<app.frontend_dir>>/<<pm.lockfile>>', '.github/actions/e2e-frontend-build/action.yml') }}
+        key: ${{ runner.os }}-e2e-dist-node${{ steps.node.outputs.version }}-${{ hashFiles('<<app.frontend_dir>>/<<fill:frontend_src>>/**', '!<<app.frontend_dir>>/<<fill:frontend_src>>/**/__tests__/**', '!<<app.frontend_dir>>/<<fill:frontend_src>>/**/*.test.*', '!<<app.frontend_dir>>/<<fill:frontend_src>>/**/*.spec.*', '<<app.frontend_dir>>/public/**', '!<<app.frontend_dir>>/<<app.build.frontend_dist>>/**', '<<app.frontend_dir>>/index.html', '<<app.frontend_dir>>/*.ts', '<<app.frontend_dir>>/*.js', '<<app.frontend_dir>>/*.mjs', '<<app.frontend_dir>>/package.json', '<<app.frontend_dir>>/tsconfig*.json', '<<app.frontend_dir>>/.env*', '<<app.frontend_dir>>/.npmrc', '<<app.frontend_dir>>/<<pm.lockfile>>', '<<app.backend_dir>>/composer.lock', '.github/actions/e2e-frontend-build/action.yml') }}
 
     # Build without source maps, which only an error tracker needs, but minified: e2e tests the code
     # production ships, and minifying is faster than not (design section 10, pattern 7).

@@ -39,7 +39,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-cache-warm-${{ github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
 
 permissions:

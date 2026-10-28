@@ -212,6 +212,7 @@ jobs:
         working-directory: <<app.backend_dir>>
     steps:
       - uses: actions/checkout@v7
+      # The runner image's own PHP (with simplexml) is enough to read phpunit.xml.
       - name: List the test suites
         id: list
         env:
