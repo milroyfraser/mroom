@@ -56,6 +56,21 @@ def code(text):
     rest = re.sub(r"^ *```[a-z]*\n.*?^ *```$", "", text, flags=re.S | re.M)
     return blocks + re.findall(r"`([^`\n]+)`", rest)
 
+RELEASE_CREATE = r"gh\s+release\s+create\s+\S"
+RELEASE_EDIT = r"gh\s+release\s+edit\s+\S"
+
+def split_commands(spans):
+    """Every command in the spans: line continuations joined, then split at newlines, ;, &&, || and |,
+    and at $( and backticks' openings, each stripped, so a command in the middle of a span is seen too."""
+    out = []
+    for span in spans:
+        joined = re.sub(r"\\\n\s*", " ", span)
+        for part in re.split(r"\n|;|&&|\|\||\||\$\(|\(", joined):
+            part = part.strip()
+            if part:
+                out.append(part)
+    return out
+
 # --- What mroom has: commands, their subcommands, config keys ---------------------------------------------
 front = read(os.path.join(root, "bin/mroom"))
 case = front[front.index('case "$cmd" in'):]
@@ -116,10 +131,7 @@ FORBIDDEN = [
     (r"git\s+push\b[^`\n]*(--force|\s-f\b|--tags|--follow-tags|--mirror|\s\+)", "a force or tag push"),
     (r"gh\s+issue\s+(create|comment|edit|close)", "a GitHub issue write (the tracker is mroom tracker)"),
     (r"gh\s+api\b[^`\n]*(-X|--method)\s*(POST|PUT|PATCH|DELETE)", "a gh api write"),
-    # A field makes gh api a POST, unless the call says GET (graphql writes are the mutation rule's).
-    (r"gh\s+api\b(?![^`\n]*(-X\s*GET|--method[\s=]GET))(?!\s+graphql\b)[^`\n]*\s(-f|-F|--field|--raw-field|--input)\b",
-     "a gh api write (a field makes it a POST)"),
-    (r"gh\s+api\s+graphql\b[^`\n]*mutation", "a GraphQL mutation"),
+    (r"\bmutation\s*[({]", "a GraphQL mutation"),
     (r"(?i)\b(linear|sentry|forge)\b[^.\n]{0,30}\bMCP\b|\bMCP\b[^.\n]{0,30}\b(linear|sentry|forge)\b",
      "a tracker, error-tracker or Forge MCP server"),
     (r"api\.linear\.app|linear\.app/|sentry\.io|forge\.laravel\.com", "a tracker, error-tracker or Forge host"),
@@ -144,9 +156,19 @@ for label, (name, kind, meta, body, text) in sorted(docs.items()):
     for pattern, what in FORBIDDEN:
         hits = [m.group(0) for m in re.finditer(pattern, text)]
         say(not hits, f"{label} runs no {what} ({hits[:3]})")
-    bad_edits = [s for s in spans if re.match(r"gh release edit \S", s)
-                 and re.search(r"--(draft|latest|prerelease|tag|target)\b", s)]
+    cmds = split_commands(spans)
+    bad_edits = [c for c in cmds if re.match(RELEASE_EDIT, c)
+                 and re.search(r"--(draft|latest|prerelease|tag|target)\b", c)]
     say(not bad_edits, f"{label}: gh release edit changes only the notes ({bad_edits[:2]})")
+    undrafted = [c for c in cmds if re.match(RELEASE_CREATE, c) and not re.search(r"\s--draft\b(?!=)", c)]
+    say(not undrafted, f"{label}: every gh release create has --draft ({undrafted[:2]})")
+    # gh api: a field makes it a POST unless this command says GET; graphql writes by a mutation, or a query
+    # read from a file, which the test cannot see.
+    api_writes = [c for c in cmds if re.match(r"gh\s+api\b", c) and (
+        (not re.match(r"gh\s+api\s+graphql\b", c) and re.search(r"\s(-f|-F|--field|--raw-field|--input)\b", c)
+         and not re.search(r"(-X\s*|--method[\s=])GET\b", c))
+        or (re.match(r"gh\s+api\s+graphql\b", c) and re.search(r"mutation|query=@|--input\b", c)))]
+    say(not api_writes, f"{label} runs no gh api write ({api_writes[:2]})")
     curls = [s for s in spans if re.search(r"\b(curl|wget|http)\b", s) and not s.startswith("http")]
     curl_ok = all(re.fullmatch(r"curl -s <production_url><version_path>", s) for s in curls)
     say(curl_ok and (not curls or name == "release"),
@@ -195,15 +217,17 @@ release = docs.get("skill release")
 if release:
     _, _, meta, body, _ = release
     say(meta.get("disable-model-invocation") == "true", "release runs only when a person asks (disable-model-invocation)")
-    spans = code(body)
-    creates = [s for s in spans if re.match(r"gh release create \S", s)]
-    edits = [s for s in spans if re.match(r"gh release edit \S", s)]
-    say(bool(creates) and all("--draft" in s for s in creates), "release always creates the release with --draft")
-    say(all(re.search(r"--(draft|latest|prerelease|tag|target)\b", s) is None for s in edits),
+    cmds = split_commands(code(body))
+    creates = [c for c in cmds if re.match(RELEASE_CREATE, c)]
+    edits = [c for c in cmds if re.match(RELEASE_EDIT, c)]
+    say(bool(creates) and all(re.search(r"\s--draft\b(?!=)", c) for c in creates),
+        f"release always creates the release with --draft ({[c for c in creates if '--draft' not in c][:2]})")
+    say(all(re.search(r"--(draft|latest|prerelease|tag|target)\b", c) is None for c in edits),
         "release's gh release edit changes only the notes")
     # A step before the one that drafts asks the person, not only the rules.
     sections = re.split(r"^## ", body, flags=re.M)
-    draft_at = next((i for i, sec in enumerate(sections) if any(c in sec for c in creates)), -1)
+    draft_at = next((i for i, sec in enumerate(sections)
+                     if any(re.match(RELEASE_CREATE, c) for c in split_commands(code(sec)))), -1)
     asked = [sec for sec in sections[:max(draft_at, 0)] if not sec.startswith("Rules")
              and re.search(r"AskUserQuestion`?:?\s*\*\*release now\*\*", sec)]
     say(draft_at > 0 and bool(asked), "release asks the person (AskUserQuestion: release now) in a step before it drafts")
