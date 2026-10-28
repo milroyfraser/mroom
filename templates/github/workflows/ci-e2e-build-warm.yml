@@ -1,0 +1,50 @@
+# mroom template (copied once by `mroom init`; the app owns it from then on). Placeholders: README, "CI templates".
+name: CI e2e build warm
+
+# Saves the e2e job's frontend build on the default branch, so a pull request that leaves the frontend
+# alone restores it instead of building it (design section 10, pattern 7). A run restores caches from
+# its own ref and the default branch only, and the e2e job runs only on pull requests, so it never
+# saves its own build.
+#
+# The key and the build are in .github/actions/e2e-frontend-build, shared with ci-e2e.yml. Its own
+# workflow, so a frontend merge does not also run ci-cache-warm.yml's dependency warming. On a pull
+# request that edits the action or this file it runs too, to show the build still works, but it saves
+# nothing.
+
+on:
+  push:
+    branches: [<<default_branch>>]
+    paths:
+      - '<<app.frontend_dir>>/**'
+      - '.github/actions/e2e-frontend-build/**'
+      - '.github/actions/setup-frontend/**'
+      - '.github/workflows/ci-e2e-build-warm.yml'
+  pull_request:
+    paths:
+      - '.github/actions/e2e-frontend-build/**'
+      - '.github/workflows/ci-e2e-build-warm.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-e2e-build-warm-${{ github.head_ref || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Node, the package manager and the package store (restore only); the action installs.
+      - name: Setup Node
+        uses: ./.github/actions/setup-frontend
+        with:
+          install: 'false'
+
+      - name: Build and save the frontend
+        uses: ./.github/actions/e2e-frontend-build
+        with:
+          save: ${{ github.ref == 'refs/heads/<<default_branch>>' }}

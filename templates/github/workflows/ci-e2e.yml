@@ -1,0 +1,225 @@
+# mroom template (copied once by `mroom init`; the app owns it from then on). Placeholders: README, "CI templates".
+# The patterns are design section 10's: restore-only caches, the installed vendor/ with a fallback key,
+# apt's downloads cached by the week, and the frontend build reused when the frontend is unchanged.
+# It assumes browser tests driven by Playwright, pinned in the backend's Node lockfile (Pest's browser
+# plugin works this way).
+name: CI e2e
+
+on:
+  # No `paths:` filter: `e2e` is required by the ruleset, and a workflow skipped by a path filter never
+  # reports. The job runs and reports, and skips its work when the PR can't affect it.
+  pull_request:
+
+concurrency:
+  group: ci-e2e-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+# No job here needs a secret or writes anything: the PR's code runs with a read-only token.
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      APP_URL: http://127.0.0.1:8000
+      APP_ENV: testing
+      DB_CONNECTION: pgsql
+      DB_HOST: 127.0.0.1
+      DB_PORT: 5432
+      DB_DATABASE: <<tests.database>>
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: 6379
+      QUEUE_CONNECTION: sync
+      MAIL_MAILER: log
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: <<tests.database>>
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check what this PR changes
+        id: areas
+        uses: ./.github/actions/changed-areas
+
+      - name: Setup PHP
+        if: steps.areas.outputs.e2e == 'true'
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '<<app.php>>'
+          extensions: pdo_pgsql, redis
+          coverage: none
+
+      # Node, the package manager and the package store, restore only. The installs come below.
+      - name: Setup Node
+        if: steps.areas.outputs.e2e == 'true'
+        uses: ./.github/actions/setup-frontend
+        with:
+          install: 'false'
+
+      # Every cache in this job is restore-only: ci-cache-warm.yml saves them on the default branch,
+      # with the same keys and paths. A different path string never restores.
+      - name: Cache vendor
+        if: steps.areas.outputs.e2e == 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: <<app.backend_dir>>/vendor
+          key: ${{ runner.os }}-vendor-php<<app.php>>-${{ hashFiles('<<app.backend_dir>>/composer.lock') }}
+          restore-keys: ${{ runner.os }}-vendor-php<<app.php>>-
+
+      - name: Cache Playwright Chromium
+        if: steps.areas.outputs.e2e == 'true'
+        id: playwright-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('<<app.backend_dir>>/<<pm.lockfile>>') }}
+
+      - name: Install backend dependencies
+        if: steps.areas.outputs.e2e == 'true'
+        working-directory: <<app.backend_dir>>
+        run: composer install --no-interaction --prefer-dist
+
+      # The backend's Node packages pin Playwright. With Vite inside the Laravel app this is also the
+      # frontend's install.
+      - name: Install backend Node dependencies
+        if: steps.areas.outputs.e2e == 'true'
+        working-directory: <<app.backend_dir>>
+        run: <<pm.install>>
+
+      # A separate frontend's packages: its preview server serves the build, restored or not.
+      - name: Install frontend dependencies
+        if: steps.areas.outputs.e2e == 'true' && '<<app.frontend_dir>>' != '<<app.backend_dir>>'
+        working-directory: <<app.frontend_dir>>
+        run: <<pm.install>>
+
+      # Chromium's system libraries come from apt, about 19 MB of .deb files. The runner's Ubuntu mirror
+      # sometimes serves them at ~27 kB/s, which made this step 2.5 to 12 minutes in some runs. apt's
+      # download folder points at a cached folder, so the files are fetched once a week (the key's ISO
+      # week) and only changed packages after that. apt still checks every cached file against the
+      # signed package index before it installs it (pattern 2).
+      - name: Point apt at the cached package folder
+        if: steps.areas.outputs.e2e == 'true'
+        id: apt-cache
+        run: |
+          # Outside $HOME (mode 0750), so apt's unprivileged _apt user can still download into it.
+          sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0755 /var/cache/ci-apt /var/cache/ci-apt/partial
+          printf 'Dir::Cache::Archives "/var/cache/ci-apt";\nBinary::apt::APT::Keep-Downloaded-Packages "true";\nAPT::Keep-Downloaded-Packages "true";\n' \
+            | sudo tee /etc/apt/apt.conf.d/99ci-archives >/dev/null
+          echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright system packages
+        if: steps.areas.outputs.e2e == 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: /var/cache/ci-apt
+          key: ${{ runner.os }}-playwright-debs-${{ hashFiles('<<app.backend_dir>>/<<pm.lockfile>>') }}-${{ steps.apt-cache.outputs.week }}
+          restore-keys: ${{ runner.os }}-playwright-debs-${{ hashFiles('<<app.backend_dir>>/<<pm.lockfile>>') }}-
+
+      - name: Install Playwright system deps
+        if: steps.areas.outputs.e2e == 'true'
+        working-directory: <<app.backend_dir>>
+        run: |
+          <<pm.exec>> playwright install-deps chromium
+          # apt leaves partial/ to _apt; hand the folder back so the next restore can unpack into it.
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/ci-apt
+
+      - name: Install Playwright Chromium
+        if: steps.areas.outputs.e2e == 'true' && steps.playwright-cache.outputs.cache-hit != 'true'
+        working-directory: <<app.backend_dir>>
+        run: <<pm.exec>> playwright install chromium
+
+      # The built frontend. A PR that leaves the frontend alone restores the default branch's build
+      # instead of building it (pattern 7). The key and the build are in the action;
+      # ci-e2e-build-warm.yml saves the build on the default branch.
+      - name: Build or restore the frontend
+        if: steps.areas.outputs.e2e == 'true'
+        uses: ./.github/actions/e2e-frontend-build
+
+      # `php artisan serve` passes only a few variables to the server it starts, so the values above go
+      # into .env as well.
+      - name: Prepare backend environment
+        if: steps.areas.outputs.e2e == 'true'
+        working-directory: <<app.backend_dir>>
+        run: |
+          cp .env.example .env
+          for name in APP_URL APP_ENV DB_CONNECTION DB_HOST DB_PORT DB_DATABASE DB_USERNAME DB_PASSWORD \
+            REDIS_HOST REDIS_PORT QUEUE_CONNECTION MAIL_MAILER; do
+            sed -i "/^${name}=/d" .env
+            printf '%s=%s\n' "$name" "${!name}" >> .env
+          done
+          php artisan key:generate
+
+      - name: Run migrations
+        if: steps.areas.outputs.e2e == 'true'
+        working-directory: <<app.backend_dir>>
+        run: php artisan migrate --force
+
+      - name: Start backend server
+        if: steps.areas.outputs.e2e == 'true'
+        working-directory: <<app.backend_dir>>
+        run: php artisan serve --host=127.0.0.1 --port=8000 > "$RUNNER_TEMP/backend.log" 2>&1 &
+
+      # A separate frontend is served from its build by Vite's own preview server, from the lockfile.
+      # `--strictPort`, so a busy port fails loudly instead of moving. With Vite inside the Laravel app,
+      # Laravel serves the build and this step does nothing.
+      - name: Start frontend server
+        if: steps.areas.outputs.e2e == 'true' && '<<app.frontend_dir>>' != '<<app.backend_dir>>'
+        working-directory: <<app.frontend_dir>>
+        run: <<pm.exec>> vite preview --port 5173 --strictPort --host 127.0.0.1 > "$RUNNER_TEMP/frontend.log" 2>&1 &
+
+      # Each server named on its own, so a timeout says which one never answered.
+      - name: Wait for servers
+        if: steps.areas.outputs.e2e == 'true'
+        env:
+          SEPARATE_FRONTEND: ${{ '<<app.frontend_dir>>' != '<<app.backend_dir>>' }}
+        run: |
+          timeout 60 bash -c 'until curl -fs http://127.0.0.1:8000/up > /dev/null; do sleep 1; done' \
+            || { echo "::error::the backend never answered /up on 127.0.0.1:8000"; cat "$RUNNER_TEMP/backend.log"; exit 1; }
+          if [ "$SEPARATE_FRONTEND" = true ]; then
+            timeout 60 bash -c 'until curl -fs http://127.0.0.1:5173 > /dev/null; do sleep 1; done' \
+              || { echo "::error::the frontend never served on 127.0.0.1:5173"; cat "$RUNNER_TEMP/frontend.log"; exit 1; }
+          fi
+
+      # Fail when no test is found: a filter that matches nothing would otherwise pass forever.
+      - name: Run E2E browser tests
+        if: steps.areas.outputs.e2e == 'true'
+        working-directory: <<app.backend_dir>>
+        run: <<fill:e2e_command>>
+
+      - name: Upload screenshots on failure
+        if: failure() && steps.areas.outputs.e2e == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-screenshots
+          path: <<app.backend_dir>>/tests/Browser/Screenshots/
+          retention-days: 7
+          if-no-files-found: ignore

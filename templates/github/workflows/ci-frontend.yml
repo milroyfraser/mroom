@@ -1,0 +1,106 @@
+# mroom template (copied once by `mroom init`; the app owns it from then on). Placeholders: README, "CI templates".
+# The patterns are design section 10's: restore-only caches, shards by count with a measuring reporter,
+# and one fixed required check per sharded job (patterns 11 and 12).
+name: CI frontend
+
+on:
+  # No `paths:` filter: the checks below are required by the ruleset, and a workflow skipped by a path
+  # filter never reports. Every job runs and reports, and skips its work when the PR can't affect it.
+  pull_request:
+
+concurrency:
+  group: ci-frontend-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+# No job here needs a secret or writes anything: the PR's code runs with a read-only token.
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: <<app.frontend_dir>>
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check what this PR changes
+        id: areas
+        uses: ./.github/actions/changed-areas
+      - name: Setup frontend
+        if: steps.areas.outputs.frontend == 'true'
+        uses: ./.github/actions/setup-frontend
+      # One step, so a formatting failure still reports the lint and type results beside it.
+      - name: Lint and types
+        if: steps.areas.outputs.frontend == 'true'
+        run: <<fill:frontend_lint>>
+
+  # Sharded by count, not by measured time (pattern 12). vitest's `--shard` puts every file it finds in
+  # exactly one shard, so a new test file always runs and no durations file needs keeping up to date.
+  # Split by time (pattern 4) only when the gain beats the run-to-run noise. Each shard costs about
+  # 45 s of setup, so add shards only while this job is the slowest check.
+  #
+  # To rebalance, change only the matrix list: the count is `strategy.job-total`, in the names and in
+  # `--shard`, and the ruleset requires `unit-tests` below, never a shard. Each shard's job summary
+  # lists its slowest files, and the `vitest-file-times-N-attempt-M` artifact has every file's phases
+  # (.github/scripts/vitest-file-times.mjs): that is the measuring mode.
+  unit:
+    name: Unit tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: <<app.frontend_dir>>
+    strategy:
+      # Every shard reports: cancelling siblings on the first red hides the rest of the failures.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check what this PR changes
+        id: areas
+        uses: ./.github/actions/changed-areas
+      - name: Setup frontend
+        if: steps.areas.outputs.frontend == 'true'
+        uses: ./.github/actions/setup-frontend
+      # Vite, which loads vitest's reporters, serves only files under the project (`server.fs.allow`),
+      # so the reporter is copied into node_modules/.cache/ first: inside the project, and ignored by
+      # git. Its JSON goes to the runner's temp folder.
+      - name: Test
+        if: steps.areas.outputs.frontend == 'true'
+        env:
+          VITEST_FILE_TIMES_OUTPUT: ${{ runner.temp }}/vitest-file-times.json
+          SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
+        run: |
+          mkdir -p node_modules/.cache
+          cp "$GITHUB_WORKSPACE/.github/scripts/vitest-file-times.mjs" node_modules/.cache/
+          <<pm.exec>> vitest run --shard="$SHARD" \
+            --reporter=default --reporter=./node_modules/.cache/vitest-file-times.mjs
+      # The attempt is in the name, so "Re-run failed jobs" does not collide with the first attempt's.
+      - name: Upload per-file times
+        if: always() && steps.areas.outputs.frontend == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: vitest-file-times-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/vitest-file-times.json
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # One stable name for the ruleset to require, so changing the shard count never renames a required
+  # check. `always()` makes it report when a shard failed or was cancelled: without it a failed shard
+  # skips this job, and a skipped check counts as passed (pattern 11).
+  unit-tests:
+    if: always()
+    name: unit-tests
+    needs: [unit]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every unit-test shard to pass
+        env:
+          RESULT: ${{ needs.unit.result }}
+        run: |
+          echo "unit-test shards: $RESULT"
+          [ "$RESULT" = success ]
