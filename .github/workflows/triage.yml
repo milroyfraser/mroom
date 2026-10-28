@@ -6,7 +6,7 @@ name: Alert triage
 # branch's mroom.toml, and mroom at the commit of this file.
 #
 #   triage      files one tracker issue per new alert key, through the persona's guard (mroom persona).
-#               A scheduled run writes; a dispatch is a dry run unless the caller says otherwise.
+#               A dry run unless the caller passes live: true (the README's caller does on a schedule).
 #   alarm       a live run whose triage job failed: pings persona.channel, at most once a UTC day.
 #   switch-off  the tracker did not keep the hidden markers: turns the app's workflow off and asks a person
 #               once. Its own job, so the token that can turn workflows off is never next to triage.
@@ -14,9 +14,9 @@ on:
   workflow_call:
     inputs:
       live:
-        description: true to write; false is a dry run, which prints what it would file and ping
+        description: true to write; false (the default) is a dry run, which prints what it would file and ping
         type: boolean
-        default: true
+        default: false
       window-minutes:
         description: How far back to look, in minutes (a run every 15 minutes looks back 40)
         type: number

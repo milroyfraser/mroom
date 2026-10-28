@@ -113,6 +113,15 @@ t_a_marker_the_guard_did_not_write_stops_every_write() {
   expect_rc 5
 }
 
+t_a_marker_the_search_cannot_find_stops_every_write() {
+  pworld
+  world_set '.unsearchable_markers = true'
+  body "x"
+  create --key sentry:1001 --title t
+  expect_rc 5; expect_err_has "the tracker's search does not find its hidden marker for sentry:1001"
+  expect_true "markers-lost does not name the issue" [ "$(cat "$T/state/markers-lost")" = ENG-1 ]
+}
+
 t_text_is_checked_marked_only_by_the_guard_and_defanged() {
   pworld
   body "the key is $LINEAR_TOKEN"
@@ -200,6 +209,7 @@ test_case comment-own-only t_comment_only_on_the_personas_own_issues
 test_case markers-lost t_markers_lost_stops_every_write
 test_case text-checked t_text_is_checked_marked_only_by_the_guard_and_defanged
 test_case forged-marker-stops t_a_marker_the_guard_did_not_write_stops_every_write
+test_case unsearchable-marker-stops t_a_marker_the_search_cannot_find_stops_every_write
 test_case read-back-fails t_a_failed_read_back_is_not_a_lost_marker
 test_case run-capped t_a_run_is_capped
 test_case dry-run t_a_dry_run_writes_nothing

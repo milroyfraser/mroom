@@ -154,6 +154,30 @@ t_one_error_one_issue_in_a_run() {
   expect_true "the second run filed it again" [ "$(count_ops linear issueCreate)" = 1 ]
 }
 
+t_lost_markers_end_the_step_green_even_after_a_refusal() {
+  pworld
+  add_alert new 1001 2026-10-28T11:51:00Z "Error near $SENTRY_TOKEN"
+  add_alert new 1005 2026-10-28T11:50:00Z
+  world_set '.strip_markers = true'
+  triage
+  expect_rc 0
+  expect_true "markers_lost: $(cat "$T/output")" [ "$(output_of markers_lost)" = ENG-1 ]
+}
+
+t_odd_event_text_is_cleaned_and_cut_never_refused() {
+  pworld
+  add_alert new 1001 2026-10-28T11:50:00Z
+  world_set '.sentry.new[0].title = "Bad\u0000title\twith\u0007controls"'
+  world_set '.sentry.events["1001"] = {eventID: "e", dateCreated: "2026-10-28T11:58:00Z", message: "m", tags: [],
+    entries: [{type: "exception", data: {values: [range(0; 60) | {type: "E\(.)", value: ("v\u0000" + ("x" * 2000)),
+      stacktrace: {frames: [range(0; 8) | {filename: "f.ts", function: "g", lineNo: ., inApp: true}]}}]}}]}'
+  triage
+  expect_rc 0
+  expect_true "the issue was not filed" [ "$(count_ops linear issueCreate)" = 1 ]
+  expect_true "a control character reached the issue" json_is "$(cat "$T/world.json")" '.issues[0] | (.description + .title) | test("[\u0000-\u0008]") | not'
+  expect_true "more than the last 3 exceptions" json_is "$(cat "$T/world.json")" '.issues[0].description | (contains("E56: ") | not) and contains("E59: ")'
+}
+
 t_a_refused_alert_fails_the_run() {
   pworld
   add_alert new 1001 2026-10-28T11:50:00Z "Error near $SENTRY_TOKEN"
@@ -345,6 +369,8 @@ test_case filed-never-crowd-out t_filed_alerts_never_crowd_out_a_new_one
 test_case ten-a-run t_at_most_ten_filed_and_the_rest_wait
 test_case one-error-one-issue t_one_error_one_issue_in_a_run
 test_case refused-fails t_a_refused_alert_fails_the_run
+test_case lost-after-refusal t_lost_markers_end_the_step_green_even_after_a_refusal
+test_case odd-event-text t_odd_event_text_is_cleaned_and_cut_never_refused
 test_case no-tracker t_without_a_tracker_nothing_is_filed
 test_case dry-run t_a_dry_run_files_nothing
 test_case tracker-down t_a_tracker_that_cannot_be_read_fails_the_run

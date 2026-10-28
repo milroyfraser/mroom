@@ -93,6 +93,8 @@ if [ "$backend" = none ]; then
   exit 0
 fi
 trap finish EXIT
+# The action's own time limit sends TERM: exit, so the EXIT trap still writes the summary and outputs.
+trap 'exit 143' TERM
 
 # The window's alerts, with their keys, the most urgent first.
 "$MROOM" errors new "$window" --environment "$environment" --limit "$SEARCH_LIMIT" >"$WORK/window.json" 2>"$WORK/errors.err" \
@@ -111,7 +113,8 @@ output "new=$total"
 
 # code <text>: the text as an inline code span: no backtick, no newline.
 # shellcheck disable=SC2016  # jq's, not the shell's
-CODE='def code: tostring | gsub("[`\r\n]"; "'"'"'") | .[0:300] | "`\(.)`";'
+CODE='def plain: tostring | gsub("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]"; "");
+  def code: plain | gsub("[`\r\n\t]"; "'"'"'") | .[0:300] | "`\(.)`";'
 
 tracker="$("$MROOM" tracker backend)" || exit 1
 if [ "$tracker" = none ]; then
@@ -139,8 +142,8 @@ body() {
         "Latest event, \($e.at // "?"), release \($e.release // "?" | code):",
         "",
         "```text",
-        ([$e.exception[]? | "\(.type // "Error"): \(.value // "")", (.frames | reverse[] | "  \(.filename // "?") in \(.function // "?"), line \(.line // "?")")]
-          | if length == 0 then [$e.message // ""] else . end | .[] | gsub("`"; "'"'"'") | .[0:300]),
+        ([($e.exception // [])[-3:][] | "\(.type // "Error"): \(.value // "")", (.frames | reverse[] | "  \(.filename // "?") in \(.function // "?"), line \(.line // "?")")]
+          | if length == 0 then [$e.message // ""] else . end | .[] | plain | gsub("`"; "'"'"'") | split("\n")[] | .[0:300]),
         "```" end),
       (if ($earlier | length) > 0 then "", "Earlier alerts of this error: \([$earlier[] | "[\(.identifier)](\(.url))"] | join(", "))." else empty end),
       "",
@@ -195,9 +198,13 @@ while IFS= read -r -u 3 group; do
   "$MROOM" errors get "$id" >"$WORK/event.json" 2>/dev/null </dev/null \
     || { echo '{}' >"$WORK/event.json"; note "the latest event of $base could not be read"; }
   # The title: one line, redacted, at most 150 characters (the guard takes 160).
-  title="$(jq -nr --argjson a "$lead" '"\($a.short_id // $a.id)\(if $a.kind == "new" then "" else " " + $a.kind end): \($a.title // "untitled")"
-    | gsub("[\r\n\t]"; " ") | .[0:200]' | persona_text redact | jq -Rr '.[0:150]')"
-  if ! body "$lead" "$WORK/event.json" "$earlier" "$also" | persona_text redact >"$WORK/body.md"; then
+  if ! title="$(jq -nr --argjson a "$lead" '"\($a.short_id // $a.id)\(if $a.kind == "new" then "" else " " + $a.kind end): \($a.title // "untitled")"
+    | gsub("[\u0000-\u001f\u007f]"; " ") | .[0:200]' | persona_text redact | jq -Rr '.[0:150]')"; then
+    note "the title for $base could not be written out, so triage stopped"; failed=1; break
+  fi
+  # The body, redacted, and cut to fit the guard's 30000 bytes with room for the footer and markers.
+  if ! body "$lead" "$WORK/event.json" "$earlier" "$also" | persona_text redact \
+    | python3 -Ic 'import sys; sys.stdout.write(sys.stdin.buffer.read()[:28000].decode("utf-8", "ignore"))' >"$WORK/body.md"; then
     note "the issue for $base could not be written out, so triage stopped"; failed=1; break
   fi
   rc=0
@@ -228,6 +235,8 @@ while IFS= read -r -u 3 group; do
   fi
 done 3<"$WORK/groups.jsonl"
 
+# Lost markers: the step ends green, so its outputs surely reach the switch-off job, which ends red.
+[ -z "$lost" ] || exit 0
 # A refused alert is refused again every run: fail, so the alarm says so.
 [ -z "$refused" ] || failed=1
 [ -z "$failed" ] || exit 1

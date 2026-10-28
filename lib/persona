@@ -16,8 +16,8 @@
 #   - it files an issue only for an alert key, and, when MROOM_PERSONA_ALERTS names a file (a JSON list of
 #     keys), only for one of this run's alerts, so nothing it is told can silence an alert to come;
 #   - the markers are its own: every "<!--" in a body is escaped, and create writes one marker a key. After
-#     a create it reads the issue back. When the tracker did not keep a marker, the next run could not find
-#     the issue and would file it again; when it holds one the guard did not write, alert text forged it.
+#     a create it reads the issue back, and searches for it as the next run will. When the tracker did not
+#     keep a marker, or its search does not find it, the next run would file the issue again; when it holds one the guard did not write, alert text forged it.
 #     Either way it writes nothing more in this run (exit 5) and leaves the issue's id in markers-lost,
 #     for the workflow's switch-off job (actions/triage, switch-off.sh);
 #   - a body or a title that holds a token this command can see, or anything shaped like one, is refused;
@@ -231,6 +231,19 @@ cmd_create() {
     say "$id was filed, but the tracker stored a hidden marker the persona did not write, so alert text could forge one. Nothing more is written until a person checks."
     exit 5
   fi
+  # Stored is not enough: the next run finds the issue by the tracker's search, which may read another
+  # form of the description. Search for each key as the next run will.
+  local found
+  for k in "${keys[@]}"; do
+    found="$(tracker find "$(persona_base_key "$k")")" || { say "$id was filed, but it could not be searched for"; exit 1; }
+    if ! jq -e --arg id "$id" --arg k "$k" 'any(.[]; .identifier == $id and ((.keys // []) | index($k) != null))' \
+      <<<"$found" >/dev/null; then
+      printf '%s\n' "$id" >"$STATE/markers-lost"
+      log markers-lost "$id: the tracker's search does not find the marker for $k"
+      say "$id was filed, but the tracker's search does not find its hidden marker for $k, so the next run would file it again. Nothing more is written until a person checks."
+      exit 5
+    fi
+  done
   jq -c --args '. + {keys: $ARGS.positional}' "${keys[@]}" <<<"$answer"
 }
 
