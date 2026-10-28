@@ -101,6 +101,20 @@ t_a_tagged_commit_is_left_alone() {
   tag; expect_rc 0; expect_out "v3.0.1 already tags this commit: nothing to do"
 }
 
+t_a_later_tag_covers_a_re_run() {
+  world
+  tag_here v1.0.0
+  merge "feat: add (#1)"
+  local older
+  older="$(git -C "$T/app" rev-parse HEAD)"
+  merge "fix: keep it (#2)"
+  tag; expect_out_has "tagged v1.1.0"
+  # The older push's run, run again: v1.1.0 is on a later commit and counts its merge.
+  git -C "$T/app" switch -q --detach "$older"
+  tag; expect_rc 0; expect_out "v1.1.0, on a later commit, already counts this one: nothing to do"
+  expect_true "the outputs are wrong" [ "$(output)" = $'previous=v1.0.0\ntag=v1.1.0\nbump=none' ]
+}
+
 t_the_highest_merged_version_counts() {
   world
   tag_here v1.9.0
@@ -185,6 +199,7 @@ test_case other-types-nothing t_other_types_release_nothing_by_default
 test_case merge-commits t_merge_commits_are_read_by_their_title
 test_case first-tag t_the_first_tag_counts_from_zero
 test_case tagged-commit t_a_tagged_commit_is_left_alone
+test_case later-tag-covers t_a_later_tag_covers_a_re_run
 test_case highest-merged t_the_highest_merged_version_counts
 test_case prefix t_a_prefix
 test_case bad-settings t_bad_settings_are_refused

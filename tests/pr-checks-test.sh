@@ -19,22 +19,28 @@ world() {
   mkdir -p "$FAKE" "$T/bin"
   cat >"$T/bin/gh" <<'EOF'
 #!/usr/bin/env bash
-# fake gh: logs "api -X <method> <path> [-f <field>]" calls; fails every call with $FAKE/down.
-printf '%s\n' "$*" >>"$FAKE/gh.log"
+# fake gh: "api --paginate <path>/labels --jq <filter>" answers from $FAKE/labels.json, the labels the pull request
+# has now; every other call is a write, logged as "api -X <method> <path> [-f <field>]". With $FAKE/down every
+# call fails; with $FAKE/404 a DELETE does, as for a label already gone; with $FAKE/writes-fail every write does.
 if [ -f "$FAKE/down" ]; then echo "error connecting to api.github.com" >&2; exit 1; fi
 [ "$1" = api ] || { echo "fake gh: unexpected: $*" >&2; exit 1; }
+if [ "$2" = --paginate ]; then jq -r "$5" "$FAKE/labels.json"; exit; fi
+printf '%s\n' "$*" >>"$FAKE/gh.log"
+if [ -f "$FAKE/writes-fail" ]; then echo "error connecting to api.github.com" >&2; exit 1; fi
+if [ "$3" = DELETE ] && [ -f "$FAKE/404" ]; then echo "gh: Label does not exist (HTTP 404)" >&2; exit 1; fi
 echo '[]'
 EOF
   chmod +x "$T/bin/gh"
   export PATH="$T/bin:$PATH"
 }
 
-# event <title> [label...]: the pull_request event the scripts read.
+# event <title> [label...]: the pull_request event the scripts read, and the labels the pull request has now.
 event() {
   local title="$1"
   shift
   jq -n --arg t "$title" '{pull_request: {number: 42, title: $t, labels: ($ARGS.positional | map({name: .}))}}' \
     --args "$@" >"$T/event.json"
+  jq -n '$ARGS.positional | map({name: .})' --args "$@" >"$FAKE/labels.json"
 }
 
 check() { run "$CHECK" "$T/event.json"; }
@@ -102,6 +108,8 @@ t_a_wrong_setup_is_its_own_error() {
   event "feat: add"
   MROOM_TITLE_TYPES='feat Fix' check; expect_rc 2; expect_out_has "setup is wrong: each of types must be lowercase"
   MROOM_TITLE_TYPES=' ' check; expect_rc 2; expect_out_has "types is empty"
+  MROOM_TITLE_TYPES='' check; expect_rc 2; expect_out_has "types is empty"
+  MROOM_TITLE_SUBJECT_PATTERN='' check; expect_rc 2; expect_out_has "subject-pattern is empty"
   MROOM_TITLE_REQUIRE_SCOPE=yes check; expect_rc 2; expect_out_has "require-scope must be true or false"
   MROOM_TITLE_SUBJECT_PATTERN='([a-z' check; expect_rc 2; expect_out_has "subject-pattern is not a valid"
 }
@@ -149,6 +157,22 @@ t_a_right_label_is_left_alone() {
   expect_no_file "$FAKE/gh.log"
 }
 
+t_labels_are_read_as_they_are_now() {
+  world
+  # The event saw type:feature, but a person took it off and put Type:Chore on since.
+  event "fix: keep the filter" type:feature
+  jq -n '[{name: "Type:Chore"}, {name: "regression"}]' >"$FAKE/labels.json"
+  label; expect_rc 0
+  expect_true "did not go by the labels the pull request has now" [ "$(log)" = "$(printf '%s\n' \
+    "api -X DELETE repos/example/shop/issues/42/labels/Type%3AChore" \
+    "api -X POST repos/example/shop/issues/42/labels -f labels[]=type:bug")" ]
+  # A label taken off between the read and the delete is gone already.
+  rm -f "$FAKE/gh.log"
+  event "feat: add" type:bug
+  touch "$FAKE/404"
+  label; expect_rc 0; expect_out_has "labelled type:feature"
+}
+
 t_no_type_no_label() {
   world
   event "Add a CSV export" type:bug
@@ -165,6 +189,7 @@ t_custom_label_names() {
     "api -X POST repos/example/shop/issues/42/labels -f labels[]=kind: feature")" ]
   MROOM_LABEL_BUG="type:Feature" label; expect_rc 1; expect_out_has "The three label names must differ."
   MROOM_LABEL_BUG="" label; expect_rc 1; expect_out_has "Each label name must be 1 to 50 characters"
+  MROOM_LABEL_BUG="$(printf 'x%.0s' {1..51})" label; expect_rc 1; expect_out_has "Each label name must be 1 to 50 characters"
   MROOM_LABEL_BUG=$'a\nb' label; expect_rc 1; expect_out_has "Each label name must be 1 to 50 characters"
 }
 
@@ -172,6 +197,9 @@ t_label_failures_are_errors() {
   world
   event "feat: add" type:bug
   touch "$FAKE/down"
+  label; expect_rc 1; expect_out_has "Could not read the pull request's labels; run the check again."
+  rm "$FAKE/down"
+  touch "$FAKE/writes-fail"
   label; expect_rc 1; expect_out_has "Could not take the label type:bug off; run the check again."
   event "feat: add"
   label; expect_rc 1; expect_out_has "Could not add the label type:feature; run the check again."
@@ -239,6 +267,9 @@ t_only_the_label_job_writes() {
   expect_true "type-label runs for a fork's pull request" grep -qF "github.event.pull_request.head.repo.full_name == github.repository" <<<"$labels"
   expect_true "type-label runs for Dependabot" grep -qF "github.actor != 'dependabot[bot]'" <<<"$labels"
   expect_true "type-label runs with labels off" grep -qF "inputs.labels &&" <<<"$labels"
+  expect_true "two label jobs of one pull request run side by side" \
+    has "$labels" '      group: mroom-type-label-${{ github.event.pull_request.number }}'
+  expect_true "a newer label job cancels a running one" has "$labels" "      cancel-in-progress: false"
   expect_true "the workflow's own permissions are more than contents: read" \
     [ "$(sed -n '/^permissions:$/,/^$/p' "$W/pr-checks.yml")" = $'permissions:\n  contents: read' ]
 }
@@ -294,6 +325,7 @@ test_case unreadable-event t_an_unreadable_event_fails
 test_case label-by-type t_label_by_type
 test_case title-edit-moves-label t_a_title_edit_moves_the_label
 test_case right-label-left-alone t_a_right_label_is_left_alone
+test_case labels-now t_labels_are_read_as_they_are_now
 test_case no-type-no-label t_no_type_no_label
 test_case custom-label-names t_custom_label_names
 test_case label-failures t_label_failures_are_errors

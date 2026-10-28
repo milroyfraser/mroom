@@ -64,11 +64,15 @@ fi
 
 read -r major minor patch previous <<<"$(versions --merged "$head" | sed -n 1p)" || true
 range="$head"
-if [ -n "${previous:-}" ]; then range="$previous..$head"; else major=0 minor=0 patch=0 previous=""; fi
+since="${previous:-the first commit}"
+if [ -n "${previous:-}" ]; then range="refs/tags/$previous..$head"; else major=0 minor=0 patch=0 previous=""; fi
 
 # rank: none 0, patch 1, minor 2, major 3.
 rank() { case "$1" in none) echo 0 ;; patch) echo 1 ;; minor) echo 2 ;; major) echo 3 ;; esac; }
 best=0 count=0
+messages="$(mktemp)"
+trap 'rm -f "$messages"' EXIT
+git log -z --first-parent --format=%B "$range" >"$messages" || fail "Could not read the merges since $since."
 while IFS= read -r -d '' message; do
   count=$((count + 1))
   bump="$OTHER_BUMP"
@@ -80,9 +84,8 @@ while IFS= read -r -d '' message; do
   fi
   r="$(rank "$bump")"
   [ "$r" -le "$best" ] || best="$r"
-done < <(git log -z --first-parent --format=%B "$range")
+done <"$messages"
 
-since="${previous:-the first commit}"
 output previous "$previous"
 case "$best" in
   0)
@@ -97,6 +100,13 @@ esac
 tag="$PREFIX$major.$minor.$patch"
 [[ "$tag" =~ $VERSION_RE ]] || fail "The next version, $tag, is out of range."
 if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+  # A re-run of an older push, after a newer run tagged a later commit that counts this one's merges.
+  if git merge-base --is-ancestor "$head" "refs/tags/$tag^{commit}"; then
+    echo "$tag, on a later commit, already counts this one: nothing to do"
+    output tag "$tag"
+    output bump none
+    exit 0
+  fi
   fail "$tag already exists on another commit; tag this one by hand, or remove the stray tag."
 fi
 

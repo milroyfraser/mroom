@@ -16,9 +16,9 @@ HERE="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=actions/pr-title/title.sh
 source "$HERE/title.sh"
 EVENT="${1:?usage: check.sh <event.json>}"
-TYPES="${MROOM_TITLE_TYPES:-feat fix chore docs refactor test perf style ci build revert}"
+TYPES="${MROOM_TITLE_TYPES-feat fix chore docs refactor test perf style ci build revert}"
 REQUIRE_SCOPE="${MROOM_TITLE_REQUIRE_SCOPE:-false}"
-SUBJECT_PATTERN="${MROOM_TITLE_SUBJECT_PATTERN:-^[A-Za-z].+$}"
+SUBJECT_PATTERN="${MROOM_TITLE_SUBJECT_PATTERN-^[A-Za-z].+$}"
 
 fail() { echo "::error title=PR title::$1"; exit 1; }
 setup_error() { echo "::error title=PR title::The check's own setup is wrong: $1"; exit 2; }
@@ -28,6 +28,7 @@ read -r -d '' -a types <<<"$TYPES" || true
 for type in "${types[@]}"; do
   [[ "$type" =~ ^[a-z]+$ ]] || setup_error "each of types must be lowercase letters."
 done
+[ -n "$SUBJECT_PATTERN" ] || setup_error "subject-pattern is empty."
 case "$REQUIRE_SCOPE" in true | false) ;; *) setup_error "require-scope must be true or false." ;; esac
 # [[ =~ ]] gives 2 for a pattern it cannot compile.
 rc=0

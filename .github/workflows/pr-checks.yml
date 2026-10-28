@@ -74,6 +74,10 @@ jobs:
       inputs.labels && github.event.pull_request.head.repo.full_name == github.repository &&
       github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
+    # One label job per pull request at a time, in order, so the newest title is the last one labelled.
+    concurrency:
+      group: mroom-type-label-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     timeout-minutes: 2
     permissions:
       contents: read

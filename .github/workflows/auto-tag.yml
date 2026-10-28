@@ -25,7 +25,7 @@ on:
         default: false
     outputs:
       tag:
-        description: The tag it pushed, or would push; empty for none
+        description: The tag it pushed, or would push; the existing one when the commit has a version tag; empty for none
         value: ${{ jobs.tag.outputs.tag }}
 
 permissions:

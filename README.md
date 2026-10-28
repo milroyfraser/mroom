@@ -23,8 +23,8 @@ The full design, including how each requirement is measured, is in [docs/design.
 **Pre-alpha, phase 1 of 6 under way.** What exists today: the skeleton (the `mroom` front door,
 `mroom config`, the one reader of `mroom.toml` and `box.env`, `install.sh`, tests and CI) and the first
 part of phase 1: the [box watchdog](#box-watchdog) with its job records, and the
-[regression label](#regression-label) check with its measures. From phase 4, the
-[PR checks](#pr-checks): the title check, type labels with release notes, and an optional auto-tag.
+[regression label](#regression-label) check with its measures. Ahead of its phase, part of phase 4:
+the [PR checks](#pr-checks), with a title check, type labels, release notes and an optional auto-tag.
 Every other command prints `not yet: phase N`. The phases and what each delivers are in
 [section 11 of the design](docs/design.md#11-phases). Expect breaking changes in every `0.x` release.
 
@@ -1016,7 +1016,15 @@ one. Both jobs read the pull request from the event file, run mroom at the commi
 never the pull request's code, and hold no secret. They print no text from the title, so a title cannot
 send a workflow command. `type-label` skips a fork's pull request and Dependabot's, whose token cannot
 label here; Dependabot can label its own (`labels: ["type:chore"]` in `dependabot.yml`). The label names
-are inputs too (`feature-label`, `bug-label`, `chore-label`).
+are inputs too (`feature-label`, `bug-label`, `chore-label`). Keep `pull-requests: write` even with
+`labels: false`: GitHub checks a called job's permissions before its `if`, so without it the whole
+workflow fails.
+
+Two titles that adopters meet on day one:
+
+- GitHub's Revert button titles a pull request `Revert "feat: x"`, which fails. Edit it to `revert: feat: x`.
+- Dependabot may title its pull requests `Bump x from 1 to 2`, unless `dependabot.yml` gives each update
+  `commit-message: { prefix: "chore", include: "scope" }`, which makes `chore(deps): bump x ...`.
 
 **Release notes.** Copy [templates/release.yml](templates/release.yml) to `.github/release.yml`. GitHub
 then groups a release's generated notes by the labels: regression fixes first (the
@@ -1035,7 +1043,7 @@ version, from the titles merged since the last version tag:
 
 | Merged titles | Bump | From v1.4.2 |
 |---|---|---|
-| any with `!` after the type | major (`breaking-bump: minor` for a minor) | v2.0.0 |
+| any with `!` after the type (a `BREAKING CHANGE:` footer is not read) | major (`breaking-bump: minor` for a minor) | v2.0.0 |
 | a `feat` | minor | v1.5.0 |
 | a `fix` | patch | v1.4.3 |
 | only other types | none, no tag (`other-bump: patch` for a patch) | |
@@ -1062,9 +1070,12 @@ jobs:
     #   dry-run: true          # say which tag it would push, and push none
 ```
 
+The job asks for `contents: write` even in a dry run, so the caller grants it either way.
+
 It pushes an annotated tag with the job token, which starts no workflow, so nothing deploys or releases
 from the tag by itself. A person still publishes the release. A tag ruleset that keeps the job token from
-creating tags makes the push fail; let `github-actions` create the auto-tag's pattern, or use `dry-run`.
+creating tags makes the push fail: leave the auto-tag's pattern (`v*`) out of that ruleset, or use
+`dry-run`.
 
 ## Development
 
