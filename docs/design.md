@@ -399,7 +399,7 @@ The workflow skills (`plugin/skills/`: refine, deliver, implement, release, corr
 trackers only through these two commands, never an API or an MCP server of their own. Each writes to the
 tracker only the state of the issue it works and comments on it, and asks a person before it files an
 issue. A design waiting for approval is a comment (`Design for review: <link>`, then
-`Design approved: <link>`), not a label. `tests/skills-test.sh` checks each skill against this contract.
+`Design approved by <name>: <link>`), not a label. `tests/skills-test.sh` checks each skill against this contract.
 
 `errors_issue_get` gives an error issue with its latest event, its counts and its first release.
 `errors_issue_resolve` needs a token with write access, which only the persona's own profile or a person holds

@@ -219,6 +219,9 @@ state_review = "In_Review-2"
 production_url = "https://app.example.dev:8443"
 tag_prefix = ""'
   run "$MROOM" config validate; expect_rc 0
+  sed -i 's/^state_started = .*/state_started = ""/' "$T/mroom.toml"
+  run "$MROOM" config validate; expect_rc 1; expect_err_has 'issues.state_started must be a state'
+  sed -i 's/^state_started = .*/state_started = "In Progress"/' "$T/mroom.toml"
   run "$MROOM" config get issues.state_review; expect_out "In_Review-2"
   run "$MROOM" config get release.tag_prefix; expect_rc 0; expect_out ""
   run "$MROOM" config get release.production_url; expect_out "https://app.example.dev:8443"

@@ -45,10 +45,16 @@ release. A person checks the draft and publishes it on GitHub.
 4. **The tag:** `release.tag_prefix` (empty by default) and then the version, such as `v1.4.0` or
    `release-v1.4.0`. It goes on the version's commit.
 5. **CI:** the checks on the version's commit must be green:
-   `gh api repos/{owner}/{repo}/commits/<sha>/check-runs --jq '.check_runs[] | [.name, .conclusion] | @tsv'`.
-   If one failed or is still running, stop and say which. A check in `pr.required_checks` that runs
-   only on pull requests (a title check, say) is not on this commit; the default branch's ruleset
-   already required it on each merged PR.
+
+   ```
+   gh api --paginate 'repos/{owner}/{repo}/commits/<sha>/check-runs?per_page=100' \
+     --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'
+   ```
+
+   `success`, `skipped` and `neutral` pass. If one failed, timed out, was cancelled or is still
+   running, stop and say which. A check in `pr.required_checks` that runs only on pull requests
+   (a title check, say) is not on this commit; the default branch's ruleset already required it
+   on each merged PR.
 6. **What ships:** `git log --format='%h %s' <last release tag>..<sha>`, one line per merged PR.
 
 ## 2. Flag what needs the person's eye

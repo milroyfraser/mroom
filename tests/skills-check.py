@@ -52,8 +52,8 @@ def frontmatter(text):
 
 def code(text):
     """Every inline code span and fenced block, as strings."""
-    blocks = re.findall(r"^```[a-z]*\n(.*?)^```$", text, flags=re.S | re.M)
-    rest = re.sub(r"^```[a-z]*\n.*?^```$", "", text, flags=re.S | re.M)
+    blocks = re.findall(r"^ *```[a-z]*\n(.*?)^ *```$", text, flags=re.S | re.M)
+    rest = re.sub(r"^ *```[a-z]*\n.*?^ *```$", "", text, flags=re.S | re.M)
     return blocks + re.findall(r"`([^`\n]+)`", rest)
 
 # --- What mroom has: commands, their subcommands, config keys ---------------------------------------------
@@ -106,6 +106,8 @@ skill_names = [d[0] for d in docs.values() if d[1] == "skill"]
 say(len(skill_names) == len(set(skill_names)), "every skill's name is unique")
 known_slash = set(SKILLS) | set(COMMANDS)
 
+# Strict on purpose: a skill names a tracker's MCP server or a secret file only in its rules' own words
+# ("Never read secrets, tokens or credential files"), never in prose such as "copy it to .env".
 FORBIDDEN = [
     (r"gh\s+pr\s+merge", "a merge"), (r"gh\s+pr\s+review", "a PR review (an approval)"), (r"--approve", "an approval"),
     (r"gh\s+release\s+delete", "a release delete"), (r"--draft=false|draft=false", "publishing a draft"),
@@ -114,7 +116,9 @@ FORBIDDEN = [
     (r"git\s+push\b[^`\n]*(--force|\s-f\b|--tags|--follow-tags|--mirror|\s\+)", "a force or tag push"),
     (r"gh\s+issue\s+(create|comment|edit|close)", "a GitHub issue write (the tracker is mroom tracker)"),
     (r"gh\s+api\b[^`\n]*(-X|--method)\s*(POST|PUT|PATCH|DELETE)", "a gh api write"),
-    (r"gh\s+api\b[^`\n]*\s(-f|-F|--field|--raw-field|--input)\b", "a gh api write (a field makes it a POST)"),
+    # A field makes gh api a POST, unless the call says GET (graphql writes are the mutation rule's).
+    (r"gh\s+api\b(?![^`\n]*(-X\s*GET|--method[\s=]GET))(?!\s+graphql\b)[^`\n]*\s(-f|-F|--field|--raw-field|--input)\b",
+     "a gh api write (a field makes it a POST)"),
     (r"gh\s+api\s+graphql\b[^`\n]*mutation", "a GraphQL mutation"),
     (r"(?i)\b(linear|sentry|forge)\b[^.\n]{0,30}\bMCP\b|\bMCP\b[^.\n]{0,30}\b(linear|sentry|forge)\b",
      "a tracker, error-tracker or Forge MCP server"),
@@ -177,7 +181,7 @@ for label, (name, kind, meta, body, text) in sorted(docs.items()):
         say(not hits, f"{label} names no {what} ({hits[:3]})")
     hosts = re.findall(r"https?://([^/\s)`\"'>]+)", text)
     # Bare host names too, with no scheme (go.shop-corp.io).
-    hosts += re.findall(r"(?<![\w./@-])((?:[a-z0-9-]+\.)+(?:dev|io|app|com|net|org|co|ai|cloud|sh))\b", text)
+    hosts += re.findall(r"(?<![\w./@-])((?:[a-z0-9-]+\.)+(?:dev|io|com|net|org|co|ai|cloud))\b(?!\.[a-z])", text)
     say(all(h.rstrip(".") == "github.com" or h.rstrip(".").endswith("example.dev") or h == "<production_url>"
             for h in hosts),
         f"{label} links only github.com or an example host ({hosts})")

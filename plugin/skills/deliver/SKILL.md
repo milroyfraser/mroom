@@ -94,7 +94,7 @@ The design source is Claude Design canvases (the Artifact tool, intent `design`)
    is `Design for review: <canvas link>`, then the decisions worth the person's eye and the
    assumptions made. When `mroom tracker` exits 3, put it in the PR body instead.
 4. **Ask once** with `AskUserQuestion`: approve / approve with changes / later.
-   - **approve:** comment `Design approved by <the person's name>: <canvas link>`. It records
+   - **approve:** comment `Design approved by <the person's name, or "the person">: <canvas link>`. It records
      their answer to this question; never write it without one.
    - **approve with changes:** redraw, post again, ask again.
    - **later:** leave it. The issue is parked, and the next run resumes it.
