@@ -192,6 +192,56 @@ EOF"
   allow 'gh api repos/o/r/git/refs/heads/main'
   allow 'gh repo sync'
 
+  # Found by review: --repo shifts the slots, other ways to push or run a command, patterns.
+  refuse 'git push --repo=origin +x'
+  refuse 'git push --repo origin x:main'
+  refuse "git push --receive-pack='sh -c x' /tmp/r x"
+  refuse 'git push --exec=x origin x'
+  refuse 'git fetch --upload-pack=x origin'
+  refuse 'git -c remote.origin.receivepack="gh pr merge 1" push origin x'
+  refuse 'git send-pack --force origin x'
+  refuse 'git push --prune origin'
+  refuse "git push origin 'refs/heads/*:refs/heads/*'"
+  refuse 'git -c push.default=matching push'
+  refuse 'git config push.default matching'
+  refuse 'setsid git push -f origin x'
+  refuse 'flock /tmp/l git push -f origin x'
+  refuse "flock /tmp/l -c 'gh pr merge 1'"
+  refuse "script -q -c 'git push -f origin x' /dev/null"
+  refuse "su deploy -c 'gh pr merge 1'"
+  refuse 'parallel git push -f ::: origin'
+  refuse "busybox sh -c 'gh pr merge 1'"
+  refuse 'gh workflow run Deploy-production.yml'
+  refuse 'gh workflow run "Deploy production"'
+  refuse 'gh config get -h github.com oauth_token'
+  refuse 'look x .env'
+  refuse 'split .env /tmp/x'
+  refuse 'zcat .env'
+  refuse 'git archive HEAD .env'
+  refuse 'cat ~/.config/mroom/secret*'
+  refuse 'cat ~/.c*/gh/*'
+  refuse 'cat /home/*/.ssh/id_*'
+  refuse 'tar cf - ~/.config/mroom'
+  refuse 'cp -r ~/.config /tmp/x'
+  refuse 'rsync -a ~/ /tmp/home'
+  refuse 'grep -r TOKEN ~/.claude'
+  refuse 'rg TOKEN $HOME'
+  refuse 'xargs cat <<< .env'
+  refuse 'echo .env | xargs cat'
+  refuse 'printf .env | xargs -I{} cat {}'
+  allow 'git push --repo=origin feat/x'
+  allow 'git config push.default current'
+  allow 'git fetch origin'
+  allow "flock /tmp/l -c 'echo hi'"
+  allow 'flock /tmp/l git status'
+  allow 'echo a b | xargs -n1 echo'
+  allow 'find . -name "*.php" | xargs grep -l Controller'
+  allow 'rg TODO ~/code/shop'
+  allow 'cp build.tgz ~'
+  allow 'tar czf /tmp/x.tgz ~/code/shop'
+  allow 'gh config get git_protocol'
+  allow 'gh workflow run qa-plan.yml'
+
   # --- Chained, nested and wrapped forms -------------------------------------------------------
   refuse 'git status && gh pr merge 1'
   refuse 'true; gh pr merge 1'
@@ -525,22 +575,24 @@ EOF
   allow '# just a comment mentioning gh pr merge'
 }
 
-# Time: a 64 KB command is checked in well under a second, allowed or refused; so is the most simple
-# commands it checks; past 256 KB or 3000 commands, refused.
+# Time: a 64 KB command, allowed or refused, and the most simple commands it checks, are checked in a
+# few seconds even on a busy box (a second on an idle one); past 256 KB or 3000 commands, refused. The
+# limits catch a quadratic slowdown, which takes minutes: Claude Code lets a command run when its hook
+# times out (60 seconds by default).
 timing() {
   local line plain body="" flat="" many=""
   line="a long PR body line with words, (parens), 'quotes', \$(subst), \`ticks\`, {braces} and env vars in it"
   plain="a long PR body line with words, (parens), {braces}, \"quotes\", \$HOME and no single quotes in it"
   while [ "${#flat}" -lt 65536 ]; do body+="$line"$'\n'; flat+="$plain"$'\n'; done
-  fast 1 0 "gh pr create --draft --title x --body \"$body\""
-  fast 1 0 "gh pr create --draft --title x --body '$flat'"
-  fast 1 2 "gh pr create --draft --title x --body \"$body\"; gh pr merge 1"
-  fast 1 2 "gh pr edit 1 --body '$flat' && cat backend/.env"
+  fast 4 0 "gh pr create --draft --title x --body \"$body\""
+  fast 4 0 "gh pr create --draft --title x --body '$flat'"
+  fast 4 2 "gh pr create --draft --title x --body \"$body\"; gh pr merge 1"
+  fast 4 2 "gh pr edit 1 --body '$flat' && cat backend/.env"
   for _ in $(seq 1 2900); do many+="git status; "; done
-  fast 2 0 "$many"
-  fast 2 2 "$many$(printf 'true; %.0s' $(seq 1 101))"
+  fast 8 0 "$many"
+  fast 8 2 "$many$(printf 'true; %.0s' $(seq 1 101))"
   while [ "${#body}" -lt 270000 ]; do body+="$body"; done
-  fast 1 2 "echo \"$body\""
+  fast 4 2 "echo \"$body\""
 }
 
 awks=()

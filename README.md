@@ -284,8 +284,9 @@ mroom guard check 'true && git push --force origin feat/x'   # exit 2, and why
 mroom guard check 'git push -u origin feat/x'                # allowed
 ```
 
-**It is a speed bump, not a boundary.** A command built from variables (`$CMD`), a script file
-(`bash x.sh`), an alias already in a config file or `ssh host 'cmd'` gets past it. Without jq or
+**It is a speed bump, not a boundary.** A command built from variables (`$CMD`) or from another
+command's output (`cat $(echo x)`), a script file (`bash x.sh`), an alias already in a config file
+or `ssh host 'cmd'` gets past it. Without jq or
 awk it is off and says so; a command it cannot parse is refused. The real gate is GitHub: the
 default branch's ruleset, review by people, and the `production` environment (design D22).
 
