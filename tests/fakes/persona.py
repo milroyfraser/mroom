@@ -14,6 +14,7 @@ the calls change there, so a second run sees what the first one filed:
   strip_markers   true: the tracker drops HTML comments from the descriptions it stores, as a tracker might
   unescape_entities  true: it turns &lt; and the like back into characters, as a rich-text store might
   unsearchable_markers  true: it keeps the markers, but its search does not see HTML comments
+  search_lag      n: the next n searches do not see HTML comments yet, as a search that lags the write
   sentry          {projects, new, regressed, escalating: [<Sentry issue>], events: {<id>: <event>}}
   slack_error     an error Slack answers every post with (channel_not_found, say)
   down            ["linear" | "sentry" | "slack"]: that service answers 503
@@ -133,8 +134,13 @@ def linear(req, auth):
         f = v.get("f") or {}
         want = (f.get("description") or {}).get("contains", "")
         team = ((f.get("team") or {}).get("key") or {}).get("eq")
+        lag = state.get("search_lag", 0)
+        if lag:
+            state["search_lag"] = lag - 1
+            save(state)
+
         def searchable(d):
-            return re.sub(r"<!--.*?-->", "", d, flags=re.S) if state.get("unsearchable_markers") else d
+            return re.sub(r"<!--.*?-->", "", d, flags=re.S) if state.get("unsearchable_markers") or lag else d
         nodes = [issue_node(state, i, viewer) for i in state["issues"]
                  if want in searchable(i.get("description") or "") and (team is None or team == state["team"]["key"])]
         return answer(req, 200, {"data": {"issues": {"nodes": nodes, "pageInfo": {"hasNextPage": False}}}})

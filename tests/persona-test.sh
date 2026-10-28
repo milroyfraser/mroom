@@ -123,6 +123,16 @@ t_a_marker_the_search_cannot_find_stops_every_write() {
   expect_true "it did not search three times, waiting 2 and 5 seconds" [ "$(cat "$T/sleep.log")" = $'2\n5' ]
 }
 
+t_a_search_that_catches_up_is_no_lost_marker() {
+  pworld
+  world_set '.search_lag = 1'
+  body "x"
+  create --key sentry:1001 --title t
+  expect_rc 0
+  expect_no_file "$T/state/markers-lost"
+  expect_true "it did not wait once, for 2 seconds: $(cat "$T/sleep.log" 2>/dev/null)" [ "$(cat "$T/sleep.log")" = 2 ]
+}
+
 t_text_is_checked_marked_only_by_the_guard_and_defanged() {
   pworld
   body "the key is $LINEAR_TOKEN"
@@ -211,6 +221,7 @@ test_case markers-lost t_markers_lost_stops_every_write
 test_case text-checked t_text_is_checked_marked_only_by_the_guard_and_defanged
 test_case forged-marker-stops t_a_marker_the_guard_did_not_write_stops_every_write
 test_case unsearchable-marker-stops t_a_marker_the_search_cannot_find_stops_every_write
+test_case search-catches-up t_a_search_that_catches_up_is_no_lost_marker
 test_case read-back-fails t_a_failed_read_back_is_not_a_lost_marker
 test_case run-capped t_a_run_is_capped
 test_case dry-run t_a_dry_run_writes_nothing

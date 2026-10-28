@@ -18,8 +18,9 @@
 #   - the markers are its own: every "<!--" in a body is escaped, and create writes one marker a key. After
 #     a create it reads the issue back, and searches for it as the next run will. When the tracker did not
 #     keep a marker, or its search does not find it after three tries, the next run would file the issue
-#     again; when it holds one the guard did not write, alert text forged it. Either way it writes nothing more in this run (exit 5) and leaves the issue's id in markers-lost,
-#     for the workflow's switch-off job (actions/triage, switch-off.sh);
+#     again; when it holds one the guard did not write, alert text forged it. Either way it writes nothing
+#     more in this run (exit 5) and leaves the issue's id in markers-lost, for the workflow's switch-off
+#     job (actions/triage, switch-off.sh);
 #   - a body or a title that holds a token this command can see, or anything shaped like one, is refused;
 #     a link to a host other than the trackers', GitHub's or the app's is defanged; a body is at most
 #     30000 bytes and a title 160 characters;

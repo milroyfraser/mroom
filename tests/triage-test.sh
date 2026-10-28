@@ -192,6 +192,20 @@ t_a_long_event_is_cut_and_closed() {
   expect_true "the markers are not after it" has "$d" "<!-- mroom-alert key=sentry:1001 -->"
 }
 
+t_the_earlier_list_is_capped() {
+  pworld
+  add_alert regressed 1001 2026-10-28T11:50:00Z
+  local i
+  for i in $(seq 1 30); do add_issue "ENG-$((100 + i))" u-person "<!-- mroom-alert key=sentry:1001:new:2026-01-01 -->"; done
+  triage
+  expect_rc 0
+  local d
+  d="$(jq -r '.issues[-1].description' "$T/world.json")"
+  expect_true "the earlier list is not capped" has "$d" "[ENG-130](https://tracker.example.dev/issue/ENG-130), and 10 more."
+  expect_true "an early one is listed" lacks "$d" "[ENG-110]("
+  expect_true "a fence was left open" [ $(( $(grep -c '^```' <<<"$d") % 2 )) = 0 ]
+}
+
 t_a_refused_alert_fails_the_run() {
   pworld
   add_alert new 1001 2026-10-28T11:50:00Z "Error near $SENTRY_TOKEN"
@@ -387,6 +401,7 @@ test_case refused-fails t_a_refused_alert_fails_the_run
 test_case lost-after-refusal t_lost_markers_end_the_step_green_even_after_a_refusal
 test_case odd-event-text t_odd_event_text_is_cleaned_and_cut_never_refused
 test_case long-event-cut t_a_long_event_is_cut_and_closed
+test_case earlier-capped t_the_earlier_list_is_capped
 test_case no-tracker t_without_a_tracker_nothing_is_filed
 test_case dry-run t_a_dry_run_files_nothing
 test_case tracker-down t_a_tracker_that_cannot_be_read_fails_the_run
