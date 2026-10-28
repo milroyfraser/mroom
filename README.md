@@ -460,15 +460,21 @@ and runs it, which installs the `parts` named:
   `MROOM_QA_SMTP_PORT`, 1025 unless set.
 - `root-setup` reads no file the box user can write: it writes each unit from its own text, checks `site-op`
   against the SHA-256 it holds, and runs again without harm, rewriting and restarting only what changed, or
-  what a run that stopped halfway left. systemd itself, as root, still resolves the units' bind paths in the
-  box user's home each time a service starts (design D21 notes this limit).
+  what a run that stopped halfway left.
+- The services live in `/var/lib/mroom/services`, not in the box user's home. systemd, as root, resolves each
+  folder a unit binds, links and all, each time a service starts, so `root-setup` makes that path root's:
+  `/var/lib/mroom/services` and a folder for each service in it belong to root, mode 755, and only the
+  folders the units bind, one level down, belong to the box user, mode 700. The box user can change what is
+  in those folders, never the path to them. `root-setup` stops before it writes a unit if any part of that
+  path is a link, a file, or a folder someone other than root may change, or if a folder it would give the
+  box user belongs to someone else (design D21, open question 8). Each service sees only its own folders.
 - Never give a token on the box a `recipe:*` scope: even `recipe:view` runs any saved recipe.
 
 <!-- root-recipe: tests/root-test.sh checks sum against lib/root-setup, and runs this block -->
 ```bash
 set -euo pipefail
 v=v0.5.0
-sum=bd54e1d19f2255fb4dabadc9890b349daf4c24e7e8b3e3711647180767e08d0a
+sum=baf4de10ef7dd45a048332e1c5ad537833a350d0337a50132b3cb32bf18f0310
 user=forge
 parts=(site-op mailpit garage reverb)
 smtp_port=1025
@@ -610,34 +616,54 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
     (`.test`). A site user's name is at most 32 characters, so an app name of 19 characters or fewer always
     fits.
 
-12. The mail catcher, when `qa.parity.mail` is `catcher` (the default): `mroom baseline mailpit`, then,
-    *as root*, the root recipe with `mailpit` in its parts, then `mroom baseline mailpit` again. Baseline
+12. The mail catcher, when `qa.parity.mail` is `catcher` (the default): *as root*, the root recipe with
+    `mailpit` in its parts, then `mroom baseline mailpit`. The recipe makes the services' folders and
+    installs three systemd units and starts them: the socket on `127.0.0.1:1025` (`MROOM_QA_SMTP_PORT` in
+    `box.env`, and the recipe's `smtp_port`, to change it), the relay and Mailpit, both run as the box user.
+    Until baseline has run, the relay and Mailpit have nothing to run, and systemd keeps trying. Baseline
     downloads Mailpit at the build `lib/core/pins.txt` names, refuses it unless the archive and the binary
     match their SHA-256 pins, puts mroom's mail relay beside it and makes their logins (mode 600, in
-    `~/.config/mroom/secrets`). The recipe installs three systemd units and starts them: the socket on
-    `127.0.0.1:1025` (`MROOM_QA_SMTP_PORT` in `box.env`, and the recipe's `smtp_port`, to change it), the
-    relay and Mailpit, both run as the box user. Baseline can run again: what is in place is kept, it
-    restarts the relay or Mailpit itself when their files changed (systemd holds the port meanwhile), and it
-    says when the installed units are not this release's, which the recipe then rewrites. Nothing else may
-    listen on the port: on a box that ran an earlier mail catcher there, stop that first.
+    `/var/lib/mroom/services/mailpit/etc`; the gate's API login in `~/.config/mroom/secrets`). Before the
+    recipe has made the folders, it installs nothing and says so. Baseline can run again: what is in place
+    is kept, it restarts the relay or Mailpit itself when their files changed (systemd holds the port
+    meanwhile), and it says when the installed units are not this release's, which the recipe then
+    rewrites. Nothing else may listen on the port: on a box that ran an earlier mail catcher there, stop
+    that first.
 
-13. The file store, when `qa.parity.files` is `same` (the default): `mroom baseline garage`, then, *as
-    root*, the root recipe with `garage` in its parts, which installs Garage's systemd unit, then
-    `mroom baseline garage` again, which gives Garage its one-node layout. Baseline downloads Garage at the
-    build `lib/core/pins.txt` names and refuses any other, and makes its RPC secret and admin and metrics
-    tokens (mode 600, in `~/.config/mroom/secrets`). With `MROOM_QA_ZONE` set, it prints the nginx configs
-    of Garage's two hosts: create `s3.<zone>` and `files.<zone>` as sites in Forge, each with its
-    certificate, and put the printed blocks in place of their `location` blocks. Forge's nginx runs as the
-    box user, who alone can open Garage's sockets. The S3 host streams each body to Garage, so an unsigned
-    upload is refused before nginx stores any of it.
+13. The file store, when `qa.parity.files` is `same` (the default): *as root*, the root recipe with `garage`
+    in its parts, which makes its folders and installs Garage's systemd unit, then `mroom baseline garage`,
+    which gives Garage its one-node layout once it answers (run it again if it says Garage does not yet).
+    Baseline downloads Garage at the build `lib/core/pins.txt` names and refuses any other, and makes its RPC
+    secret and admin and metrics tokens (mode 600, in `/var/lib/mroom/services/garage/etc`). With
+    `MROOM_QA_ZONE` set, it prints the nginx configs of Garage's two hosts: create `s3.<zone>` and
+    `files.<zone>` as sites in Forge, each with its certificate, and put the printed blocks in place of their
+    `location` blocks. Forge's nginx runs as the box user, who alone can open Garage's sockets. The S3 host
+    streams each body to Garage, so an unsigned upload is refused before nginx stores any of it.
 
-14. WebSockets, when `qa.parity.broadcast` is `same` (the default): `mroom baseline reverb`, then, *as root*,
-    the root recipe with `reverb` in its parts, which installs the Reverb host's systemd unit, then
-    `mroom baseline reverb` again, which says whether it answers. Baseline installs this release's
+14. WebSockets, when `qa.parity.broadcast` is `same` (the default): *as root*, the root recipe with `reverb`
+    in its parts, which makes its folders and installs the Reverb host's systemd unit, then
+    `mroom baseline reverb`, which says whether it answers. Baseline installs this release's
     `reverb-host` with the packages its `composer.lock` pins, which takes Composer and PHP 8.3 or later at
-    `/usr/bin/php`, and makes its folders and an empty apps file (mode 600, in a folder of its own). With
+    `/usr/bin/php`, and an empty apps file (mode 600, in `/var/lib/mroom/services/reverb/apps`). With
     `MROOM_QA_ZONE` set, it prints the nginx config of the host: create `ws.<zone>` as a site in Forge, with
     its certificate, and put the printed block in place of its `location` blocks.
+
+**A box whose services ran before 0.5.0** keeps them in `~/.local/share/mroom-services`, and their logins
+and Garage's secrets in `~/.config/mroom/secrets`. To move them, for each part it runs:
+
+1. Upgrade the box to the release.
+2. *As root*, the root recipe with the same parts. It makes the folders in `/var/lib/mroom/services` and
+   installs the new units, and restarts each service, which then has nothing to run until step 3: QA mail,
+   files and WebSockets are down from here to there.
+3. `mroom baseline <part>`. It checks that the units are this release's and that nothing runs from the old
+   folder any more, then moves the data into the new folders before it installs a build, so the service
+   cannot start while its data moves: Mailpit's mail and SMTP logins, Garage's metadata, data and secrets
+   (its node, layout, buckets and keys stay), and the Reverb host's apps. Then it installs the builds again.
+   A name in both places that is not the same file stops it, with neither changed. Run again, it moves
+   nothing.
+4. Put the nginx blocks baseline prints in place of the old ones on `s3.<zone>`, `files.<zone>` and
+   `ws.<zone>`: the sockets moved.
+5. Remove `~/.local/share/mroom-services`, which holds only old builds and sockets now.
 
 ## QA environments
 

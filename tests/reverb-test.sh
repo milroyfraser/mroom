@@ -22,13 +22,13 @@ trap cleanup EXIT
 
 gate() { run env SSH_ORIGINAL_COMMAND="$1" "$MROOM" gate provision; }
 field() { sed -n "s/^$1=//p" <<<"$2"; }
-reverb_dir() { echo "$HOME/.local/share/mroom-services/reverb"; }
+reverb_dir() { echo "$T/services/reverb"; }
 apps_file() { echo "$(reverb_dir)/apps/apps.json"; }
 
 # world: box.env, and the folders and empty apps file mroom baseline reverb makes.
 world() {
-  mkdir -p "$HOME/.config/mroom" "$(reverb_dir)/apps" "$(reverb_dir)/run"
-  chmod 700 "$(reverb_dir)" "$(reverb_dir)/apps" "$(reverb_dir)/run"
+  mkdir -p "$HOME/.config/mroom"
+  services_tree reverb/apps reverb/run
   printf 'MROOM_APP_NAME=shop\nMROOM_QA_ZONE=qa.example.test\n' >"$HOME/.config/mroom/box.env"
   printf '{"apps": []}\n' >"$(apps_file)"
   chmod 600 "$(apps_file)"

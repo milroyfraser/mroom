@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317,SC2016  # t_* run through test_case; a $ in single quotes is for eval, later
 # The gate's Reverb operations against mroom's real Reverb host, run the way a box runs it: what a fake cannot
-# show. mroom baseline reverb installs this release's reverb-host with the packages its composer.lock pins, its
-# unit is installed by this release's lib/root-setup, run as root, from a home under /home as on a box, and
+# show. This release's lib/root-setup, run as root as the root recipe runs it, makes the services' folders and
+# installs the unit, mroom baseline reverb installs this release's reverb-host with the packages its
+# composer.lock pins, from a home under /home as on a box, moving the apps of a host that lived there, and
 # systemd runs it confined. The test then checks:
 # - an app reverb-app-add gives connects from its environment's two sites and stays open; from any other site
 #   it is refused and closed, and an app no one added does not exist;
@@ -39,6 +40,7 @@ cleanup() {
   sudo rm -f /etc/systemd/system/mroom-reverb.service
   sudo systemctl daemon-reload || true
   rm -f "$ROOT/reverb-host/.ci-build"
+  sudo rm -r /var/lib/mroom/services 2>/dev/null || true
   [ -z "$CI_HOME" ] || rm -rf "$CI_HOME"
   rm -rf "$TOP"
 }
@@ -46,7 +48,7 @@ trap cleanup EXIT
 
 gate() { run env SSH_ORIGINAL_COMMAND="$1" "$MROOM" gate provision; }
 field() { sed -n "s/^$1=//p" <<<"$2"; }
-reverb_dir() { echo "$HOME/.local/share/mroom-services/reverb"; }
+reverb_dir() { echo /var/lib/mroom/services/reverb; }
 sock() { echo "unix:$(reverb_dir)/run/reverb.sock"; }
 client() { python3 -I "$ROOT/tests/reverb/client.py" "$@"; }
 main_pid() { systemctl show -p MainPID --value mroom-reverb.service; }
@@ -90,13 +92,21 @@ t_the_reverb_operations_against_the_real_host() {
   export HOME="$CI_HOME"
   mkdir -p "$HOME/.config/mroom"
   printf 'MROOM_APP_NAME=shop\nMROOM_QA_ZONE=qa.example.test\n' >"$HOME/.config/mroom/box.env"
+  # A host that lived in the home, as before: its apps file, which moves once the new unit is in.
+  mkdir -p "$HOME/.local/share/mroom-services/reverb/apps"
+  printf '{"apps": []}\n' >"$HOME/.local/share/mroom-services/reverb/apps/apps.json"
+  chmod 600 "$HOME/.local/share/mroom-services/reverb/apps/apps.json"
+  run "$MROOM" baseline reverb
+  expect_rc 1; expect_out_has "The folders of reverb are not in place yet"
+  # The root recipe: this release's lib/root-setup, run as root, makes the folders and installs the unit.
+  run sudo bash "$ROOT/lib/root-setup" --user "$(id -un)" reverb
+  expect_rc 0
+  expect_out_has "service folders made in /var/lib/mroom/services, for $(id -un): reverb/apps reverb/builds reverb/run"
+  expect_out_has "systemd units written: mroom-reverb.service"
   run "$MROOM" baseline reverb
   expect_rc 0; expect_out_has "installed (Reverb v1.12.0)"
-  expect_out_has "To be installed or updated: mroom-reverb.service."
-  expect_out_has "Reverb host does not answer yet"
-  # Install the unit as the root recipe does: this release's lib/root-setup, run as root.
-  run sudo bash "$ROOT/lib/root-setup" --user "$(id -un)" --home "$HOME" reverb
-  expect_rc 0; expect_out_has "systemd units written: mroom-reverb.service"
+  expect_out_has "Reverb host: its data moved from ~/.local/share/mroom-services/reverb to /var/lib/mroom/services"
+  expect_no_file "$HOME/.local/share/mroom-services/reverb/apps/apps.json"
   wait_ready
   run "$MROOM" baseline reverb
   expect_rc 0; expect_out_has "matches this mroom"; expect_out_has "Reverb host answers; its apps file holds 0."
@@ -204,11 +214,12 @@ t_the_reverb_operations_against_the_real_host() {
   expect_rc 0; expect_out_has "installed (Reverb v1.12.0)"; expect_out_has "Reverb host: restarted to run its build"
   expect_out_has "Reverb host answers; its apps file holds 1."
   expect_true "the host did not restart" [ "$(main_pid)" != "$pid" ]
-  run bash -c 'ls "$1" | wc -l' _ "$(reverb_dir)/builds"; expect_out 2
+  # Two builds, and the link to the current one.
+  run bash -c 'ls "$1" | wc -l' _ "$(reverb_dir)/builds"; expect_out 3
   run client open "$(sock)" "$key13" https://13.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
   run "$MROOM" baseline reverb
   expect_rc 0; expect_out_has "matches this mroom"
-  run bash -c 'ls "$1" | wc -l' _ "$(reverb_dir)/builds"; expect_out 1
+  run bash -c 'ls "$1" | wc -l' _ "$(reverb_dir)/builds"; expect_out 2
 }
 
 test_case real-reverb t_the_reverb_operations_against_the_real_host
