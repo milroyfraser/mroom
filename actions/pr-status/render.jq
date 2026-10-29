@@ -38,7 +38,7 @@ def latest($checks; $name): [$checks[] | select(.name == $name)] | max_by(.id);
 # digit or _ (an address keeps its @), so no text in it mentions anyone, and in every :// and www., so none is a
 # link of its own; and a link with such a label.
 def md: tostring | gsub("[\r\n\t]+"; " ") | gsub("(?<c>[\\\\`*_\\[\\]<>|#~])"; "\\\(.c)")
-  | gsub("(?<![A-Za-z0-9_])@"; "@\u200b") | gsub("://"; ":\u200b//") | gsub("(?<w>\\b[Ww]{3})\\."; "\(.w)\u200b.");
+  | gsub("(?<![A-Za-z0-9_])@"; "@\u200b") | gsub("://"; ":\u200b//") | gsub("(?<![A-Za-z])(?<w>[Ww]{3})\\."; "\(.w)\u200b.");
 def mdlink($url; $label): "[\($label | md)](\($url))";
 
 # Slack mrkdwn: an escaped text, and a link with an escaped label (a | would end the label early).

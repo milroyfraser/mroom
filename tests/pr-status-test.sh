@@ -233,8 +233,9 @@ t_environment() {
     | .jobs += ([range(10; 16) as $i | {key: "\($i)", value: [{name: "qa / QA deploy · PR #\($i)", status: "completed", conclusion: "success", html_url: "x"}]}] | from_entries)'
   rendered
   has_json "other PRs' newer runs do not crowd this PR's out" "$(keys) == [\"aaaaaaa11111:env:failed\"]"
-  world; world_set '.fail = ["GET actions/runs/9/jobs"]'; qa_body $'### QA environment\n<!-- mroom-qa: failed -->\n\nThe deploy failed.'; rendered
-  has_json "a run whose jobs cannot be read is passed over" "$(line Environment) | startswith(\"- **Environment:** ❌ deploy failed · [why]\")"
+  world; world_set '.fail = ["GET actions/runs/9/jobs"]'; status 42
+  expect_err_has "could not read the jobs of qa-up run 9"
+  expect_eq "a run whose jobs cannot be read fails the update: nothing written" "$(count writes) $(count pings)" "0 0"
   world; world_set '.runs["qa-up.yml"] += [{id: 7, status: "in_progress", conclusion: null, html_url: "https://github.com/example/shop/actions/runs/7", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
     | .jobs["7"] = [{name: "qa / QA pull request", status: "in_progress", conclusion: null, html_url: "x"}]'; rendered
   has_json "a newer run with no deploy job yet: planning" "$(line Environment) | startswith(\"- **Environment:** ⏳ planning · [run](https://github.com/example/shop/actions/runs/7)\")"
@@ -392,6 +393,14 @@ t_marker_lost() {
   expect_true "the line is back, with this run's pings recorded" grep -q 'sent=once:ready:ready,aaaaaaa11111:ci:failed -->' <<<"$(note_body)"
   : >"$T/calls.jsonl"; status 42
   expect_eq "and they never go out later" "$(count pings)" 0
+  # A person's edit on the web: CRLF line ends, and the hidden line kept, then lost.
+  world_set --argjson id "$id" '(.comments["42"][] | select(.id == $id)).body |= (gsub("\n"; "\r\n") + "\r\n")'
+  check_set '{"name": "lint", "conclusion": "cancelled"}'; : >"$T/calls.jsonl"; status 42
+  expect_err_lacks "hidden line was lost"
+  check_set '{"name": "lint", "conclusion": "failure"}'
+  world_set --argjson id "$id" '(.comments["42"][] | select(.id == $id)).body |= (gsub("\n"; "\r\n") | split("\r\n<!-- mroom-pr-status")[0] + "\r\n")'
+  : >"$T/calls.jsonl"; status 42
+  expect_eq "a CRLF note without its hidden line: found by its footer, the same one" "$(notes | jq length) $(notes | jq '.[0].id')" "1 $id"
   expect_true "and the ready ping is recorded too" grep -q 'sent=once:ready:ready,' <<<"$(note_body)"
   check_set '{"name": "test", "conclusion": "success"}'; check_set '{"name": "lint", "conclusion": "success"}'
   : >"$T/calls.jsonl"; status 42
@@ -420,6 +429,17 @@ t_two_notes() {
   : >"$T/calls.jsonl"; status 42
   expect_err_lacks "more than one note"
   expect_eq "the next run: one note, nothing to write" "$(count writes)" 0
+  # An exact copy of the note: nothing to change in the note, the copy is marked all the same.
+  comment_add "github-actions[bot]" "$(note_body)"
+  : >"$T/calls.jsonl"; status 42
+  expect_eq "an exact copy is marked, the note left as it is" "$(notes | jq length) $(count writes)" "1 1"
+  # On a closed PR whose note is final, a copy is marked too, once.
+  pr_set '.pulls["42"] += {state: "closed", closed_at: "2026-10-28T11:00:00Z"}'; status 42
+  comment_add "github-actions[bot]" "$(note_body)"
+  : >"$T/calls.jsonl"; status 42
+  expect_eq "a final note's copy: marked, no ping" "$(notes | jq length) $(count pings)" "1 0"
+  : >"$T/calls.jsonl"; status 42
+  expect_eq "and then nothing to write" "$(count writes)" 0
 }
 
 t_not_a_note() {
@@ -429,6 +449,11 @@ t_not_a_note() {
   expect_true "a bot comment that quotes the footer is left alone" \
     jqt '.comments["42"][] | select(.body == "Welcome! You wrote: Edited in place by mroom'"'"'s pr-status")' "$T/world.json"
   expect_eq "and a note of its own is posted, with its ping" "$(notes | jq length) $(count pings)" "1 1"
+  world
+  comment_add "github-actions[bot]" $'Some other bot\n\n<sub>Edited in place by mroom\'s pr-status; each line names the commit it refers to.</sub>'
+  status 42
+  expect_true "the footer line without the note's heading is no note either" \
+    jqt '.comments["42"][] | select(.body | startswith("Some other bot"))' "$T/world.json"
 }
 
 t_other_base() {
@@ -560,14 +585,14 @@ channel = "#nope"'
 t_sent_trimmed() {
   world
   # Recorded newest last, in no hex order: the trim keeps the last recorded, not the last in sort order.
-  local keys; keys="once:ready:ready,$(for i in $(seq 1 250); do printf '%012x:ci:failed,' $(((i * 7919) % 100003)); done)"
+  local keys; keys="once:ready:ready,ffffffffffff:ci:failed,$(for i in $(seq 1 250); do printf '%012x:ci:failed,' $(((i * 7919) % 100003)); done)"
   comment_add "github-actions[bot]" $'x\n\n<!-- mroom-pr-status pr=42 final=0 sent='"${keys%,}"' -->'
   check_set '{"name": "lint", "conclusion": "failure"}'; status 42
   local line; line="$(note_body | tail -n1)"
   expect_true "the once key stays" grep -q 'sent=once:ready:ready,' <<<"$line"
   expect_eq "200 others at most, the newest kept" "$(tr ',' '\n' <<<"${line#*sent=}" | grep -c ':ci:')" 200
   expect_true "this run's key is among them" grep -q 'aaaaaaa11111:ci:failed -->' <<<"$line"
-  expect_true "the oldest recorded went" bash -c '! grep -q "$(printf "%012x" 7919):ci" <<<"$1"' _ "$line"
+  expect_true "the oldest recorded went, though it sorts last" bash -c '! grep -q "ffffffffffff:ci" <<<"$1"' _ "$line"
   expect_true "the newest recorded stayed" grep -q "$(printf '%012x' $(((250 * 7919) % 100003))):ci:failed," <<<"$line"
 }
 

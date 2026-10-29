@@ -177,7 +177,8 @@ ping_login() {
 # or on a dispatch, so GitHub links its run to no PR: its run-name ends in "PR #<n>" (README, QA environments).
 # A run-name can come from a fork's own QA plan, though, so a run counts only when its deploy job, which qa-up
 # names after the PR it resolved itself ("QA deploy · PR #<n>"), names this PR. A run whose deploy job names
-# another PR is passed over, and so is one whose jobs cannot be read. A run whose deploy job names none (qa-up
+# another PR is passed over. When a run's jobs cannot be read, it fails: an older run's result must not stand in for
+# a newer one's. A run whose deploy job names none (qa-up
 # resolved no PR to deploy, and skipped it), or that has none yet, counts as one that deploys nothing: while it
 # runs it can only say "planning", and once done, the QA environment comment speaks. A fork's own QA plan can
 # make such a run, which can say no more than that. An app without that workflow has no runs. Fails when GitHub
@@ -198,7 +199,7 @@ qa_run() {
     [[ "$id" =~ ^[0-9]{1,20}$ ]] || continue
     # Its jobs: the deploy job's own result, since the run also holds the plan and what follows the deploy.
     jobs="$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" --jq "[.jobs[] | {name, status, conclusion, html_url}]" 2>/dev/null)" \
-      && [ -n "$jobs" ] || continue
+      && [ -n "$jobs" ] || { warn "could not read the jobs of qa-up run $id"; return 1; }
     # A called workflow's job is "<caller job> / <its name>".
     deploy="$(jq -c --arg p "$QA_DEPLOY_JOB · PR #" --arg n "$1" '
       [.[] | (.name | split(" / ") | last) as $name
@@ -253,7 +254,8 @@ render() { jq -L "$MROOM_ROOT/actions/review-findings" -f "$HERE/render.jq"; }
 read_note() {
   jq -c --arg bot "$BOT" --arg mark "$MARK$1 " --arg footer "$FOOTER_LINE" '
     def ordered: reduce .[] as $k ([]; if index([$k]) then . else . + [$k] end);
-    [.comments[] | select(.login == $bot)] as $mine
+    # A comment a person edited on the web comes back with CRLF line ends.
+    [.comments[] | select(.login == $bot) | .body |= gsub("\r"; "")] as $mine
     | ($mark | gsub("(?<c>[.*+?()\\[\\]{}|^$\\\\])"; "\\\(.c)")) as $re
     | [$mine[] | select(.body | contains($mark))
        | . + {state: (first(.body | capture("(^|\n)" + $re + "final=(?<f>[01]) sent=(?<s>[a-z0-9:,-]*) -->$")) // null)}]
@@ -310,10 +312,13 @@ chat_ping() {
 # closed_not_final — the PRs closed in the last day (among the 20 most recently updated closed ones) whose note is
 # not final yet, one number per line.
 closed_not_final() {
-  local since n
+  local since n branch
   since="$(date -u -d "@$(($(mroom_now) - 86400))" +%Y-%m-%dT%H:%M:%SZ)"
+  # A PR on another base gets no update (main), so retrying it would only start runs that stop at once.
+  branch="${MROOM_DEFAULT_BRANCH:-$(gh api "repos/$REPO" --jq .default_branch 2>/dev/null)}"
+  [[ "$branch" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] || return 0
   gh api "repos/$REPO/pulls?state=closed&sort=updated&direction=desc&per_page=20" \
-    --jq ".[] | select(.closed_at != null and .closed_at >= \"$since\" and .user.login != \"dependabot[bot]\") | .number" 2>/dev/null \
+    --jq ".[] | select(.closed_at != null and .closed_at >= \"$since\" and .user.login != \"dependabot[bot]\" and .base.ref == \"$branch\") | .number" 2>/dev/null \
     | while read -r n; do
         [[ "$n" =~ ^[0-9]{1,9}$ ]] || continue
         gh api --paginate "repos/$REPO/issues/$n/comments?per_page=100" --jq '.[] | {id, login: .user.login, body: (.body // "")}' 2>/dev/null \
@@ -367,9 +372,9 @@ main() {
     action="none (PR closed, note final)"
   else
     text="$(note_text "$out" "$pr" "$(jq .final <<<"$out")" "$keys")"
-    if [ "$(jq -r .found <<<"$note")" != none ] && [ "$(jq -r .body <<<"$note")" = "$text" ] \
-      && [ "$(jq '.dupes | length' <<<"$note")" = 0 ]; then
-      action="none (unchanged)"
+    if [ "$(jq -r .found <<<"$note")" != none ] && [ "$(jq -r .body <<<"$note")" = "$text" ]; then
+      # Unchanged; its copies, if any, still to be marked.
+      if [ "$(jq '.dupes | length' <<<"$note")" = 0 ]; then action="none (unchanged)"; else action=copies; fi
     elif [ "$(jq -r .found <<<"$note")" = none ]; then
       action=create
     else
@@ -392,11 +397,13 @@ main() {
     none*) notice "PR #$pr: note $action"; return 0 ;;
   esac
   # The pings are in the note before they go out: when it cannot be written, none go.
-  note_write "$pr" "$(jq -r '.id // ""' <<<"$note")" "$text" || {
-    [ "$n" = 0 ] || warn "PR #$pr: $n ping(s) not sent, since the note that records them was not saved"
-    return 0
-  }
-  notice "PR #$pr: note $([ "$action" = create ] && echo posted || echo edited)"
+  if [ "$action" != copies ]; then
+    note_write "$pr" "$(jq -r '.id // ""' <<<"$note")" "$text" || {
+      [ "$n" = 0 ] || warn "PR #$pr: $n ping(s) not sent, since the note that records them was not saved"
+      return 0
+    }
+    notice "PR #$pr: note $([ "$action" = create ] && echo posted || echo edited)"
+  fi
   # The other notes, whose keys the note now holds, are edited once to say so: without the hidden line or the
   # footer, they count no more.
   for id in $(jq -r '.dupes[]' <<<"$note"); do
