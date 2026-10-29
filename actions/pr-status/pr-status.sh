@@ -197,8 +197,10 @@ qa_run() {
     id="$(jq -r '.id' <<<"$run")"
     [[ "$id" =~ ^[0-9]{1,20}$ ]] || continue
     # Its jobs: the deploy job's own result, since the run also holds the plan and what follows the deploy.
-    jobs="$(gh api --paginate "repos/$REPO/actions/runs/$id/jobs?per_page=100" --jq ".jobs[] | {name, status, conclusion, html_url}" 2>/dev/null | jq -sc .)" \
-      && [ -n "$jobs" ] || { warn "could not read the jobs of qa-up run $id"; return 1; }
+    if ! jobs="$(gh api --paginate "repos/$REPO/actions/runs/$id/jobs?per_page=100" --jq ".jobs[] | {name, status, conclusion, html_url}" 2>/dev/null | jq -sc .)" \
+      || [ -z "$jobs" ]; then
+      warn "could not read the jobs of qa-up run $id"; return 1
+    fi
     # A called workflow's job is "<caller job> / <its name>".
     deploy="$(jq -c --arg p "$QA_DEPLOY_JOB · PR #" --arg n "$1" '
       [.[] | (.name | split(" / ") | last) as $name
