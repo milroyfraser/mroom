@@ -24,7 +24,8 @@ The full design, including how each requirement is measured, is in [docs/design.
 `mroom config`, the one reader of `mroom.toml` and `box.env`, `install.sh`, tests and CI) and the first
 part of phase 1: the [box watchdog](#box-watchdog) with its job records, and the
 [regression label](#regression-label) check with its measures. Ahead of its phase, part of phase 4:
-the [Claude review](#claude-review) and its [review findings](#review-findings) check. Every other command
+the [Claude review](#claude-review) and its [review findings](#review-findings) check; and ahead of it, part
+of phase 5: the persona's [PR status](#pr-status) notes and pings. Every other command
 prints `not yet: phase N`. The phases and what each delivers are in
 [section 11 of the design](docs/design.md#11-phases). Expect breaking changes in every `0.x` release.
 
@@ -1091,6 +1092,153 @@ links.
 The check is a signal for the person who reviews, not a gate. GitHub counts a neutral check as passing, and
 any workflow with `checks: write`, one a pull request adds among them, can post a check run of the same name.
 The gate is a person's approval of the latest push, which shows such a change.
+
+## PR status
+
+The persona keeps one status note on each pull request, edited in place, and pings the author in chat
+only when they must act. The note has a line each for the QA environment, CI, the Claude review, the
+review findings check and browser QA, and each line names the commit it refers to and links what it
+rests on:
+
+```
+✅ **Agent's notes** · ready for review
+
+- **Environment:** ✅ [app](https://42.qa.example.dev) · [API](https://api.42.qa.example.dev) · [comment](…) · `aaaaaaa`
+- **CI:** ✅ 4/4 required pass · [checks](…) · `aaaaaaa`
+- **Claude review:** ✅ [no blocking findings](…) · `aaaaaaa`
+- **Review findings:** ✅ [No open findings](…) · `aaaaaaa`
+- **Browser QA:** not set up
+```
+
+What was not checked says "not run" or "unknown", never a pass, and an unknown or pending line keeps
+the pull request from ready. When two lines disagree (CI green but browser QA failed, an environment
+serving an older commit than the head), the note asks an **Open question** with the next thing to
+check. It is a reusable workflow, `.github/workflows/pr-status.yml`, with the composite action
+`actions/pr-status`, which the app calls from a workflow of its own:
+
+```yaml
+# .github/workflows/pr-status.yml
+name: PR status
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]
+  workflow_run:
+    # Each workflow's name: what the note reads, so it updates when one completes.
+    workflows: [CI, Claude review, QA plan, QA environment up]
+    types: [completed]
+  # By hand; by the called workflow itself (relay, retry-closed); and by qa-up, when it is in its
+  # next-workflows, which passes up_run_id too.
+  workflow_dispatch:
+    inputs:
+      pr: { description: The pull request to update, required: true, type: string }
+      up_run_id: { description: The qa-up run that started this one, if any, required: false, type: string }
+permissions:
+  contents: read
+jobs:
+  status:
+    permissions:
+      actions: write # to start this workflow again for a qa-up run's or a closed pull request's update
+      checks: read
+      contents: read
+      issues: write
+      pull-requests: write # to write the note
+    uses: milroyfraser/mroom/.github/workflows/pr-status.yml@v0.5.0 # the first release with PR status
+    with:
+      pr: ${{ inputs.pr }}
+      # review-check: claude / review   # the Claude review's check run: <your caller job> / review
+      # findings-check: Review findings # empty when the app has no review findings check
+      # browser-check: ""               # the browser QA check run, once the app has one (phase 2b)
+      # qa-workflow: qa-up.yml          # your qa-up workflow's file, and qa-up-name its name
+      # qa-up-name: QA environment up
+    secrets:
+      MROOM_CHAT_TOKEN: ${{ secrets.MROOM_CHAT_TOKEN }}
+```
+
+The review findings check runs on events of its own (README, Review findings), and a check the job token
+posts starts no workflow, so the app's review findings workflow runs the note after its check, as a second
+job:
+
+```yaml
+# .github/workflows/review-findings.yml, after its findings job
+  status:
+    needs: findings
+    if: always() && needs.findings.result != 'skipped' && (github.event_name != 'issue_comment' || github.event.issue.pull_request)
+    permissions: { actions: write, checks: read, contents: read, issues: write, pull-requests: write }
+    uses: milroyfraser/mroom/.github/workflows/pr-status.yml@v0.5.0
+    with:
+      pr: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}
+    secrets:
+      MROOM_CHAT_TOKEN: ${{ secrets.MROOM_CHAT_TOKEN }}
+```
+
+And a qa-up run that the job token started ends with no `workflow_run` (README, QA environments), so name
+`pr-status.yml` in qa-up's `next-workflows`.
+
+```toml
+[persona]
+name = "Agent"                          # the name on every note and ping
+channel = "C0123456789"                 # the chat channel pings go to (a Slack channel id)
+chat_users = ".github/chat-users.json"  # the chat user map, the default
+
+[github]
+agent_login = "shop-agents"             # the box's agents' GitHub account (design D22)
+
+[issues]                                # optional: pings link the pull request's issue
+id_pattern = "SHOP-[0-9]+"
+url = "https://tracker.example.dev/issue/{id}"
+```
+
+- **Pings.** One goes out when CI turns red, the review has blocking findings, the deploy fails, or
+  browser QA fails or cannot verify, and once per pull request when it is ready for review. Each says
+  what happened, links the evidence, the pull request and its issue, and ends with the question for the
+  author. None for a draft or a closed pull request, and none for one by anyone but the repository's
+  owner, members and collaborators, or from a fork: on a public repository anyone can open one. Those
+  get the note alone.
+- **Whom a ping mentions.** The chat user map, a JSON object in the app's repository read from the default
+  branch, maps a GitHub login or a commit email to a Slack user id (`{"dev1": "U0123456789"}`); an entry
+  whose value is not a user id is dropped. The author of a pull request is mentioned through it, or
+  named when it has no entry. An agent's pull request (opened as `github.agent_login`) mentions the
+  author of its first commit, since a profile commits under its developer's name: by GitHub account,
+  else by email. Later commits never count. A first commit the map knows by neither, such as the
+  agents' own, mentions the developer the map names for `github.agent_login`.
+- **One note, one ping per change.** The note ends with a hidden line, `<!-- mroom-pr-status pr=42
+  final=0 sent=… -->`, holding the pings already sent, each keyed by commit, kind and outcome. A ping is
+  recorded in the note before it goes out: when the note cannot be written, none goes; when a ping fails
+  after that, it is missed, not sent again. Should a person's edit lose the hidden line, the note is found
+  by its footer and edited in place, and since what was sent is lost with it, that run's pings and the
+  ready ping are recorded without being sent; only a failure that goes away and comes back on the same
+  commit could ping twice then. Should there be two notes (a post whose answer was lost, then another),
+  the oldest is kept current, the pings any of them recorded count, and the others are edited once to say
+  they are copies. Deleting the note resets its pings.
+- **Closed pull requests.** A closed pull request's note shows the final state and is left alone until it
+  reopens. It is marked final only once GitHub took that edit, and every `workflow_run` also retries the
+  pull requests closed in the last day whose note is not final yet.
+- **Which events.** Every run rebuilds the note from GitHub (the pull request; the required checks of the
+  rulesets and the branch protection on its base branch, or `pr.required_checks` when those name none; the
+  check runs on its head; its comments; and the app's latest qa-up run with its deploy job), so it does
+  not matter which event woke it. A qa-up run links no pull request, so the called workflow's `relay` job
+  starts the app's workflow by dispatch for the number its run-name ends in. That name can come from a
+  fork's own QA plan, so a run counts only when its deploy job, which qa-up names after the pull request
+  it resolved itself (`QA deploy · PR #42`), names this one. One update per pull request runs at a time.
+  A pull request based on another branch than the default gets no note.
+- **Secrets.** Only the chat bot's token (`chat:write`, invited to the channel), in the `persona`
+  environment (design 8.8; default branch only), never a repository or organisation secret. Without it
+  the note is still kept, and no pings go out until it is set. The note is written with the job token.
+  No trigger runs a pull request's own copy of the app's workflow (`pull_request_target` runs its base
+  branch's, the others the default branch's), the update runs only for a pull request based on the
+  default branch, the jobs check out only the default branch's `mroom.toml` and mroom at the commit of
+  the workflow, and the pull request is read as data, through the API. Text in the note that does not
+  come from mroom, such as a check's name or title, is escaped, with no mentions and no links, and so is
+  the title in a ping.
+- **A dry run.** `actions/pr-status/pr-status.sh <pr>`, run anywhere without `MROOM_PR_STATUS_LIVE=1`,
+  prints the note, what it would do with it, and the pings, and changes nothing.
+
+For now the note lives on the pull request, as the design's tracker `none` has it, even when the app has
+a tracker; keeping it on the tracker's issue instead comes with the tracker adapter. The note is a signal,
+not a gate. A pull request's own workflow can post a check run of any name, such as a required check's
+or `Review findings`, and can post as `github-actions[bot]`, so it could make its own note show a pass
+or forge its hidden line. The gate is a person's review of the latest push, and the required checks
+GitHub itself enforces.
 
 ## Development
 
