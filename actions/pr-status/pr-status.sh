@@ -177,12 +177,11 @@ ping_login() {
 # or on a dispatch, so GitHub links its run to no PR: its run-name ends in "PR #<n>" (README, QA environments).
 # A run-name can come from a fork's own QA plan, though, so a run counts only when its deploy job, which qa-up
 # names after the PR it resolved itself ("QA deploy · PR #<n>"), names this PR. A run whose deploy job names
-# another PR is passed over. When a run's jobs cannot be read, it fails: an older run's result must not stand in for
-# a newer one's. A run whose deploy job names none (qa-up
-# resolved no PR to deploy, and skipped it), or that has none yet, counts as one that deploys nothing: while it
-# runs it can only say "planning", and once done, the QA environment comment speaks. A fork's own QA plan can
-# make such a run, which can say no more than that. An app without that workflow has no runs. Fails when GitHub
-# did not answer.
+# another PR is passed over. A run whose deploy job names none (qa-up resolved no PR to deploy, and skipped it),
+# or that has none yet, counts as one that deploys nothing: while it runs it can only say "planning", and once
+# done, the QA environment comment speaks. A fork's own QA plan can make such a run, which can say no more than
+# that. An app without that workflow has no runs. Fails when GitHub did not answer, a run's jobs included: an
+# older run's result must not stand in for a newer one's.
 qa_run() {
   local runs err id run jobs deploy
   err="$(mktemp)"
@@ -198,7 +197,7 @@ qa_run() {
     id="$(jq -r '.id' <<<"$run")"
     [[ "$id" =~ ^[0-9]{1,20}$ ]] || continue
     # Its jobs: the deploy job's own result, since the run also holds the plan and what follows the deploy.
-    jobs="$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" --jq "[.jobs[] | {name, status, conclusion, html_url}]" 2>/dev/null)" \
+    jobs="$(gh api --paginate "repos/$REPO/actions/runs/$id/jobs?per_page=100" --jq ".jobs[] | {name, status, conclusion, html_url}" 2>/dev/null | jq -sc .)" \
       && [ -n "$jobs" ] || { warn "could not read the jobs of qa-up run $id"; return 1; }
     # A called workflow's job is "<caller job> / <its name>".
     deploy="$(jq -c --arg p "$QA_DEPLOY_JOB · PR #" --arg n "$1" '
@@ -316,7 +315,7 @@ closed_not_final() {
   since="$(date -u -d "@$(($(mroom_now) - 86400))" +%Y-%m-%dT%H:%M:%SZ)"
   # A PR on another base gets no update (main), so retrying it would only start runs that stop at once.
   branch="${MROOM_DEFAULT_BRANCH:-$(gh api "repos/$REPO" --jq .default_branch 2>/dev/null)}"
-  [[ "$branch" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] || return 0
+  [[ "$branch" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] || { warn "could not read the default branch; no closed PR is retried"; return 0; }
   gh api "repos/$REPO/pulls?state=closed&sort=updated&direction=desc&per_page=20" \
     --jq ".[] | select(.closed_at != null and .closed_at >= \"$since\" and .user.login != \"dependabot[bot]\" and .base.ref == \"$branch\") | .number" 2>/dev/null \
     | while read -r n; do

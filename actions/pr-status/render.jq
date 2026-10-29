@@ -37,7 +37,7 @@ def latest($checks; $name): [$checks[] | select(.name == $name)] | max_by(.id);
 # Markdown, for the note: an escaped text, with a zero-width space after every @ that does not follow a letter,
 # digit or _ (an address keeps its @), so no text in it mentions anyone, and in every :// and www., so none is a
 # link of its own; and a link with such a label.
-def md: tostring | gsub("[\r\n\t]+"; " ") | gsub("(?<c>[\\\\`*_\\[\\]<>|#~])"; "\\\(.c)")
+def md: tostring | gsub("[\r\n\t]+"; " ") | gsub("&"; "&amp;") | gsub("(?<c>[\\\\`*_\\[\\]<>|#~])"; "\\\(.c)")
   | gsub("(?<![A-Za-z0-9_])@"; "@\u200b") | gsub("://"; ":\u200b//") | gsub("(?<![A-Za-z])(?<w>[Ww]{3})\\."; "\(.w)\u200b.");
 def mdlink($url; $label): "[\($label | md)](\($url))";
 

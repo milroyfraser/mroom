@@ -309,6 +309,8 @@ required_checks = ["test", "@team **x** <b>"]'
   has_json "no ping holds a raw <!" '[.alerts[].text | contains("<!")] | any | not'
   world; check_set '{"name": "QA (browser)", "conclusion": "failure", "output": {"title": "-@org/team a+@b x.@c see https://evil.example or www.evil.example"}}'; rendered
   has_json "an @ after any mark but a letter, digit or _ is broken; an address keeps its @; a URL is no link" "$(line "Browser QA") | contains(\"-@\u200borg/team a+@\u200bb x.@\u200bc see https:\u200b//evil.example or www\u200b.evil.example\")"
+  world; check_set '{"name": "QA (browser)", "conclusion": "failure", "output": {"title": "&#64;team"}}'; rendered
+  has_json "an entity in a check title stays text" "$(line "Browser QA") | contains(\"&amp;\\\\#64;team · [run]\")"
   world_set '.pulls["42"].user.login = "dev2"'; rendered
   has_json "an unmapped author is named, escaped" '.alerts[0].text | startswith("Dev &lt;Two&gt; ")'
 }
@@ -454,6 +456,10 @@ t_not_a_note() {
   status 42
   expect_true "the footer line without the note's heading is no note either" \
     jqt '.comments["42"][] | select(.body | startswith("Some other bot"))' "$T/world.json"
+  world
+  comment_add "github-actions[bot]" $'⏳ **Bot One\'s notes** · quoted\n\nby mroom'
+  status 42
+  expect_true "nor the heading without the footer line" jqt '.comments["42"][] | select(.body | endswith("by mroom"))' "$T/world.json"
 }
 
 t_other_base() {
@@ -525,6 +531,10 @@ t_closed() {
   expect_true "final once GitHub took it" grep -q 'final=1 sent=once:ready:ready -->' <<<"$(note_body)"
   expect_true "merged in the heading" grep -q "^🟣 \*\*Bot One's notes\*\* · merged" <<<"$(note_body)"
   run "$A/pr-status.sh" --closed-not-final; expect_out ""
+  world_set --argjson id "$id" '.pulls["42"].base.ref = "release" | (.comments["42"][] | select(.id == $id)).body |= sub("final=1"; "final=0")'
+  run "$A/pr-status.sh" --closed-not-final
+  expect_out ""
+  world_set --argjson id "$id" '.pulls["42"].base.ref = "main" | (.comments["42"][] | select(.id == $id)).body |= sub("final=0"; "final=1")'
   check_set '{"name": "lint", "conclusion": "failure"}'; : >"$T/calls.jsonl"; status 42
   expect_eq "a final note is left alone, and a closed PR pings nobody" "$(count writes) $(count pings)" "0 0"
   expect_err_has "note none (PR closed, note final)"
