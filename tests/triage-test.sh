@@ -263,6 +263,8 @@ t_lengthened_alert_text_never_stops_the_others() {
     '[.[] | .description | scan("<!-- mroom-alert key=([^ ]+) -->") | .[0]] == ["sentry:1001"]'
   expect_true "the summary does not say the title was refused" grep -q "the guard refused to file sentry:1002" "$T/summary.md"
   expect_true "the summary does not say the event was refused" grep -q "the guard refused to file sentry:1003" "$T/summary.md"
+  expect_true "the summary does not say why the title was refused" grep -q "the tracker takes 200" "$T/summary.md"
+  expect_true "the summary does not say why the event was refused" grep -q "the tracker takes 65536" "$T/summary.md"
 }
 
 t_no_write_to_an_issue_the_persona_did_not_file() {

@@ -184,13 +184,14 @@ t_text_the_guard_lengthens_is_refused_before_the_tracker() {
   body "x"
   # 160 characters as given; each <!-- becomes &lt;!--, so 280 once escaped.
   create --key sentry:1001 --title "$(printf '<!--%.0s' {1..40})"
-  expect_rc 4; expect_err_has "once escaped and defanged"
+  expect_rc 4; expect_err_has "the title is 280 characters once escaped and defanged; the tracker takes 200"
   # A link to another host: each dot of its host becomes [.]. 160 characters either way; 200 and 202 once defanged.
   create --key sentry:1002 --title "http://$(printf 'a.%.0s' {1..20})$(printf 'b%.0s' {1..113})"
   expect_rc 0
+  expect_true "the title at the limit was not filed whole: $(issue ENG-1 | jq -c .title)" json_is "$(issue ENG-1)" '.title | length == 200'
   create --key sentry:1003 --title "http://$(printf 'a.%.0s' {1..21})$(printf 'b%.0s' {1..111})"
-  expect_rc 4; expect_err_has "the tracker takes 200"
-  # A body of 29900 bytes as given, about 88000 once its links are defanged: past the tracker's 64 KiB.
+  expect_rc 4; expect_err_has "the title is 202 characters once escaped and defanged; the tracker takes 200"
+  # A body of 29800 bytes as given, about 88000 once its links are defanged: past the tracker's 64 KiB.
   local line
   line="http://$(printf '.%.0s' {1..290})"
   body "$(for _ in $(seq 1 100); do printf '%s\n' "$line"; done)"
@@ -198,10 +199,16 @@ t_text_the_guard_lengthens_is_refused_before_the_tracker() {
   expect_rc 4; expect_err_has "the tracker takes 65536"
   expect_true "expected only the one create within the limits: $(ops linear issueCreate | jq -c .vars.i.title)" \
     [ "$(count_ops linear issueCreate)" = 1 ]
+  # A comment the same: refused before the tracker is even asked whose issue it is.
+  add_issue ENG-51 u-persona "Mine."
+  comment_on ENG-51
+  expect_rc 4; expect_err_has "the tracker takes 65536"
+  expect_true "the comment reached the tracker: $(ops linear | jq -r .op | sort | uniq -c | tr '\n' ' ')" \
+    [ "$(count_ops linear commentCreate) $(count_ops linear viewer)" = "0 0" ]
   export MROOM_PERSONA_LIVE=""
   body "x"
   create --key sentry:1005 --title "$(printf '<!--%.0s' {1..40})"
-  expect_rc 4; expect_err_has "once escaped and defanged"
+  expect_rc 4; expect_err_has "the tracker takes 200"
 }
 
 t_a_failed_read_back_is_not_a_lost_marker() {

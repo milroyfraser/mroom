@@ -75,8 +75,9 @@ fi
   echo "Alert triage could not run on $day: $what."
   echo
   [ -z "$run" ] || { echo "The run: $run"; echo; }
-  echo "Until a run succeeds, no alert is filed. Each run looks back over its own window only, so alerts from"
-  echo "a longer gap are not filed later: look at the error tracker for them."
+  echo "Until a run succeeds, some or all of the alerts go unfiled; the run's summary says which were filed."
+  echo "Each run looks back over its own window only, so alerts from a longer gap are not filed later: look at"
+  echo "the error tracker for them."
   echo
   echo "This issue records that $persona pinged about it today, so it pings once a day at most."
 } >"$WORK/alarm.md"
