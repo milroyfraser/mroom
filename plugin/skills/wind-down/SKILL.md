@@ -91,8 +91,11 @@ Decisions arrive after this skill ends, so every regular check and every restart
 helper, open a PR, add a to-do with the ready command when it needs the developer) and write
 `acted: {"<i>": {state: "doing"|"done", outcome, link, at}}`. Set `state: "done"` once the work has
 landed (a merged PR, a filed issue, a settings change made). An item that was read and not ticked is
-declined: record it as such in the report and do nothing. Update the report as items move, and close
-it when every action item is done or declined.
+declined: record it as such in the report and do nothing. Keep the report in step with the Room: on every
+check, compare each learning's `status`, `confirmed` and `acted` with the report and update it when
+anything differs (a card read later, a decision changed with Back, an action moving). The developer
+can change a decision after the report is written, so never treat the report as a snapshot. Close it
+when every action item is done or declined.
 
 After the last card the page shows the report's link and a **Close retrospective** button (two
 clicks). Closing writes `meta/winddown.retroClosedAt` and hides the cards; then close the report in
