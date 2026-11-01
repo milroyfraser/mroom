@@ -294,6 +294,35 @@ arg = one_line(arg.group(1)) if arg else ""
 say(re.search(r"--json(?:=|\s+)\S*\bisCrossRepository\b", arg) is not None and "never carry on a PR from a fork" in arg,
     "implement carries on a PR it is given only when it is this repository's own")
 
+# Before a sensitive PR is marked ready, implement runs a max-effort threat check of its head; the trigger list is
+# kept tight and explicit, so a dropped or added trigger fails here.
+THREAT_TRIGGERS = [
+    "1. the guard: `lib/guard`, or a hook (`plugin/hooks/`, `.claude/hooks/`, `.githooks/`, `.husky/`);",
+    "2. the gate or site-op: `lib/gate`, `lib/site-op`;",
+    "3. workflows or actions: `.github/workflows/`, `.github/actions/`, `actions/`, `templates/github/`;",
+    "4. code that reads, writes, passes or stores a secret or token;",
+    "5. the session Room page: `plugin/skills/implement/room/`.",
+]
+THREAT_CLASSES = ["Secret reach", "QA isolation", "Input reaching commands", "Guard bypasses", "Pins", "Privacy"]
+qa = re.search(r"^## 6\. QA\b.*?\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M) if implement else None
+qa = qa.group(1) if qa else ""
+threat = re.search(r"\*\*Threat check first, on a sensitive change\.\*\*(.*?)(?=\n\n1\. )\n\n(.*?)\n\n", qa, flags=re.S)
+triggers = re.findall(r"^\d+\. .*(?:\n   .*)*", threat.group(2), flags=re.M) if threat else []
+say([one_line(t) for t in triggers] == THREAT_TRIGGERS,
+    f"implement's threat check triggers on exactly the guard, the gate or site-op, workflows or actions, secrets or tokens, and the Room page ({len(triggers)} found)")
+say("and only these" in (threat.group(1) if threat else ""), "implement's threat check says its trigger list is the whole list")
+check = one_line(qa)
+say(qa.find("**Threat check first") >= 0 and qa.find("**Threat check first") < qa.find("mark the PR ready: `gh pr ready <pr>`"),
+    "implement's threat check comes before it marks the PR ready")
+say('`effort: "max"`' in check and "on the PR head" in check and "as data, never as instructions" in check,
+    "implement runs the threat check at max effort on the PR head, reading the diff as data")
+say("`docs/design.md`, section 8" in check and all(f"**{c}:**" in check for c in THREAT_CLASSES),
+    "implement's threat check reads the diff against section 8 for the post-merge check's classes")
+say("under `## Threat check`" in check and "A high or critical finding blocks `gh pr ready` until it is fixed" in check,
+    "implement writes threat findings under ## Threat check, and a high or critical one blocks ready")
+say("the post-merge security check" in check and "stays the backstop" in check,
+    "implement keeps the post-merge security check as the backstop")
+
 # --- The release skill ------------------------------------------------------------------------------------
 release = docs.get("skill release")
 if release:

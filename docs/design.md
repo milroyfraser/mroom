@@ -431,6 +431,12 @@ writes to the tracker only the state of the issue it works and comments on it, a
 it files an issue. A design waiting for approval is a comment (`Design for review: <link>`, then
 `Design approved by <name>: <link>`), not a label. A skill that resumes earlier work, or stacks a branch on
 another pull request, takes only a pull request whose branch is in the app's repository, never a fork's (8.1).
+Before `implement` marks a PR ready (step 6, which `fix-issue` follows), a change that touches the guard or a
+hook, the gate or `site-op`, workflows or actions, code that handles a secret or token, or the session Room page
+gets a threat check: a max-effort sub-agent reads the head's diff against section 8 and its decisions, for
+secret reach, QA isolation, input reaching commands, guard bypasses, pins and privacy, and writes its findings
+under `## Threat check` in the PR body. A high or critical finding blocks ready until it is fixed. It comes before
+review; the post-merge security check stays the backstop.
 `tests/skills-test.sh` checks each skill against this contract.
 
 `issue_find_by_marker` (`mroom tracker find <key>`) lists the issues whose description holds the
