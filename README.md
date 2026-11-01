@@ -606,6 +606,10 @@ that Claude Code reads; in a session they are `/mroom:<name>`.
 - **Rules in every skill:** an agent never merges, approves, deploys or releases; a person does.
   Tracker writes are only the state of the issue being worked and comments on it. A skill asks
   before it files an issue or a label, never touches production, and never reads a secret.
+- **Earlier work is the app's own:** `deliver`, `implement` and `fix-issue` resume only a pull
+  request whose branch is in the app's repository, and no workflow skill checks out or runs a fork's
+  pull request on the box, just as the QA workflows refuse it. That is the skills' rule: the guard
+  does not refuse such a checkout.
 - **Release asks twice:** once in the session, and again through the `ask` rule on
   `gh release create` in `settings/base.json`. It only ever drafts; publishing is a person's click.
 - **From `mroom.toml`:** the issue id and link (`issues.id_pattern`, `issues.url`), the started and
@@ -629,9 +633,10 @@ The settings fragment `base.json` allows the adapters' reads (`mroom tracker get
 `owned`) and asks before `mroom tracker create`, `mroom errors resolve` and the guard's writes
 (`mroom persona create`, `comment`). `tests/skills-test.sh` checks the skills as a contract: their frontmatter,
 that every `mroom` command, skill and key they name exists, the rules above, the release's draft and
-question, that no skill resolves an error issue, and that none names a host, an IP address, an id or
-an email address. For `fix-issue` it also checks that the branch names both ids, that a failing test
-comes before the fix, that the only links are the `Fixes` lines, and that it stops at a PR in review.
+question, that no skill resolves an error issue, that a skill resuming earlier work never takes a
+fork's pull request for it, and that none names a host, an IP address, an id or an email address.
+For `fix-issue` it also checks that the branch names both ids, that a failing test comes before the
+fix, that the only links are the `Fixes` lines, and that it stops at a PR in review.
 Names of people and projects come from `$MROOM_PRIVATE_WORDS`, a file of patterns kept outside the
 repository.
 
