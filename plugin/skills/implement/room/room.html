@@ -1350,9 +1350,12 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (safeUrl(pr.session)) { const a = anchor("session", safeUrl(pr.session)); a.className = "fsess"; head.append(a); }
     card.append(head);
     const part = (label, node) => { const d = el("div"); d.append(el("div", "flabel", label), node); card.append(d); };
-    if (b.problem) part("Problem", el("p", null, String(b.problem)));
+    /* An Issue card (kind "issue", no PR yet) shows the problem as the issue states it and the solution as a
+       draft for the developer to review; a PR card shows the agreed solution. */
+    const isIssue = it.kind === "issue";
+    if (b.problem) part(isIssue ? "Problem (from the issue)" : "Problem", el("p", null, String(b.problem)));
     const sol = Array.isArray(b.solution) ? b.solution.filter(Boolean) : [];
-    if (sol.length) { const ol = el("ol"); for (const s of sol) ol.append(el("li", null, String(s))); part("Solution", ol); }
+    if (sol.length) { const ol = el("ol"); for (const s of sol) ol.append(el("li", null, String(s))); part(isIssue ? "Proposed solution (draft, for your review)" : "Solution", ol); }
     const steps = Array.isArray(b.steps) ? b.steps.filter((s) => s && s.text) : [];
     let cur = Number(b.current) || 0;
     /* A merge can't be Go while something blocks it: the branch is behind main or conflicts (checks
@@ -1371,7 +1374,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     }
     /* Every PR card shows a QA tab. When a card has none yet, a placeholder sits after Review (or first),
        saying QA is missing, so a card can't look finished without it. */
-    if (steps.length && !steps.some((s) => s.title === "QA")) {
+    if (it.kind !== "issue" && steps.length && !steps.some((s) => s.title === "QA")) {
       const at = Math.max(0, steps.findIndex((s) => s.title === "Review") + 1);
       steps.splice(at, 0, { title: "QA", who: "Claude", text: "No QA recorded for this PR yet.", evidenceNote: "Claude adds the test cases, the tests that prove each one, and browser screenshots when the change has a screen.", verdict: { go: false, call: "No QA yet", why: "QA cases and their tests are missing." } });
       if (cur >= at) cur += 1;
