@@ -150,6 +150,13 @@ COMMANDS=0
 # rest are worst-cased, so total matcher work stays bounded (see glob_stars_over_cap).
 GLOB_SEEN=0
 GLOB_BUDGET=48
+# How many inline-code segments (a `-c`/`-e`/`-r` program, an awk `system()`, a heredoc into an interpreter)
+# this command has had check_code scan. Each scan forks a few times to lower case and match, which is cheap
+# once but a command could carry thousands within every other cap (a run of `python -c ...;` separated by
+# `;`), and the forks then add up past the hook timeout, which is a bypass. Past this budget the rest are
+# refused instead of scanned, so total check_code work stays bounded (see check_code).
+CODE_SEEN=0
+CODE_BUDGET=128
 RAW=$(printf '%s' "$command" | tr '[:upper:]' '[:lower:]')
 
 block() { [ -n "$BLOCKED" ] || BLOCKED=$1; }
@@ -336,6 +343,15 @@ mentions_forbidden() {
 
 check_code() {
   local what=$1 code=$2
+  # Bound the total scanning work: a command with thousands of inline-code segments would otherwise fork its
+  # way past the hook timeout (a bypass), so past the budget each further segment is refused unscanned. A
+  # command with more than CODE_BUDGET of them is pathological; blocking it matches the other "too many to
+  # check in time" caps.
+  CODE_SEEN=$((CODE_SEEN + 1))
+  if [ "$CODE_SEEN" -gt "$CODE_BUDGET" ]; then
+    block "the command has more than $CODE_BUDGET inline-code segments, too many to check in time"
+    return
+  fi
   if mentions_secret "$code"; then
     block "$what names a secret file"
   elif mentions_forbidden "$code"; then

@@ -539,6 +539,11 @@ EOF"
 print(1 + 1)
 EOF"
   allow 'gh pr view 1 --json body | python3 -c "import json,sys; print(json.load(sys.stdin))"'
+  # A command with more inline-code segments than check_code can scan in time is refused, not scanned to the
+  # end: scanning each one forks, and thousands within every other cap (a run of `python -c ...;`) would run
+  # past the hook timeout, so a merge or secret read after them would run. A handful still passes.
+  allow "$(printf "python -c 'print(1)'; %.0s" $(seq 1 20))"
+  refuse_for "inline-code segments" "$(printf "python -c 'print(1)'; %.0s" $(seq 1 2000))"
 
   # gh flags that shift the positional slots.
   agree 'gh workflow run --ref main deploy-production.yml'
@@ -877,6 +882,11 @@ timing() {
   uc=""; seg="find .$(printf ' -iname A%.0s' $(seq 1 990))"
   for _ in $(seq 1 10); do uc+="$seg; "; done
   fast 8 0 "$uc"
+  # Inline-code segments, within every other cap (2000 `python -c ...;`, ~36 KB): scanning each forks a few
+  # times, so before the budget this ran for minutes, well past the hook timeout, and a refused command after
+  # it ran. The budget refuses it after a bound, so it is decided far inside the limit.
+  uc=""; for _ in $(seq 1 2000); do uc+="python -c 'Aa=1'; "; done
+  fast 20 2 "$uc"
 }
 
 awks=()
