@@ -15,8 +15,8 @@ the calls change there, so a second run sees the note the first one wrote:
   branches        {<branch>: <branch>}, as branches/<branch> gives it (unprotected when absent)
   check_runs      {<sha>: [{id, name, status, conclusion, html_url, external_id, output: {title}}]}
   comments        {<N>: [{id, user: {login}, body, html_url, created_at}]}, oldest first
-  runs            {<workflow file>: [{id, status, conclusion, html_url, display_title, created_at,
-                                      pull_requests: [{number}]}]}
+  runs            {<workflow file>: [{id, event, head_branch, status, conclusion, html_url, display_title,
+                                      created_at, pull_requests: [{number}]}]}
   jobs            {<run id>: [{name, status, conclusion, html_url}]}
   contents        {<path>: <text>}, the default branch's files
   next_id         the id the next comment gets

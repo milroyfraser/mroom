@@ -59,7 +59,7 @@ world() {
       {id: 10, user: {login: "github-actions[bot]"}, body: $qa, html_url: "\($gh)/pull/42#c10", created_at: "2026-10-28T10:00:00Z"},
       {id: 11, user: {login: "claude[bot]"}, body: "No blocking findings.\n\n<!-- claude-review sha=\($head) -->",
        html_url: "\($gh)/pull/42#c11", created_at: "2026-10-28T10:30:00Z"}]},
-    runs: {"qa-up.yml": [{id: 9, status: "completed", conclusion: "success", html_url: "\($gh)/actions/runs/9",
+    runs: {"qa-up.yml": [{id: 9, event: "workflow_run", status: "completed", conclusion: "success", html_url: "\($gh)/actions/runs/9",
       display_title: "QA environment · PR #42", created_at: "2026-10-28T09:00:00Z", pull_requests: []}]},
     jobs: {"9": [{name: "qa / QA paths", status: "completed", conclusion: "success", html_url: "\($gh)/job/8"},
                  {name: "qa / QA deploy · PR #42", status: "completed", conclusion: "success", html_url: "\($gh)/job/9"}]},
@@ -214,21 +214,21 @@ t_environment() {
   has_json "a passed deploy with no comment: unknown, never a pass, with a question" "($(line Environment) | startswith(\"- **Environment:** ❓ unknown: \")) and .alerts == [] and (.body | contains(\"Open question\"))"
   world; world_set '.comments["42"] |= map(select(.id != 10)) | .jobs["9"][1] += {name: "qa / QA deploy · PR #", conclusion: "skipped"}'; check_set '{"name": "QA (browser)", "conclusion": "skipped"}'; rendered
   has_json "the plan said no: not needed, ready" "($(line Environment) | startswith(\"- **Environment:** not needed\")) and $(keys) == [\"once:ready:ready\"]"
-  world; world_set '.runs["qa-up.yml"] += [{id: 7, status: "completed", conclusion: "failure", html_url: "x", display_title: "QA environment · PR #4", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
+  world; world_set '.runs["qa-up.yml"] += [{id: 7, event: "workflow_run", status: "completed", conclusion: "failure", html_url: "x", display_title: "QA environment · PR #4", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
     | .jobs["7"] = [{name: "qa / QA deploy · PR #4", status: "completed", conclusion: "failure", html_url: "x"}]'; rendered
   has_json "another PR's run (PR #4 for #42) is not this one's" "($(line Environment) | startswith(\"- **Environment:** ✅\")) and $(keys) == [\"once:ready:ready\"]"
-  world; world_set '.runs["qa-up.yml"] += [{id: 7, status: "completed", conclusion: "failure", html_url: "x", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
+  world; world_set '.runs["qa-up.yml"] += [{id: 7, event: "workflow_run", status: "completed", conclusion: "failure", html_url: "x", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
     | .jobs["7"] = [{name: "qa / QA deploy · PR #7", status: "completed", conclusion: "failure", html_url: "x"}]'; rendered
   has_json "a run whose deploy job names another PR is passed over" "($(line Environment) | startswith(\"- **Environment:** ✅\")) and $(keys) == [\"once:ready:ready\"]"
-  world; world_set '.runs["qa-up.yml"] += [{id: 7, status: "completed", conclusion: "success", html_url: "x", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
+  world; world_set '.runs["qa-up.yml"] += [{id: 7, event: "workflow_run", status: "completed", conclusion: "success", html_url: "x", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
     | .jobs["7"] = [{name: "qa / QA pull request", status: "completed", conclusion: "success", html_url: "x"}, {name: "qa / QA deploy · PR #", status: "completed", conclusion: "skipped", html_url: "x"}]'; rendered
   has_json "a run-name a fork forged deploys nothing: the comment speaks, no ping" "($(line Environment) | startswith(\"- **Environment:** ✅\")) and $(keys) == [\"once:ready:ready\"]"
   world; world_set '.jobs["9"][1].conclusion = "failure"
-    | .runs["qa-up.yml"] += [{id: 7, status: "completed", conclusion: "success", html_url: "x", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
+    | .runs["qa-up.yml"] += [{id: 7, event: "workflow_run", status: "completed", conclusion: "success", html_url: "x", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
     | .jobs["7"] = [{name: "qa / QA deploy · PR #", status: "completed", conclusion: "skipped", html_url: "x"}]'; rendered
   has_json "the newest run deployed nothing, an older one failed: the newest counts, no ping" "($(line Environment) | startswith(\"- **Environment:** ✅\")) and $(keys) == [\"once:ready:ready\"]"
   world; world_set '.jobs["9"][1].conclusion = "failure"
-    | .runs["qa-up.yml"] += [range(10; 16) as $i | {id: $i, status: "completed", conclusion: "success", html_url: "x",
+    | .runs["qa-up.yml"] += [range(10; 16) as $i | {id: $i, event: "workflow_run", status: "completed", conclusion: "success", html_url: "x",
         display_title: "QA environment · PR #\($i)", created_at: "2026-10-28T11:\($i):00Z", pull_requests: []}]
     | .jobs += ([range(10; 16) as $i | {key: "\($i)", value: [{name: "qa / QA deploy · PR #\($i)", status: "completed", conclusion: "success", html_url: "x"}]}] | from_entries)'
   rendered
@@ -236,7 +236,7 @@ t_environment() {
   world; world_set '.fail = ["GET actions/runs/9/jobs"]'; status 42
   expect_err_has "could not read the jobs of qa-up run 9"
   expect_eq "a run whose jobs cannot be read fails the update: nothing written" "$(count writes) $(count pings)" "0 0"
-  world; world_set '.runs["qa-up.yml"] += [{id: 7, status: "in_progress", conclusion: null, html_url: "https://github.com/example/shop/actions/runs/7", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
+  world; world_set '.runs["qa-up.yml"] += [{id: 7, event: "workflow_run", status: "in_progress", conclusion: null, html_url: "https://github.com/example/shop/actions/runs/7", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
     | .jobs["7"] = [{name: "qa / QA pull request", status: "in_progress", conclusion: null, html_url: "x"}]'; rendered
   has_json "a newer run with no deploy job yet: planning" "$(line Environment) | startswith(\"- **Environment:** ⏳ planning · [run](https://github.com/example/shop/actions/runs/7)\")"
   world; world_set '.jobs["9"][1] += {conclusion: "failure"}'
@@ -245,6 +245,31 @@ t_environment() {
   world; world_set '.fail = ["GET actions/workflows"]'; rendered
   expect_out ""
   expect_err_has "HTTP 502"
+}
+
+# A run of the qa-up workflow's file counts only when it ran the default branch's copy, as qa-up's own runs do: on
+# workflow_run, or dispatched on the default branch (the plan's hand-over). A pull request's own copy of the file,
+# or a branch's, names its run and its jobs as it likes, so its runs say nothing about any pull request.
+t_environment_copies() {
+  local event
+  for event in pull_request push pull_request_target; do
+    world; world_set --arg e "$event" '.runs["qa-up.yml"] += [{id: 7, event: $e, head_branch: "some-branch", status: "completed",
+        conclusion: "failure", html_url: "x", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
+      | .jobs["7"] = [{name: "QA deploy · PR #42", status: "completed", conclusion: "failure", html_url: "x"}]'; rendered
+    has_json "a $event run of another copy is not this PR's deploy: no failure, no ping" "($(line Environment) | startswith(\"- **Environment:** ✅\")) and $(keys) == [\"once:ready:ready\"]"
+  done
+  world; world_set '.runs["qa-up.yml"] += [{id: 7, event: "workflow_dispatch", head_branch: "some-branch", status: "in_progress",
+      conclusion: null, html_url: "x", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
+    | .jobs["7"] = [{name: "qa / QA deploy · PR #42", status: "in_progress", conclusion: null, html_url: "x"}]'; rendered
+  has_json "a dispatch on another branch ran that branch's copy: not deploying this PR" "($(line Environment) | startswith(\"- **Environment:** ✅\")) and $(keys) == [\"once:ready:ready\"]"
+  world; world_set '.runs["qa-up.yml"][0].status = "in_progress" | .jobs["9"][1] += {status: "in_progress", conclusion: null}
+    | .runs["qa-up.yml"] += [{id: 7, event: "pull_request", head_branch: "some-branch", status: "completed", conclusion: "action_required",
+        html_url: "x", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]'; rendered
+  has_json "a newer run of another copy, with no jobs, does not hide this PR's deploy" "($(line Environment) | startswith(\"- **Environment:** ⏳ deploying\")) and .alerts == []"
+  world; world_set '.runs["qa-up.yml"] += [{id: 7, event: "workflow_dispatch", head_branch: "main", status: "completed",
+      conclusion: "failure", html_url: "x", display_title: "QA environment · PR #42", created_at: "2026-10-28T11:00:00Z", pull_requests: []}]
+    | .jobs["7"] = [{name: "qa / QA deploy · PR #42", status: "completed", conclusion: "failure", html_url: "x"}]'; rendered
+  has_json "a dispatch on the default branch (the hand-over's) counts" "($(line Environment) | startswith(\"- **Environment:** ❌ deploy failed · [run](x)\")) and $(keys) == [\"aaaaaaa11111:env:failed\"]"
 }
 
 t_no_qa_workflow() {
@@ -629,6 +654,7 @@ test_case ci t_ci
 test_case required-list t_required_list
 test_case review t_review
 test_case environment t_environment
+test_case environment-copies t_environment_copies
 test_case no-qa-workflow t_no_qa_workflow
 test_case browser t_browser
 test_case findings t_findings
