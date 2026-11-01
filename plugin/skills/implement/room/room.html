@@ -1,0 +1,1905 @@
+<title>Session · mroom</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* A session Room: one narrow working column. "Live" is the stack of PR cards in priority
+   order; "Plans" shows only the open steps of each plan (boards/plans); "Engine" is the dev box, the
+   worktree and the QA slots.
+   Every row comes from the artifact database (todos, work, boards, meta); an empty database is a fresh session. */
+:root{
+  --bg:#eef1f4; --surface:#ffffff; --ink:#17202a; --muted:#5b6876; --line:#d6dde4;
+  --accent:#1f56c3; --accent-soft:#e4ecfb;
+  --now:#b23f0c; --now-soft:#fbe9df;
+  --decide:#7a4fb3; --decide-soft:#efe7fa;
+  --ok:#2b7a4f; --ok-soft:#e1f2e8;
+  --warn:#a35f00;
+  --alarm:#d92d20;
+  --wait1:#c99a00; --wait2:#e06c00; --wait3:#d92d20;
+  --code-bg:#f1f4f8;
+  --display:"Bricolage Grotesque","Arial Narrow",system-ui,sans-serif;
+  --body:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0e1319; --surface:#151c24; --ink:#e3e9ef; --muted:#97a4b2; --line:#26313d;
+  --accent:#86adff; --accent-soft:#1a2740;
+  --now:#f39363; --now-soft:#3a2219;
+  --decide:#c4a4f0; --decide-soft:#2a2138;
+  --ok:#73cf9c; --ok-soft:#173326;
+  --warn:#f0b35a;
+  --alarm:#ff5a4f;
+  --wait1:#f2cf4a; --wait2:#f59a3c; --wait3:#ff5a4f;
+  --code-bg:#0f151c; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0e1319; --surface:#151c24; --ink:#e3e9ef; --muted:#97a4b2; --line:#26313d;
+  --accent:#86adff; --accent-soft:#1a2740;
+  --now:#f39363; --now-soft:#3a2219;
+  --decide:#c4a4f0; --decide-soft:#2a2138;
+  --ok:#73cf9c; --ok-soft:#173326;
+  --warn:#f0b35a;
+  --alarm:#ff5a4f;
+  --wait1:#f2cf4a; --wait2:#f59a3c; --wait3:#ff5a4f;
+  --code-bg:#0f151c; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:15px/1.55 var(--body);margin:0;padding-inline:max(16px,env(safe-area-inset-left,0px));padding-block:32px 48px}
+.wrap{max-width:760px;margin:0 auto;display:grid;gap:22px}
+header{display:grid;gap:14px}
+h1{margin:0;font:800 clamp(34px,6vw,48px)/1 var(--display);letter-spacing:-.01em;text-wrap:balance}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
+.session{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;font-size:14px;color:var(--muted)}
+.session:empty{display:none}
+.session .sid{font:600 13px var(--mono);color:var(--accent)}
+.session .stitle{color:var(--ink);font-weight:600;overflow-wrap:anywhere}
+.session .sbranch{font:12.5px var(--mono);overflow-wrap:anywhere}
+.titles{display:grid;gap:4px;min-width:0}
+/* The profile header: the viewer's initials and name, and a line about this session. */
+.titles.who{display:flex;align-items:center;gap:12px;min-width:0}
+.avatar{flex:none;display:grid;place-items:center;width:38px;height:38px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font:700 14px/1 var(--body);letter-spacing:.02em}
+.whotext{display:grid;gap:2px;min-width:0}
+.whotext h1{font:700 18px/1.2 var(--body);letter-spacing:0}
+.boxline{font:12.5px/1.3 var(--body);color:var(--muted);overflow-wrap:anywhere}
+/* The status pill is the main navigation: it opens a menu with the views. */
+.navwrap{position:relative;flex:none}
+.navmenu{position:absolute;right:0;top:calc(100% + 8px);z-index:30;min-width:240px;max-width:min(320px,calc(100vw - 32px));background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:0 10px 30px color-mix(in srgb,var(--ink) 14%,transparent);padding:6px;display:grid;gap:2px}
+.tabs{display:flex;flex-direction:column;gap:2px}
+.tabs button{font:600 14px var(--body);color:var(--muted);background:transparent;border:0;border-radius:6px;padding:9px 10px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:7px;white-space:nowrap;text-align:left}
+.tabs button[aria-selected="true"]{background:var(--accent-soft);color:var(--accent)}
+.tabs button:hover{background:var(--code-bg);color:var(--ink)}
+.count{font:500 12px/1 var(--mono);padding:3px 7px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font-variant-numeric:tabular-nums}
+.count.hot{background:var(--now-soft);color:var(--now)}
+.count:empty{display:none}
+.panel{display:grid;gap:24px}
+#sessSections,#boxSections{display:grid;gap:24px}
+#sessSections:empty,#boxSections:empty,#boxSlots:empty{display:none}
+.slotgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+@media (max-width:420px){.slotgrid{grid-template-columns:minmax(0,1fr)}}
+.slot{display:grid;gap:2px;align-content:start;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--surface);min-height:64px;font-size:13px;color:var(--ink);min-width:0}
+.slot.free{border-style:dashed;background:transparent;color:var(--muted);place-content:center;text-align:center}
+.slot.used{border-color:color-mix(in srgb,var(--ok) 55%,var(--line))}
+.slot.used.bad{border-color:var(--alarm)}
+.slot.mine{box-shadow:inset 0 0 0 1px var(--accent)}
+.slot b{font:600 13.5px var(--mono)}
+.slot span{color:var(--muted);font-size:12px;line-height:1.35;overflow-wrap:anywhere}
+.slot .stop{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 8px}
+.slot .why{color:var(--ink)}
+.slot.bad .why{color:var(--alarm)}
+.slot .slinks{display:flex;gap:12px;font-size:12.5px;margin-top:2px}
+.waitlist{margin:10px 0 0;padding:0;list-style:none;display:grid;gap:4px;font-size:13.5px}
+.slotlegend{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:10px;font-size:12.5px;color:var(--muted)}
+.slotlegend .lg{display:inline-flex;align-items:center;gap:6px}
+.swatch{width:14px;height:14px;border-radius:4px;border:2px solid var(--line);background:var(--surface);flex:none}
+.swatch.used{border-color:color-mix(in srgb,var(--ok) 55%,var(--line))}
+.swatch.bad{border-color:var(--alarm)}
+.swatch.free{border-style:dashed;background:transparent}
+.lede{margin:0;color:var(--muted);max-width:60ch}
+.status{font-size:14px;color:var(--muted);margin:0}
+.status.error{color:var(--now)}
+section.group,section.sec{display:grid;gap:10px}
+.ghead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+h2{margin:0;font:700 13px/1.2 var(--body);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.ghead .hint{font-size:13px;color:var(--muted)}
+#focusCard{display:grid;gap:16px}
+/* An investigation card: a data investigation that feeds decisions, on one screen, on top of the PR stack. */
+.invcard{display:grid;gap:14px;padding:16px 18px;background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:10px;min-width:0}
+.invcard .ftitle{font:700 20px/1.25 var(--display);text-wrap:balance}
+.invcard .ftitle .ititle{font:inherit}
+.invchip{font:600 11px/1.2 var(--body);letter-spacing:.05em;text-transform:uppercase;color:var(--warn)}
+.invmeta{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--muted);flex-wrap:wrap}
+.invage{font:600 11px var(--body);padding:2px 8px;border-radius:999px;border:1px solid currentColor}
+.invage.ok{color:var(--ok)}
+.invage.warn{color:var(--warn)}
+.invqa{display:grid;gap:2px}
+.invqa p{margin:0}
+.invk,.invh{font:600 11px/1.2 var(--body);letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+.invans{font-weight:600;font-size:15px;text-wrap:balance}
+.invgates{display:grid;gap:10px}
+.invgate{border:1px solid var(--line);border-left:3px solid var(--line);border-radius:8px;padding:10px 12px;display:grid;gap:8px;min-width:0}
+.invgate.done{border-left-color:var(--ok)}
+.invgate.doing{border-left-color:var(--accent)}
+.invgate.you{border-left-color:var(--warn)}
+.invgh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.invgn{font:700 13px var(--body);color:var(--muted)}
+.invgs{font:600 10.5px var(--body);padding:2px 8px;border-radius:999px;border:1px solid currentColor;color:var(--muted)}
+.invgs.done{color:var(--ok)}
+.invgs.doing{color:var(--accent)}
+.invgs.you{color:var(--warn)}
+.invgst{margin:0;font-size:13.5px}
+.invgnums{display:flex;flex-wrap:wrap;gap:6px}
+.invgnum{display:inline-flex;gap:6px;align-items:baseline;padding:3px 9px;border:1px solid var(--line);border-radius:999px;font-size:12px}
+.invgnum b{font-variant-numeric:tabular-nums}
+.invgnext{display:flex;gap:8px;align-items:baseline;font-size:13px}
+.invtiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.invtile{display:grid;gap:4px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;min-width:0}
+.invtv{font:700 22px/1.1 var(--body);font-variant-numeric:tabular-nums}
+.invtl{font-size:12.5px;color:var(--ink)}
+.invtn{font-size:11.5px;color:var(--muted)}
+.invtf{display:flex;justify-content:space-between;align-items:center;gap:6px}
+.invsrc{font-size:11px;color:var(--muted)}
+.invq{font:600 11px var(--body);padding:2px 8px;border-radius:6px;border:1px solid var(--line);background:none;color:var(--accent);cursor:pointer}
+.invsec{display:grid;gap:8px}
+.invfind{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.invft{display:flex;gap:8px;align-items:baseline}
+.invfe{margin:2px 0 0;font-size:12.5px;color:var(--muted)}
+.invconf{font:600 10.5px var(--body);padding:1px 7px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
+.invconf.ok{color:var(--ok)}
+.invconf.warn{color:var(--warn)}
+.invdec{display:grid;gap:6px;padding:10px 0;border-top:1px solid var(--line)}
+.invopts{display:grid;gap:6px}
+.invopt{display:flex;flex-wrap:wrap;gap:6px;align-items:baseline;text-align:left;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:none;color:inherit;font:inherit;cursor:pointer}
+.invopt span{color:var(--muted);font-size:12.5px}
+.invopt .tag{font:700 10.5px/1 var(--body);letter-spacing:.06em;text-transform:uppercase;color:var(--decide);margin-left:auto}
+.invopt.armed{border-color:var(--accent)}
+.invopt.chosen{border-color:var(--ok)}
+div.invopt{cursor:default}
+.invev summary{cursor:pointer;font:600 12px var(--body);color:var(--muted)}
+.invevb{display:grid;gap:6px;margin-top:10px}
+.invevt{display:grid;grid-template-columns:minmax(120px,max-content) minmax(0,1fr);gap:4px 14px;font-size:12.5px}
+.invek{color:var(--muted)}
+.invcmpw{overflow-x:auto}
+.invcmp{border-collapse:collapse;width:100%;min-width:560px;font-size:12.5px}
+.invcmp th{text-align:left;font:600 10.5px var(--body);letter-spacing:.05em;text-transform:uppercase;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--line)}
+.invcmp td{padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+.invck{font-weight:600}
+.invcv{font-variant-numeric:tabular-nums;white-space:nowrap}
+.invcn{color:var(--muted)}
+.invev2{font-variant-numeric:tabular-nums}
+/* The Live view: one summary card per PR that met its definition of done. */
+/* Tab reload skeleton: the panel's content fades and shimmering bars sit on top until the fresh read lands. */
+.panel{position:relative}
+.panel.reloading>*{opacity:.18;transition:opacity .15s}
+.panel.reloading::after{content:"";position:absolute;inset:8px 0 auto 0;height:min(420px,70vh);border-radius:12px;pointer-events:none;
+  background:
+    linear-gradient(90deg,transparent,color-mix(in srgb,var(--surface) 70%,transparent),transparent) 0 0/40% 100% no-repeat,
+    linear-gradient(var(--line),var(--line)) 18px 22px/38% 14px no-repeat,
+    linear-gradient(var(--line),var(--line)) 18px 52px/70% 10px no-repeat,
+    linear-gradient(var(--line),var(--line)) 18px 72px/56% 10px no-repeat,
+    linear-gradient(var(--line),var(--line)) 18px 118px/44% 14px no-repeat,
+    linear-gradient(var(--line),var(--line)) 18px 148px/76% 10px no-repeat,
+    linear-gradient(var(--line),var(--line)) 18px 168px/62% 10px no-repeat,
+    linear-gradient(var(--line),var(--line)) 18px 214px/40% 14px no-repeat,
+    linear-gradient(var(--line),var(--line)) 18px 244px/72% 10px no-repeat,
+    var(--surface);
+  border:1px solid var(--line)}
+@media (prefers-reduced-motion:no-preference){@keyframes skel{from{background-position:-40% 0,18px 22px,18px 52px,18px 72px,18px 118px,18px 148px,18px 168px,18px 214px,18px 244px,0 0}to{background-position:140% 0,18px 22px,18px 52px,18px 72px,18px 118px,18px 148px,18px 168px,18px 214px,18px 244px,0 0}}.panel.reloading::after{animation:skel 1.1s ease-in-out infinite}}
+.sec.done h2{color:var(--ok)}
+.sec.you h2{color:var(--ink)}
+/* The focus card: the top priority with a brief, as Title, Problem, Solution, then a step wizard. Red is kept
+   for real failures only. */
+.focus{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:10px;padding:16px 18px;display:grid;gap:14px;min-width:0}
+.focus > div{min-width:0}
+.nextstep{display:grid;gap:6px;background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--wait1);border-radius:10px;padding:12px 16px;margin-block:4px 14px;min-width:0}
+.nextstep .nslabel{font:600 11px/1.2 var(--body);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.nextstep .nstitle{font:600 17px/1.3 var(--display);text-wrap:balance}
+.nextstep .nstext{margin:0;color:var(--ink);max-width:70ch}
+.nextstep .nsrec{margin:0;padding:8px 10px;background:var(--ok-soft);border-radius:6px;color:var(--ink);max-width:70ch}
+.nextstep .nshow{margin:0;padding:8px 10px;background:var(--accent-soft);border-radius:6px;color:var(--ink);max-width:70ch}
+.nextstep .nsrow{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;color:var(--muted);font-size:13px}
+.nextstep a.nstitle{color:var(--ink);text-decoration:none}.nextstep a.nstitle:hover{text-decoration:underline}
+.focus.flash{animation:cardflash 1.6s ease-out}
+@keyframes cardflash{0%{box-shadow:0 0 0 3px var(--accent)}100%{box-shadow:0 0 0 0 transparent}}
+.relnotes,.relafter{display:grid;gap:6px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;min-width:0}
+.relnotes h4,.relafter h4{margin:0;font:600 12px/1.2 var(--body);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.relnotes ul{margin:0;padding-left:18px;display:grid;gap:4px}
+.relafter ol{margin:0;padding-left:20px;display:grid;gap:10px}
+.relafter .ralabel{font-weight:600}.relafter .rawhere{color:var(--muted);font-size:13px}
+.relafter .raexpect{margin:4px 0 0;color:var(--muted);font-size:13px}
+.focus ol li{min-width:0}
+.focus .cmd{margin-top:6px}
+.focus .ftitle{font:700 20px/1.25 var(--display);text-wrap:balance;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.focus .ftitle .ititle{font:inherit}
+.focus .ftitle a{color:inherit}
+.fbehind{font:600 12px/1 var(--body);padding:4px 9px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+.fbehind.behind{color:var(--decide);background:var(--decide-soft)}
+.fupdated{font:400 12.5px var(--body);color:var(--muted)}
+.fwt{font:11.5px var(--mono);color:var(--muted);overflow-wrap:anywhere}
+.fsess{font:600 12px var(--body)}
+.focus .flabel{font:700 11.5px/1.2 var(--body);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+.focus p{margin:0;max-width:68ch}
+.focus ol{margin:0;padding-left:22px;display:grid;gap:6px;max-width:72ch}
+.focus .fwholine{margin:0;font:600 11.5px/1.2 var(--body);letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+.fwiz{display:grid;gap:0;min-width:0}
+.fwtabs{display:flex;gap:2px;overflow-x:auto;border-bottom:1px solid var(--line)}
+.fwtab{display:inline-flex;align-items:center;gap:6px;font:600 12.5px var(--body);color:var(--muted);background:transparent;border:0;border-bottom:2px solid transparent;padding:8px 10px;cursor:pointer;white-space:nowrap;margin-bottom:-1px}
+.fwtab.done{color:var(--ok)}
+.fwtab.now{color:var(--accent)}
+/* The current step's tab header blinks, so the step in play is easy to spot. */
+@keyframes fwnow{0%,100%{opacity:1}50%{opacity:.3}}
+.fwtab.now{animation:fwnow 1.4s ease-in-out infinite}
+@media (prefers-reduced-motion:reduce){.fwtab.now{animation:none;text-decoration:underline}}
+.fwtab.todo{opacity:.55}
+.fwtab[aria-selected="true"]{border-bottom-color:currentColor}
+.fwtab:hover{background:var(--code-bg)}
+.fwpanel{display:grid;gap:8px;padding-top:12px;min-width:0}
+.fwpanel p{font-weight:600}
+.fwstate{font:600 11.5px/1.2 var(--body);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.fwstate.now{color:var(--accent)}
+.fwstate.done{color:var(--ok)}
+.fchecks,.fevidence,.fverdict{display:grid;gap:6px;min-width:0}
+.fckdet summary{list-style:none;cursor:pointer;display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.fckdet summary::-webkit-details-marker{display:none}
+.fcklabel{font:700 11.5px/1.2 var(--body);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-right:2px}
+.fckchip{display:inline-flex;align-items:center;gap:4px;font:600 12px/1 var(--body);color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:3px 8px}
+.fckchip.success{color:var(--ok)}
+.fckchip.failure,.fckchip.cancelled{color:var(--alarm)}
+.fckchip.pending,.fckchip.in_progress{color:var(--warn)}
+.fckat{font:12px var(--body);color:var(--muted)}
+.fckdet[open] .fcklist{margin-top:8px}
+.fcklist{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:4px 12px;font-size:13px}
+.fck{display:flex;gap:6px;align-items:baseline;min-width:0}
+.fckname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
+.fckicon{font:700 12px/1 var(--mono);width:14px;flex:none;text-align:center;color:var(--muted)}
+.fck.success .fckicon{color:var(--ok)}
+.fck.failure .fckicon,.fck.cancelled .fckicon{color:var(--alarm)}
+.fck.pending .fckicon,.fck.in_progress .fckicon{color:var(--warn)}
+.fck.skipped .fckname{color:var(--muted)}
+.fround{margin:0;padding-left:20px;display:grid;gap:4px;font-size:13px}
+.fround li{display:flex;flex-wrap:wrap;gap:6px;align-items:baseline}
+.fround .fsum{font-weight:400;min-width:0}
+.fres{font:600 11.5px/1.2 var(--body);padding:2px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+.fres.ok{color:var(--ok);background:var(--ok-soft)}
+.fres.warn{color:var(--warn)}
+.fres.bad{color:var(--alarm)}
+.fverdict{border-top:1px solid var(--line);padding-top:10px}
+.fverdict p{font-weight:400}
+/* A Rollout step's timeline: what the platform should do next, with its live number or a query for it. */
+.rtl{border-top:1px solid var(--line);padding-top:12px;display:grid;gap:8px;min-width:0}
+.rtlh{font:600 11px/1.2 var(--body);letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+.rtll{list-style:none;margin:0;padding:0 0 0 14px;border-left:2px solid var(--line);display:grid;gap:12px}
+.rtli{position:relative;display:grid;gap:4px;min-width:0}
+.rtli::before{content:"";position:absolute;left:-20px;top:4px;width:10px;height:10px;border-radius:50%;background:var(--bg);border:2px solid var(--line)}
+.rtli.done::before{background:var(--ok);border-color:var(--ok)}
+.rtli.now::before{background:var(--accent);border-color:var(--accent)}
+.rtli.todo{opacity:.8}
+.rtlt{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.rtlat{font:500 12px var(--body);color:var(--muted);font-variant-numeric:tabular-nums}
+.fwpanel p.rtle{margin:0;font-size:13px;font-weight:400;color:var(--muted)}
+.rtln{font:600 14px var(--body);font-variant-numeric:tabular-nums}
+.rtlq{display:grid;gap:4px;min-width:0}
+.rtlqk{font-size:12px;color:var(--muted)}
+.rtlq .cmd code{white-space:pre-wrap;word-break:break-all}
+.fconf{font:600 11.5px/1 var(--body);padding:4px 10px;border-radius:999px;border:1px solid var(--line);font-variant-numeric:tabular-nums}
+.fconf.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,var(--line))}
+.fconf.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
+.fconf.bad{color:var(--alarm);border-color:color-mix(in srgb,var(--alarm) 45%,var(--line))}
+.fconfbasis{margin:0;color:var(--muted);font-size:13px}
+.fconflist{margin:6px 0 0;padding-left:18px;display:grid;gap:4px;font-size:13px}
+.fconfn{margin:0 6px;font:600 12px var(--mono);font-variant-numeric:tabular-nums}
+.fvhead{display:flex;align-items:center;gap:8px}
+.fvhead .flabel{margin-bottom:0}
+.fgo{font:700 12px/1 var(--body);padding:5px 11px;border-radius:999px;border:1px solid var(--line)}
+.fgo.go{color:var(--ok);background:var(--ok-soft);border-color:color-mix(in srgb,var(--ok) 45%,var(--line))}
+.fgo.nogo{color:var(--alarm);background:var(--now-soft);border-color:color-mix(in srgb,var(--alarm) 45%,var(--line))}
+/* The review table: one row per area (Area · What we found · Claude), details folded per row. */
+.rvtable{display:grid;grid-template-columns:auto minmax(0,1fr) minmax(0,1.2fr);gap:8px 14px;align-items:start;font-size:13px}
+.rvh{font:700 11px/1.2 var(--body);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--line);padding-bottom:4px}
+.rvlabel{font-weight:600;white-space:nowrap}
+.rvmid,.rvright{display:grid;gap:4px;min-width:0}
+.rvfact{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.rvfact .add{color:var(--ok);font-family:var(--mono)}
+.rvfact .del{color:var(--muted);font-family:var(--mono)}
+.rvmore{font:600 12px var(--body);color:var(--accent);cursor:pointer}
+.rvtable .fckdet{margin:0}
+.rvverdict{font-weight:500}
+.rvneed{font:600 12px var(--body)}
+.rvneed.yes{color:var(--accent)}
+.rvneed.no{color:var(--muted)}
+.rvverdict.ok{color:var(--ok)}
+.rvverdict.warn{color:var(--warn)}
+.rvverdict.bad{color:var(--alarm)}
+.rvverdict.recalc{color:var(--muted);font-style:italic}
+.fgo.recalc{color:var(--muted);font-weight:600}
+.rvlegend{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;font-size:12px;color:var(--muted);padding-top:4px}
+.fkey{display:inline-flex;align-items:center;gap:6px}
+.fwkey{font:600 12px var(--body)}
+.fwkey.done{color:var(--ok)}
+.fwkey.now{color:var(--accent)}
+.fwkey.todo{color:var(--muted)}
+@media (max-width:640px){.rvtable{grid-template-columns:minmax(0,1fr)}.rvh{display:none}.rvlabel{margin-top:6px;border-top:1px solid var(--line);padding-top:8px}}
+.fevnote{margin:0;color:var(--muted);font-size:13px;font-weight:400}
+.fthumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.fthumb{display:grid;gap:4px;text-decoration:none;color:var(--muted);font-size:12px;min-width:0}
+.fthumb img{width:100%;aspect-ratio:16/10;object-fit:cover;object-position:top;border:1px solid var(--line);border-radius:6px;background:var(--code-bg)}
+.fthumb:hover img{border-color:var(--accent)}
+.fcap{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The QA tab's cases: each collapsed to its title and a proof pill; open, it shows Expected, Seen, Claude and
+   the screenshot. */
+.qacases{display:grid;gap:6px;min-width:0}
+.qashot{border:1px solid var(--line);border-radius:10px;background:var(--surface);min-width:0}
+.qasum{display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;list-style:none;font:13.5px/1.4 var(--body)}
+.qasum::-webkit-details-marker{display:none}
+.qacase{font-weight:600;min-width:0}
+.qasum .qacase::before{content:"▸ ";color:var(--muted)}
+.qashot[open]>.qasum .qacase::before{content:"▾ "}
+.qapill{margin-left:auto;flex:none;font:600 11.5px/1 var(--body);padding:4px 10px;border-radius:999px;border:1px solid var(--line)}
+.qapill.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,var(--line))}
+.qapill.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
+.qapill.bad{color:var(--alarm);border-color:color-mix(in srgb,var(--alarm) 45%,var(--line))}
+.qapill.recalc,.qapill.none{color:var(--muted);font-style:italic}
+.qabody{display:grid;gap:6px;padding:0 14px 12px}
+.qaline{display:grid;grid-template-columns:80px minmax(0,1fr);gap:10px;font:13px/1.45 var(--body)}
+.qalabel{color:var(--muted);font:600 11px/1.6 var(--body);letter-spacing:.05em;text-transform:uppercase}
+.qabody .fshotimg{padding:4px 0 0}
+/* QA evidence without cases: one expandable row per screenshot, opening to the full-width image. */
+.fshots{display:grid;gap:8px}
+.fshot{border:1px solid var(--line);border-radius:10px;background:var(--surface);min-width:0}
+.fshotsum{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline;padding:10px 14px;cursor:pointer;font:13.5px/1.4 var(--body)}
+.fshotsum b{font-weight:600}
+.fproves{color:var(--muted)}
+.fshotimg{display:block;padding:0 10px 10px}
+.fshotimg img{display:block;width:100%;height:auto;border-radius:6px;border:1px solid var(--line)}
+@media (max-width:480px){.fwtab{padding:8px 7px;font-size:12px}}
+ul.items{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+li.item{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 16px;display:grid;grid-template-columns:minmax(0,1fr);gap:4px 12px}
+.naacts{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:4px}
+.actbtn{font:600 13px var(--body);color:var(--accent);background:var(--surface);border:1px solid color-mix(in srgb,var(--accent) 50%,var(--line));border-radius:6px;padding:6px 12px;cursor:pointer}
+.actbtn:hover{border-color:var(--accent)}
+.actbtn.armed{background:var(--accent-soft);border-color:var(--accent)}
+.actbtn:disabled{opacity:.6;cursor:default}
+.checks{display:inline-flex;align-items:center;gap:5px;font:600 11.5px/1 var(--body);padding:4px 8px;border-radius:999px;white-space:nowrap;border:1px solid var(--line);color:var(--muted)}
+.checks .ckicon{font:700 12px/1 var(--mono)}
+.checks.green{color:var(--ok);background:var(--ok-soft);border-color:color-mix(in srgb,var(--ok) 40%,var(--line))}
+.checks.running{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
+.checks.red{color:var(--alarm);background:var(--now-soft);border-color:var(--alarm)}
+.checks.behind{color:var(--decide);background:var(--decide-soft)}
+@media (prefers-reduced-motion:no-preference){@keyframes ckpulse{50%{opacity:.35}}.checks.running .ckicon{animation:ckpulse 1.2s ease-in-out infinite}}
+li.item.next-up{border-color:color-mix(in srgb,var(--accent) 45%,var(--line))}
+.na-label{font:700 11.5px/1.2 var(--body);letter-spacing:.06em;text-transform:uppercase;color:var(--accent)}
+.ibody{display:grid;gap:6px;min-width:0}
+.itop{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 10px}
+.ititle{font:600 16px/1.35 var(--body);overflow-wrap:anywhere}
+.chip{font:500 11.5px/1 var(--mono);padding:4px 7px;border-radius:5px;background:var(--accent-soft);color:var(--accent);white-space:nowrap}
+.pill{font:600 11px/1 var(--body);letter-spacing:.06em;text-transform:uppercase;padding:5px 8px;border-radius:999px;white-space:nowrap;flex:none}
+.pill.doing{background:var(--accent-soft);color:var(--accent)}
+.pill.waiting{background:var(--decide-soft);color:var(--decide)}
+.pill.watching{background:var(--ok-soft);color:var(--ok)}
+.detail{margin:0;color:var(--ink);max-width:66ch;overflow-wrap:anywhere}
+.steps{list-style:none;margin:0;padding:0;display:grid;gap:3px;font-size:14px}
+.steps li{display:flex;gap:8px;align-items:baseline;color:var(--muted)}
+.steps li::before{content:"○";font:12px var(--mono);color:var(--muted);flex:none}
+.steps li.done{color:var(--ink)}
+.steps li.done::before{content:"✓";color:var(--ok)}
+.steps li.doing{color:var(--ink);font-weight:600}
+.steps li.doing::before{content:"●";color:var(--accent)}
+.decision{display:grid;gap:8px;background:var(--decide-soft);border-radius:10px;padding:12px 14px;margin-block:2px}
+.decision .q{font:700 14px/1.35 var(--body);color:var(--decide)}
+.facts{margin:0;padding-left:18px;display:grid;gap:2px;font-size:14px}
+.opts{display:grid;gap:6px}
+.opt{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:14px}
+.opt b{font-weight:600}
+.opt span{color:var(--muted)}
+.opt.rec{border-color:var(--decide)}
+.opt .tag{font:700 10.5px/1 var(--body);letter-spacing:.06em;text-transform:uppercase;color:var(--decide);margin-left:auto}
+.opt.pick{cursor:pointer;width:100%;text-align:left;font:inherit;color:inherit}
+.opt.pick:hover{border-color:var(--accent)}
+.opt.pick:disabled{opacity:.6;cursor:default}
+.opt.armed{border-color:var(--accent);background:var(--accent-soft)}
+.opt.armed .tag{color:var(--accent)}
+.cmd{display:flex;gap:8px;align-items:stretch;min-width:0}
+.cmd code{flex:1;min-width:0;font:13px/1.5 var(--mono);background:var(--code-bg);border:1px solid var(--line);border-radius:6px;padding:7px 10px;overflow-x:auto;white-space:pre}
+.cmd button{font:500 13px var(--body);color:var(--accent);background:transparent;border:1px solid var(--line);border-radius:6px;padding:6px 10px;cursor:pointer}
+.cmd button:hover{border-color:var(--accent)}
+button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.links{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:14px}
+a{color:var(--accent);text-decoration-thickness:1px;text-underline-offset:2px;overflow-wrap:anywhere}
+.meta{font:12px var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}
+.empty{background:var(--surface);border:1px dashed var(--line);border-radius:10px;padding:20px 18px;display:grid;gap:4px;list-style:none}
+.empty b{font:600 16px var(--body)}
+.empty span{color:var(--muted);font-size:14px}
+ul.rows{list-style:none;margin:0;padding:0;background:var(--surface);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+li.row{display:flex;align-items:center;gap:10px;padding:9px 14px;border-top:1px solid var(--line);font-size:14px;min-width:0;flex-wrap:wrap}
+li.row:first-child{border-top:0}
+.row .tick{color:var(--ok);font:600 13px var(--mono);flex:none}
+.row .arrow{color:var(--muted);font:600 13px var(--mono);flex:none}
+.row .mark{flex:none;font:700 13px var(--mono);width:14px;text-align:center}
+.mark.done,.mark.ok{color:var(--ok)}
+.mark.doing{color:var(--accent)}
+.mark.partly{color:var(--decide)}
+.mark.todo,.mark.info{color:var(--muted)}
+.mark.you{color:var(--accent)}
+.mark.bad{color:var(--alarm)}
+.mark.warn{color:var(--warn)}
+.row .rt{flex:none;font-weight:600;white-space:nowrap;max-width:52%;overflow:hidden;text-overflow:ellipsis}
+.row .rt a{color:var(--ink);text-decoration-color:var(--line)}
+.row .rt a:hover{color:var(--accent)}
+.row .rl{flex:1;min-width:0;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .dt{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink)}
+.row .dt a{color:var(--ink);text-decoration-color:var(--line)}
+.row .rowmore{flex-basis:100%;display:grid;gap:8px;padding:6px 0 4px 24px}
+.who{flex:none;font:600 11px/1 var(--body);letter-spacing:.04em;padding:4px 8px;border-radius:999px;white-space:nowrap}
+.who.you{background:var(--accent-soft);color:var(--accent)}
+.who.claude{background:var(--ok-soft);color:var(--ok)}
+.who.ci{background:var(--decide-soft);color:var(--decide)}
+.dtime{flex:none;font:12px var(--mono);color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+.small{flex:none;font:500 12px var(--body);color:var(--muted);background:transparent;border:1px solid var(--line);border-radius:6px;padding:3px 8px;cursor:pointer}
+.small:hover{color:var(--accent);border-color:var(--accent)}
+.more{justify-self:start;font:500 13px var(--body);color:var(--accent);background:transparent;border:1px solid var(--line);border-radius:6px;padding:6px 10px;cursor:pointer}
+.bhead{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.btitle{display:grid;gap:2px;min-width:0}
+.btitle b{font:800 26px/1.1 var(--display)}
+/* The progress line, first in the header: a countdown to the session's next scheduled check (meta/settings). */
+.mood{flex:none;display:grid;justify-items:start;gap:3px;width:max-content;max-width:calc(100vw - 32px);border:1px solid var(--line);border-radius:999px;padding:6px 12px;background:var(--surface);cursor:pointer;font:inherit;color:inherit;text-align:left}
+.says{display:flex;align-items:center;gap:6px;font:700 11.5px/1.2 var(--body);letter-spacing:.05em;text-transform:uppercase;color:var(--muted);white-space:nowrap}
+.light{width:9px;height:9px;border-radius:50%;background:var(--line);flex:none}
+.mood[data-mood="fire"] .says{color:var(--ink)}
+.mood[data-mood="fire"] .light{background:var(--now)}
+.mood[data-mood="cooking"] .says{color:var(--accent)}
+.mood[data-mood="cooking"] .light{background:var(--accent)}
+.mood[data-mood="waiting"] .says{color:var(--decide)}
+.mood[data-mood="waiting"] .light{background:var(--decide)}
+.mood[data-mood="clear"] .says{color:var(--ok)}
+.mood[data-mood="clear"] .light{background:var(--ok)}
+@media (prefers-reduced-motion:no-preference){@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:.15}}.mood[data-mood="fire"] .light{animation:blink 1s steps(1) infinite}}
+footer{font-size:11px;line-height:1.4;color:var(--muted);display:flex;flex-wrap:nowrap;justify-content:space-between;align-items:baseline;gap:16px;white-space:nowrap}
+footer > span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+footer > .copy{flex:none}
+footer a{color:inherit}
+@media (max-width:480px){li.item,.focus{padding:12px 13px}.cmd{flex-direction:column}li.row{padding:9px 11px;gap:8px}.row .rt{max-width:60%}.decision{padding:10px 12px}}
+/* Page background: a slow aurora in the progress bar's colours (accent to ok), with a faint dot grid. */
+html{background:var(--bg)}
+body{position:relative;isolation:isolate;min-height:100vh}
+body::before,body::after{content:"";position:fixed;inset:-20vmax;z-index:-1;pointer-events:none}
+body::before{background:
+  radial-gradient(38vmax 30vmax at 20% 25%,color-mix(in srgb,var(--accent) 22%,transparent),transparent 70%),
+  radial-gradient(34vmax 28vmax at 80% 30%,color-mix(in srgb,color-mix(in srgb,var(--accent) 40%,var(--ok)) 20%,transparent),transparent 70%),
+  radial-gradient(40vmax 32vmax at 55% 85%,color-mix(in srgb,var(--ok) 16%,transparent),transparent 70%);
+  filter:blur(40px) saturate(1.1);opacity:.9}
+body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink) 9%,transparent) 1px,transparent 1.2px);background-size:22px 22px;
+  -webkit-mask-image:radial-gradient(ellipse at 50% 0%,#000 30%,transparent 75%);mask-image:radial-gradient(ellipse at 50% 0%,#000 30%,transparent 75%)}
+@media (prefers-reduced-motion:no-preference){
+  @keyframes aurora{0%{transform:translate3d(0,0,0) rotate(0deg) scale(1)}33%{transform:translate3d(4vmax,-3vmax,0) rotate(8deg) scale(1.08)}66%{transform:translate3d(-3vmax,3vmax,0) rotate(-6deg) scale(.96)}100%{transform:translate3d(0,0,0) rotate(0deg) scale(1)}}
+  body::before{animation:aurora 28s ease-in-out infinite;will-change:transform}
+}
+/* Plans tab footer: what each row mark means. */
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin:4px 0 0;font-size:12.5px;color:var(--muted)}
+.legend .mark{display:inline-block;width:1.1em;text-align:center;font-weight:700}
+/* Screenshot viewer: a click on any screenshot opens it full screen; Esc, the close button or a click
+   outside the image closes it. */
+.shotbox{position:fixed;inset:0;z-index:1000;background:color-mix(in srgb,#000 82%,transparent);display:grid;grid-template-rows:auto 1fr;gap:8px;padding:calc(12px + env(safe-area-inset-top,0px)) 16px calc(16px + env(safe-area-inset-bottom,0px))}
+.shotbox[hidden]{display:none}
+.shotbar{display:flex;align-items:center;gap:12px;color:#fff;font-size:14px;min-width:0}
+.shotbar .shotcap{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.shotbar a{color:#fff}
+.shotbar button{display:grid;place-items:center;width:36px;height:36px;padding:0;color:#fff;background:transparent;border:0;border-radius:999px;cursor:pointer}
+.shotbar button:hover{opacity:.75}.shotbar button:focus{outline:none}
+.shotbar button svg{width:22px;height:22px}
+.shotview{overflow:auto;display:grid;place-items:start center;min-height:0}
+.shotview img{max-width:100%;height:auto;cursor:zoom-out;border-radius:6px;background:#fff}
+.fshotimg img{cursor:zoom-in}
+/* A card whose checks are running, or whose branch is behind main, pulses its left border. */
+@keyframes cardpulse{0%,100%{border-left-color:var(--accent)}50%{border-left-color:color-mix(in srgb,var(--accent) 25%,transparent)}}
+@keyframes cardbehind{0%,100%{border-left-color:var(--warn)}50%{border-left-color:color-mix(in srgb,var(--warn) 25%,transparent)}}
+.focus[data-checks="running"]{animation:cardpulse 1.6s ease-in-out infinite}
+.focus[data-checks="behind"]{animation:cardbehind 1.6s ease-in-out infinite}
+@media (prefers-reduced-motion:reduce){.focus[data-checks]{animation:none;border-left-style:dashed}}
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="top">
+      <div class="titles who">
+        <span class="avatar" id="meAvatar" aria-hidden="true">·</span>
+        <div class="whotext"><h1 id="pageTitle">mroom</h1><span class="boxline" id="boxLine">Session room</span></div>
+      </div>
+      <div class="navwrap">
+        <button type="button" class="mood" id="mood" data-mood="loading" aria-live="polite" aria-haspopup="true" aria-expanded="false" aria-controls="navMenu">
+          <span class="says"><span class="light"></span><span id="moodSays">Opening</span></span>
+        </button>
+        <div class="navmenu" id="navMenu" hidden>
+    <div class="tabs" role="tablist" aria-label="Views" aria-orientation="vertical">
+      <button type="button" role="tab" id="tab-current" aria-controls="panel-current" aria-selected="true">Live <span class="count" id="countCurrent"></span></button>
+      <button type="button" role="tab" id="tab-session" aria-controls="panel-session" aria-selected="false" tabindex="-1">Plans <span class="count" id="countSession"></span></button>
+      <button type="button" role="tab" id="tab-engine" aria-controls="panel-engine" aria-selected="false" tabindex="-1">Engine <span class="count" id="countBox"></span></button>
+    </div>
+        </div>
+      </div>
+    </div>
+    <div class="session" id="session"></div>
+    <p class="status" id="status">Opening the session…</p>
+  </header>
+
+  <section class="panel" id="panel-current" role="tabpanel" aria-labelledby="tab-current">
+    <section class="nextstep" id="nextStep" hidden aria-live="polite"></section>
+    <section class="sec" id="secFocus">
+      <div class="ghead"><h2>Issue and PR cards · top priority first</h2></div>
+      <div id="focusCard"></div>
+    </section>
+  </section>
+  </section>
+
+  <section class="panel" id="panel-session" role="tabpanel" aria-labelledby="tab-session" hidden>
+    <div class="bhead">
+      <div class="btitle"><b>Plans</b><span class="meta" id="sessUpdated">Not filled in yet</span></div>
+    </div>
+    <div id="sessSections"></div>
+    <div class="empty" id="sessEmpty"><b>No open plan.</b><span>Claude writes each plan here as the conversation settles it; finished steps leave the list.</span></div>
+    <p class="legend" id="plansLegend" aria-label="What the marks mean"><span><span class="mark you">!</span> Waiting on you</span><span><span class="mark doing">●</span> In progress</span><span><span class="mark partly">◐</span> Partly done</span><span><span class="mark todo">○</span> Not started</span><span><span class="mark warn">▲</span> Needs a look</span><span><span class="mark bad">✕</span> Blocked</span></p>
+  </section>
+
+  <section class="panel" id="panel-engine" role="tabpanel" aria-labelledby="tab-engine" hidden>
+    <div class="bhead">
+      <div class="btitle"><b id="boxTitle">Engine</b><span class="meta" id="boxUpdated">Not filled in yet</span></div>
+    </div>
+    <div id="boxSlots"></div>
+    <div id="boxSections"></div>
+    <div class="empty" id="boxEmpty"><b>No engine status yet.</b><span>The dev box, the session's worktree and the QA slots show here once Claude checks them.</span></div>
+  </section>
+
+  <footer><span>Times are your local time. The page updates live.</span><span class="copy">© 2026 <a href="https://github.com/milroyfraser" target="_blank" rel="noopener">Milroy Fraser</a> · <a href="https://github.com/milroyfraser/mroom/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a></span></footer>
+</div>
+
+<script>
+(() => {
+  const WHO = { you: "You", claude: "Claude", ci: "CI" };
+  const MARK = { done: "✓", doing: "●", partly: "◐", todo: "○", you: "!", ok: "✓", warn: "▲", bad: "✕", info: "·" };
+  const fmt = new Intl.DateTimeFormat("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const fmtTime = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit" });
+  const fmtDay = new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" });
+  const $ = (id) => document.getElementById(id);
+  let db = null, readOnly = false, todos = [], work = [], session = null;
+  /* meta/next: the developer's single next action, written by Claude. */
+  let nextMeta = null;
+  const boards = { session: null, box: null, plans: null };
+  const loaded = { todos: false, work: false };
+  const openRows = new Set();
+
+  /* Views: the choice is remembered per viewer; #live (or #task), #plan or #engine opens that view. The status pill
+     is the main navigation: it shows the current view's title and opens a menu with the views.
+     Escape or a click outside closes the menu. */
+  const TABS = ["current", "session", "engine"];
+  const TAB_ALIAS = { task: "current", live: "current", plan: "session", plans: "session" };
+  let currentView = "";
+  function openNav() { $("navMenu").hidden = false; $("mood").setAttribute("aria-expanded", "true"); }
+  function closeNav() { $("navMenu").hidden = true; $("mood").setAttribute("aria-expanded", "false"); }
+  function showTab(name, focus) {
+    for (const t of TABS) {
+      const on = t === name;
+      const btn = $("tab-" + t);
+      btn.setAttribute("aria-selected", on ? "true" : "false");
+      btn.tabIndex = on ? 0 : -1;
+      $("panel-" + t).hidden = !on;
+      if (on && focus) btn.focus();
+    }
+    try { localStorage.setItem("tab", name); } catch {}
+    const label = $("tab-" + name).firstChild;
+    currentView = label && label.nodeType === 3 ? label.nodeValue.trim() : "";
+    renderMood();
+    closeNav();
+  }
+  document.addEventListener("click", (e) => { if (!$("navMenu").hidden && !e.target.closest(".navwrap")) closeNav(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("navMenu").hidden) { closeNav(); $("mood").focus(); } });
+  /* Visiting a view (a click) also reloads its data: a skeleton shows until the fresh read lands. */
+  let tabRefresh = null;
+  async function visitTab(t) {
+    showTab(t);
+    if (!tabRefresh) return;
+    const panel = $("panel-" + t);
+    panel.classList.add("reloading");
+    const started = Date.now();
+    try { await tabRefresh(t); } catch {}
+    setTimeout(() => panel.classList.remove("reloading"), Math.max(0, 450 - (Date.now() - started)));
+  }
+  for (const t of TABS) $("tab-" + t).addEventListener("click", () => { visitTab(t); $("mood").focus(); });
+  /* Arrow keys move through the views in the open menu without choosing one; Enter or a click chooses. */
+  $("tab-current").parentElement.addEventListener("keydown", (e) => {
+    const fwd = e.key === "ArrowDown" || e.key === "ArrowRight", back = e.key === "ArrowUp" || e.key === "ArrowLeft";
+    if (!fwd && !back) return;
+    e.preventDefault();
+    const btns = TABS.map((t) => $("tab-" + t));
+    const at = Math.max(0, btns.indexOf(document.activeElement));
+    btns[(at + (fwd ? 1 : btns.length - 1)) % btns.length].focus();
+  });
+  $("mood").addEventListener("click", () => {
+    if ($("navMenu").hidden) { openNav(); const sel = document.querySelector('.navmenu .tabs button[aria-selected="true"]'); if (sel) sel.focus(); }
+    else closeNav();
+  });
+
+  /* The pill's light shows the status: Needs you, Working, Waiting or All clear; the aria-label names it. */
+  const MOODS = { fire: "Needs you", cooking: "Working", waiting: "Waiting", clear: "All clear" };
+  function ago(ms) {
+    const m = Math.max(0, Math.round(ms / 60000));
+    if (m < 1) return "just now";
+    if (m < 60) return m + " min ago";
+    const h = Math.round(m / 60);
+    return h < 24 ? h + " h ago" : Math.round(h / 24) + " d ago";
+  }
+  const FOCUS_MAX = 2;
+  function actionable() { return todos.filter((i) => i.status !== "done" && (prio(i) < Infinity || i.when === "now")).sort(byRank); }
+  function renderMood() {
+    const btn = $("mood");
+    if (loaded.todos && loaded.work) {
+      const needs = actionable().length;
+      const doing = work.filter((w) => w.state === "doing").length;
+      const waiting = work.filter((w) => w.state === "waiting" || w.state === "watching").length;
+      btn.dataset.mood = needs ? "fire" : doing ? "cooking" : waiting ? "waiting" : "clear";
+    }
+    const status = MOODS[btn.dataset.mood] || "Opening";
+    $("moodSays").textContent = currentView || status;
+    btn.setAttribute("aria-label", (currentView || "Views") + ". " + status + ". Open the menu.");
+  }
+
+  let first = location.hash.replace("#", "");
+  if (Object.hasOwn(TAB_ALIAS, first)) first = TAB_ALIAS[first];
+  if (!TABS.includes(first)) { try { first = localStorage.getItem("tab") || ""; } catch { first = ""; } }
+  showTab(TABS.includes(first) ? first : "current");
+
+  function setStatus(text, isError) {
+    const s = $("status");
+    s.textContent = text || "";
+    s.hidden = !text;
+    s.classList.toggle("error", !!isError);
+  }
+  function when(d) { const t = Date.parse(d || ""); return Number.isFinite(t) ? fmt.format(new Date(t)) : ""; }
+  function shortWhen(d) {
+    const t = Date.parse(d || "");
+    if (!Number.isFinite(t)) return "";
+    return fmtDay.format(new Date(t)) === fmtDay.format(new Date()) ? fmtTime.format(new Date(t)) : fmt.format(new Date(t)).replace(",", "");
+  }
+  function updated(b) { return b && b.updatedAt ? "Updated " + ago(Date.now() - (Date.parse(b.updatedAt) || Date.now())) + " · " + when(b.updatedAt) : "Not filled in yet"; }
+  function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  function safeUrl(u) { try { const x = new URL(String(u)); return x.protocol === "https:" ? x.href : null; } catch { return null; } }
+  function goodLinks(list) { return (Array.isArray(list) ? list : []).map((l) => ({ label: l && l.label, url: safeUrl(l && l.url) })).filter((l) => l.url); }
+  function anchor(text, url) { const a = el("a", null, text); a.href = url; a.target = "_blank"; a.rel = "noopener noreferrer"; return a; }
+  function linksRow(list) {
+    const good = goodLinks(list);
+    if (!good.length) return null;
+    const row = el("div", "links");
+    for (const l of good) row.append(anchor(String(l.label || l.url), l.url));
+    return row;
+  }
+  function linked(text, url, cls) {
+    const span = el("span", cls);
+    const u = safeUrl(url);
+    if (u) span.append(anchor(text, u)); else span.textContent = text;
+    span.title = text;
+    return span;
+  }
+  function firstSentence(s) { const t = String(s || ""); const m = t.match(/^.*?[.!?](\s|$)/); return (m ? m[0] : t).trim(); }
+
+  /* Asking Claude: the page saves what was clicked on the card, then sends it to the watching session as a
+     comment so it acts now. Without a watching session the saved field waits for Claude's next check. */
+  async function tellClaude(btn, text) {
+    try {
+      const c = window.claude ? await window.claude.use("comments") : null;
+      if (!c || (await c.canSendToClaude()) !== "available") return false;
+      await c.sendToClaude({ anchor: await c.anchorFor(btn), text });
+      return true;
+    } catch { return false; }
+  }
+
+  /* A decision card: the first click selects an option, the second confirms it, so a stray click never decides. */
+  const pendingChoice = new Map();
+  function decisionNode(d, item) {
+    if (!d || typeof d !== "object") return null;
+    const box = el("div", "decision");
+    if (d.question) box.append(el("div", "q", "Your decision: " + String(d.question)));
+    const facts = Array.isArray(d.facts) ? d.facts.filter(Boolean) : [];
+    if (facts.length) { const ul = el("ul", "facts"); for (const f of facts) ul.append(el("li", null, String(f))); box.append(ul); }
+    const opts = Array.isArray(d.options) ? d.options.filter((o) => o && o.label) : [];
+    if (opts.length) {
+      const wrap = el("div", "opts");
+      const clickable = !!(item && db && !readOnly && item.status !== "done");
+      for (const o of opts) {
+        const row = el(clickable ? "button" : "div", "opt" + (o.recommended ? " rec" : "") + (clickable ? " pick" : ""));
+        if (clickable) row.type = "button";
+        row.append(el("b", null, String(o.label)));
+        if (o.note) row.append(el("span", null, String(o.note)));
+        const armed = clickable && pendingChoice.get(item.id) === o.label;
+        if (armed) { row.classList.add("armed"); row.append(el("em", "tag", "Click again to confirm")); }
+        else if (o.recommended) row.append(el("em", "tag", "Recommended"));
+        if (clickable) {
+          row.addEventListener("click", () => {
+            if (pendingChoice.get(item.id) === o.label) { pendingChoice.delete(item.id); choose(item, String(o.label), row); }
+            else { pendingChoice.set(item.id, o.label); armedAction.key = ""; renderAll(); }
+          });
+        }
+        wrap.append(row);
+      }
+      box.append(wrap);
+      if (clickable) box.append(el("div", "meta", "Pick an option to tell Claude; click it twice to confirm."));
+    }
+    return box;
+  }
+  async function choose(it, label, btn) {
+    btn.disabled = true;
+    const now = new Date().toISOString();
+    try {
+      await db.doc("todos/" + it.id).update({ choice: label, chosenAt: now, status: "done", doneAt: now, doneBy: "you" });
+    } catch {
+      btn.disabled = false;
+      setStatus("That choice didn't save. Try again in a moment.", true);
+      return;
+    }
+    const sent = await tellClaude(btn, "Decision on “" + (it.title || it.id) + "”: " + label + ".");
+    setStatus(sent ? "Sent to Claude: " + label + "." : "Saved: " + label + ". Claude picks it up at its next check.");
+  }
+  function commandRow(text) {
+    const row = el("div", "cmd");
+    const code = el("code", null, String(text));
+    const copy = el("button", null, "Copy");
+    copy.type = "button";
+    copy.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(String(text)); copy.textContent = "Copied"; }
+      catch { const r = document.createRange(); r.selectNodeContents(code); const s = getSelection(); s.removeAllRanges(); s.addRange(r); copy.textContent = "Selected"; }
+      setTimeout(() => { copy.textContent = "Copy"; }, 1600);
+    });
+    row.append(code, copy);
+    return row;
+  }
+
+  /* ---------- Live ---------- */
+  /* A lower `priority` comes first (1 = top priority), then urgency (now, decide, soon, whenever), then order. */
+  const WHEN_RANK = { now: 0, decide: 1, soon: 2, whenever: 3 };
+  function prio(x) { const p = Number(x && x.priority); return Number.isFinite(p) && p > 0 ? p : Infinity; }
+  function byRank(a, c) {
+    return prio(a) - prio(c) || (WHEN_RANK[a.when] ?? 4) - (WHEN_RANK[c.when] ?? 4)
+      || (Number(a.order) || 999) - (Number(c.order) || 999) || String(a.addedAt || "").localeCompare(String(c.addedAt || ""));
+  }
+  /* A title whose ids (#123, ABC-45) link to the card's own links with that id in their label. */
+  const ID_RE = /#\d+|\b[A-Z][A-Z0-9]*-[A-Z0-9]+\b/g;
+  function titleWithLinks(title, links) {
+    const node = el("span", "ititle");
+    const good = goodLinks(links);
+    const used = new Set();
+    const text = String(title || "Untitled");
+    let last = 0;
+    for (const m of text.matchAll(ID_RE)) {
+      const hit = good.find((l) => !used.has(l.url) && String(l.label || "").split(/\s+/).includes(m[0]));
+      if (!hit) continue;
+      node.append(document.createTextNode(text.slice(last, m.index)), anchor(m[0], hit.url));
+      used.add(hit.url);
+      last = m.index + m[0].length;
+    }
+    node.append(document.createTextNode(text.slice(last)));
+    return { node, used };
+  }
+  function restLinks(links, used) { return linksRow((Array.isArray(links) ? links : []).filter((l) => !used.has(safeUrl(l && l.url)))); }
+  function todoCard(it, label) {
+    const li = el("li", label ? "item next-up" : "item");
+    li.dataset.id = it.id;
+    li.tabIndex = -1;
+    const body = el("div", "ibody");
+    if (label) body.append(el("div", "na-label", label));
+    const top = el("div", "itop");
+    const title = titleWithLinks(it.title, it.links);
+    top.append(title.node);
+    const ck = checksChip(it.checks);
+    if (ck) top.append(ck);
+    if (it.area) top.append(el("span", "chip", String(it.area)));
+    body.append(top);
+    if (it.detail) body.append(el("p", "detail", String(it.detail)));
+    const d = decisionNode(it.decision, it);
+    if (d) body.append(d);
+    if (it.command) body.append(commandRow(it.command));
+    const links = restLinks(it.links, title.used);
+    if (links) body.append(links);
+    /* No Done button: Claude marks a card done when the work moves on. */
+    const acts = actionButtons(it);
+    if (acts.length) { const w = el("div", "naacts"); w.append(...acts); body.append(w); }
+    li.append(body);
+    return li;
+  }
+  /* The focus card for the top-ranked card that has a brief (it.brief: {problem, solution: [..],
+     steps: [{text, who?, cmd?, size?, checks?, checksAt?, reviews?, qa?, evidence?, evidenceNote?, verdict?}],
+     current}): Title, Problem, Solution, then a step wizard. It has no action buttons: actions go through the chat. */
+  const wizardStep = new Map();
+  /* A review step's CI results (step.checks: [{name, state, url}]): count chips per state, the list folded. */
+  const CK_ORDER = { failure: 0, cancelled: 1, pending: 2, in_progress: 2, neutral: 3, success: 4, skipped: 5 };
+  const CK_ICON = { failure: "✕", cancelled: "⊘", pending: "●", in_progress: "●", neutral: "–", success: "✓", skipped: "·" };
+  function stepChecks(list, at, embedded) {
+    const rows = Array.isArray(list) ? list.filter((c) => c && c.name) : [];
+    if (!rows.length) return null;
+    const norm = (c) => String(c.state || "").toLowerCase();
+    rows.sort((a, b) => (CK_ORDER[norm(a)] ?? 3) - (CK_ORDER[norm(b)] ?? 3) || String(a.name).localeCompare(String(b.name)));
+    const box = el("div", "fchecks");
+    const counts = {};
+    for (const c of rows) counts[norm(c)] = (counts[norm(c)] || 0) + 1;
+    const det = el("details", "fckdet");
+    const sum = el("summary", "fcksum");
+    sum.append(embedded ? el("span", "rvmore", "All checks") : el("span", "fcklabel", "Checks"));
+    for (const k of embedded ? [] : Object.keys(CK_ORDER)) {
+      if (!counts[k]) continue;
+      const chip = el("span", "fckchip " + k);
+      chip.append(el("span", "fckicon", CK_ICON[k]), document.createTextNode(String(counts[k])));
+      chip.title = counts[k] + " " + k;
+      sum.append(chip);
+    }
+    if (at) sum.append(el("span", "fckat", shortWhen(at)));
+    det.append(sum);
+    const ul = el("ul", "fcklist");
+    for (const c of rows) {
+      const st = norm(c);
+      const li = el("li", "fck " + (st || "unknown"));
+      li.append(el("span", "fckicon", CK_ICON[st] || "?"), linked(String(c.name), c.url, "fckname"));
+      ul.append(li);
+    }
+    det.append(ul);
+    box.append(det);
+    return box;
+  }
+  /* A time people read at a glance: "just now", "12 min ago", "2 h 15 min ago", "1 day ago", "3 days ago". */
+  function humanWhen(d) {
+    const t = Date.parse(d || "");
+    if (!Number.isFinite(t)) return "";
+    const m = Math.max(0, Math.round((Date.now() - t) / 60000));
+    if (m < 1) return "just now";
+    if (m < 60) return m + " min ago";
+    const h = Math.floor(m / 60), r = m % 60;
+    if (h < 24) return h + " h" + (r ? " " + r + " min" : "") + " ago";
+    const days = Math.floor(h / 24);
+    return days === 1 ? "1 day ago" : days + " days ago";
+  }
+  const corrections = (n) => (Number(n) || 0) + (Number(n) === 1 ? " correction" : " corrections");
+  /* Claude's call per review area (step.verdicts.size|checks|review|qa: {pill: ok|warn|bad, text}). */
+  const VPILL = { ok: "Good", warn: "Watch", bad: "Problem" };
+  const resCls = (c) => (["ok", "warn", "bad"].includes(c) ? c : "neutral");
+  function countChips(into, list) {
+    const counts = {};
+    for (const c of list) { const st = String(c.state || "").toLowerCase(); counts[st] = (counts[st] || 0) + 1; }
+    for (const k of Object.keys(CK_ORDER)) {
+      if (!counts[k]) continue;
+      const chip = el("span", "fckchip " + k);
+      chip.append(el("span", "fckicon", CK_ICON[k]), document.createTextNode(String(counts[k])));
+      chip.title = counts[k] + " " + k;
+      into.append(chip);
+    }
+  }
+  /* The review summary as one table: a row per area (size, checks, code review, browser QA, test scope, scope,
+     risk, after merge) with what we found,
+     its details folded, and Claude's call from step.verdicts. */
+  /* While checks run on a newer push, a verdict written before that push (its `at` older than it.pr.updatedAt,
+     or missing) is stale: it shows "Recalculating…" until Claude rewrites it. */
+  function isStale(verdict, it) {
+    if (!verdict || !it || it.checks !== "running") return false;
+    const pushed = Date.parse((it.pr && it.pr.updatedAt) || "");
+    const at = Date.parse(verdict.at || "");
+    return !Number.isFinite(at) || (Number.isFinite(pushed) && at < pushed);
+  }
+  function reviewTable(s, it) {
+    const v = s.verdicts && typeof s.verdicts === "object" ? s.verdicts : {};
+    const rows = [];
+    if (s.size && typeof s.size === "object") {
+      const z = s.size;
+      const f = el("span", "rvfact");
+      f.append(document.createTextNode((Number(z.files) || 0) + " files "), el("span", "add", "+" + (Number(z.additions) || 0)), el("span", "del", "−" + (Number(z.deletions) || 0)));
+      rows.push(["Size", f, null, v.size]);
+    }
+    const ck = Array.isArray(s.checks) ? s.checks.filter((c) => c && c.name) : [];
+    if (ck.length) {
+      const f = el("span", "rvfact");
+      countChips(f, ck);
+      if (s.checksAt) f.append(el("span", "fckat", "checked " + humanWhen(s.checksAt)));
+      rows.push(["Checks", f, stepChecks(ck, null, true), v.checks]);
+    }
+    const rounds = (list) => (Array.isArray(list) ? list.filter((r) => r && (r.summary || r.result)) : []);
+    for (const [label, list, key] of [["Code review", rounds(s.reviews), "review"], ["Browser QA", rounds(s.qa), "qa"]]) {
+      /* Browser QA also says whether it is needed at all (s.qaNeeded: true|false), even with no rounds. */
+      const need = key === "qa" && typeof s.qaNeeded === "boolean" ? s.qaNeeded : null;
+      const needTag = () => el("span", "rvneed " + (need ? "yes" : "no"), need ? "Needed" : "Not needed");
+      if (!list.length && need === null) continue;
+      if (!list.length) {
+        const f0 = el("span", "rvfact");
+        f0.append(needTag(), document.createTextNode("· not run"));
+        rows.push([label, f0, null, v[key]]);
+        continue;
+      }
+      const last = list[list.length - 1];
+      const f = el("span", "rvfact");
+      if (need !== null) f.append(needTag());
+      /* With `corrections` on any round, the row also counts the fixes pushed because of the rounds. */
+      const counted = list.some((r) => r.corrections != null);
+      const fixes = list.reduce((n, r) => n + (Number(r.corrections) || 0), 0);
+      f.append(document.createTextNode(list.length + (list.length === 1 ? " round · " : " rounds · ") + (counted ? corrections(fixes) + " · " : "")));
+      if (last.result) f.append(el("span", "fres " + resCls(last.resultClass), String(last.result)));
+      if (last.at) f.append(el("span", "fckat", "last " + humanWhen(last.at)));
+      const det = el("details", "fckdet");
+      det.append(el("summary", "fcksum rvmore", "Rounds"));
+      const ol = el("ol", "fround");
+      list.forEach((r, n) => {
+        const li = el("li");
+        li.append(el("span", "fckat", "Round " + (n + 1) + (r.at ? " · " + humanWhen(r.at) : "")));
+        if (r.result) li.append(el("span", "fres " + resCls(r.resultClass), String(r.result)));
+        if (r.corrections != null) li.append(el("span", "fckat", corrections(r.corrections)));
+        if (r.summary) li.append(el("span", "fsum", String(r.summary)));
+        ol.append(li);
+      });
+      det.append(ol);
+      rows.push([label, f, det, v[key]]);
+    }
+    /* Test scope, scope, risk and after-merge rows: step.testScope / scope / risk / afterMerge = {fact} (plain text). */
+    for (const [label, obj, key] of [["Test scope", s.testScope, "tests"], ["Scope", s.scope, "scope"], ["Risk", s.risk, "risk"], ["After merge", s.afterMerge, "after"]]) {
+      if (!obj || !obj.fact) continue;
+      rows.push([label, el("span", "rvfact", String(obj.fact)), null, v[key]]);
+    }
+    /* Any step's own rows (step.rows: [{area, fact, key}], verdicts in step.verdicts[key]), after the built-in ones. */
+    const own = Array.isArray(s.rows) ? s.rows : [];
+    for (const r of own) {
+      if (!r || !r.area || !r.fact) continue;
+      rows.push([String(r.area), el("span", "rvfact", String(r.fact)), null, r.key ? v[r.key] : null]);
+    }
+    if (!rows.length) return null;
+    const t = el("div", "rvtable");
+    t.append(el("div", "rvh", "Area"), el("div", "rvh", "What we found"), el("div", "rvh", own.length ? "Claude decision" : "Claude"));
+    for (const [label, fact, more, verdict] of rows) {
+      t.append(el("div", "rvlabel", label));
+      const mid = el("div", "rvmid");
+      mid.append(fact);
+      if (more) mid.append(more);
+      t.append(mid);
+      const right = el("div", "rvright");
+      if (verdict && typeof verdict === "object" && isStale(verdict, it)) right.append(el("span", "rvverdict recalc", "Recalculating…"));
+      else if (verdict && typeof verdict === "object") {
+        const k = Object.hasOwn(VPILL, verdict.pill) ? verdict.pill : "ok";
+        const tx = el("span", "rvverdict " + k, String(verdict.text || ""));
+        tx.title = VPILL[k];
+        right.append(tx);
+      }
+      t.append(right);
+    }
+    return t;
+  }
+  /* The legend at the bottom of a review step: the verdict pills, the check icons and the step title colours. */
+  function reviewLegend() {
+    const d = el("div", "rvlegend");
+    const item = (node, text) => { const k = el("span", "fkey"); k.append(node, document.createTextNode(text)); d.append(k); };
+    d.append(el("span", "fcklabel", "Legend"));
+    item(el("span", "rvverdict ok", "Green text"), "fine as it is");
+    item(el("span", "rvverdict warn", "Amber text"), "look at it, not blocking");
+    item(el("span", "rvverdict bad", "Red text"), "must be fixed");
+    for (const [k, txt] of [["success", "passed"], ["failure", "failed"], ["neutral", "neutral"], ["skipped", "skipped"]]) { const c = el("span", "fckchip " + k); c.append(el("span", "fckicon", CK_ICON[k])); item(c, txt); }
+    item(el("span", "fwkey done", "Title"), "step done");
+    item(el("span", "fwkey now", "Title"), "step now");
+    item(el("span", "fwkey todo", "Title"), "step to do");
+    return d;
+  }
+  /* The final verdict, always last (step.verdict: {go: true|false, call, why}), with a Go / No-go pill. */
+  /* Each tab's verdict answers that tab's question: Review is the merge verdict, QA the QA verdict, and so on. */
+  function verdictLabel(v) {
+    const t = String((v && v.step) || "").toLowerCase();
+    return ({ review: "Merge verdict", qa: "QA verdict", release: "Release verdict", rollout: "Rollout verdict", dod: "Definition of done" })[t] || "Claude's verdict";
+  }
+  function stepVerdict(v, pr, it) {
+    if (!v || !v.call) return null;
+    if (isStale(v, it)) {
+      const box0 = el("div", "fverdict");
+      const head0 = el("div", "fvhead");
+      head0.append(el("span", "flabel", verdictLabel(v)), el("span", "fgo recalc", "Recalculating…"));
+      box0.append(head0, el("p", "fevnote", "Checks are running on the latest push. Claude rewrites this when they finish."));
+      return box0;
+    }
+    /* A PR behind main is never a Go: its checks did not run against today's main. */
+    const behind = pr && typeof pr.behindBy === "number" && pr.behindBy > 0;
+    if (behind && v.go === true) v = { go: false, step: v.step, call: "No-go: behind main.", why: "The branch is " + pr.behindBy + (pr.behindBy === 1 ? " commit" : " commits") + " behind main, so its checks did not run on today's main. Update the branch and let CI pass first. Otherwise: " + String(v.why || v.call) };
+    const box = el("div", "fverdict");
+    const head = el("div", "fvhead");
+    head.append(el("span", "flabel", verdictLabel(v)));
+    if (typeof v.go === "boolean") head.append(el("span", "fgo " + (v.go ? "go" : "nogo"), String(v.step || "").toLowerCase() === "dod" ? (v.go ? "Live" : "Not yet") : v.go ? "Go" : "No-go"));
+    box.append(head);
+    const p = el("p");
+    p.append(el("b", null, String(v.call)));
+    if (v.why) p.append(document.createTextNode(" " + String(v.why)));
+    box.append(p);
+    /* QA confidence (v.confidence = {score 0–100, basis, criteria: [{name, score, how}]}): how sure Claude is
+       that the issue's acceptance criteria are all met, from browser proof and old and new tests. */
+    const c = v.confidence && typeof v.confidence === "object" ? v.confidence : null;
+    if (c && Number.isFinite(Number(c.score))) {
+      const n = Math.max(0, Math.min(100, Math.round(Number(c.score))));
+      head.append(el("span", "fconf " + (n >= 90 ? "ok" : n >= 70 ? "warn" : "bad"), "Confidence " + n + "%"));
+      if (c.basis) box.append(el("p", "fconfbasis", String(c.basis)));
+      const rows = Array.isArray(c.criteria) ? c.criteria.filter((r) => r && r.name) : [];
+      if (rows.length) {
+        const det = el("details", "fconfdet");
+        det.append(el("summary", "fcksum rvmore", "How the score is built"));
+        const ul = el("ul", "fconflist");
+        for (const r of rows) {
+          const li = el("li");
+          li.append(el("b", null, String(r.name)), el("span", "fconfn", Math.round(Number(r.score) || 0) + "%"), document.createTextNode(String(r.how || "")));
+          ul.append(li);
+        }
+        det.append(ul);
+        box.append(det);
+      }
+    }
+    return box;
+  }
+  /* Browser QA proof (step.evidence: [{src, href, caption}]): thumbnails of screenshots uploaded to this page's
+     assets, each opening the full image or the QA report. With none, step.evidenceNote says why. */
+  function assetSrc(src) {
+    const s = String(src || "");
+    return /^\/?_blob\/[A-Za-z0-9._-]+$/.test(s) ? s : safeUrl(s);
+  }
+  /* The QA step's cases (step.cases: [{title, expected, seen, key, shot?: {src, href}}], proof verdicts in
+     step.verdicts[key]). Collapsed: the title and a proof pill. Open: Expected, Seen, Claude and the screenshot. */
+  const PROOF = { ok: "Proven", warn: "Partly proven", bad: "Not proven" };
+  function qaCases(s, it) {
+    const v = s.verdicts && typeof s.verdicts === "object" ? s.verdicts : {};
+    /* Cases written in a looser shape ({name, state, note}) still render, and a case list that renders
+       nothing says so instead of leaving the QA tab silently empty. */
+    const cases = s.cases
+      .map((c) => (c && !c.title && c.name ? Object.assign({}, c, { title: c.name, seen: c.seen || c.note, key: c.key || String(c.name) }) : c))
+      .filter((c) => c && c.title);
+    if (!cases.length) return s.cases.length ? el("p", "fevnote", "QA results are recorded in a shape this page can't read. Claude needs to rewrite them as {title, expected, seen, key, shot}.") : null;
+    const box = el("div", "qacases");
+    for (const c of cases) {
+      const verdict = c.key && v[c.key] && typeof v[c.key] === "object" ? v[c.key] : null;
+      const stale = verdict && isStale(verdict, it);
+      const k = verdict && Object.hasOwn(PROOF, verdict.pill) ? verdict.pill : "ok";
+      const det = el("details", "qashot");
+      const sum = el("summary", "qasum");
+      sum.append(el("b", "qacase", String(c.title)), stale ? el("span", "qapill recalc", "Recalculating…") : verdict ? el("span", "qapill " + k, PROOF[k]) : el("span", "qapill none", "Not judged"));
+      const body = el("div", "qabody");
+      /* c.tests: every test that proves the case, of any kind: [{type, name, result?}], e.g. {type: "unit", name: "BandLabelTest", result: "pass"}. */
+      const testsLine = Array.isArray(c.tests) && c.tests.length ? c.tests.map((t) => t && typeof t === "object" ? [t.type, t.name].filter(Boolean).join(": ") + (t.result ? " (" + t.result + ")" : "") : String(t)).join(" · ") : "";
+      for (const [label, text] of [["Expected", c.expected], ["Seen", c.seen], ["Tests", testsLine], ["Claude", stale ? "" : verdict && verdict.text]]) {
+        if (!text) continue;
+        const row = el("div", "qaline");
+        row.append(el("span", "qalabel", label), el("span", null, String(text)));
+        body.append(row);
+      }
+      const src = c.shot && assetSrc(c.shot.src);
+      if (src) {
+        const a = anchor("", safeUrl(c.shot.href) || src);
+        a.className = "fshotimg";
+        const img = el("img");
+        img.src = src; img.alt = String(c.title); img.loading = "lazy";
+        a.append(img);
+        body.append(a);
+      }
+      det.append(sum, body);
+      box.append(det);
+    }
+    return box;
+  }
+  /* Rollout timeline (step.timeline: [{state: done|now|todo, at or when, title, expect, number, numberNote, query}]):
+     each point says what the platform should do and its live number, or the read-only query that finds it. */
+  function rolloutTimeline(list) {
+    if (!Array.isArray(list) || !list.length) return null;
+    const box = el("div", "rtl");
+    box.append(el("div", "rtlh", "Rollout timeline"));
+    const ol = el("ol", "rtll");
+    for (const pt of list) {
+      if (!pt || typeof pt !== "object") continue;
+      const li = el("li", "rtli " + (pt.state === "done" ? "done" : pt.state === "now" ? "now" : "todo"));
+      const head = el("div", "rtlt");
+      head.append(el("span", "rtlat", when(pt.at) || String(pt.when || "next")), el("b", null, String(pt.title || "")));
+      li.append(head);
+      if (pt.expect) li.append(el("p", "rtle", String(pt.expect)));
+      if (pt.number != null && pt.number !== "") li.append(el("div", "rtln", String(pt.number) + (pt.numberNote ? " · " + pt.numberNote : "")));
+      else if (pt.query) {
+        const q = el("div", "rtlq");
+        q.append(el("span", "rtlqk", "Number unknown: run this read-only query"), commandRow(pt.query));
+        li.append(q);
+      }
+      ol.append(li);
+    }
+    box.append(ol);
+    return box;
+  }
+  /* Investigation card: one screen, no tabs. it.inv = {question, answer, asOf, tiles[{value, label, source, query, note}],
+     findings[{text, evidence, confidence: confirmed|likely, source}], decisions[{key, title, options[{label, note, recommended}]}],
+     evidence[{title, source, rows[{k, v}], query}]}; the developer's picks live in it.choices {key: label}. */
+  const invPending = new Map();
+  function investigationCard(it) {
+    const I = it.inv || {};
+    const choices = it.choices && typeof it.choices === "object" ? it.choices : {};
+    const card = el("article", "invcard");
+    card.dataset.id = it.id;
+    card.tabIndex = -1;
+    card.append(el("div", "invchip", "Investigation"));
+    const head = el("div", "ftitle");
+    head.append(titleWithLinks(it.title, it.links).node);
+    card.append(head);
+    const asOf = Date.parse(I.asOf || "");
+    if (Number.isFinite(asOf)) {
+      const old = Date.now() - asOf > 864e5;
+      const meta = el("div", "invmeta");
+      meta.append(el("span", null, "Data as of " + when(I.asOf)), el("span", "invage " + (old ? "warn" : "ok"), old ? "Older than a day: re-run" : "Fresh"));
+      card.append(meta);
+    }
+    if (I.question) { const q = el("div", "invqa"); q.append(el("span", "invk", "Question"), el("p", null, String(I.question))); card.append(q); }
+    if (I.answer) { const a = el("div", "invqa"); a.append(el("span", "invk", "Answer"), el("p", "invans", String(I.answer))); card.append(a); }
+    /* Gates (inv.gates: [{n, title, state: done|doing|todo|you, status, numbers[{value, label}], facts[{text,
+       confidence}], next, query}]): the developer's own conditions, one block each, right after the answer. */
+    const GATE = { done: "Done", doing: "In progress", you: "Needs you", todo: "Not started" };
+    const gates = Array.isArray(I.gates) ? I.gates.filter((g) => g && typeof g === "object") : [];
+    if (gates.length) {
+      const gl = el("div", "invgates");
+      for (const g of gates) {
+        const st = Object.hasOwn(GATE, g.state) ? g.state : "todo";
+        const b = el("div", "invgate " + st);
+        const h = el("div", "invgh");
+        h.append(el("span", "invgn", String(g.n ?? "")), el("b", null, String(g.title || "")), el("span", "invgs " + st, GATE[st]));
+        b.append(h);
+        if (g.status) b.append(el("p", "invgst", String(g.status)));
+        const nums = Array.isArray(g.numbers) ? g.numbers.filter(Boolean) : [];
+        if (nums.length) {
+          const nr = el("div", "invgnums");
+          for (const x of nums) { const c = el("span", "invgnum"); c.append(el("b", null, String(x.value ?? "")), el("span", null, String(x.label || ""))); nr.append(c); }
+          b.append(nr);
+        }
+        const facts = Array.isArray(g.facts) ? g.facts.filter((f) => f && f.text) : [];
+        if (facts.length) {
+          const ul = el("ul", "invfind");
+          for (const f of facts) {
+            const li = el("li");
+            const top = el("div", "invft");
+            const sure = f.confidence === "confirmed";
+            top.append(el("span", "invconf " + (sure ? "ok" : "warn"), sure ? "Confirmed" : "Likely"), el("span", null, String(f.text)));
+            li.append(top);
+            ul.append(li);
+          }
+          b.append(ul);
+        }
+        if (g.next) { const n = el("div", "invgnext"); n.append(el("span", "invk", "Next"), el("span", null, String(g.next))); b.append(n); }
+        if (g.query) b.append(commandRow(g.query));
+        gl.append(b);
+      }
+      card.append(gl);
+    }
+    const tiles = Array.isArray(I.tiles) ? I.tiles.filter((t) => t && typeof t === "object") : [];
+    if (tiles.length) {
+      const g = el("div", "invtiles");
+      for (const t of tiles) {
+        const c = el("div", "invtile");
+        c.append(el("span", "invtv", String(t.value ?? "—")), el("span", "invtl", String(t.label || "")));
+        const f = el("div", "invtf");
+        f.append(el("span", "invsrc", String(t.source || "")));
+        if (t.query) {
+          const b = el("button", "invq", "Query");
+          b.type = "button";
+          b.title = "Copy the read-only query";
+          b.addEventListener("click", async () => {
+            try { await navigator.clipboard.writeText(String(t.query)); b.textContent = "Copied"; } catch { b.textContent = "Copy failed"; }
+            setTimeout(() => { b.textContent = "Query"; }, 1600);
+          });
+          f.append(b);
+        }
+        c.append(f);
+        if (t.note) c.append(el("span", "invtn", String(t.note)));
+        g.append(c);
+      }
+      card.append(g);
+    }
+    const findings = Array.isArray(I.findings) ? I.findings.filter((f) => f && f.text) : [];
+    if (findings.length) {
+      const sec = el("div", "invsec");
+      sec.append(el("div", "invh", "Findings"));
+      const ul = el("ul", "invfind");
+      for (const f of findings) {
+        const li = el("li");
+        const top = el("div", "invft");
+        const sure = f.confidence === "confirmed";
+        top.append(el("span", "invconf " + (sure ? "ok" : "warn"), sure ? "Confirmed" : "Likely"), el("b", null, String(f.text)));
+        li.append(top);
+        const sub = [];
+        if (f.evidence) sub.push(String(f.evidence));
+        if (f.source) sub.push("Source: " + f.source);
+        if (sub.length) li.append(el("p", "invfe", sub.join(" · ")));
+        ul.append(li);
+      }
+      sec.append(ul);
+      card.append(sec);
+    }
+    /* Side-by-side tables (inv.compare: [{title, cols: [left, right], rows: [{k, a, b, note}]}]). */
+    for (const cmp of Array.isArray(I.compare) ? I.compare.filter((c) => c && typeof c === "object") : []) {
+      const sec = el("div", "invsec");
+      sec.append(el("div", "invh", String(cmp.title || "Side by side")));
+      const wrap = el("div", "invcmpw");
+      const tb = el("table", "invcmp");
+      const cols = Array.isArray(cmp.cols) && cmp.cols.length === 2 ? cmp.cols : ["Before", "After"];
+      const hr = el("tr");
+      for (const h of ["", ...cols, ""]) hr.append(el("th", null, String(h)));
+      const thead = el("thead");
+      thead.append(hr);
+      const tbody = el("tbody");
+      for (const r of Array.isArray(cmp.rows) ? cmp.rows : []) {
+        if (!r) continue;
+        const tr = el("tr");
+        tr.append(el("td", "invck", String(r.k || "")), el("td", "invcv", String(r.a ?? "—")), el("td", "invcv", String(r.b ?? "—")), el("td", "invcn", String(r.note || "")));
+        tbody.append(tr);
+      }
+      tb.append(thead, tbody);
+      wrap.append(tb);
+      sec.append(wrap);
+      card.append(sec);
+    }
+    const decisions = Array.isArray(I.decisions) ? I.decisions.filter((d) => d && d.key) : [];
+    if (decisions.length) {
+      const sec = el("div", "invsec");
+      sec.append(el("div", "invh", "Decisions · " + decisions.filter((d) => choices[d.key]).length + " of " + decisions.length + " made"));
+      for (const d of decisions) {
+        const box = el("div", "invdec");
+        box.append(el("b", null, String(d.title || d.key)));
+        const wrap = el("div", "invopts");
+        const picked = choices[d.key];
+        const clickable = !picked && db && !readOnly;
+        for (const o of Array.isArray(d.options) ? d.options.filter((x) => x && x.label) : []) {
+          const pk = it.id + "/" + d.key;
+          const chosen = picked === o.label;
+          const row = el(clickable ? "button" : "div", "invopt" + (chosen ? " chosen" : ""));
+          if (clickable) row.type = "button";
+          row.append(el("b", null, String(o.label)));
+          if (o.note) row.append(el("span", null, String(o.note)));
+          if (chosen) row.append(el("em", "tag", "Your choice"));
+          else if (clickable && invPending.get(pk) === o.label) { row.classList.add("armed"); row.append(el("em", "tag", "Click again to confirm")); }
+          else if (o.recommended && !picked) row.append(el("em", "tag", "My advice"));
+          if (clickable) row.addEventListener("click", () => {
+            if (invPending.get(pk) === o.label) { invPending.delete(pk); chooseInv(it, d, String(o.label), row); }
+            else { invPending.set(pk, o.label); renderWork(); }
+          });
+          wrap.append(row);
+        }
+        box.append(wrap);
+        sec.append(box);
+      }
+      card.append(sec);
+    }
+    const evidence = Array.isArray(I.evidence) ? I.evidence.filter((e) => e && typeof e === "object") : [];
+    if (evidence.length) {
+      const det = el("details", "invev");
+      det.append(el("summary", null, "Evidence and queries"));
+      for (const e of evidence) {
+        const blk = el("div", "invevb");
+        blk.append(el("b", null, String(e.title || "") + (e.source ? " · " + e.source : "")));
+        const tb = el("div", "invevt");
+        for (const r of Array.isArray(e.rows) ? e.rows : []) if (r) tb.append(el("span", "invek", String(r.k ?? "")), el("span", "invev2", String(r.v ?? "")));
+        blk.append(tb);
+        if (e.query) blk.append(commandRow(e.query));
+        det.append(blk);
+      }
+      card.append(det);
+    }
+    return card;
+  }
+  /* A pick is saved on the card; when every decision is made the card is done. Claude hears it at once. */
+  async function chooseInv(it, d, label, btn) {
+    btn.disabled = true;
+    const choices = Object.assign({}, it.choices || {}, { [d.key]: label });
+    const all = (Array.isArray(it.inv && it.inv.decisions) ? it.inv.decisions : []).every((x) => !x || !x.key || choices[x.key]);
+    const now = new Date().toISOString();
+    const patch = { choices, chosenAt: now };
+    if (all) Object.assign(patch, { status: "done", doneAt: now, doneBy: "you" });
+    try { await db.doc("todos/" + it.id).update(patch); }
+    catch { btn.disabled = false; setStatus("That choice didn't save. Try again in a moment.", true); return; }
+    const sent = await tellClaude(btn, "Investigation “" + (it.title || it.id) + "”, " + (d.title || d.key) + ": " + label + ".");
+    setStatus(sent ? "Sent to Claude: " + label + "." : "Saved: " + label + ". Claude picks it up at its next check.");
+  }
+  function stepEvidence(list, note, full) {
+    const shots = (Array.isArray(list) ? list : []).map((e) => e && { src: assetSrc(e.src), href: safeUrl(e.href), caption: e.caption, proves: e.proves }).filter((e) => e && e.src);
+    if (!shots.length && !note) return null;
+    const box = el("div", "fevidence");
+    box.append(el("div", "flabel", "Browser test evidence"));
+    if (note) box.append(el("p", "fevnote", String(note)));
+    if (shots.length && full) {
+      /* QA tab: one expandable row per screenshot (the case and what it proves), the first open. */
+      const rowsBox = el("div", "fshots");
+      shots.forEach((e, n) => {
+        const det = el("details", "fshot");
+        if (n === 0) det.open = true;
+        const sum = el("summary", "fshotsum");
+        sum.append(el("b", null, String(e.caption || "Screenshot " + (n + 1))));
+        if (e.proves) sum.append(el("span", "fproves", String(e.proves)));
+        const img = el("img");
+        img.src = e.src; img.alt = String(e.proves || e.caption || "Screenshot"); img.loading = "lazy";
+        const a = anchor("", e.href || e.src);
+        a.className = "fshotimg";
+        a.append(img);
+        det.append(sum, a);
+        rowsBox.append(det);
+      });
+      box.append(rowsBox);
+    } else if (shots.length) {
+      const grid = el("div", "fthumbs");
+      for (const e of shots) {
+        const a = anchor("", e.href || e.src);
+        a.className = "fthumb";
+        const img = el("img");
+        img.src = e.src; img.alt = String(e.caption || "Screenshot"); img.loading = "lazy";
+        a.append(img);
+        if (e.caption) a.append(el("span", "fcap", String(e.caption)));
+        grid.append(a);
+      }
+      box.append(grid);
+    }
+    return box;
+  }
+  function focusCard(it) {
+    const b = it.brief || {};
+    const card = el("div", "focus");
+    card.dataset.id = it.id;
+    /* While checks run or the branch is behind main, the card's left border pulses. */
+    if (it.checks === "running" || it.checks === "behind") card.dataset.checks = it.checks;
+    card.tabIndex = -1;
+    const head = el("div", "ftitle");
+    const title = titleWithLinks(it.title, it.links);
+    head.append(title.node);
+    const ck = checksChip(it.checks);
+    if (ck) head.append(ck);
+    /* PR status on the title line (it.pr: {updatedAt, behindBy}): how far behind main it is and when it last changed. */
+    const pr = it.pr && typeof it.pr === "object" ? it.pr : {};
+    if (typeof pr.behindBy === "number" && Number.isFinite(pr.behindBy)) {
+      const n = pr.behindBy;
+      head.append(el("span", "fbehind " + (n ? "behind" : "even"), n ? n + (n === 1 ? " commit" : " commits") + " behind main" : "Up to date with main"));
+    }
+    if (pr.updatedAt) head.append(el("span", "fupdated", "updated " + humanWhen(pr.updatedAt)));
+    /* Where the work lives (it.pr.worktree, it.pr.session): the box worktree and the Claude session on it. */
+    if (pr.worktree) {
+      const w = el("code", "fwt", String(pr.worktree));
+      w.title = "Worktree on the dev box";
+      head.append(w);
+    }
+    if (safeUrl(pr.session)) { const a = anchor("session", safeUrl(pr.session)); a.className = "fsess"; head.append(a); }
+    card.append(head);
+    const part = (label, node) => { const d = el("div"); d.append(el("div", "flabel", label), node); card.append(d); };
+    if (b.problem) part("Problem", el("p", null, String(b.problem)));
+    const sol = Array.isArray(b.solution) ? b.solution.filter(Boolean) : [];
+    if (sol.length) { const ol = el("ol"); for (const s of sol) ol.append(el("li", null, String(s))); part("Solution", ol); }
+    const steps = Array.isArray(b.steps) ? b.steps.filter((s) => s && s.text) : [];
+    let cur = Number(b.current) || 0;
+    /* A merge can't be Go while something blocks it: the branch is behind main or conflicts (checks
+       "behind"), a check is red or still running, or the card names a blocker (it.blockers). The page shows
+       the Review verdict as No-go with the reason, whatever was written. */
+    {
+      const why = it.checks === "behind" ? "behind main or conflicting; update the branch first"
+        : it.checks === "red" ? "a check failed"
+        : it.checks === "running" ? "checks still running"
+        : Array.isArray(it.blockers) && it.blockers.length ? String(it.blockers[0]) : "";
+      const rv = why && steps.find((s) => s.title === "Review" && s.verdict && s.verdict.go);
+      if (rv) {
+        const i = steps.indexOf(rv);
+        steps[i] = Object.assign({}, rv, { verdict: Object.assign({}, rv.verdict, { go: false, call: "No-go: " + why + ".", why: "Was: " + (rv.verdict.call || "Go") + " " + (rv.verdict.why || "") }) });
+      }
+    }
+    /* Every PR card shows a QA tab. When a card has none yet, a placeholder sits after Review (or first),
+       saying QA is missing, so a card can't look finished without it. */
+    if (steps.length && !steps.some((s) => s.title === "QA")) {
+      const at = Math.max(0, steps.findIndex((s) => s.title === "Review") + 1);
+      steps.splice(at, 0, { title: "QA", who: "Claude", text: "No QA recorded for this PR yet.", evidenceNote: "Claude adds the test cases, the tests that prove each one, and browser screenshots when the change has a screen.", verdict: { go: false, call: "No QA yet", why: "QA cases and their tests are missing." } });
+      if (cur >= at) cur += 1;
+    }
+    if (steps.length) {
+      /* One tab per step, named by its short title and coloured by status (done green, now blue, to do grey),
+         opening on the current step; the step text is the tab's tooltip. The panel shows the step, who does
+         it, its copy-commands and, on a review step, its review facts. The picked tab survives a re-render
+         until `current` moves. */
+      const wiz = el("div", "fwiz");
+      const bar = el("div", "fwtabs");
+      bar.setAttribute("role", "tablist");
+      bar.setAttribute("aria-label", "Steps");
+      const panel = el("div", "fwpanel");
+      panel.setAttribute("role", "tabpanel");
+      const picked = wizardStep.get(it.id);
+      const shownStep = Math.min(Math.max((picked && picked.cur === cur ? picked.k : 0) || cur || 1, 1), steps.length);
+      const stateOf = (k) => (k < cur ? "done" : k === cur ? "now" : "todo");
+      /* Each step's colour runs along the progress bar's range, from accent (first step) to ok (last); the
+         card's left border takes its current step's colour. */
+      const stepColour = (n) => "color-mix(in srgb, var(--ok) " + (steps.length > 1 ? Math.round((n / (steps.length - 1)) * 100) : 0) + "%, var(--accent))";
+      if (cur >= 1) card.style.borderLeftColor = stepColour(Math.min(cur, steps.length) - 1);
+      /* Waiting on the developer: the current step (step 1 while `current` is 0) is theirs ("you") and Claude's
+         verdict on it is Go, or the card sets waitingSince. The border then turns yellow, orange, then red,
+         one level per check period. */
+      const curStep = steps[Math.min(Math.max(cur, 1), steps.length) - 1];
+      const waitSince = it.waitingSince || (curStep && curStep.who === "you" && curStep.verdict && curStep.verdict.go === true ? curStep.verdict.at : null);
+      if (it.status !== "done" && waitSince && !isNaN(Date.parse(waitSince))) { card.dataset.waitSince = waitSince; setTimeout(paintWaiting, 0); }
+      const tabs = steps.map((s, n) => {
+        const state = stateOf(n + 1);
+        const t = el("button", "fwtab " + state);
+        t.style.color = stepColour(n);
+        t.type = "button";
+        t.setAttribute("role", "tab");
+        t.append(el("span", "fwlabel", String(s.title || "Step " + (n + 1))));
+        t.title = String(s.text);
+        t.addEventListener("click", () => { wizardStep.set(it.id, { k: n + 1, cur }); show(n + 1); });
+        t.addEventListener("keydown", (e) => {
+          const go = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+          if (!go) return;
+          e.preventDefault();
+          const to = Math.min(Math.max(n + 1 + go, 1), steps.length);
+          wizardStep.set(it.id, { k: to, cur }); show(to); tabs[to - 1].focus();
+        });
+        bar.append(t);
+        return t;
+      });
+      const show = (k) => {
+        tabs.forEach((t, n) => { const on = n + 1 === k; t.setAttribute("aria-selected", on ? "true" : "false"); t.tabIndex = on ? 0 : -1; });
+        const s = steps[k - 1];
+        const state = stateOf(k);
+        panel.replaceChildren();
+        /* Who does the step and when, on its own line above the text: "YOU · NOW", "CLAUDE · LATER". */
+        const w = String(s.who || "").trim();
+        if (w) panel.append(el("p", "fwholine", w + " · " + (k < cur ? "done" : k === cur ? "now" : "later")));
+        panel.append(el("p", null, String(s.text)));
+        /* Release tab: the draft release notes, then what to run after the release, in order. */
+        if (Array.isArray(s.notes) && s.notes.length) {
+          const box = el("div", "relnotes");
+          box.append(el("h4", null, s.notesTitle ? String(s.notesTitle) : "Release notes"));
+          const ul = el("ul");
+          for (const n of s.notes) ul.append(el("li", null, String(n)));
+          box.append(ul);
+          panel.append(box);
+        }
+        if (Array.isArray(s.after) && s.after.length) {
+          const box = el("div", "relafter");
+          box.append(el("h4", null, "After the release, run in order"));
+          const ol = el("ol");
+          for (const a of s.after) {
+            if (!a || typeof a !== "object") continue;
+            const li = el("li");
+            li.append(el("span", "ralabel", String(a.label || "")));
+            if (a.where) li.append(el("span", "rawhere", " · " + String(a.where)));
+            if (a.cmd) li.append(commandRow(String(a.cmd)));
+            if (a.expect) li.append(el("p", "raexpect", "Expect: " + String(a.expect)));
+            ol.append(li);
+          }
+          box.append(ol);
+          panel.append(box);
+        }
+        const cmds = Array.isArray(s.cmd) ? s.cmd : s.cmd ? [s.cmd] : [];
+        /* Copy commands show only when the step may go: its own verdict is a fresh Go (not behind main, not
+           recalculating); a step with no verdict of its own shows them once it is the current step. */
+        const pr = it.pr || {};
+        const behind = typeof pr.behindBy === "number" && pr.behindBy > 0;
+        const mayGo = s.verdict ? s.verdict.go === true && !behind && !isStale(s.verdict, it) : k <= cur;
+        if (mayGo) for (const c of cmds) panel.append(commandRow(c));
+        else if (cmds.length) panel.append(el("p", "fevnote", "Commands show here once Claude's verdict is Go."));
+        /* A QA step with cases shows them instead of the review table and the evidence block. */
+        const hasCases = Array.isArray(s.cases);
+        const rv = hasCases ? qaCases(s, it) : reviewTable(s, it);
+        if (rv) panel.append(rv);
+        const ev = hasCases ? (s.evidenceNote ? el("p", "fevnote", String(s.evidenceNote)) : null) : stepEvidence(s.evidence, s.evidenceNote, s.title === "QA");
+        for (const node of [ev, stepVerdict(Object.assign({ step: s.title }, s.verdict || {}), it.pr, it), rolloutTimeline(s.timeline)]) if (node) panel.append(node);
+        panel.append(el("div", "fwstate " + state, (state === "done" ? "Done" : state === "now" ? "Now" : "To do") + " · " + k + " of " + steps.length));
+      };
+      show(shownStep);
+      wiz.append(bar, panel);
+      card.append(wiz);
+    }
+    return card;
+  }
+  /* A card's check status (it.checks: green, running, red or behind), kept current by Claude. */
+  const CHECKS = { green: ["✓", "Checks pass"], running: ["●", "Checks running"], red: ["✕", "Checks failing"], behind: ["↻", "Behind main"] };
+  function checksChip(state) {
+    if (!Object.hasOwn(CHECKS, state)) return null;
+    const [icon, text] = CHECKS[state];
+    const c = el("span", "checks " + state);
+    c.append(el("span", "ckicon", icon), document.createTextNode(text));
+    c.setAttribute("aria-label", text);
+    return c;
+  }
+  /* Action buttons (it.actions: [{label, note?}]) take two clicks: the first arms one, the second saves the
+     ask on the card and tells Claude. */
+  const armedAction = { key: "" };
+  function actionButtons(it) {
+    if (readOnly || !db || it.status === "done") return [];
+    const acts = Array.isArray(it.actions) ? it.actions.filter((a) => a && a.label) : [];
+    return acts.map((a) => {
+      const label = String(a.label);
+      const key = it.id + "\u0000" + label;
+      const asked = !!(it.asked && it.asked.label === label);
+      const armed = armedAction.key === key;
+      const b = el("button", "actbtn" + (armed ? " armed" : ""), asked ? "Asked: " + label : armed ? "Click again to confirm" : label);
+      b.type = "button";
+      if (a.note) b.title = String(a.note);
+      b.disabled = asked;
+      b.setAttribute("aria-label", (armed ? "Click again to confirm: " : "") + label + " (" + (it.title || "") + ")");
+      b.addEventListener("click", () => {
+        if (armedAction.key === key) { armedAction.key = ""; askAction(it, label, b); }
+        else { armedAction.key = key; pendingChoice.clear(); renderAll(); }
+      });
+      return b;
+    });
+  }
+  async function askAction(it, label, btn) {
+    btn.disabled = true;
+    try {
+      await db.doc("todos/" + it.id).update({ asked: { label, at: new Date().toISOString() } });
+    } catch {
+      btn.disabled = false;
+      setStatus("That didn't save. Try again in a moment.", true);
+      return;
+    }
+    const sent = await tellClaude(btn, "Action on “" + (it.title || it.id) + "”: " + label + ".");
+    setStatus(sent ? "Sent to Claude: " + label + "." : "Saved: " + label + ". Claude picks it up at its next check.");
+  }
+  /* Dependencies: a card with `blocks` (a todo id, or a list of them) sits right above the card it unblocks,
+     as a normal card, so the first thing that is needed comes first. One with no rank of its own shows only
+     above the card it unblocks. */
+  function ordered(open, act) {
+    const byId = new Map(open.map((i) => [i.id, i]));
+    const parentsOf = (i) => [].concat(i.blocks || []).filter((id) => byId.has(id));
+    const deps = open.filter((i) => parentsOf(i).length);
+    const out = [];
+    const seen = new Set();
+    const place = (it) => {
+      if (seen.has(it.id)) return;
+      seen.add(it.id);
+      for (const d of deps.filter((x) => parentsOf(x).includes(it.id))) place(d);
+      out.push(it);
+    };
+    for (const it of act.filter((i) => !deps.includes(i))) place(it);
+    for (const d of deps) if (act.includes(d)) place(d);
+    return out;
+  }
+  function renderNextStep(focused) {
+    const box = $("nextStep");
+    box.replaceChildren();
+    delete box.dataset.waitSince;
+    delete box.dataset.waitLevel;
+    box.style.borderLeftColor = "";
+    box.removeAttribute("title");
+    let n = nextMeta && nextMeta.title ? nextMeta : null;
+    if (!n) {
+      /* Anything waiting on the developer counts: the first open to-do by rank that is a decision or a "now",
+         unless a PR card whose current step is theirs comes first. */
+      const firstTodo = todos.filter((i) => i.status !== "done" && i.kind !== "review" && !i.brief && (i.when === "decide" || i.when === "now")).sort(byRank)[0];
+      if (firstTodo && (!focused.length || prio(firstTodo) < prio(focused[0]))) {
+        const link = goodLinks(firstTodo.links)[0];
+        n = { title: String(firstTodo.title || "Untitled"), text: firstTodo.detail || (firstTodo.decision && firstTodo.decision.question) || "", url: link && link.url, at: firstTodo.addedAt };
+      }
+    }
+    if (!n) {
+      for (const it of focused) {
+        const steps = (it.brief && Array.isArray(it.brief.steps) ? it.brief.steps : []).filter((x) => x && x.text);
+        if (!steps.length) continue;
+        const cur = Math.min(Math.max(Number(it.brief.current) || 0, 1), steps.length);
+        const st = steps[cur - 1];
+        if (st.who !== "you") continue;
+        const link = goodLinks(it.links)[0];
+        const v = st.verdict && st.verdict.call ? st.verdict : null;
+        n = { title: String(st.title || "Step " + cur) + " · " + String(it.title || "Untitled"), text: v ? v.call + (v.why ? " " + v.why : "") : st.text, cardId: it.id, url: link && link.url, at: st.verdict && st.verdict.at };
+        break;
+      }
+    }
+    box.hidden = !n;
+    if (!n) return;
+    /* The title scrolls to the card, which flashes an accent outline when reached. */
+    const goCard = (e) => {
+      if (e) e.preventDefault();
+      const c = n.cardId && document.querySelector('.focus[data-id="' + CSS.escape(String(n.cardId)) + '"]');
+      if (!c) return;
+      c.scrollIntoView({ behavior: "smooth", block: "start" });
+      c.classList.remove("flash"); void c.offsetWidth; c.classList.add("flash");
+    };
+    const t = el("a", "nstitle", String(n.title));
+    t.href = "#";
+    t.addEventListener("click", goCard);
+    box.append(el("div", "nslabel", "Your next step"), t);
+    /* meta/next.recommend: Claude's recommendation for this step, above the instruction. */
+    if (n.recommend) { const r = el("p", "nsrec"); r.append(el("b", null, "My recommendation: "), document.createTextNode(String(n.recommend))); box.append(r); }
+    /* meta/next.how: the exact instruction, where and what to type or click. */
+    if (n.how) { const h = el("p", "nshow"); h.append(el("b", null, "How: "), document.createTextNode(String(n.how))); box.append(h); }
+    if (n.text) box.append(el("p", "nstext", String(n.text)));
+    const row = el("div", "nsrow");
+    const url = safeUrl(n.url);
+    if (url) row.append(anchor(n.cardId ? "Open the PR on GitHub ↗" : "Open ↗", url));
+    if (n.at && !isNaN(Date.parse(n.at))) { box.dataset.waitSince = n.at; }
+    if (row.childNodes.length) box.append(row);
+    setTimeout(paintWaiting, 0);
+  }
+  function renderWork() {
+    const open = todos.filter((i) => i.status !== "done").sort(byRank);
+    /* Investigation cards (kind "investigation", with `inv`) sit on top of the PR stack, newest first. */
+    const isInv = (i) => i.kind === "investigation";
+    const invs = open.filter((i) => isInv(i) && i.inv).sort((a, b) => String(b.addedAt || "").localeCompare(String(a.addedAt || "")));
+    const isPr = (i) => !isInv(i) && (i.kind === "review" || !!i.brief);
+    let stack = [...invs, ...ordered(open, actionable()).filter(isPr)];
+    /* The card(s) the developer's next step is about (meta/next.cardId and cardIds) always sit on top of the
+       stack, right under the box, whatever their priority. */
+    {
+      const nextIds = new Set([].concat(nextMeta && nextMeta.cardId ? nextMeta.cardId : [], (nextMeta && Array.isArray(nextMeta.cardIds) && nextMeta.cardIds) || []).map(String));
+      if (nextIds.size) {
+        const pinned = [];
+        for (const id of nextIds) {
+          /* Any open card the step names joins the stack, even one with no rank or that is not a PR card. */
+          const hit = stack.find((i) => String(i.id) === id) || open.find((i) => String(i.id) === id);
+          if (hit && !pinned.includes(hit)) pinned.push(hit);
+        }
+        stack = [...pinned, ...stack.filter((i) => !pinned.includes(i))];
+      }
+    }
+    renderNextStep(stack);
+    const fc = $("focusCard");
+    fc.replaceChildren();
+    for (const it of stack) {
+      if (isInv(it) && it.inv) { fc.append(investigationCard(it)); continue; }
+      if (it.brief) { fc.append(focusCard(it)); continue; }
+      const ul = el("ul", "items");
+      ul.append(todoCard(it, ""));
+      fc.append(ul);
+    }
+    /* One legend sits once under the last card. */
+    if (stack.length) fc.append(reviewLegend());
+    else {
+      const e = el("div", "empty");
+      e.append(el("b", null, "No PR needs you right now."), el("span", null, "Other to-dos are in Plans."));
+      fc.append(e);
+    }
+    const cnt = $("countCurrent");
+    cnt.textContent = stack.length ? String(stack.length) : "";
+    cnt.classList.toggle("hot", stack.length > 0);
+  }
+
+  /* The session strip under the title: issue, title, branch and start (meta/session). */
+  function renderSession() {
+    const box = $("session");
+    box.replaceChildren();
+    const s = session;
+    /* The line under the name: this session at a glance, "ABC-123 · PR #42 · <branch> · Checks pass". */
+    const line = [];
+    if (s && s.issue) line.push(String(s.issue));
+    if (s && Number(s.pr)) line.push("PR #" + Number(s.pr));
+    if (s && s.branch) line.push(String(s.branch));
+    if (s && Object.hasOwn(CHECKS, s.checks)) line.push(CHECKS[s.checks][1]);
+    $("boxLine").textContent = line.length ? line.join(" · ") : "Session room";
+    if (!s) return;
+    const u = safeUrl(s.url);
+    if (s.issue) box.append(u ? (() => { const a = anchor(String(s.issue), u); a.className = "sid"; return a; })() : el("span", "sid", String(s.issue)));
+    if (s.title) box.append(el("span", "stitle", String(s.title)));
+    if (s.branch) box.append(el("span", "sbranch", String(s.branch)));
+    if (s.startedAt) box.append(el("span", "meta", "started " + when(s.startedAt)));
+  }
+
+  /* meta/settings.refreshSeconds is the session check period; the waiting colours step once per period. */
+  let refreshSeconds = 0, atMinute = 0;
+  /* Yellow while a card waits less than one check period on the developer, orange for the next, red after. */
+  function paintWaiting() {
+    const step = (refreshSeconds || 600) * 1000;
+    for (const c of document.querySelectorAll("[data-wait-since]")) {
+      const age = Date.now() - Date.parse(c.dataset.waitSince);
+      const level = age < step ? 1 : age < 2 * step ? 2 : 3;
+      c.dataset.waitLevel = String(level);
+      c.style.borderLeftColor = "var(--wait" + level + ")";
+      c.title = "Waiting on you for " + Math.max(0, Math.round(age / 60000)) + " min";
+    }
+  }
+  setInterval(paintWaiting, 30000);
+
+  /* ---------- Boards: Plans, PRs and Engine ---------- */
+  function boardRow(item) {
+    const li = el("li", "row");
+    const st = MARK[item.state] ? item.state : "todo";
+    li.append(el("span", "mark " + st, MARK[st]));
+    const link = goodLinks(item.links || (item.url ? [{ url: item.url }] : []))[0];
+    li.append(linked(item.label || "Untitled", link && link.url, "rt"));
+    const rl = el("span", "rl", item.line || "");
+    rl.title = item.line || "";
+    li.append(rl);
+    const ck = checksChip(item.checks);
+    if (ck) li.append(ck);
+    if (item.who && WHO[item.who]) li.append(el("span", "who " + item.who, WHO[item.who]));
+    return li;
+  }
+  function renderSections(containerId, sections) {
+    const main = $(containerId);
+    main.replaceChildren();
+    let n = 0;
+    for (const s of Array.isArray(sections) ? sections : []) {
+      const items = Array.isArray(s.items) ? s.items : [];
+      if (!items.length) continue;
+      n += items.length;
+      const sec = el("section", "sec");
+      const head = el("div", "ghead");
+      head.append(el("h2", null, String(s.title || "")));
+      if (s.hint) head.append(el("span", "hint", String(s.hint)));
+      const ul = el("ul", "rows");
+      for (const it of items) ul.append(boardRow(it));
+      sec.append(head, ul);
+      main.append(sec);
+    }
+    return n;
+  }
+  function countItems(b, pred) {
+    let n = 0;
+    for (const s of (b && Array.isArray(b.sections) ? b.sections : [])) n += (Array.isArray(s.items) ? s.items : []).filter(pred).length;
+    return n;
+  }
+  /* Plans tab: only the plan groups (boards/plans), and in them only steps not done; a plan with none left is hidden. */
+  function openPlans() {
+    return ((boards.plans && boards.plans.sections) || [])
+      .map((sec) => Object.assign({}, sec, { items: (Array.isArray(sec.items) ? sec.items : []).filter((i) => i && i.state !== "done") }))
+      .filter((sec) => sec.items.length);
+  }
+  function renderPlan() {
+    $("sessUpdated").textContent = updated(boards.plans && boards.plans.updatedAt ? boards.plans : null);
+    const plans = openPlans();
+    const n = renderSections("sessSections", plans);
+    $("sessEmpty").hidden = !!n;
+    const left = plans.reduce((k, sec) => k + sec.items.length, 0);
+    $("countSession").textContent = left ? String(left) : "";
+  }
+  function renderBox() {
+    const b = boards.box;
+    $("boxTitle").textContent = (b && b.title) || "Engine";
+    $("boxUpdated").textContent = updated(b);
+    const sn = slotsNode(b && b.slots);
+    $("boxSlots").replaceChildren(...(sn ? [sn] : []));
+    const n = renderSections("boxSections", b && b.sections);
+    $("boxEmpty").hidden = !!(n || sn);
+    const bad = countItems(b, (i) => i.state === "bad" || i.state === "warn");
+    const cnt = $("countBox");
+    cnt.textContent = bad ? String(bad) : "";
+    cnt.classList.toggle("hot", countItems(b, (i) => i.state === "bad") > 0);
+  }
+
+  /* QA slots: one cell per slot with its PR, whether its site answers, its browser QA and links; this
+     session's own PR (slots.mine) is outlined; then who waits. */
+  function slotsNode(s) {
+    if (!s || typeof s !== "object") return null;
+    const max = Math.max(0, Math.min(40, Number(s.max) || 0));
+    const used = Array.isArray(s.used) ? s.used : [];
+    const waiting = Array.isArray(s.waiting) ? s.waiting : [];
+    const sec = el("section", "group");
+    const head = el("div", "ghead");
+    head.append(el("h2", null, "QA slots · " + used.length + " of " + max + " in use"), el("span", "hint", s.hint ? String(s.hint) : waiting.length ? waiting.length + " waiting for a slot" : "nobody waiting"));
+    const grid = el("div", "slotgrid");
+    for (let i = 0; i < Math.max(max, used.length); i++) {
+      const u = i < used.length ? used[i] : null;
+      if (!u) { grid.append(el("div", "slot free", "free")); continue; }
+      const ok = String(u.up) === "200";
+      const cell = el("div", "slot used" + (ok ? "" : " bad") + (s.mine && Number(s.mine) === Number(u.pr) ? " mine" : ""));
+      const top = el("div", "stop");
+      top.append(el("b", null, "#" + (u.pr || "?")));
+      if (u.author) top.append(el("span", null, String(u.author)));
+      cell.append(top);
+      cell.append(el("span", "why", ok ? "up" : String(u.reason || "down (" + (u.up || "?") + ")")));
+      if (u.qa) cell.append(el("span", null, "browser QA " + String(u.qa)));
+      if (u.title) cell.append(el("span", null, String(u.title)));
+      const links = el("div", "slinks");
+      for (const [text, href] of [["Site", u.siteUrl], ["PR", u.url]]) { const h = safeUrl(href); if (h) links.append(anchor(text, h)); }
+      if (links.childNodes.length) cell.append(links);
+      grid.append(cell);
+    }
+    sec.append(head, grid);
+    const legend = el("div", "slotlegend");
+    for (const [cls, text] of [["used", "In use, site answers"], ["used bad", "In use, site doesn't answer"], ["free", "Free"]]) {
+      const item = el("span", "lg");
+      item.append(el("span", "swatch " + cls), document.createTextNode(text));
+      legend.append(item);
+    }
+    sec.append(legend);
+    if (waiting.length) {
+      const ul = el("ul", "waitlist");
+      for (const w of waiting) {
+        const li = el("li");
+        const h = safeUrl(w.url);
+        const text = "#" + (w.pr || "?") + (w.title ? " " + w.title : "");
+        li.append(h ? anchor(text, h) : el("span", null, text));
+        ul.append(li);
+      }
+      sec.append(ul);
+    }
+    if (s.checkedAt) sec.append(el("div", "meta", "Checked " + when(s.checkedAt)));
+    return sec;
+  }
+
+  function renderAll() { renderWork(); renderPlan(); renderBox(); renderSession(); renderMood(); }
+
+  async function start() {
+    renderAll();
+    db = window.claude ? await window.claude.use("db") : null;
+    if (!db) { setStatus("Sign in to claude.ai to see this session.", true); return; }
+    const user = await window.claude.use("user");
+    /* The header names whoever is viewing, with their initials; "mroom" when the name is unknown. */
+    if (user && typeof user.me === "function") {
+      try {
+        const me = await user.me();
+        const name = String((me && me.name) || "").trim();
+        $("pageTitle").textContent = name || "mroom";
+        const ini = name.split(/\s+/).filter(Boolean).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
+        $("meAvatar").textContent = ini || "·";
+      } catch {}
+    }
+    if (user && typeof user.can === "function") {
+      try { if ((await user.can("data.write")) === false) readOnly = true; } catch {}
+    }
+    const onErr = (e) => setStatus(e && e.code === "revoked" ? "This session room is no longer available here." : "The page stopped updating. Reload it to reconnect.", true);
+    const rows = (snap) => snap.docs.map((d) => Object.assign({ id: d.id }, d.data()));
+    const data = (snap) => (snap.exists ? snap.data() : null);
+    db.collection("todos").onSnapshot((snap) => { todos = rows(snap); loaded.todos = true; setStatus(""); renderWork(); renderPlan(); renderMood(); }, onErr);
+    db.collection("work").onSnapshot((snap) => { work = rows(snap); loaded.work = true; renderWork(); renderMood(); }, onErr);
+    db.doc("meta/session").onSnapshot((snap) => { session = data(snap); renderSession(); }, onErr);
+    db.doc("meta/next").onSnapshot((snap) => { nextMeta = data(snap); renderWork(); }, onErr);
+    db.doc("meta/settings").onSnapshot((snap) => {
+      const s = data(snap) || {};
+      const sec = Number(s.refreshSeconds), m = Number(s.atMinute);
+      refreshSeconds = sec >= 60 ? sec : 0;
+      atMinute = m >= 0 ? m : 0;
+      paintWaiting();
+    }, onErr);
+    db.doc("boards/session").onSnapshot((snap) => { boards.session = data(snap); renderPlan(); }, onErr);
+    db.doc("boards/plans").onSnapshot((snap) => { boards.plans = data(snap); renderPlan(); }, onErr);
+    db.doc("boards/box").onSnapshot((snap) => { boards.box = data(snap); renderBox(); }, onErr);
+    /* One-off reads behind a view visit; the live listeners above keep it current afterwards. */
+    const getRows = async (c) => rows(await db.collection(c).get());
+    const getDoc = async (d) => data(await db.doc(d).get());
+    tabRefresh = async (t) => {
+      if (t === "current") { [todos, work] = await Promise.all([getRows("todos"), getRows("work")]); renderWork(); renderPlan(); renderMood(); }
+      else if (t === "session") { [todos, boards.session, boards.plans] = await Promise.all([getRows("todos"), getDoc("boards/session"), getDoc("boards/plans")]); renderPlan(); renderWork(); renderMood(); }
+      else if (t === "engine") { boards.box = await getDoc("boards/box"); renderBox(); }
+      session = await getDoc("meta/session");
+      renderSession();
+    };
+    setInterval(() => { renderWork(); renderPlan(); renderBox(); }, 30000);
+  }
+  start();
+})();
+</script>
+<script>
+/* Screenshot viewer for every screenshot (.fshotimg): opens the image full screen in the page; the run or
+   report it came from stays one click away. The host opens any real link in a new tab before the page can
+   stop it, so each screenshot's link is turned into a button (its target kept in data-source). */
+(() => {
+  let box = null, last = null;
+  function tame(a) {
+    if (a.dataset.source !== undefined) return;
+    a.dataset.source = a.getAttribute("href") || "";
+    a.removeAttribute("href"); a.removeAttribute("target");
+    a.setAttribute("role", "button"); a.tabIndex = 0;
+    a.setAttribute("aria-label", "Open screenshot full screen");
+  }
+  const tameAll = (root) => { for (const a of (root.querySelectorAll ? root.querySelectorAll("a.fshotimg") : [])) tame(a); };
+  tameAll(document);
+  new MutationObserver((list) => { for (const m of list) for (const n of m.addedNodes) if (n.nodeType === 1) { if (n.matches && n.matches("a.fshotimg")) tame(n); tameAll(n); } })
+    .observe(document.body, { childList: true, subtree: true });
+  function close() { if (!box || box.hidden) return; box.hidden = true; document.body.style.overflow = ""; if (last) last.focus(); }
+  function build() {
+    box = document.createElement("div");
+    box.className = "shotbox"; box.hidden = true;
+    box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true"); box.setAttribute("aria-label", "Screenshot");
+    const bar = document.createElement("div"); bar.className = "shotbar";
+    const cap = document.createElement("span"); cap.className = "shotcap";
+    const src = document.createElement("a"); src.target = "_blank"; src.rel = "noopener noreferrer"; src.textContent = "Open source \u2197";
+    const btn = document.createElement("button"); btn.type = "button"; btn.setAttribute("aria-label", "Close"); btn.title = "Close (Esc)";
+    btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+    btn.addEventListener("click", close);
+    bar.append(cap, src, btn);
+    const view = document.createElement("div"); view.className = "shotview";
+    const img = document.createElement("img"); img.alt = "";
+    view.append(img);
+    box.append(bar, view);
+    box.addEventListener("click", (e) => { if (e.target === box || e.target === view || e.target === img) close(); });
+    document.body.append(box);
+  }
+  function open(a, e) {
+    const pic = a.querySelector("img");
+    if (!pic || !pic.src) return;
+    if (e) { e.preventDefault(); e.stopPropagation(); }
+    if (!box) build();
+    last = a;
+    const img = box.querySelector(".shotview img"), cap = box.querySelector(".shotcap"), src = box.querySelector(".shotbar a");
+    img.src = pic.src; img.alt = pic.alt || "Screenshot";
+    cap.textContent = pic.alt || "";
+    tame(a);
+    const href = a.dataset.source || "";
+    src.hidden = !href || href === pic.getAttribute("src") || href === pic.src;
+    if (!src.hidden) src.href = href;
+    box.hidden = false; document.body.style.overflow = "hidden";
+    box.querySelector("button").focus();
+  }
+  document.addEventListener("click", (e) => { const a = e.target.closest && e.target.closest("a.fshotimg"); if (a) open(a, e); }, true);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") return close();
+    const a = (e.key === "Enter" || e.key === " ") && e.target.closest && e.target.closest("a.fshotimg");
+    if (a) open(a, e);
+  });
+})();
+</script>
