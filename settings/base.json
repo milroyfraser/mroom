@@ -59,14 +59,22 @@
       "Bash(mroom config path:*)",
       "Bash(mroom config validate:*)",
       "Bash(mroom config keys:*)",
-      "Bash(mroom guard check:*)"
+      "Bash(mroom guard check:*)",
+      "Bash(mroom tracker get:*)",
+      "Bash(mroom tracker list:*)",
+      "Bash(mroom tracker backend:*)",
+      "Bash(mroom errors get:*)",
+      "Bash(mroom errors search:*)",
+      "Bash(mroom errors backend:*)"
     ],
     "ask": [
       "Bash(git restore:*)",
       "Bash(git push:*)",
       "Bash(gh workflow run:*)",
       "Bash(gh release create:*)",
-      "Bash(gh release edit:*)"
+      "Bash(gh release edit:*)",
+      "Bash(mroom tracker create:*)",
+      "Bash(mroom errors resolve:*)"
     ],
     "deny": [
       "Bash(git push*--force*)",

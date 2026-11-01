@@ -28,9 +28,9 @@
 #                              the PreToolUse guard for Claude Code's Bash tool (design 8.3): refuses a
 #                              merge, an approval, a release, a force-push or a secret read; a speed bump,
 #                              not a boundary (GitHub is the gate)
-#   mroom tracker get|comment|state|create|backend
-#                              the tracker adapter (issues.tracker: linear or none): read an issue,
-#                              comment, set its state, or file one (only with --allow-create)
+#   mroom tracker get|list|comment|state|create|backend
+#                              the tracker adapter (issues.tracker: linear or none): read or list issues,
+#                              comment, set a state, or file one (only with --allow-create)
 #   mroom errors get|search|resolve|backend
 #                              the error-tracker adapter (errors.provider: sentry): an issue and its
 #                              latest event, a search, or resolving one
