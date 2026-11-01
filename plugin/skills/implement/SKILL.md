@@ -51,6 +51,32 @@ on without it.
 **No tracker.** Every `mroom tracker` call exits 3 when `issues.tracker` is `none`. Then skip the
 tracker step and put its note on the pull request instead: in the body, or with `gh pr comment`.
 
+## Production checks a person runs
+
+A session never reads production. When it needs a production fact, it writes a check and a person
+runs it, as mroom's `docs/production-access.md` sets out (its access levels, and who runs a check).
+Before handing the check over, confirm each point below and say so; rewrite a check that fails one.
+
+1. **Read-only by construction:** one transaction that starts read-only, with a statement timeout
+   (Postgres: `BEGIN; SET TRANSACTION READ ONLY; SET LOCAL statement_timeout = '30s';` … `ROLLBACK;`,
+   or `BEGIN READ ONLY;`; outside a transaction block both SETs only warn and do nothing; MySQL:
+   `START TRANSACTION READ ONLY`, and its `max_execution_time` bounds SELECTs only; in an app
+   console, wrap the check in the framework's transaction helper), so any write is refused and a
+   slow query stops. No app methods that save, queue jobs, send mail or call an API.
+2. **Aggregate, non-personal output:** counts, yes or no, sums, distributions, and organisations'
+   names or domains when the decision needs them (not when the organisation is one person, such as
+   a sole trader). Never a person's name, email, phone or IP address, and never free text
+   (filtering on it is fine when only a count comes out). Ids only when the next step needs them,
+   and never a user's.
+3. **Bounded:** indexed filters or a time window; name any scan of a large table.
+4. **Tested first** on a local database or a masked QA copy; say the result came from there.
+5. **Explained:** what each number means, and which decision each outcome leads to.
+6. **Recorded:** the person notes the command and its output in the tracker issue it serves (or on
+   the pull request). Only that output comes back to the session.
+
+When the project keeps its own production-access rules, such as a runbook its `CLAUDE.md` names,
+point the person to them: they win.
+
 ## 0. Preconditions
 
 1. `mroom tracker get <id>`: title, state, labels, branch, description and comments. Stop if its
