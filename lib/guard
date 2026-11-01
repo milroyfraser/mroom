@@ -72,7 +72,14 @@
 # through, so this script exits only 0 or 2.
 #
 # A broken guard must not brick every session: without jq or awk it allows and warns. A command it cannot
-# check (over 256 KB, over 3000 simple commands, or one the tokeniser fails on) is refused instead.
+# check (over 256 KB, over 3000 simple commands, over 2000 words in a simple command or 20,000 in all, over
+# 200 commands inside other commands, or one the tokeniser fails on) is refused instead.
+#
+# Time is part of the contract: a hook that runs past its timeout is non-blocking, so the command runs. The
+# plugin's hooks.json sets this hook's timeout to 60 seconds explicitly (Claude Code's default for a command
+# hook, written down so nobody lowers it by accident), and the checks stay linear and far inside it: no fork
+# per word (lower case is one `tr` per simple command at most, see lower_all), and the caps above bound the
+# rest. A fork per argument once let `cat x x x ...` with 100k words, then a merge, run past the timeout.
 #
 # Bash 3.2 compatible (macOS). Tests: tests/guard-test.sh. No `set -u`: bash 3.2 treats an empty
 # "${array[@]}" as unbound, and any exit other than 0 or 2 lets the command through.
@@ -107,6 +114,16 @@ HERE=$(cd "$(dirname "$(readlink -f "$SELF" 2>/dev/null || echo "$SELF")")" && p
 TOKENIZER="$HERE/core/guard-tokenize.awk"
 MAX_BYTES=262144
 MAX_COMMANDS=3000
+# Words in one simple command (its name and arguments), and in the whole command. Far above an everyday
+# command (`git add` of a few hundred files); tens of thousands of words are refused rather than checked
+# slowly (each word costs some bash, and 256 KB holds over 100,000 of them).
+MAX_WORDS=2000
+MAX_TOTAL_WORDS=20000
+WORDS=0
+# Strings tokenised (the command, and each command inside it: bash -c, git -c core.editor=..., ...). Each one
+# forks awk, so a command that hands hundreds of them on is refused rather than checked slowly.
+MAX_PARSES=200
+PARSES=0
 
 if [ "$mode" = hook ]; then
   command -v jq >/dev/null 2>&1 || warn_off jq
@@ -130,6 +147,24 @@ block() { [ -n "$BLOCKED" ] || BLOCKED=$1; }
 # Lower case, with the tokeniser's encoded newlines decoded. Long strings never go through bash's
 # ${x//...} or ${x##*...}: in bash 3.2 those are quadratic or worse, and a slow hook is a bypass.
 lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr '\035' '\n'; }
+# lower TEXT: LOWER = lc TEXT, with no fork when there is nothing to change (no upper case, no encoded
+# newline). Code that goes through every word calls lower_all first, so lower never forks once per word.
+lower() {
+  case "$1" in
+    *[A-Z]* | *$'\035'*) LOWER=$(lc "$1") ;;
+    *) LOWER=$1 ;;
+  esac
+}
+# lower_all WORD...: LOWERED = every word through lc, with one fork for all of them (none when no word
+# needs it).
+lower_all() {
+  LOWERED=("$@")
+  case "$*" in *[A-Z]* | *$'\035'*) ;; *) return 0 ;; esac
+  local -a out=()
+  IFS=$US read -r -d '' -a out < <(printf '%s\037' "$@" | tr '[:upper:]' '[:lower:]' | tr '\035' '\n') || true
+  [ "${#out[@]}" = "$#" ] && LOWERED=("${out[@]}")
+  return 0
+}
 # NAME = basename of a command word (no fork: this runs per command); a word too long to be a path is left alone.
 # A leading `=` is zsh's `=cmd` (the path of cmd).
 cmd_name() { if [ "${#1}" -le 4096 ]; then NAME=${1##*/}; NAME=${NAME#=}; else NAME=$1; fi; }
@@ -151,7 +186,8 @@ is_secret_path() {
   while [ "${t%/}" != "$t" ]; do t=${t%/}; done
   [ -n "$t" ] || return 1
   # Lower case: macOS file systems ignore case, so `.ENV` is `.env` there.
-  t=$(lc "$t")
+  lower "$t"
+  t=$LOWER
   base=${t##*/}
   case "$base" in *.example | *.example.* | *.pub) return 1 ;; esac
   case "$base" in
@@ -189,7 +225,8 @@ is_secret_path() {
 # is the part after it ("" for the folder itself).
 home_rest() {
   local t
-  t=$(lc "$1")
+  lower "$1"
+  t=$LOWER
   # shellcheck disable=SC2088 # a literal ~, as the command has it
   case "$t" in
     "~" | "${DY}\$home" | "${DY}\${home}" | /root) REST="" ;;
@@ -295,6 +332,9 @@ check_secrets() {
   shift
   local -a args=("$@")
   local i a prev="" n=${#args[@]} last_pos=-1 skip_pattern=0 seen_pos=0
+  # No positional parameters from here on: bash copies them into every function call, so a function called
+  # once per word with thousands of them set is quadratic (minutes, for a long enough command).
+  set --
 
   case "$READERS" in *" $cmd "*) ;; *) return ;; esac
 
@@ -321,8 +361,12 @@ check_secrets() {
       ;;
   esac
 
+  # Lower case once for every word (is_secret_path then never forks), and check the lowered word, `la`.
+  local la
+  lower_all "${args[@]}"
   for ((i = 0; i < n; i++)); do
     a=${args[$i]}
+    la=${LOWERED[$i]}
     case "$prev" in
       -e | --regexp | --expression) prev=$a; continue ;; # a pattern, not a file
       --exclude | --exclude-from | --exclude-dir) prev=$a; continue ;; # a name left out, not read
@@ -336,13 +380,13 @@ check_secrets() {
     # name@path (curl --data-urlencode, httpie's file items).
     case "$cmd" in
       curl | wget | http | https)
-        local v=$a
+        local v=$la
         [ "${#v}" -le 4096 ] || v=""
         case "$v" in -*=*) v=${v#*=} ;; esac
         case "$v" in *=[@\<]*) v=${v#*=} ;; esac
         case "$v" in [@\<]*) v=${v:1} ;; *@*) v=${v#*@} ;; esac
         v=${v%%;*}
-        if [ -n "$v" ] && [ "$v" != "$a" ] && is_secret_path "$v"; then
+        if [ -n "$v" ] && [ "$v" != "$la" ] && is_secret_path "$v"; then
           block "$cmd would send a secret file ($v)"
           return
         fi
@@ -350,7 +394,7 @@ check_secrets() {
     esac
     case "$a" in
       -*@*) # a flag glued to a file (`curl -d@.env`, `--data-binary@...`)
-        if [ "${#a}" -le 4096 ] && is_secret_path "${a#*@}"; then
+        if [ "${#a}" -le 4096 ] && is_secret_path "${la#*@}"; then
           block "$cmd would read a secret file (${a#*@})"
           return
         fi
@@ -366,13 +410,13 @@ check_secrets() {
         ;;
     esac
     [ "$i" = "$last_pos" ] && continue # the destination of cp/mv/ln
-    if is_secret_path "$a"; then
+    if is_secret_path "$la"; then
       block "$cmd would read a secret file ($a)"
       return
     fi
     case "$RECURSIVE" in
       *" $cmd "*)
-        if is_secret_parent "$a"; then
+        if is_secret_parent "$la"; then
           block "$cmd would read a folder that holds secret files ($a)"
           return
         fi
@@ -400,7 +444,7 @@ check_graphql_text() {
 normalize_endpoint() {
   local ep
   [ "${#1}" -le 4096 ] || { printf '%s' "$1"; return; } # not an endpoint (see lc)
-  ep=$(lc "$1")
+  lower "$1"; ep=$LOWER
   ep=${ep#https://api.github.com}
   ep=${ep#http://api.github.com}
   ep=${ep%%\?*}
@@ -431,7 +475,7 @@ check_gh_api() {
       *) [ -n "$endpoint" ] || endpoint=$a ;;
     esac
     if [ -n "$v" ]; then
-      case "$(lc "$v")" in event=approve) approve=1 ;; esac
+      lower "$v"; case "$LOWER" in event=approve) approve=1 ;; esac
       case "$v" in *=@*) file_field=1 ;; esac
     fi
   done
@@ -524,7 +568,7 @@ check_gh() {
     "auth token") block "gh auth token prints the GitHub token" ;;
     "config get")
       for flag in "$@"; do
-        case "$(lc "$flag")" in *token*) block "gh config get $flag prints a token" ;; esac
+        lower "$flag"; case "$LOWER" in *token*) block "gh config get $flag prints a token" ;; esac
       done
       ;;
     "auth status")
@@ -585,7 +629,7 @@ check_gh_workflow_run() {
     [ -n "$workflow" ] || workflow=$a
   done
   cmd_name "$workflow"
-  NAME=$(lc "$NAME")
+  lower "$NAME"; NAME=$LOWER
   case "$NAME" in
     deploy*) block "gh workflow run $workflow deploys" ;;
     *[!0-9]* | "") ;;
@@ -597,13 +641,15 @@ check_gh_workflow_run() {
 # A method flag, a body or a form in any spelling (short groups such as -sX or -sd too) counts as a write,
 # and so does httpie unless it names GET or HEAD, since it sends whatever is on its stdin as the body.
 check_http() {
-  local cmd=$1 a hit=0 write=0 verb=""
+  local cmd=$1 a hit=0 write=0 verb="" i=0
   shift
-  for a in "$@"; do
-    case "$(lc "$a")" in *api.github.com* | *uploads.github.com*) hit=1 ;; esac
+  lower_all "$@"
+  for a in "${LOWERED[@]}"; do
+    case "$a" in *api.github.com* | *uploads.github.com*) hit=1 ;; esac
   done
   [ "$hit" = 1 ] || return
   for a in "$@"; do
+    i=$((i + 1))
     case "$a" in
       --request* | --method* | --data* | --form* | --json* | --upload-file* | --post-* | --body* | --raw*) write=1 ;;
       --*) ;;
@@ -612,7 +658,7 @@ check_http() {
       *)
         case "$cmd" in
           http | https)
-            case "$(lc "$a")" in
+            case "${LOWERED[$((i - 1))]}" in
               get | head) [ -n "$verb" ] || verb="read" ;;
               *github.com*) ;;
               *:=* | *=* | *@*) write=1 ;; # a data item (x=y, x:=y, x@file)
@@ -632,28 +678,31 @@ check_http() {
 check_find() {
   local meta=$1 depth=$2
   shift 2
-  local secret=0 hands_on=0 a v
-  local -a ex
+  local secret=0 hands_on=0 a v i=0 n=$#
+  local -a ex w=("$@") lw
   [[ ${meta:1:1} == p || ${meta:2:1} == s ]] && hands_on=1
-  while [ $# -gt 0 ]; do
-    a=$1
-    shift
+  lower_all "$@"
+  lw=("${LOWERED[@]}")
+  set -- # no positional parameters while calling a function per word (see check_secrets)
+  while [ "$i" -lt "$n" ]; do
+    a=${w[$i]}
+    i=$((i + 1))
     case "$a" in
       -name | -iname | -path | -ipath | -wholename | -iwholename | -regex | -iregex)
-        v=${1:-}
-        shift
+        v=${w[$i]:-}
+        i=$((i + 1))
         find_pattern_secret "$a" "$v" && secret=1
         ;;
       -exec | -execdir | -ok | -okdir)
         hands_on=1
         ex=()
-        while [ $# -gt 0 ] && [ "$1" != ";" ] && [ "$1" != "+" ]; do ex+=("$1"); shift; done
-        [ $# -gt 0 ] && shift
+        while [ "$i" -lt "$n" ] && [ "${w[$i]}" != ";" ] && [ "${w[$i]}" != "+" ]; do ex+=("${w[$i]}"); i=$((i + 1)); done
+        [ "$i" -lt "$n" ] && i=$((i + 1))
         [ "${#ex[@]}" -gt 0 ] && check_segment "$depth" "---" "" "${ex[@]}"
         ;;
       -print0 | -fprint | -fprint0 | -fprintf | -fls | -printf) hands_on=1 ;;
       -*) ;;
-      *) is_secret_path "$a" && secret=1 ;;
+      *) is_secret_path "${lw[$((i - 1))]}" && secret=1 ;;
     esac
   done
   if [ "$secret" = 1 ] && [ "$hands_on" = 1 ]; then
@@ -671,14 +720,14 @@ find_pattern_secret() {
       done
       ;;
     -name | -iname)
-      [ "$flag" = -iname ] && pat=$(lc "$pat")
+      [ "$flag" = -iname ] && { lower "$pat"; pat=$LOWER; }
       for cand in .env .env.local .env.testing .env.production .envrc .forge-token .credentials.json id_rsa id_ed25519 hosts.yml forge-token mcp.env; do
         # shellcheck disable=SC2053 # $pat is a glob on purpose
         [[ $cand == $pat ]] && return 0
       done
       ;;
     *)
-      [[ $flag == -i* ]] && pat=$(lc "$pat")
+      [[ $flag == -i* ]] && { lower "$pat"; pat=$LOWER; }
       for cand in ./backend/.env ./.env /home/u/.ssh/id_rsa /home/u/.ssh/id_ed25519 /home/u/.config/gh/hosts.yml /home/u/.forge-token /home/u/.claude/.credentials.json /home/u/.config/mroom/secrets/forge-token /home/u/.config/tool/mcp.env; do
         # shellcheck disable=SC2053 # $pat is a glob on purpose
         [[ $cand == $pat ]] && return 0
@@ -692,33 +741,40 @@ find_pattern_secret() {
 check_git() {
   local depth=$1
   shift
-  local a v sub="" k aliases=""
-  local -a rest=()
-  while [ $# -gt 0 ]; do
-    a=$1
-    shift
+  local a v lv sub="" k aliases="" i=0 n=$#
+  local -a rest=() w=("$@") lw
+  # Lower case once for every word: a -c key is matched without case, and there can be many.
+  lower_all "$@"
+  lw=("${LOWERED[@]}")
+  set -- # no positional parameters while calling a function per word (see check_secrets)
+  while [ "$i" -lt "$n" ]; do
+    a=${w[$i]}
+    i=$((i + 1))
     v=""
     case "$a" in
-      -c) v=${1:-}; shift ;;
-      -c*) v=${a#-c} ;;
+      -c) v=${w[$i]:-}; lv=${lw[$i]:-}; i=$((i + 1)) ;;
+      -c*) v=${a#-c}; lv=${lw[$((i - 1))]#-c} ;;
       --config-env | --config-env=*) block "git --config-env sets configuration from the environment, which cannot be checked" ;;
-      -C | --git-dir | --work-tree | --namespace) shift ;;
+      -C | --git-dir | --work-tree | --namespace) i=$((i + 1)) ;;
       -*) ;;
-      *) sub=$a; rest=("$@"); break ;;
+      *) sub=$a; rest=("${w[@]:$i}"); break ;;
     esac
     if [ -n "$v" ]; then
-      check_git_config_pair "$depth" "$v"
+      # The key in lower case (so check_git_config_pair does not fork for it), the value as written.
+      check_git_config_pair "$depth" "${lv%%=*}=${v#*=}"
       # An alias defined here and used as this command's subcommand: remembered, to check what it runs.
-      case "$(lc "${v%%=*}")" in alias.*) aliases+="$(lc "${v%%=*}")=${v#*=}$US" ;; esac
+      case "${lv%%=*}" in alias.*) aliases+="${lv%%=*}=${v#*=}$US" ;; esac
     fi
   done
   [ -n "$BLOCKED" ] && return
   if [ -n "$aliases" ] && [ -n "$sub" ]; then
     local -a defs
-    local def
+    local def lsub
+    lower "$sub"
+    lsub=$LOWER
     IFS=$US read -r -a defs <<<"$aliases"
     for def in "${defs[@]}"; do
-      if [ "${def%%=*}" = "alias.$(lc "$sub")" ]; then
+      if [ "${def%%=*}" = "alias.$lsub" ]; then
         analyze "git ${def#*=} $(printf '%q ' ${rest[@]+"${rest[@]}"})" $((depth + 1))
         return
       fi
@@ -762,10 +818,11 @@ check_git() {
     credential | credential-*) block "git $sub reads or stores a credential" ;;
     send-pack) block "git send-pack pushes without git push, and can force"; return ;;
     diff | show | cat-file | grep | blame | add | hash-object | update-index | archive)
+      lower_all ${rest[@]+"${rest[@]}"}
       for ((k = 0; k < ${#rest[@]}; k++)); do
-        a=${rest[$k]}
+        a=${LOWERED[$k]}
         case "$a" in
-          :*) ;;                 # :path (or :N:path) is the index, which holds what was added from the working tree
+          :*) ;;                # :path (or :N:path) is the index, which holds what was added from the working tree
           -* | *:*) continue ;;  # REV:path is committed content
         esac
         a=${a##*:}
@@ -791,7 +848,7 @@ is_git_command_key() {
 check_git_config_pair() {
   local depth=$1 pair=$2 key value
   [ "${#pair}" -le 4096 ] || { block "a git -c value too long to check"; return; }
-  key=$(lc "${pair%%=*}")
+  lower "${pair%%=*}"; key=$LOWER
   value=${pair#*=}
   case "$key" in
     alias.*)
@@ -840,7 +897,7 @@ check_git_config_set() {
     set) key=${ops[1]:-}; value=${ops[2]:-}; [ "${#ops[@]}" -ge 3 ] || return ;;
     *) key=${ops[0]:-}; value=${ops[1]:-}; [ "${#ops[@]}" -ge 2 ] || return ;;
   esac
-  key=$(lc "$key")
+  lower "$key"; key=$LOWER
   case "$key" in
     alias.*)
       if [ "${value:0:1}" = "!" ]; then
@@ -868,7 +925,7 @@ is_git_push_key() {
     remote.*.push | remote.*.mirror | push.followtags | push.pushoption) return 0 ;;
     # matching pushes every branch that exists on both sides, the default branch too; upstream (tracking)
     # pushes to whatever branch the current one tracks, which can be main.
-    push.default) case "$(lc "$2")" in matching | upstream | tracking) return 0 ;; esac ;;
+    push.default) lower "$2"; case "$LOWER" in matching | upstream | tracking) return 0 ;; esac ;;
     branch.*.merge | branch.*.pushremote | remote.pushdefault) return 0 ;;
   esac
   return 1
@@ -880,7 +937,8 @@ check_git_alias() {
   [ "${#2}" -le 4096 ] || { block "a git alias too long to check"; return; }
   # An alias for push itself would take its options where this hook no longer sees them (`git p --force`),
   # even behind git's own options (`--no-pager push`, `-C . push`).
-  case " $(lc "$2") " in
+  lower "$2"
+  case " $LOWER " in
     *" push "* | *" send-pack "*) block "a git alias for push hides the options a later push passes it"; return ;;
   esac
   analyze "git $2" $(($1 + 1))
@@ -890,7 +948,7 @@ check_git_alias() {
 # tag, design section 10), and tag names that look like releases (v1.2, v1.2.3, release-v1.2.3).
 is_protected_ref() {
   local r
-  r=$(lc "$1")
+  lower "$1"; r=$LOWER
   r=${r#refs/}
   r=${r#heads/}
   case "$r" in
@@ -978,7 +1036,7 @@ check_segment() {
   shift 3
   local -a words=()
   local a k base stdin="" stdin_kind="" stdin_file="" brace_list=0
-  local -a raw=("$@")
+  local -a raw=("$@") lraw=()
 
   # Redirections can sit anywhere, even before the command word (`<<EOF bash`, `2>&1 gh ...`).
   for ((k = 0; k < ${#raw[@]}; k++)); do
@@ -988,8 +1046,10 @@ check_segment() {
       "${MK}R<") k=$((k + 1)); stdin_file=${raw[$k]}; stdin_kind="file" ;;
       "${MK}R>")
         k=$((k + 1))
+        # Lower case once for all the words, at the first redirection (not a fork per redirection).
+        [ "${#lraw[@]}" -gt 0 ] || { lower_all "${raw[@]}"; lraw=("${LOWERED[@]}"); }
         # Writing git's own config or hooks changes what later git commands do, out of sight.
-        case "/$(lc "${raw[$k]:-}")" in
+        case "/${lraw[$k]:-}" in
           */.git/config | */.git/hooks/* | */.gitconfig | */.config/git/config)
             block "it writes git's configuration or hooks (${raw[$k]})"
             return
@@ -1350,8 +1410,9 @@ check_segment() {
     git) check_git "$depth" "$@" ;;
     curl | wget | http | https) check_http "$cmd" "$@" ;;
     printenv)
-      for a in "$@"; do
-        case "$(lc "$a")" in *token* | *secret* | *password* | *_key | *apikey*) block "printenv $a prints a secret"; return ;; esac
+      lower_all "$@"
+      for a in "${LOWERED[@]}"; do
+        case "$a" in *token* | *secret* | *password* | *_key | *apikey*) block "printenv $a prints a secret"; return ;; esac
       done
       ;;
     find) check_find "$meta" "$depth" "$@" ;;
@@ -1410,14 +1471,17 @@ check_shell() {
   local a script="" has_c=0 from_stdin=0 file="" skip=0 opts=1
   # Options first: short groups (-ec, +x), and -o/+o/-O/+O whose next word is an option name, not
   # a script. The first other word is the -c string or the script file.
-  local init_next=0
+  local init_next=0 i=-1
+  local -a lw=()
+  [ "$SHELL_NAME" = pwsh ] && { lower_all "$@"; lw=("${LOWERED[@]}"); }
   for a in "$@"; do
+    i=$((i + 1))
     if [ "$skip" = 1 ]; then skip=0; continue; fi
     if [ "$init_next" = 1 ]; then init_next=0; analyze "$a" $((depth + 1)); continue; fi
     if [ "$opts" = 1 ] && [ "$SHELL_NAME" = pwsh ]; then
       # PowerShell's options, matched without case: -Command (and its abbreviations, -c) is the command,
       # -File the script, an encoded command cannot be read, and a few take a value.
-      case "$(lc "$a")" in
+      case "${lw[$i]}" in
         -configurationname | -configurationfile | -cnf | -workingdirectory | -wd | -executionpolicy | -ep | \
           -outputformat | -of | -inputformat | -if | -settingsfile | -custompipename) skip=1; continue ;;
         -c | -co*) has_c=1; continue ;;
@@ -1481,11 +1545,15 @@ check_interpreter() {
   for a in "$@"; do
     case "$a" in
       -c | -e | -E | -r | -p | --eval | --print | --eval=* | --print=* | -m | -f | eval | run) inline=1 ;;
-      -*) ;;
     esac
-    check_code "inline $cmd code" "$a"
-    [ -n "$BLOCKED" ] && return
   done
+  # Every word at once, joined by US (not one check per word: check_code forks, and a fork per word is slow).
+  if [ "$#" -gt 0 ]; then
+    local joined
+    printf -v joined '%s\037' "$@"
+    check_code "inline $cmd code" "$joined"
+    [ -n "$BLOCKED" ] && return
+  fi
   # Code on stdin is checked whether or not a script is named too (`php artisan tinker <<EOF`).
   if [ "$inline" = 0 ] && [ "$stdin_kind" = static ]; then
     check_code "$cmd code on stdin" "$stdin"
@@ -1496,6 +1564,8 @@ check_interpreter() {
 analyze() {
   local s=$1 depth=$2 out rec prev="" status=0
   [ "$depth" -le 8 ] || { block "the command nests shells too deeply to check"; return; }
+  PARSES=$((PARSES + 1))
+  [ "$PARSES" -le "$MAX_PARSES" ] || { block "the command holds more than $MAX_PARSES commands to check inside it, too many to check in time"; return; }
   out=$(printf '%s' "$s" | "$AWK" -f "$TOKENIZER") || status=$?
   if [ "$status" != 0 ]; then
     block "the command could not be parsed to check it"
@@ -1511,6 +1581,15 @@ analyze() {
       return
     fi
     IFS=$US read -r -a f <<<"$rec"
+    if [ "$((${#f[@]} - 1))" -gt "$MAX_WORDS" ]; then
+      block "a simple command has more than $MAX_WORDS words, too many to check in time"
+      return
+    fi
+    WORDS=$((WORDS + ${#f[@]} - 1))
+    if [ "$WORDS" -gt "$MAX_TOTAL_WORDS" ]; then
+      block "the command has more than $MAX_TOTAL_WORDS words, too many to check in time"
+      return
+    fi
     check_segment "$depth" "${f[0]}" "$prev" "${f[@]:1}"
     prev=$rec
   done <<<"$out"
