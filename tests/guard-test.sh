@@ -774,11 +774,11 @@ EOF
 }
 
 # Time: a 64 KB command, allowed or refused, and the most simple commands it checks, are checked in a
-# few seconds even on a busy box (a second on an idle one); past 256 KB or 3000 commands, refused. The
-# limits catch a quadratic slowdown, which takes minutes: Claude Code lets a command run when its hook
-# times out (60 seconds by default).
+# few seconds even on a busy box (a second on an idle one); past 256 KB, 3000 commands, 2000 words in one
+# command, 20,000 words in all or 200 commands inside others, refused. The limits catch a quadratic
+# slowdown, which takes minutes: Claude Code lets a command run when its hook times out (60 seconds).
 timing() {
-  local line plain body="" flat="" many=""
+  local line plain body="" flat="" many="" words wide=""
   line="a long PR body line with words, (parens), 'quotes', \$(subst), \`ticks\`, {braces} and env vars in it"
   plain="a long PR body line with words, (parens), {braces}, \"quotes\", \$HOME and no single quotes in it"
   while [ "${#flat}" -lt 65536 ]; do body+="$line"$'\n'; flat+="$plain"$'\n'; done
@@ -791,6 +791,15 @@ timing() {
   fast 8 2 "$many$(printf 'true; %.0s' $(seq 1 101))"
   while [ "${#body}" -lt 270000 ]; do body+="$body"; done
   fast 4 2 "echo \"$body\""
+  # Many words: one simple command of tens of thousands (with a fork per word, the merge after it was
+  # checked only after minutes), many commands at the per-command cap, and words that are each a command.
+  words=$(printf ' A%.0s' $(seq 1 40000))
+  fast 4 2 "cat$words; gh pr merge 1"
+  fast 4 2 "git add$words"
+  fast 4 0 "cat${words:0:3980}"
+  for _ in $(seq 1 20); do wide+="cat${words:0:3980}; "; done
+  fast 4 2 "$wide gh pr merge 1"
+  fast 4 2 "git$(printf ' -c core.editor=true%.0s' $(seq 1 300)) status"
 }
 
 awks=()
