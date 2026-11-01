@@ -699,7 +699,8 @@ frontend alone also restored the e2e build (pattern 7) and took 123 to 151 s; th
    outside `$HOME` (so apt still downloads as `_apt`), key it on the lockfile that pins the tool plus the
    ISO week, run `apt-get autoclean` before the weekly save. apt checks each file it downloads against
    the signed index, but takes a file already in that folder on its size alone (apt 2.7 and 3.1), so
-   the cache is only as sound as the default branch's runs, the only ones that save it.
+   the cache is only as sound as the default branch's runs, the only ones that save it. Each week's save
+   starts from the week before's folder, so a file stays there until `apt-get autoclean` drops its version.
 3. **Cache the installed `vendor/`, with a fallback key.** On a changed lock the previous `vendor/` is
    restored and `composer install` reconciles it; composer's own download cache is then unnecessary.
 4. **Shard by measured time, not by name.** Ship a measuring mode (one job per suite) and record the
