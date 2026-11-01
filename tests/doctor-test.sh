@@ -34,6 +34,7 @@ caller() {
 # world: a box set up as the README says, and an app (one Laravel app with Vite inside it) whose mroom.toml it
 # meets. Every check passes in it.
 world() {
+  export T  # the fakes answer from files under it
   # A test may call it again for a fresh app and box: what the last one left goes first.
   if [ -d "$T/libexec" ]; then chmod u+w "$T/libexec"; fi
   if [ -d "$T/services" ]; then chmod -R u+w "$T/services"; fi

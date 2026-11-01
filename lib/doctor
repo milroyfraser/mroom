@@ -74,7 +74,7 @@ section() { printf '\n== %s\n' "$1"; }
 
 # ---- the app ------------------------------------------------------------------------------------------------
 
-CONFIG_OK=0 QA_ON=0 APP_ROOT=""
+CONFIG_OK=0 QA_ON=0 APP_ROOT="" BACKEND=""
 # What the app's mroom.toml needs of the box; without --app, the box is taken as it is.
 APP_NAME="" QA_ZONE="" BACKEND_DIR="." FRONTEND_DIR="" APP_PHP="" PERSONA_DOMAIN=".test"
 MAIL="" FILES="" BROADCAST="" DB_READ_SET=0 DB_READ_LIST="" TEMPLATE_DB=""
@@ -119,6 +119,8 @@ app_config() {
   APP_NAME="$(cfg app.name "")"
   QA_ZONE="$(cfg qa.zone "")"
   BACKEND_DIR="$(cfg app.backend_dir .)"
+  BACKEND="$APP_ROOT"
+  if [ "$BACKEND_DIR" != . ]; then BACKEND="$APP_ROOT/$BACKEND_DIR"; fi
   FRONTEND_DIR="$(cfg app.frontend_dir "")"
   APP_PHP="$(cfg app.php "")"
   PERSONA_DOMAIN="$(cfg qa.persona_domain .test)"
@@ -255,7 +257,7 @@ app_reverb_frontend() {
 # app_redis_commands: nothing in QA's deploy or schedule runs a command the environment's Redis user is refused
 # (design 9): phpredis reports a refused FLUSHDB as done, so the step seems to work and does nothing.
 app_redis_commands() {
-  local backend="$APP_ROOT/$BACKEND_DIR" found=0 command file hit
+  local backend="$BACKEND" found=0 command file hit
   while IFS= read -r command; do
     if [[ "$command" =~ ^($REFUSED_COMMANDS)([[:space:]]|$) ]]; then
       report fail redis-commands "app.build.after_deploy runs $command, which the environment's Redis user is refused" \
@@ -278,7 +280,7 @@ app_redis_commands() {
 # honours <KEY> [<config file>]: whether the backend reads KEY. A config file the app has not published leaves
 # Laravel's (or the package's) own, which reads it; one it has must read it itself.
 honours() {
-  local backend="$APP_ROOT/$BACKEND_DIR" dir
+  local backend="$BACKEND" dir
   if [ -n "${2:-}" ]; then
     [ -f "$backend/$2" ] || return 0
     grep -qw -- "$1" "$backend/$2"
@@ -292,7 +294,7 @@ honours() {
 
 # app_isolation: the backend honours each setting that keeps environments on one box apart (design 8.7, 9).
 app_isolation() {
-  local backend="$APP_ROOT/$BACKEND_DIR" missing=() pair key file where
+  local backend="$BACKEND" missing=() pair key file where
   if [ ! -f "$backend/artisan" ]; then
     report fail isolation "$BACKEND_DIR has no artisan, so it is not the Laravel app" "set app.backend_dir to the Laravel app's folder"
     return 0
@@ -325,7 +327,7 @@ app_isolation() {
 # app_health: the two paths a deploy waits on, by a look at the routes (design 9). A warn: a route may be built
 # in a way a search does not find.
 app_health() {
-  local backend="$APP_ROOT/$BACKEND_DIR" path part
+  local backend="$BACKEND" path part
   if grep -rqsE "health:[[:space:]]*['\"]/up['\"]|['\"]/?up['\"]" "$backend/bootstrap/app.php" "$backend/routes" 2>/dev/null; then
     report ok health "the backend has /up"
   else
