@@ -4,12 +4,19 @@ MROOM_ROOT_DIR set. Prints one line per check, "ok <what>" or "FAIL <what>". Pyt
 library only."""
 import json, os, re, shutil, subprocess, sys
 
-root = os.environ["MROOM_ROOT_DIR"]
-sys.path.insert(0, os.path.join(root, "tools"))
-from privacy_check import private_words  # noqa: E402
+import importlib.util
 
-# The private list: $MROOM_PRIVATE_WORDS (a file or the list itself) or the gitignored .private-words.
-PRIVATE_WORDS = private_words(root) or []
+root = os.environ["MROOM_ROOT_DIR"]
+# The private list, read by tools/privacy_check.py's private_words(), loaded by its path: $MROOM_PRIVATE_WORDS
+# (the list), $MROOM_PRIVATE_WORDS_FILE (its file) or, outside GitHub Actions, the gitignored .private-words.
+_spec = importlib.util.spec_from_file_location("privacy_check", os.path.join(root, "tools", "privacy_check.py"))
+privacy_check = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(privacy_check)
+try:
+    PRIVATE_WORDS = privacy_check.private_words(root) or []
+    PRIVATE_LIST_ERROR = None
+except privacy_check.ListError as e:
+    PRIVATE_WORDS, PRIVATE_LIST_ERROR = [], str(e)
 skills_dir = os.environ["SKILLS_DIR"]
 commands_dir = os.environ["COMMANDS_DIR"]
 
@@ -94,6 +101,7 @@ subs = {}
 for m in re.finditer(r"mroom ([a-z]+) ([a-z][a-z|-]*)", usage_text):
     subs.setdefault(m.group(1), set()).update(m.group(2).split("|"))
 keys = set(re.findall(r"^\s*\"([a-z_]+(?:\.[a-z_]+)+)\":", read(os.path.join(root, "lib/core/config.py")), flags=re.M))
+say(PRIVATE_LIST_ERROR is None, f"the private list reads ({PRIVATE_LIST_ERROR})")
 say("tracker" in commands and {"get", "list", "comment", "state"} <= subs.get("tracker", set()),
     "the checks find mroom's commands and subcommands")
 say("issues.state_review" in keys and "release.production_url" in keys, "the checks find mroom.toml's keys")

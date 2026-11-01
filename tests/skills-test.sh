@@ -20,7 +20,7 @@
 #   - the Room decides whether a card is blocked in one place, so no verdict it shows (the card's tabs, the
 #     next-step box) reads Go for a blocked card, and an Issue card keeps its QA placeholder once its PR opens;
 #   - no skill names a host, address, id or person (and none of the private words, which
-#     tools/privacy_check.py reads from $MROOM_PRIVATE_WORDS or the gitignored .private-words).
+#     tools/privacy_check.py reads: README, Privacy check).
 #
 #   tests/skills-test.sh            (SKILLS_DIR and COMMANDS_DIR override the folders, for mutation checks)
 set -euo pipefail

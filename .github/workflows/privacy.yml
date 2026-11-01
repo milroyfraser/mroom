@@ -1,15 +1,19 @@
 name: privacy
 
-# A pull request's added lines, paths, commit messages, title and body against the owner's private words
-# (tools/privacy_check.py, README "Privacy check"). The list is the secret MROOM_PRIVATE_WORDS, one
-# case-insensitive regular expression per line. A hit names its place and the entry's number, never the word.
+# A pull request's paths, added lines, commits (author, committer, message), title, body and branch name against
+# the owner's private words (tools/privacy_check.py, README "Privacy check"). The list is the secret
+# MROOM_PRIVATE_WORDS of the privacy environment, which admits the default branch alone; one case-insensitive
+# regular expression per line. A hit names its place and the entry's number, never the word.
 #
 # The job holds the secret, so it never runs the pull request's code. pull_request_target runs the default
-# branch's copy of this file, never the pull request's; the check script comes from a checkout of the default
-# branch (base/), and the pull request's head is checked out apart (pr/) as data only: git reads it, nothing in it
-# runs. The script runs with python3 -I, so nothing in pr/ is imported. Each entry is masked before the check runs,
-# and nothing here traces commands (no set -x). With no secret the check passes with a notice. A fork's pull
-# request is checked too; it is only read.
+# branch's copy of this file; the job runs only for a pull request based on the default branch, so that copy is
+# the one the environment admits. The script comes from this file's own commit (base/), run with python3 -I. The
+# pull request is fetched by its two commits into a bare repository (pr.git): git reads it as data, and no working
+# tree, hook or attribute of it is used. The script masks each entry before it prints anything, and nothing here
+# traces commands (no set -x). With no secret the check passes with a notice.
+#
+# A fork's pull request is not checked: its annotations are public, so anyone could test guesses against the list.
+# The owner runs tools/privacy_check.py on it before merging (README). Dependabot's runs get no secrets.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
@@ -24,42 +28,39 @@ concurrency:
 jobs:
   privacy:
     name: privacy
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
+      github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment:
+      name: privacy
+      deployment: false
     steps:
-      - name: the check, from the default branch
-        uses: actions/checkout@v4
+      - name: the check, at this file's commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.workflow_sha }}
           path: base
           persist-credentials: false
           sparse-checkout: /tools/privacy_check.py
           sparse-checkout-cone-mode: false
       - name: the pull request, as data
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          path: pr
-          fetch-depth: 0
-          persist-credentials: false
-      - name: private words
         env:
-          WORDS: ${{ secrets.MROOM_PRIVATE_WORDS }}
-        run: |
-          [ -n "$WORDS" ] || exit 0
-          while IFS= read -r word; do
-            word="${word%$'\r'}"
-            word="${word#"${word%%[![:space:]]*}"}"
-            word="${word%"${word##*[![:space:]]}"}"
-            [ -z "$word" ] || printf '::add-mask::%s\n' "$word"
-          done <<<"$WORDS"
-          list="$RUNNER_TEMP/private-words"
-          (umask 077 && printf '%s\n' "$WORDS" >"$list")
-          printf 'MROOM_PRIVATE_WORDS=%s\n' "$list" >>"$GITHUB_ENV"
-      - name: check the pull request
-        working-directory: pr
-        env:
+          REPO: ${{ github.server_url }}/${{ github.repository }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git init -q --bare pr.git
+          git -C pr.git fetch -q --no-tags "$REPO" "$BASE_SHA" "$HEAD_SHA"
+      - name: check the pull request
+        working-directory: pr.git
+        env:
+          MROOM_PRIVATE_WORDS: ${{ secrets.MROOM_PRIVATE_WORDS }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
-        run: python3 -I ../base/tools/privacy_check.py --base "$BASE_SHA" --head HEAD
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: python3 -I ../base/tools/privacy_check.py --base "$BASE_SHA" --head "$HEAD_SHA"
