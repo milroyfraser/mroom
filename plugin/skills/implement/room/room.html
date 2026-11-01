@@ -677,8 +677,8 @@ body[data-winddown]{--bg:var(--wd-bg);--surface:var(--wd-surface);background:var
   function updated(b) { return b && b.updatedAt ? "Updated " + ago(Date.now() - (Date.parse(b.updatedAt) || Date.now())) + " · " + when(b.updatedAt) : "Not filled in yet"; }
 
   /* Wind-down and the retrospective. meta/winddown {on, note, paused:[...]} puts the page in its dusk mood;
-     each learnings doc {order, title, happened, continue:{text,rec}, stop:{text,rec}, actions:[{text,rec}],
-     status} is one card. The first one not "done" (by order) shows above the next step; "Next learning"
+     each learnings doc {order, title, observation, actions:[{text,rec}], status} is one card: what was seen,
+     then the recommended action items, each with Claude's recommendation. The first one not "done" (by order) shows above the next step; "Next learning"
      marks it done. Rows are data: every field lands as text. */
   let learnings = [], windDown = null;
   function renderLearning() {
@@ -700,20 +700,13 @@ body[data-winddown]{--bg:var(--wd-bg);--surface:var(--wd-surface);background:var
     const head = el("div", "lchead");
     head.append(el("span", null, "Retrospective"), el("span", null, "Learning " + (list.indexOf(cur) + 1) + " of " + list.length));
     box.append(head, el("h3", null, String(cur.title || "")));
-    if (cur.happened) { const p = el("div", "lcpart"); p.append(el("b", null, "What happened"), el("p", null, String(cur.happened))); box.append(p); }
-    for (const [label, key] of [["Continue doing", "continue"], ["Stop doing", "stop"]]) {
-      const v = cur[key] && typeof cur[key] === "object" ? cur[key] : null;
-      if (!v || !v.text) continue;
-      const p = el("div", "lcpart");
-      p.append(el("b", null, label), el("p", null, String(v.text)));
-      if (v.rec) p.append(el("p", "lcrec", "Claude recommends: " + String(v.rec)));
-      box.append(p);
-    }
+    const obs = cur.observation || cur.happened;
+    if (obs) { const p = el("div", "lcpart"); p.append(el("b", null, "Observation"), el("p", null, String(obs))); box.append(p); }
     const acts = Array.isArray(cur.actions) ? cur.actions.filter((a) => a && a.text) : [];
     if (acts.length) {
       const p = el("div", "lcpart"); const ul = el("ul");
       for (const a of acts) { const li = el("li"); li.append(el("p", null, String(a.text))); if (a.rec) li.append(el("p", "lcrec", "Claude recommends: " + String(a.rec))); ul.append(li); }
-      p.append(el("b", null, "Action items"), ul); box.append(p);
+      p.append(el("b", null, "Recommended action items"), ul); box.append(p);
     }
     const row = el("div", "lcrow");
     row.append(el("span", "wdnote", open.length - 1 ? (open.length - 1) + " more after this" : "Last one"));

@@ -597,7 +597,7 @@ that Claude Code reads; in a session they are `/mroom:<name>`.
 | Skill or command | What it does |
 |---|---|
 | `/mroom:refine` | lists my open issues, tags each with a Design value, and runs `/mroom:implement` on the ones I confirm |
-| `/mroom:wind-down` | ends the day: turns the Room to its wind-down mood, pauses running work so it can restart, and shows a retrospective of the day's learnings one card at a time |
+| `/mroom:wind-down` | ends the day: turns the Room to its wind-down mood, pauses running work so it can restart, and shows a retrospective of the day's learnings one card at a time (an observation and its recommended action items) |
 | `/mroom:deliver <id>` | a design gate when the issue needs one (a canvas, approved in a comment), then `/mroom:implement`; resumes stopped work |
 | `/mroom:implement <id>` | one issue to a PR in review: a worktree, the change, the affected tests, a draft PR, CI and QA on the PR's environment, then stop |
 | `/mroom:fix-issue <error id>` | one error issue to a fix in review: reads the error and its latest event, finds the issue the persona filed (`mroom tracker find`), works on a branch that names both ids, reproduces the error with a failing test before it fixes it, and links the error issue only through `Fixes <error id>` lines, on the fixing commit and in the PR body; never resolves it |

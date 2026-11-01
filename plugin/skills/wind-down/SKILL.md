@@ -1,6 +1,6 @@
 ---
 name: wind-down
-description: End the working day. Turn the session Room to its wind-down mood, bring every piece of running work to a state that can be paused and restarted later, and run a retrospective of the day's learnings, one card at a time. Never merges.
+description: End the working day. Turn the session Room to its wind-down mood, bring every piece of running work to a state that can be paused and restarted later, and run a retrospective of the day's learnings, one card at a time: an observation and its recommended action items. Never merges.
 ---
 
 # /mroom:wind-down: pause the day and look back
@@ -55,19 +55,16 @@ Group it into a handful of learnings (usually 5 to 12), ranked by impact. Write 
 the Room's `learnings` collection:
 
 ```
-{ order, title, happened,
-  continue: { text, rec },
-  stop:     { text, rec },
-  actions:  [ { text, rec } ],
+{ order, title, observation,
+  actions: [ { text, rec } ],
   status: "open" }
 ```
 
 - `title`: the learning in a few words.
-- `happened`: what was seen, with the PRs or events that show it.
-- `continue`: what worked and should keep happening. `rec` is Claude's recommendation for it.
-- `stop`: what cost time or caused a problem. `rec` says what to do instead.
-- `actions`: concrete changes (a check, a rule, a tool, a template change). Each `rec` says how
-  Claude would do it and how big it is.
+- `observation`: what was seen, with the PRs or events that show it.
+- `actions`: the recommended action items, concrete changes (a check, a rule, a tool, a template
+  change). Each `rec` is Claude's recommendation: how to do it, how big it is, and whether it needs
+  the developer's decision first.
 
 The page shows one learning at a time on top of "Your next step", with "Learning n of N", until
 the developer has read each one ("Next learning" marks it done). Keep the learning generic when it

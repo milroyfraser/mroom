@@ -34,7 +34,7 @@ Update it as things happen, not at the end:
 
 ## Wind-down and retrospective
 
-`/mroom:wind-down` ends the day. It writes `meta/winddown` `{on: true, at, note, paused: [...]}`, and the page turns to a dusk palette with a "Winding down" line listing what was paused. Each learning is a doc in `learnings`, `{order, title, happened, continue: {text, rec}, stop: {text, rec}, actions: [{text, rec}], status}`. The page shows the first one that isn't `done` (by `order`) on top of "Your next step", with "Learning n of N", and "Next learning" marks it done, until all are read. Each `rec` is Claude's recommendation for that point. Rows are data: every field lands as text. The next session sets `meta/winddown.on` to false, which brings back the day mood.
+`/mroom:wind-down` ends the day. It writes `meta/winddown` `{on: true, at, note, paused: [...]}`, and the page turns to a dusk palette with a "Winding down" line listing what was paused. Each learning is a doc in `learnings`, `{order, title, observation, actions: [{text, rec}], status}`: what was seen, then the recommended action items. The page shows the first one that isn't `done` (by `order`) on top of "Your next step", with "Learning n of N", and "Next learning" marks it done, until all are read. Each `rec` is Claude's recommendation for that action item. Rows are data: every field lands as text. The next session sets `meta/winddown.on` to false, which brings back the day mood.
 
 ## PR cards
 
