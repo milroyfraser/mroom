@@ -421,11 +421,10 @@ mroom tracker get SHOP-12                    # title, state, labels, branch, des
 mroom tracker list --mine --open             # my 50 latest open issues, by priority; or --label lesson
 mroom tracker find sentry:1001               # the issues whose description holds the marker for an alert
 mroom tracker owned SHOP-12                  # whether the token's user filed the issue
-note="$(mktemp)"                             # a fresh file per comment, never a fixed name; fill it in the
-mroom tracker comment SHOP-12 < "$note"      # same shell. Adds a comment; the body comes on stdin
+mroom tracker comment SHOP-12 < "$note"      # adds a comment; the body comes on stdin, from a fresh file
+                                             # (an agent writes it with the Write tool, never a heredoc)
 mroom tracker state SHOP-12 "In Review"      # the team's state of that name, in any case
-body="$(mktemp)"                             # and another fresh file for the new issue's body
-mroom tracker create --allow-create --title "Checkout fails" --state Triage --label bug < "$body"
+mroom tracker create --allow-create --title 'Checkout fails' --state Triage --label bug < "$body"
 mroom errors get SHOP-1A2                    # the error issue and its latest event
 mroom errors search 'is:unresolved' --environment production --period 24h --limit 50
 mroom errors new 40 --environment production # new, regressed and escalating issues of the last 40 minutes

@@ -123,7 +123,8 @@ cause in two sentences, and the branch: `mroom tracker comment <id> < "$f"`, a f
 `/mroom:implement` steps 4 and 5, plus:
 
 - **Title:** `fix(<issue id>): <what no longer fails>`, such as
-  `fix(SHOP-123): accept a NUL byte in a run's JSON`. With no tracker: `fix(<error id>): …`.
+  `fix(SHOP-123): accept a NUL byte in the JSON of a run`. With no tracker: `fix(<error id>): …`.
+  The title holds no `'`, since it goes in single quotes (`/mroom:implement`, Rules).
 - **Body:** next to the issue link, the error issue: `Errors: <error id> <its link>`. Then
   `Fixes <error id>` on a line of its own, for a squash merge that uses the PR's description.
   The summary says what users hit (events, users, since which release), the cause and the fix.

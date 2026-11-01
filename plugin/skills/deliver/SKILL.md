@@ -23,7 +23,8 @@ installed, go on without it.
 - Never add the `qa` label. It is a person's switch.
 - Write every PR body, comment, note and commit message with a body to a fresh file, never a
   fixed name in a shared folder: with the Write tool, to a new file in a fresh folder that
-  `mktemp -d` makes, and never through the shell, such as a heredoc (`/mroom:implement`, Rules).
+  `mktemp -d` makes in your scratchpad, and never through the shell, such as a heredoc. A title on
+  a command line goes in single quotes and holds no `'` (`/mroom:implement`, Rules).
 - Push early: after the first commit, push and open a draft PR linked to the issue
   (`/mroom:implement` step 4). Mark it ready only when the work is done (`/mroom:implement` step 6).
 - Never check out, run or push to a pull request from a fork (`isCrossRepository` true). A fork's

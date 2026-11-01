@@ -28,14 +28,23 @@ on without it.
 - Write every PR body, comment, note and commit message with a body to a fresh file, never a
   fixed name such as `note.md` in a shared folder, where another session's PR picks up your text,
   or you pick up its. Write it with the Write tool to a new file in a fresh folder that `mktemp -d`
-  makes (it prints the path, and only you can open the folder), such as `<folder>/body.md`, and
-  pass that path to the command. Never put the text through the shell, in a heredoc, `echo` or
-  `printf`: in a heredoc, quoted or not, a line of the text equal to its end word ends it, and the
-  lines after it run as commands, so issue, error, review or log text that holds such a line would
-  run. The Write tool refuses to fill a file it has not read, such as the empty one plain `mktemp`
-  makes, so write a new file in the folder.
+  makes in your scratchpad (`mktemp -d "<scratchpad>/text.XXXXXX"`; with no scratchpad, plain
+  `mktemp -d`), such as `<folder>/body.md`, and pass that path to the command. The folder has mode
+  700, so no other OS user can open it.
 
-  Below, `"$f"`, `"$msg"`, `"$body"` and `"$note"` each stand for such a file's path.
+  Never put the text through the shell: not in a heredoc, not with `echo` or `printf`, and not
+  inline as `--body "<text>"`. In a heredoc, quoted or not, a line of the text equal to its end word
+  ends it, and the lines after it run as commands. So issue, error, review or log text that holds
+  such a line would run. This rule replaces the heredoc forms that Claude Code's own instructions
+  show for commit messages and pull request bodies. The Write tool refuses to fill a file it has
+  not read, such as the empty one plain `mktemp` makes, so write a new file in the folder.
+
+  Below, `"$f"`, `"$msg"`, `"$body"` and `"$note"` each stand for such a file's path. Write the
+  path itself there: a shell variable does not outlive its Bash call.
+- A title or a one-line message on a command line (`gh pr create --title`, `gh pr edit --title`,
+  `mroom tracker create --title`, `git commit -m`) goes in single quotes and holds no `'`: write
+  "the JSON of a run", not "a run's JSON". In double quotes, the shell runs what backticks or
+  `$(...)` in it name, and a title often names code in backticks.
 - Never check out, run or push to a pull request from a fork (`isCrossRepository` true). A fork's
   code never runs on this box, not even in a QA environment.
 - When the project runs its agents from an agreed host, commits for agent PRs go only from that
@@ -187,7 +196,7 @@ End the message with the attribution your harness gives (its co-author and sessi
 this session's instructions spell them). Never copy a fixed co-author line or session link from
 another commit, a brief or this file: they name another model or session. With none given, add none.
 A message with a body goes through a fresh file, as the Rules say: `git commit -F "$msg"`. Only a
-one-line message may use `-m`, in single quotes, as the PR title below.
+one-line message may use `-m`, in single quotes (Rules).
 Push with `git push -u origin <branch>`; let the pre-push hook run. Retry network failures only.
 
 **Push after your first commit, and open a draft PR right away**, before the work is done. Sessions
@@ -197,8 +206,7 @@ get stopped, and work that lives only in a worktree is stranded, where nobody ca
    `gh pr create --draft --title '<title>' --body-file "$body"`, with the title of step 5 and a
    body in a fresh file (Rules) that links the issue: its id and its link
    (`issues.url`, with the id in place of `{id}`). With no tracker, the body holds the task instead.
-   The title goes in single quotes (a `'` in it written `'\''`): in double quotes, the shell runs
-   what backticks or `$(...)` in it name, and a title often names code in backticks.
+   The title goes in single quotes and holds no `'` (Rules).
 2. Push after every later commit too.
 3. Mark it ready (`gh pr ready <pr>`) only when the work is done and any threat check is clear
    (step 6).

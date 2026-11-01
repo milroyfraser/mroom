@@ -421,15 +421,25 @@ texts = [(label, d[3]) for label, d in sorted(docs.items())] + [("README.md", re
 for label, body in texts:
     bad = fixed_files(code(body))
     say(not bad, f"{label} reads PR bodies, commit messages and comments only from a mktemp file ({bad[:3]})")
-    # A heredoc of outside text is quoted, so its $ and backticks are never expanded.
+    # Skills and commands show no heredoc at all (below); any other heredoc a text shows is quoted at least.
     say(not loose_heredocs(body), f"{label} quotes every heredoc ({loose_heredocs(body)[:2]})")
 say(loose_heredocs("`cat > \"$f\" <<EOF`") == ["<<EOF"] and not loose_heredocs("`cat <<'EOF'` `<<fill:x>>` `<<app.dir>>`"),
     "the heredoc check finds an unquoted heredoc, and not a template placeholder")
 impl_rules = one_line(re.search(r"^## Rules\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M).group(1)) if implement else ""
 say(all(p in impl_rules for p in ("PR body, comment, note and commit message with a body to a fresh file",
-                                  "never a fixed name", "a fresh folder that `mktemp -d` makes", "with the Write tool",
-                                  "Never put the text through the shell", "a line of the text equal to its end word ends it")),
+                                  "never a fixed name", "a fresh folder that `mktemp -d` makes in your scratchpad",
+                                  "with the Write tool", "Never put the text through the shell",
+                                  "a line of the text equal to its end word ends it",
+                                  "replaces the heredoc forms that Claude Code's own instructions show",
+                                  "Write the path itself there", "goes in single quotes and holds no `'`")),
     "implement's rules write every body, message and note with the Write tool, to a new file in a mktemp -d folder")
+# deliver and release make their files the same way, rather than drifting back to plain mktemp or a heredoc.
+for name in ("deliver", "release"):
+    doc = docs.get(f"skill {name}")
+    flat = one_line(doc[3]) if doc else ""
+    say("with the Write tool" in flat and "a fresh folder that `mktemp -d` makes in your scratchpad" in flat
+        and "never through the shell" in flat,
+        f"{name} writes its bodies with the Write tool in a fresh mktemp -d folder, never through the shell")
 # Why: a heredoc, quoted or not, ends at the first line of its text equal to its end word, and the lines after
 # that run as commands. Issue, error, review and log text can carry such a line, so no skill or command puts a
 # body, a message or a note through one; the Write tool never hands the text to a shell.
@@ -437,24 +447,62 @@ demo = subprocess.run(["bash", "-c", "cat <<'EOF'\nquoted text\nEOF\necho ran-as
                       capture_output=True, text=True)
 say("ran-as-a-command" in demo.stdout.split("\n"),
     "bash ends a quoted heredoc at a line of its text equal to the end word, and runs what follows")
-HEREDOC = re.compile(r"(?<!<)<<-?\s*(?:'[^'\n]+'|\"[^\"\n]+\"|\\?\w+(?![\w>:.]))")
+HEREDOC = re.compile(r"(?<!<)<<-?\s*(?:'[^'\n]+'|\"[^\"\n]+\"|\\?\w+(?![\w:.]|>>))")
 def heredocs(text):
     """Every code span or block of the text that holds a heredoc (not a here-string or a <<placeholder>>)."""
     return [c for c in code(text) if HEREDOC.search(c)]
-for label, d in sorted(docs.items()):
-    found = heredocs(d[3])
+# The text goes neither inline nor through echo or printf: a body, a message or notes on the command line itself,
+# echo or printf feeding gh, git or mroom, and, in a skill or a command, echo or printf writing a file (the README's
+# setup steps write secret files that way, which is a person's own text, not a body).
+def inline_texts(spans, files=True):
+    bad = []
+    for span in spans:
+        joined = re.sub(r"\\\n\s*", " ", span)
+        for pipeline in re.split(r"\n|;|&&|\|\|", joined):
+            stages = [re.sub(r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*", "", s).strip() for s in pipeline.split("|")]
+            for k, s in enumerate(stages):
+                if re.match(r"gh\s", s) and re.search(r"\s(?:--body|-b|--notes)(?:=|\s+)(?!-)\S", s):
+                    bad.append(s)
+                if re.match(r"(?:echo|printf)\b", s) and (
+                        (files and re.search(r"(?<![<>&\d])>{1,2}\s*\S", s))
+                        or any(re.match(r"(?:gh|git|mroom)\s", t) for t in stages[k + 1:])):
+                    bad.append(s)
+    return bad
+shell_texts = [(label, d[3], True) for label, d in sorted(docs.items())] + [
+    (name, read(os.path.join(root, name)), False) for name in ("README.md", "docs/design.md")]
+for label, text, files in shell_texts:
+    found = heredocs(text)
     say(not found, f"{label} writes no body, message or note through a heredoc ({[f[:40] for f in found[:2]]})")
-say(len(heredocs("`cat > \"$f\" <<'EOF'` `<<EOF` `x <<-\"END\"` `y <<\\EOF`")) == 4
-    and not heredocs("`cat <<<'x'` `<<fill:x>>` `<<app.dir>>`"),
+    found = inline_texts(code(text), files)
+    say(not found, f"{label} puts no body, message or note inline or through echo or printf ({found[:2]})")
+say(len(heredocs("`cat > \"$f\" <<'EOF'` `<<EOF` `x <<-\"END\"` `y <<\\EOF` `cat <<EOF>\"$f\"`")) == 5
+    and not heredocs("`cat <<<'x'` `<<fill:x>>` `<<app.dir>>` `<<key>>`"),
     "the heredoc check finds every heredoc, and not a here-string or a template placeholder")
-# A title in double quotes runs what backticks or $(...) in it name, and a Conventional Commit title often names
-# code in backticks; in single quotes it stays text.
+say(len(inline_texts(['gh pr comment 1 --body "<text>"', "gh pr create -b '<text>'", "gh release edit v1 --notes x",
+                      'printf "%s" "<text>" > "$f"', "echo '<text>' | mroom tracker comment <id>"])) == 5
+    and not inline_texts(['gh pr comment 1 --body-file "$f"', 'gh release create v1 --notes-file "$n"',
+                          "gh pr view 1 --json body", "echo $((1 + 2))", 'printf "%s\\n" a b | sort', "echo hi 2>&1"])
+    and not inline_texts(["printf '%s' \"$t\" >~/.config/x"], files=False),
+    "the inline check finds a body inline or through echo or printf, and nothing else")
+# A title or a one-line message on a command line goes in single quotes: in double quotes the shell runs what
+# backticks or $(...) in it name, and a Conventional Commit title often names code in backticks.
+TITLED = r"gh\s+(?:pr|release)\s+(?:create|edit)\b|mroom\s+tracker\s+create\b"
 def dq_titles(spans):
-    return [c for c in split_commands(spans) if re.match(r"gh\s+pr\s+(?:create|edit)\b", c) and re.search(r"\s--title\s+\"", c)]
+    out = []
+    for c in split_commands(spans):
+        c = re.sub(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*", "", c)
+        if (re.match(TITLED, c) and re.search(r"\s(?:--title|-t)(?:=|\s+)\"", c)) or (
+                re.match(r"git\s+commit\b", c) and re.search(r"\s(?:-m|--message)(?:=|\s*)\"", c)):
+            out.append(c)
+    return out
 titled = [c for _, d in sorted(docs.items()) for c in dq_titles(code(d[3]))]
-say(not titled, f"no skill passes a PR title in double quotes ({titled[:2]})")
-say(dq_titles(['gh pr create --draft --title "<title>" --body-file "$body"']) and not dq_titles(["gh pr create --title '<title>'"]),
-    "the title check finds a double-quoted PR title, and not a single-quoted one")
+titled += dq_titles(code(read(os.path.join(root, "README.md"))))
+say(not titled, f"no skill, command or README example passes a title or a message in double quotes ({titled[:2]})")
+say(len(dq_titles(['gh pr create --draft --title "<title>" --body-file "$body"', 'gh pr edit 1 -t "<t>"',
+                   'GH_REPO=o/r gh pr create --title="<t>"', 'gh release create v1 --title "<v>"',
+                   'mroom tracker create --title "<t>"', 'git commit -m "<m>"'])) == 6
+    and not dq_titles(["gh pr create --title '<title>'", "git commit -m '<m>'", 'gh pr view 1 --json title']),
+    "the title check finds a double-quoted title or message, and not a single-quoted one")
 step4 = re.search(r"^## 4\. .*?\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M) if implement else None
 say(bool(step4) and "A message with a body goes through a fresh file" in one_line(step4.group(1)),
     "implement's commit step agrees with its rules: every message with a body goes through a fresh file")
