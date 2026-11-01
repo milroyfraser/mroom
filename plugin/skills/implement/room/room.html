@@ -1556,8 +1556,8 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     box.removeAttribute("title");
     let n = nextMeta && nextMeta.title ? nextMeta : null;
     /* A next step that names a card which is done or gone is stale (the step it named has happened):
-       ignore it and fall back to the first ready card, so the box never freezes on finished work. */
-    if (n) {
+       ignore it and fall back to the first ready card, so the box never freezes on finished work. Only once the cards have loaded, so the box doesn't flicker. */
+    if (n && loaded.todos) {
       const named = [].concat(n.cardId ? n.cardId : [], Array.isArray(n.cardIds) ? n.cardIds : []).map(String);
       if (named.length && !named.some((id) => todos.some((t) => String(t.id) === id && t.status !== "done"))) n = null;
     }
@@ -1604,7 +1604,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (n.text) box.append(el("p", "nstext", String(n.text)));
     const row = el("div", "nsrow");
     const url = safeUrl(n.url);
-    if (url) row.append(anchor(n.cardId ? "Open the PR on GitHub ↗" : "Open ↗", url));
+    if (url) row.append(anchor(n.cardId ? ((todos.find((t) => String(t.id) === String(n.cardId)) || {}).kind === "issue" ? "Open the issue ↗" : "Open the PR on GitHub ↗") : "Open ↗", url));
     if (n.at && !isNaN(Date.parse(n.at))) { box.dataset.waitSince = n.at; }
     if (row.childNodes.length) box.append(row);
     setTimeout(paintWaiting, 0);
