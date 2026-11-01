@@ -20,7 +20,7 @@ t_version() {
 
 t_later_phases() {
   local cmd
-  for cmd in status sessions resume restart doctor site update wt user keys env init guard default; do
+  for cmd in status sessions resume restart doctor site update wt user keys env init default; do
     run "$MROOM" "$cmd"; expect_rc 1; expect_err_has "$cmd: not yet: phase 1"
   done
 }

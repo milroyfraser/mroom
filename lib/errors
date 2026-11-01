@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# errors — the error-tracker adapter on the command line (design section 7), for the workflow skills.
+#
+#   mroom errors get <id>                   the error issue (counts, first and last seen and release, top
+#                                           tags) and its latest event (message, release, in-app frames)
+#   mroom errors search <query> [--environment <name>] [--period 14d] [--limit 25]
+#                                           issues for a search, in the error tracker's own syntax
+#   mroom errors resolve <id>               marks the issue resolved (the token needs write access)
+#   mroom errors backend                    the error tracker mroom.toml names: sentry or none
+#
+# The error tracker is errors.provider in mroom.toml (sentry; no [errors] table means none), in the
+# organisation errors.org and the region errors.region (us | de). Its token is the environment variable
+# errors.token_env names (SENTRY_AUTH_TOKEN by default). Answers are JSON on stdout. Exit 0 done, 1 the error
+# tracker or the config failed, 2 a usage error, 3 there is no error tracker.
+set -euo pipefail
+# Tokens pass through this command: no trace, even under bash -x or SHELLOPTS=xtrace.
+set +x
+umask 077
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+MROOM_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+# shellcheck source=lib/core/api.sh
+. "$MROOM_ROOT/lib/core/api.sh"
+# shellcheck source=lib/core/errors.sh
+. "$MROOM_ROOT/lib/core/errors.sh"
+
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; }
+
+for tool in curl jq python3; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "mroom errors: needs $tool, which this host does not have" >&2; exit 1; }
+done
+
+cmd="${1:-help}"
+[ "$#" -gt 0 ] && shift
+# The private folder is made here, outside every $(...), so the EXIT trap removes it.
+trap api_cleanup EXIT
+api_tmp
+rc=0
+case "$cmd" in
+  get) errors_issue_get "$@" || rc=$? ;;
+  search) errors_search "$@" || rc=$? ;;
+  resolve) errors_issue_resolve "$@" || rc=$? ;;
+  backend) [ "$#" = 0 ] || { echo "mroom errors: backend takes no arguments" >&2; exit 2; }; errors_backend || rc=$? ;;
+  help | -h | --help) usage ;;
+  *) echo "mroom errors: unknown command '$cmd' (get, search, resolve, backend)" >&2; rc=2 ;;
+esac
+exit "$rc"
