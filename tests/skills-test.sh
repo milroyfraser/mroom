@@ -8,7 +8,7 @@
 #   - a skill that calls `mroom tracker` or `mroom errors` says what to do when it exits 3 (no tracker);
 #   - every lookup of an issue's pull request asks whether it is from a fork, a skill that resumes earlier
 #     work never takes a fork's pull request or someone else's branch for it, and none checks a pull
-#     request's head out by its number;
+#     request's head out by its number or applies its change as a patch;
 #   - the release skill asks before it drafts, only drafts, and the settings fragments still ask on a release;
 #   - no skill names a host, address, id or person (and none of the words in $MROOM_PRIVATE_WORDS, a file
 #     of one case-insensitive regular expression per line, kept outside the repository).
