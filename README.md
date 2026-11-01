@@ -415,9 +415,10 @@ mroom tracker get SHOP-12                    # title, state, labels, branch, des
 mroom tracker list --mine --open             # my 50 latest open issues, by priority; or --label lesson
 mroom tracker find sentry:1001               # the issues whose description holds the marker for an alert
 mroom tracker owned SHOP-12                  # whether the token's user filed the issue
-mroom tracker comment SHOP-12 < note.md      # adds a comment; the body comes on stdin
+note="$(mktemp)"                             # a fresh file per comment, never a fixed name
+mroom tracker comment SHOP-12 < "$note"      # adds a comment; the body comes on stdin
 mroom tracker state SHOP-12 "In Review"      # the team's state of that name, in any case
-mroom tracker create --allow-create --title "Checkout fails" --state Triage --label bug < body.md
+mroom tracker create --allow-create --title "Checkout fails" --state Triage --label bug < "$note"
 mroom errors get SHOP-1A2                    # the error issue and its latest event
 mroom errors search 'is:unresolved' --environment production --period 24h --limit 50
 mroom errors new 40 --environment production # new, regressed and escalating issues of the last 40 minutes

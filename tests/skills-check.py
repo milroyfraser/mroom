@@ -343,6 +343,46 @@ fix = docs.get("skill fix-issue")
 say(bool(fix) and "Follow `/mroom:implement` steps 6 and 7" in fix[3],
     "fix-issue follows implement's steps 6 and 7, so it runs the threat check too")
 
+# The builder starts from the threat check's own questions, so the author answers them while writing, before any
+# reviewer asks. Step 2 opens with them, one bullet per class the threat check reads for, ahead of the principles.
+build = re.search(r"^## 2\. Implement\n\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M) if implement else None
+build = build.group(1) if build else ""
+asked = re.findall(r"^- \*\*([^*]+):\*\*", build.split("\n\n- Before adding anything")[0], flags=re.M)
+say(build.startswith("**Build to the threat model.**") and asked == THREAT_CLASSES,
+    f"implement step 2 opens with the threat check's questions, one per class ({asked})")
+say("before adding anything" not in one_line(build.split("**Build to the threat model.**")[0]).lower()
+    and build.find("**Build to the threat model.**") < build.find("- Before adding anything"),
+    "implement asks the threat-model questions before the principles")
+ROUND = "the code added since the last review round"
+say(ROUND in one_line(build) and ROUND in check,
+    "implement's later rounds and threat re-checks look hardest at the code added since the last review round")
+deliver_doc = docs.get("skill deliver")
+say(bool(fix) and "**Build to the threat model**" in fix[3] and bool(deliver_doc)
+    and "**Build to the threat model**" in one_line(deliver_doc[3]) and ROUND in one_line(deliver_doc[3]),
+    "fix-issue and deliver build from implement's threat-model questions, and deliver's re-review looks at what is new")
+
+# A PR body, commit message, comment or note goes in a fresh mktemp file, never a fixed name in a shared folder,
+# where one session's PR picks up another's text. Every file a gh, git or mroom command reads its text from is a
+# "$variable" (set from mktemp), in every skill, command and the README.
+FILE_ARG = re.compile(r"(?:\s<|\s--body-file|\s--notes-file|\s-F|\s--file)(?:=|\s+)(\S+)")
+def fixed_files(spans):
+    bad = []
+    for c in split_commands(spans):
+        if re.match(r"(?:gh|git|mroom)\s", c):
+            bad += [m.group(1) for m in FILE_ARG.finditer(" " + c) if not m.group(1).startswith('"$')]
+    return bad
+texts = [(label, d[3]) for label, d in sorted(docs.items())] + [("README.md", read(os.path.join(root, "README.md")))]
+for label, body in texts:
+    bad = fixed_files(code(body))
+    say(not bad, f"{label} reads PR bodies, commit messages and comments only from a mktemp file ({bad[:3]})")
+say(bool(implement) and 'f="$(mktemp)"' in implement[3] and "Never a fixed name" in implement[3],
+    "implement's rules write every body, message and note to a fresh mktemp file")
+# The check sees a fixed name when there is one.
+say(fixed_files(["mroom tracker comment <id> < note.md", "gh pr comment 1 --body-file /tmp/body.md",
+                 'git commit -F msg.txt', 'gh release edit v1 --notes-file <file>']) ==
+    ["note.md", "/tmp/body.md", "msg.txt", "<file>"] and not fixed_files(['gh pr create --body-file "$body"']),
+    "the mktemp check finds a fixed-name body file")
+
 # --- The release skill ------------------------------------------------------------------------------------
 release = docs.get("skill release")
 if release:

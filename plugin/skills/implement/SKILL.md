@@ -25,6 +25,9 @@ on without it.
 - Tests run only against a test database: the worktree's own, named by `tests.database_pattern`.
   Never point tests at a dev, QA or production database.
 - Never add the `qa` label. It is a person's switch.
+- Write every PR body, commit message, comment or note to a fresh file: `f="$(mktemp)"`, then
+  pass `"$f"`. Never a fixed name such as `note.md` in a shared folder, where another session's
+  PR picks up your text, or you pick up its.
 - Never check out, run or push to a pull request from a fork (`isCrossRepository` true). A fork's
   code never runs on this box, not even in a QA environment.
 - When the project runs its agents from an agreed host, commits for agent PRs go only from that
@@ -109,8 +112,28 @@ Check `git status -sb` before every commit. Never commit on the default branch.
 
 ## 2. Implement
 
+**Build to the threat model.** Start from the questions the threat check (step 6) and the
+reviewers ask, and answer them while you write, not after a review finds them. For each change, ask:
+
+- **Secret reach:** can a secret, a token or a credential file reach PR code, a log, argv or a job
+  that runs untrusted code?
+- **QA isolation:** can a QA environment reach another environment's data, services or files, or
+  the dev site's?
+- **Input reaching commands:** does PR, issue, alert or user text reach a shell, SQL, a path or a
+  workflow expression? Pass it as data, or escape it.
+- **Guard bypasses:** does a spelling of a merge, an approval, a release, a force-push or a secret
+  read get past the guard or the permission rules?
+- **Pins:** is every action, tool and download pinned to a tag, a commit or a checksum?
+- **Privacy:** does a host, an address, an id, a person's name or personal data land in code, logs,
+  comments or the Room?
+
+Name any answer that is not a plain no in the PR body, with what keeps it safe. On a later round,
+after a review or a threat check, look hardest at the code added since the last review round
+(`git diff <head the last review read>..HEAD`): that is where new findings come from.
+
 For a Design `no` issue, first comment the decisions you made on the issue
-(`mroom tracker comment <id> < decisions.md`), so a person can see them before review.
+(`f="$(mktemp)"`, write them to it, then `mroom tracker comment <id> < "$f"`), so a person can see
+them before review.
 
 Follow the app's `CLAUDE.md` files. Migrations are expand then contract, so a rollback stays safe.
 Run the app's formatters after editing (for Laravel, `vendor/bin/pint --dirty`).
@@ -148,14 +171,17 @@ behaviour breaks, and keep passing when only the inside changes
 ## 4. Commit and push early
 
 A Conventional Commit with the issue id as scope: `fix(SHOP-123): handle an empty seat override`.
+Write a message longer than its title to a fresh file (`msg="$(mktemp)"`) and commit with
+`git commit -F "$msg"`.
 Push with `git push -u origin <branch>`; let the pre-push hook run. Retry network failures only.
 
 **Push after your first commit, and open a draft PR right away**, before the work is done. Sessions
 get stopped, and work that lives only in a worktree is stranded, where nobody can see it.
 
-1. After the first commit: `git push -u origin <branch>`, then `gh pr create --draft` with the
-   title of step 5, and a body that links the issue: its id and its link (`issues.url`, with the
-   id in place of `{id}`). With no tracker, the body holds the task instead.
+1. After the first commit: `git push -u origin <branch>`, then
+   `gh pr create --draft --title "<title>" --body-file "$body"`, with the title of step 5 and a
+   body in a fresh file (`body="$(mktemp)"`) that links the issue: its id and its link
+   (`issues.url`, with the id in place of `{id}`). With no tracker, the body holds the task instead.
 2. Push after every later commit too.
 3. Mark it ready (`gh pr ready <pr>`) only when the work is done and any threat check is clear
    (step 6).
@@ -169,7 +195,7 @@ per environment. Then Read the `blast-radius` skill in full, if it is installed,
 `## Safe because` section to the PR body. Its proof is a test or a script that ran, not a
 paragraph.
 
-Fill in the draft PR (`gh pr edit`):
+Fill in the draft PR (`gh pr edit <pr> --body-file "$body"`, the body in a fresh `mktemp` file):
 
 - **Title:** `<type>(<id>): <description>`, a Conventional Commit.
 - **Body:** the repository's PR template, if it has one. The issue link, Summary, Changes, Testing
@@ -218,7 +244,9 @@ severity (critical, high, medium or low), the file and line, and its fix; or `No
 or critical finding blocks `gh pr ready` until it is fixed on the branch and the check, run again on
 the new head, no longer finds it. A later push that touches a trigger runs it again; if that
 re-check finds a high or critical after the PR is ready, move it back to draft
-(`gh pr ready <pr> --undo`) until it is fixed. This check comes before review, not in its place:
+(`gh pr ready <pr> --undo`) until it is fixed. A re-check, like a re-review, reads the whole diff
+but looks hardest at the code added since the last review round: give the sub-agent the head the
+last round read as well. This check comes before review, not in its place:
 the post-merge security check, which reads every merge, stays the backstop for what it misses.
 
 When the work is complete, the affected tests pass and any threat check has no open high or
@@ -259,7 +287,8 @@ locally and push to bring a PR up to date.
 - `gh pr checks <pr>` (read-only) to report CI.
 - Move the issue to the review state:
   `mroom tracker state <id> "$(mroom config get issues.state_review --default 'In Review')"`.
-- `mroom tracker comment <id> < note.md`: the PR link and the QA result for the head commit. When
-  `mroom tracker` exits 3, put the note on the PR with `gh pr comment <pr> --body-file note.md`.
+- `note="$(mktemp)"`, write the PR link and the QA result for the head commit to it, then
+  `mroom tracker comment <id> < "$note"`. When `mroom tracker` exits 3, put the note on the PR
+  with `gh pr comment <pr> --body-file "$note"`.
 - Stop. No merge, no deploy, no more state changes. Keep the worktree: review fixes go there. After
   the PR merges, the person (or a later session) removes it with `git worktree remove <path>`.

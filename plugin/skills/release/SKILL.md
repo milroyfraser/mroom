@@ -80,12 +80,13 @@ notes, plus an "Also fixed" section for step 2's hidden fixes). Ask with `AskUse
 ## 4. Draft it; the person publishes
 
 ```
+notes="$(mktemp)"    # write the extra notes to it
 gh release create <tag> --draft --target <sha> --title "<version>" \
-  --generate-notes --notes-start-tag <last release tag> --notes-file <extra notes>
+  --generate-notes --notes-start-tag <last release tag> --notes-file "$notes"
 ```
 
 If a draft for this tag already exists (`gh release view <tag> --json isDraft`), create no second
-one. Use that draft, and update its notes with `gh release edit <tag> --notes-file <file>` if they
+one. Use that draft, and update its notes with `gh release edit <tag> --notes-file "$notes"` (a fresh `mktemp` file) if they
 changed. Never drop `--draft` from these commands.
 
 The command prompts the person. A draft creates no tag and starts nothing. Give the person its

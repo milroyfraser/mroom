@@ -90,9 +90,9 @@ Then follow `/mroom:implement` step 1 with this branch instead of the issue's ow
 then a worktree of its own, and work only there. The tracker still links the branch through the
 issue id in its name.
 
-Its step 1.4 moves the issue to the started state. Then also
-`mroom tracker comment <id> < started.md`: the error issue's link, the cause in two sentences, and
-the branch.
+Its step 1.4 moves the issue to the started state. Then also comment the error issue's link, the
+cause in two sentences, and the branch: write them to a fresh file (`f="$(mktemp)"`), then
+`mroom tracker comment <id> < "$f"`.
 
 ## 4. Reproduce, then fix
 
@@ -101,10 +101,13 @@ the branch.
    you fix anything.
    - For a frontend error, render the component or call the hook in the state the event shows.
    - If you cannot reproduce it, say in the PR what you tried, and fix only what the evidence shows.
-2. **Then fix it** where the system first went wrong, as `/mroom:implement` step 2 says. Run the
-   test again and see it pass.
+2. **Then fix it** where the system first went wrong, as `/mroom:implement` step 2 says,
+   starting from its **Build to the threat model** questions: an error's input is outside text, so
+   ask above all whether it reaches a shell, SQL, a path or a log. Run the test again and see it
+   pass.
 3. **Commit.** End the message of the commit that fixes it with `Fixes <error id>` on a line of its
-   own, before any trailers. These lines are the only link to the error issue.
+   own, before any trailers. Write the message to a fresh file (`msg="$(mktemp)"`) and commit with
+   `git commit -F "$msg"`. These lines are the only link to the error issue.
    - The error tracker's SCM integration links the commit to the issue as soon as the branch is
      pushed, and may assign the issue to the commit's author. So never put the line on a commit
      that does not fix the issue.
@@ -137,7 +140,8 @@ Follow `/mroom:implement` steps 6 and 7: mark the PR ready, wait for its checks 
 commit, then move the issue to the review state
 (`mroom tracker state <id> "$(mroom config get issues.state_review --default 'In Review')"`).
 
-The hand-off note (`mroom tracker comment <id> < note.md`, or the PR when `mroom tracker` exits 3)
+The hand-off note (in a fresh file, `note="$(mktemp)"`, then `mroom tracker comment <id> < "$note"`,
+or the PR when `mroom tracker` exits 3)
 also carries the error issue's link. It says the fix is proven only when the release that ships it
 has no new events for the issue, and that a person resolves the issue then, if the release did not
 resolve it.
