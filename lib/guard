@@ -84,6 +84,10 @@
 # Bash 3.2 compatible (macOS). Tests: tests/guard-test.sh. No `set -u`: bash 3.2 treats an empty
 # "${array[@]}" as unbound, and any exit other than 0 or 2 lets the command through.
 export LC_ALL=C
+# extglob, set before any function is parsed, so `%%+($'\n')` strips a trailing newline run in one O(n)
+# step (the per-newline loop was quadratic) and a glob's star runs collapse in one step. No existing glob
+# pattern uses an extglob operator (?* + @ ! before a paren), so this changes nothing else.
+shopt -s extglob
 
 SELF="${BASH_SOURCE[0]}"
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF" | sed -n '/^  *mroom guard hook/,/^$/p'; }
@@ -141,6 +145,11 @@ MK=$'\034'
 DY=$'\033'
 BLOCKED=""
 COMMANDS=0
+# How many multi-star glob patterns this command has already matched against the secret candidates. Each
+# match is cheap under the per-pattern star cap, but a command could carry thousands; past this budget the
+# rest are worst-cased, so total matcher work stays bounded (see glob_stars_over_cap).
+GLOB_SEEN=0
+GLOB_BUDGET=48
 RAW=$(printf '%s' "$command" | tr '[:upper:]' '[:lower:]')
 
 block() { [ -n "$BLOCKED" ] || BLOCKED=$1; }
@@ -161,16 +170,15 @@ lower_all() {
   LOWERED=("$@")
   case "$*" in *[A-Z]* | *$'\035'*) ;; *) return 0 ;; esac
   local -a low=()
-  IFS=$US read -r -d '' -a low < <(printf '%s\037' "$@" | tr '[:upper:]' '[:lower:]' | tr '\035' '\n') || true
-  if [ "${#low[@]}" = "$#" ]; then
-    # lower() takes LOWER from $(lc ...), and command substitution strips trailing newlines; match it per
-    # word, or an exact comparison such as event=approve would miss a value with a trailing newline.
-    local j
-    for ((j = 0; j < ${#low[@]}; j++)); do
-      while [ "${low[j]%$'\n'}" != "${low[j]}" ]; do low[j]=${low[j]%$'\n'}; done
-    done
-    LOWERED=("${low[@]}")
-  fi
+  # Lower case, strip each word's trailing newline run, and decode the rest — all in awk, in one linear
+  # pass. The strip must match lower(), whose LOWER=$(lc ...) drops trailing newlines; doing it per word
+  # in bash was quadratic (a per-newline loop) or, with extglob, a stack overflow on a long run — either
+  # way a word of many trailing newlines, inside every cap, could run past the hook timeout. The tokeniser
+  # encodes a newline as \035, so a trailing run of \035 before a word's \037 separator is stripped.
+  # shellcheck disable=SC2016 # $0/buf are awk's, not the shell's
+  IFS=$US read -r -d '' -a low < <(printf '%s\037' "$@" | tr '[:upper:]' '[:lower:]' \
+    | "$AWK" -v NL=$'\035' -v US=$'\037' '{ buf = buf $0 } END { gsub(NL "+" US, US, buf); gsub(NL, "\n", buf); printf "%s", buf }') || true
+  [ "${#low[@]}" = "$#" ] && LOWERED=("${low[@]}")
   return 0
 }
 # NAME = basename of a command word (no fork: this runs per command); a word too long to be a path is left alone.
@@ -185,20 +193,41 @@ COPIERS=" cp mv ln scp rsync install "
 RECURSIVE=" cp scp rsync tar zip 7z grep egrep fgrep rg ag ack zgrep "
 INTERPRETERS=" python python3 php node ruby perl deno bun osascript "
 
-# glob_or_regex_risky PATTERN: a glob or regex that can make bash's matcher recurse at every position
-# (many `*`, or a quantifier stacked on a group or another quantifier). Against even a short fixed
-# candidate the cost grows combinatorially, so a tiny command could hang the hook (a bypass; there is no
-# word cap on one argument's length). Over the cap the caller takes the worst case instead of matching.
-glob_or_regex_risky() {
+# glob_stars_over_cap GLOB: true when this glob is too costly to match safely against the fixed secret
+# candidates. bash's matcher recurses at every position for each separated `*`, so the cost grows
+# combinatorially in the number of separated stars (a run of stars, `**`, backtracks like one, so it is
+# collapsed first). Over the per-pattern cap, or once the per-command budget of multi-star matches is
+# spent, the caller worst-cases the pattern instead of matching it, so neither one long argument nor many
+# patterns can hang the hook (a bypass; there is no word cap on one argument's length).
+glob_stars_over_cap() {
+  [ "${#1}" -gt 512 ] && return 0
+  local collapsed=${1//+(\*)/\*} nostars n
+  nostars=${collapsed//\*/}
+  n=$((${#collapsed} - ${#nostars}))
+  [ "$n" -gt 4 ] && return 0
+  if [ "$n" -ge 2 ]; then
+    GLOB_SEEN=$((GLOB_SEEN + 1))
+    [ "$GLOB_SEEN" -gt "$GLOB_BUDGET" ] && return 0
+  fi
+  return 1
+}
+
+# regex_risky REGEX: true when a find -regex pattern could make bash's =~ backtrack combinatorially — a
+# quantifier stacked on a group or a `{...}` (the catastrophic case), or many quantifiers. A plain `(.*)`
+# or `.*\.env` is fine. Over the cap or the budget, the caller worst-cases it.
+regex_risky() {
   [ "${#1}" -gt 512 ] && return 0
   case "$1" in
-    *'**'* | *'*+'* | *'+*'* | *'++'* | *')*'* | *')+'* | *')?'* | *'){'* | *'}*'* | *'}+'*) return 0 ;;
+    *')*'* | *')+'* | *'){'* | *'}*'* | *'}+'* | *'}{'*) return 0 ;;
   esac
-  local rest=$1 n=0
-  while [ "$n" -le 8 ]; do
-    case "$rest" in *[\*+]*) rest=${rest#*[\*+]}; n=$((n + 1)) ;; *) break ;; esac
-  done
-  [ "$n" -gt 8 ]
+  local c=${1//+(\*)/\*} noq
+  noq=${c//[\*+]/}
+  [ "$((${#c} - ${#noq}))" -gt 6 ] && return 0
+  if [ "$((${#c} - ${#noq}))" -ge 2 ]; then
+    GLOB_SEEN=$((GLOB_SEEN + 1))
+    [ "$GLOB_SEEN" -gt "$GLOB_BUDGET" ] && return 0
+  fi
+  return 1
 }
 
 # is_secret_path TOKEN: does this argument name a secret file?
@@ -229,7 +258,7 @@ is_secret_path() {
   esac
   # A glob starting with a dot (`.env*`, `.*`) that would match a secret file.
   if [[ $base == .* && $base == *[\*\?\[]* ]]; then
-    glob_or_regex_risky "$base" && return 0 # too complex to match safely: assume it could
+    glob_stars_over_cap "$base" && return 0 # too complex to match safely: assume it could
     for name in .env .env.local .env.testing .env.production .envrc .forge-token .credentials.json; do
       # shellcheck disable=SC2053 # $base is a glob on purpose
       [[ $name == $base ]] && return 0
@@ -237,7 +266,7 @@ is_secret_path() {
   fi
   # A glob under the home folder (`~/.config/mroom/secret*`, `~/.c*/gh/*`) that would match a secret file.
   if [[ $t == *[\*\?\[]* ]] && home_rest "$t"; then
-    glob_or_regex_risky "$REST" && return 0 # too complex to match safely: assume it could
+    glob_stars_over_cap "$REST" && return 0 # too complex to match safely: assume it could
     for name in .ssh/id_rsa .ssh/id_ed25519 .config/gh/hosts.yml .config/mroom/secrets/forge-token \
       .config/tool/mcp.env .forge-token .claude/.credentials.json .aws/credentials; do
       # shellcheck disable=SC2053 # $REST is a glob on purpose
@@ -754,14 +783,15 @@ find_pattern_secret() {
   local flag=$1 pat=$2 lpat cand
   if [ "$#" -ge 3 ]; then lpat=$3; else lower "$pat"; lpat=$LOWER; fi
   case "$pat" in *"$DY"*) return 0 ;; esac # a pattern from a variable: assume the worst
-  glob_or_regex_risky "$pat" && return 0 # too complex to match safely: assume it names a secret
   case "$flag" in
     -regex | -iregex)
+      regex_risky "$pat" && return 0 # too costly to match safely: assume it names a secret
       for cand in ./backend/.env ./.env /home/u/.ssh/id_rsa /home/u/.forge-token /home/u/.claude/.credentials.json /home/u/.config/mroom/secrets/forge-token; do
         [[ $cand =~ $pat ]] && return 0
       done
       ;;
     -name | -iname)
+      glob_stars_over_cap "$pat" && return 0 # too costly to match safely: assume it names a secret
       [ "$flag" = -iname ] && pat=$lpat
       for cand in .env .env.local .env.testing .env.production .envrc .forge-token .credentials.json id_rsa id_ed25519 hosts.yml forge-token mcp.env; do
         # shellcheck disable=SC2053 # $pat is a glob on purpose
@@ -769,6 +799,7 @@ find_pattern_secret() {
       done
       ;;
     *)
+      glob_stars_over_cap "$pat" && return 0 # too costly to match safely: assume it names a secret
       [[ $flag == -i* ]] && pat=$lpat
       for cand in ./backend/.env ./.env /home/u/.ssh/id_rsa /home/u/.ssh/id_ed25519 /home/u/.config/gh/hosts.yml /home/u/.forge-token /home/u/.claude/.credentials.json /home/u/.config/mroom/secrets/forge-token /home/u/.config/tool/mcp.env; do
         # shellcheck disable=SC2053 # $pat is a glob on purpose

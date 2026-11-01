@@ -791,6 +791,12 @@ EOF
 
   # --- A glob too complex to match safely is worst-cased, not run through bash's backtracker ----
   refuse 'cat ~/.ss*[!Z]*[!Z]*[!Z]*[!Z]*[!Z]*[!Z]*[!Z]*[!Z]*[!Z]Z'
+  refuse 'find . -regex "(.*)*Z" -print0'  # a nested-quantifier regex is worst-cased too
+  # ...but ordinary ** path globs (adjacent stars collapse) and a few separated stars are matched normally
+  allow 'find . -path "src/**/*.ts" -exec cat {} ";"'
+  allow 'find . -path "build/**" -print0'
+  allow 'cat ~/.config/**/settings.json'
+  allow 'find . -regex ".*\.ts" -print0'
 
   # --- A secret-valued BASH_ENV is still caught after restructuring the assignment handlers -----
   refuse 'BASH_ENV=backend/.env bash script.sh'    # a leading assignment
@@ -848,6 +854,15 @@ timing() {
   # shellcheck disable=SC2088 # a literal ~ on purpose: the guard parses it as the home directory
   local redos="~/"; for _ in $(seq 1 20); do redos+='*[!Z]'; done; redos+="Z"
   fast 4 2 "cat '$redos'"
+  # A reader argument that is a long run of newlines (which lower_all strips to match a short exact value)
+  # must be decided fast: the per-newline strip was quadratic and ran past the hook timeout.
+  local nlword; nlword=$(head -c 200000 /dev/zero | tr '\0' '\n'; printf x); nlword=${nlword%x}
+  fast 4 0 "cat '$nlword'"
+  # Many separated-star glob patterns in one command stay fast: the per-command budget worst-cases them
+  # after a bound, so total matcher work is capped.
+  local many_glob="find ."; for _ in $(seq 1 500); do many_glob+=" -iname '*[!Z]*[!Z]*Z'"; done
+  many_glob+=" -exec cat {} ';'"
+  fast 4 2 "$many_glob"
   # The other per-word paths, within every cap: a git -c push.default per command, env and export
   # assignments, and find -iname patterns. Each must be decided inside the limit.
   uc=""; seg="git$(printf ' -c push.default=A%.0s' $(seq 1 660)) status"
