@@ -1,0 +1,92 @@
+name: Deploy to production
+
+# The production deploy (mroom design 10, patterns 8 to 10). Publishing a release deploys its tag; a person deploys
+# another tag, a rollback to the previous one included, with `gh workflow run deploy-production.yml --ref <tag>`.
+# The run takes no input, so nothing a person types reaches a script: the tag is the ref the run is for.
+#
+#   release  in the production environment, which admits release tags only and waits for a person's approval:
+#            points the release branch at the tag's commit with the deploy key only this environment holds. The
+#            host deploys that branch (on Forge, Quick Deploy watching release, or the deploy hook below).
+#   verify   no environment and no secret: waits until production reports the tag's commit (deploy-verify).
+#
+# One deploy at a time: a second waits until the first is verified, so it never moves the branch under it.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    name: Release branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: production
+      url: <<fill:backend_origin>>
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.release.outputs.commit }}
+      previous: ${{ steps.release.outputs.previous }}
+      direction: ${{ steps.release.outputs.direction }}
+    steps:
+      # The tag, with history to check it is on the default branch. Nothing from the checkout runs but the script
+      # below: this job builds nothing and installs nothing, since it holds the deploy key.
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          ssh-key: ${{ secrets.MROOM_RELEASE_KEY }}
+          persist-credentials: true
+      - name: Point the release branch at the tag
+        id: release
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          DEFAULT_BRANCH: <<default_branch>>
+          TAG_PATTERN: '<<fill:tag_pattern>>'
+        run: .github/scripts/release-branch.sh | tee -a "$GITHUB_OUTPUT"
+      # Only when the host does not deploy on a push to the release branch by itself: with both, it deploys twice.
+      - name: Start the host's deploy
+        env:
+          DEPLOY_HOOK: ${{ secrets.MROOM_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$DEPLOY_HOOK" ]; then
+            echo "No MROOM_DEPLOY_HOOK: the host deploys the release branch on its own push"
+            exit 0
+          fi
+          curl -sS --fail --max-time 30 -X POST -o /dev/null "$DEPLOY_HOOK"
+
+  verify:
+    name: Deploy verify
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the tag's mroom.toml
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.commit }}
+          persist-credentials: false
+          sparse-checkout: /mroom.toml
+          sparse-checkout-cone-mode: false
+      - name: Wait until production runs the tag
+        uses: milroyfraser/mroom/actions/deploy-verify@<<mroom_version>>
+        with:
+          origin: <<fill:backend_origin>>
+          frontend-origin: '<<fill:frontend_origin>>'
+          commit: ${{ needs.release.outputs.commit }}
+          tag: ${{ needs.release.outputs.tag }}

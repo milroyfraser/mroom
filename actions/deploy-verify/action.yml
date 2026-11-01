@@ -1,0 +1,51 @@
+name: deploy verify
+description: >-
+  Waits until production runs the release that was just deployed, not for a fixed time (design 10, pattern 9). It
+  asks the app's app.version_path, and a separate SPA's version.json, with a query no cache has seen, until each
+  reports the tag's commit three times in a row and the app's health path answers 200, and fails after a time limit.
+  It holds no secret and changes nothing: run it from a job with no environment, after the job that deployed.
+inputs:
+  origin:
+    description: The Laravel app's production origin, such as https://api.shop.example.dev (no path)
+    required: true
+  frontend-origin:
+    description: A separate SPA's production origin, whose /version.json the frontend build writes; empty for none
+    default: ""
+  commit:
+    description: The full commit the release tag points at, from the job that deployed it
+    required: true
+  tag:
+    description: The release tag; when the app reports another release name for the same commit, a warning says so
+    default: ""
+  health-path:
+    description: A path on the app's origin that must answer 200 for a poll to count; empty checks none
+    default: /up
+  timeout:
+    description: How long to wait, such as 10m or 600
+    default: 10m
+  interval:
+    description: The pause between polls, such as 10s
+    default: 10s
+  config:
+    description: The app's mroom.toml, which names app.version_path
+    default: mroom.toml
+outputs:
+  seconds:
+    description: How long the new release took to be confirmed live
+    value: ${{ steps.verify.outputs.seconds }}
+runs:
+  using: composite
+  steps:
+    - id: verify
+      name: Wait until production runs the release
+      shell: bash
+      env:
+        MROOM_CONFIG: ${{ inputs.config }}
+        DEPLOY_ORIGIN: ${{ inputs.origin }}
+        DEPLOY_FRONTEND_ORIGIN: ${{ inputs.frontend-origin }}
+        DEPLOY_COMMIT: ${{ inputs.commit }}
+        DEPLOY_TAG: ${{ inputs.tag }}
+        DEPLOY_HEALTH_PATH: ${{ inputs.health-path }}
+        DEPLOY_TIMEOUT: ${{ inputs.timeout }}
+        DEPLOY_INTERVAL: ${{ inputs.interval }}
+      run: '"$GITHUB_ACTION_PATH/verify.sh" | tee -a "$GITHUB_OUTPUT"'
