@@ -38,6 +38,8 @@ t_it_sets_up_and_holds() {
 #!/usr/bin/env bash
 set -euo pipefail
 [ "$(id -un)" = mroom-holder ] && [ -s /etc/mroom-sandbox/holder/secret ] && echo holder-ok
+# A process left behind, as a wrapper might leave one, so the test can show mroom-step kills the holder's too.
+nohup sleep 300 >/dev/null 2>&1 &
 EOF
   echo "before the sandbox: $(stat -c '%A %U' "$TOOL") $TOOL"
   cd "$APP"
@@ -94,8 +96,14 @@ EOF
   run mroom-step -- /bin/sh -c 'nohup sleep 300 >/dev/null 2>&1 &'
   expect_rc 0
   expect_true "the step's background process was killed" [ -z "$(pgrep -u mroom-step || true)" ]
-  run mroom-step -- /bin/sh -c 'nohup sudo -n -u mroom-holder "$MROOM_HOLDER" >/dev/null 2>&1 &'
-  expect_true "and the holder's" [ -z "$(pgrep -u mroom-holder || true)" ]
+  run mroom-step -- /bin/sh -c 'sudo -n -u mroom-holder "$MROOM_HOLDER" >/dev/null; pgrep -u mroom-holder >/dev/null && echo alive'
+  expect_out_has alive
+  expect_true "and the holder's, which outlived the wrapper" [ -z "$(pgrep -u mroom-holder || true)" ]
+
+  # A background writer the step leaves: nothing it prints comes after the resume marker.
+  run mroom-step -- /bin/sh -c '(while :; do echo "::warning::late"; sleep 0.02; done) & sleep 0.2'
+  expect_rc 0
+  expect_true "the resume marker is the last line" grep -Eqx '::[0-9a-f]{32}::' <<<"$(tail -n 1 <<<"$out")"
 
   # --collect: a link the step left gives only what the step itself could read.
   printf 'runner-only-%s\n' "$SECRET" >"$HOME/runner-only"

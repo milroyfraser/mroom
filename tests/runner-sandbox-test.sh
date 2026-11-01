@@ -143,6 +143,19 @@ echo "::add-mask::nothing"; echo "::error::from the step" >&2; printf "no newlin
   case "$out" in *stop-commands*) fail "markers outside a GitHub job" ;; *) ok ;; esac
 }
 
+t_nothing_comes_after_the_resume_marker() {
+  world
+  # The step leaves a writer printing a command in a loop; the fake kill takes a moment, then stops it.
+  fake_bin sudo 'case " $* " in
+  *" /usr/bin/kill "*) sleep 0.3; [ ! -f "'"$T"'/writer.pid" ] || kill "$(cat "'"$T"'/writer.pid")" 2>/dev/null; exit 1 ;;
+esac
+(while :; do echo "::warning::late"; sleep 0.02; done) & echo $! >"'"$T"'/writer.pid"'
+  run env GITHUB_ACTIONS=true "$RS/step.sh" -- true
+  expect_rc 0
+  expect_true "the writer wrote" grep -q '::warning::late' <<<"$out"
+  expect_true "the resume marker is the last line" grep -Eqx '::[0-9a-f]{32}::' <<<"$(tail -n 1 <<<"$out")"
+}
+
 t_step_refuses_bad_calls() {
   world
   argv_sudo
@@ -404,6 +417,7 @@ test_case setup-inputs t_setup_refuses_bad_inputs_before_changing_anything
 test_case setup-root t_setup_needs_root_through_sudo
 test_case step t_step_runs_as_the_step_user_with_a_clean_environment
 test_case step-commands t_step_output_gives_the_runner_no_workflow_command
+test_case step-late t_nothing_comes_after_the_resume_marker
 test_case step-bad t_step_refuses_bad_calls
 test_case step-status t_step_passes_the_commands_status
 test_case collect t_collect_copies_the_evidence_as_plain_files

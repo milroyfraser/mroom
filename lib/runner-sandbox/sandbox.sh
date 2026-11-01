@@ -143,7 +143,8 @@ fi
 rm -f "$swept"
 
 # Nothing outside their homes may already belong to the sandbox's users: the step owns what it owns.
-uids=(-uid "$(id -u "$SANDBOX_STEP_USER")" -o -uid "$(id -u "$SANDBOX_HOLDER_USER")")
+uids=(-uid "$(id -u "$SANDBOX_STEP_USER")" -o -uid "$(id -u "$SANDBOX_HOLDER_USER")"
+  -o -gid "$(id -g "$SANDBOX_STEP_USER")" -o -gid "$(id -g "$SANDBOX_HOLDER_USER")")
 for disk in "${disks[@]}"; do
   owned="$(find "$disk" -xdev \( -path /proc -o -path /sys -o -path /dev -o -path /run \
     -o -path "$(getent passwd "$SANDBOX_STEP_USER" | cut -d: -f6)" -o -path "$(getent passwd "$SANDBOX_HOLDER_USER" | cut -d: -f6)" \) \

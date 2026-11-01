@@ -50,10 +50,12 @@ if [ "${1:-}" = --collect ]; then
   [ -d "$SANDBOX_VAR/evidence" ] || die "the runner sandbox is not set up (run the runner-sandbox action first)"
   # Absolute before the cd below: a relative name would then mean a folder in the evidence, which the step owns
   # and could have made a link to the runner's home.
-  dest="$(cd "$2" && pwd -P)"
+  dest="$(CDPATH='' cd -P -- "$2" && pwd -P)"
   stop_all
   cd "$SANDBOX_VAR/evidence"
-  sudo -n -u "$SANDBOX_STEP_USER" -- /usr/bin/tar -chf - --hard-dereference --ignore-failed-read . \
+  # The step's tar names files the step chose in its warnings: they stay out of the job log, where a line could be a
+  # workflow command.
+  sudo -n -u "$SANDBOX_STEP_USER" -- /usr/bin/tar -chf - --hard-dereference --ignore-failed-read . 2>/dev/null \
     | tar -xf - -C "$dest" --no-same-owner --no-same-permissions
   exit 0
 fi
@@ -110,8 +112,14 @@ if [ -n "$token" ]; then
     PATH="$path" HOME="${home:-/home/$SANDBOX_STEP_USER}" LANG=C.UTF-8 MROOM_SANDBOX=1 \
     MROOM_INPUTS="$SANDBOX_VAR/inputs" MROOM_EVIDENCE="$SANDBOX_VAR/evidence" ${vars[@]+"${vars[@]}"} \
     "$@" 2>&1 || rc=$?
+  # Everything the step left running is gone before commands resume: a background writer could still print one
+  # until then. Should the kill itself fail, the marker still comes, and then the failure.
+  killed=0
+  (stop_all) || killed=$?
   echo
   echo "::$token::"
+  [ "$killed" = 0 ] || exit "$killed"
+  exit "$rc"
 else
   sudo -n -u "$SANDBOX_STEP_USER" -- /usr/bin/env -i \
     PATH="$path" HOME="${home:-/home/$SANDBOX_STEP_USER}" LANG=C.UTF-8 MROOM_SANDBOX=1 \
