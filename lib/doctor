@@ -1,0 +1,792 @@
+#!/usr/bin/env bash
+# doctor — says whether the box, and an app's mroom setup, are as mroom needs them (design 8.7, 8.9, 9).
+#
+#   mroom doctor               the box: box.env, the QA gate's keys and logins, site-op, Postgres, Redis, the QA
+#                              services that are set up, the memory QA environments get, and the kernel's and
+#                              sshd's settings that keep a QA site's user in its own place
+#   mroom doctor --app [<dir>] the app in <dir> (or the one whose mroom.toml mroom config finds) against the box:
+#                              mroom.toml, its calls of mroom's workflows and their pins, the app contract it can
+#                              see in the repository, and the box checks for what that mroom.toml needs
+#
+# Each check prints one line, ok, warn or fail, and a warn or a fail one more, the fix. It changes nothing, and
+# never prints a secret: it reads the gate's secret files only to see that they are there, private and complete,
+# and signs in to Postgres and Redis as the gate to read settings, never data. Run it as the box user, on the box.
+#
+# Exit codes: 0 no check failed (a warn passes), 1 a check failed, 2 a usage error.
+set -euo pipefail
+umask 077
+export LC_ALL=C
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+MROOM_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+# shellcheck source=lib/core/util.sh
+. "$MROOM_ROOT/lib/core/util.sh"
+# shellcheck source=lib/memory-preflight
+. "$MROOM_ROOT/lib/memory-preflight"
+
+# The repository whose reusable workflows and actions an app calls.
+MROOM_REPO="milroyfraser/mroom"
+QA_WORKFLOWS=(qa-plan qa-up qa-down qa-reap)
+# Commands an environment's Redis user is refused (D15), which phpredis reports as done (design 9).
+REFUSED_COMMANDS='cache:clear|optimize:clear|cache:prune-stale-tags|horizon:clear-metrics'
+SECRETS="$HOME/.config/mroom/secrets"
+PG_SERVICES="$SECRETS/pg_service.conf"
+REDIS_SECRETS="$SECRETS/redis-gate.env"
+SERVICES="${MROOM_SERVICES_DIR:-/var/lib/mroom/services}"
+SITE_OP="${MROOM_GATE_SITE_OP:-/usr/local/libexec/mroom/site-op}"
+SSHD_CONFIG="${MROOM_SSHD_CONFIG:-/etc/ssh/sshd_config}"
+AUTHORIZED_KEYS="$HOME/.ssh/authorized_keys"
+
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; }
+die() { echo "mroom doctor: $1" >&2; exit "${2:-1}"; }
+
+APP_MODE=0 APP_DIR=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h | --help) usage; exit 0 ;;
+    --app)
+      APP_MODE=1
+      if [ -n "${2:-}" ] && [ "${2:0:1}" != - ]; then APP_DIR="$2"; shift; fi
+      shift
+      ;;
+    *) die "unknown argument '$1' (mroom doctor [--app [<dir>]])" 2 ;;
+  esac
+done
+
+need python3 jq stat
+
+WORK="$(mktemp -d)"
+trap 'rm -rf -- "$WORK"' EXIT
+
+N_OK=0 N_WARN=0 N_FAIL=0
+# report <ok|warn|fail> <check> <what> [<fix>]: one check's line, and its fix under a warn or a fail.
+report() {
+  case "$1" in
+    ok) N_OK=$((N_OK + 1)) ;;
+    warn) N_WARN=$((N_WARN + 1)) ;;
+    fail) N_FAIL=$((N_FAIL + 1)) ;;
+  esac
+  printf '%-5s %s: %s\n' "$1" "$2" "$3"
+  if [ "$1" != ok ] && [ -n "${4:-}" ]; then printf '      fix: %s\n' "$4"; fi
+  return 0
+}
+section() { printf '\n== %s\n' "$1"; }
+
+# ---- the app ------------------------------------------------------------------------------------------------
+
+CONFIG_OK=0 QA_ON=0 APP_ROOT=""
+# What the app's mroom.toml needs of the box; without --app, the box is taken as it is.
+APP_NAME="" QA_ZONE="" BACKEND_DIR="." FRONTEND_DIR="" APP_PHP="" PERSONA_DOMAIN=".test"
+MAIL="" FILES="" BROADCAST="" DB_READ_SET=0 DB_READ_LIST="" TEMPLATE_DB=""
+ENV_MEMORY=1024 MAX_ENVS=5
+
+# cfg <key> [<fallback>], cfg_json <key> [<fallback>]: a value of the app's mroom.toml, read once it validated, so
+# a key it cannot give is one the file leaves out: mroom's own default, or else the fallback.
+cfg() {
+  local value
+  if value="$(python3 "$MROOM_ROOT/lib/core/config.py" get "$1" 2>/dev/null)"; then printf '%s\n' "$value"; else printf '%s\n' "${2-}"; fi
+}
+cfg_json() {
+  local value
+  if value="$(python3 "$MROOM_ROOT/lib/core/config.py" get "$1" --json 2>/dev/null)"; then printf '%s\n' "$value"; else printf '%s\n' "${2-}"; fi
+}
+
+app_config() {
+  local path line list
+  if [ -n "$APP_DIR" ]; then
+    [ -f "$APP_DIR/mroom.toml" ] || die "$APP_DIR has no mroom.toml"
+    MROOM_CONFIG="$(cd "$APP_DIR" && pwd)/mroom.toml"
+    export MROOM_CONFIG
+  fi
+  if ! path="$(python3 "$MROOM_ROOT/lib/core/config.py" path 2>"$WORK/err")"; then
+    report fail config "no mroom.toml found: $(head -n1 "$WORK/err")" \
+      "run mroom doctor --app in the app's repository, or name it: mroom doctor --app <dir>"
+    return 0
+  fi
+  export MROOM_CONFIG="$path"
+  APP_ROOT="$(dirname "$path")"
+  if python3 "$MROOM_ROOT/lib/core/config.py" validate >/dev/null 2>"$WORK/err"; then
+    CONFIG_OK=1
+    report ok config "$path is valid"
+    while IFS= read -r line; do
+      if [ -n "$line" ]; then report warn config "${line#mroom config: warning: }" "remove or rename the key in mroom.toml"; fi
+    done <"$WORK/err"
+  else
+    report fail config "$path is not valid: $(grep -m1 . "$WORK/err" | sed 's/^mroom config: //')" \
+      "mroom config validate lists every error; fix them, then run doctor again"
+    return 0
+  fi
+  APP_NAME="$(cfg app.name "")"
+  QA_ZONE="$(cfg qa.zone "")"
+  BACKEND_DIR="$(cfg app.backend_dir .)"
+  FRONTEND_DIR="$(cfg app.frontend_dir "")"
+  APP_PHP="$(cfg app.php "")"
+  PERSONA_DOMAIN="$(cfg qa.persona_domain .test)"
+  MAIL="$(cfg qa.parity.mail catcher)"
+  FILES="$(cfg qa.parity.files same)"
+  BROADCAST="$(cfg qa.parity.broadcast same)"
+  TEMPLATE_DB="$(cfg qa.template_database "")"
+  ENV_MEMORY="$(cfg qa.env_memory_mb 1024)"
+  MAX_ENVS="$(cfg qa.max_envs 5)"
+  # qa.db_read_allowlist has no default, ever (design 8.6): a file without it has no browser QA.
+  if list="$(python3 "$MROOM_ROOT/lib/core/config.py" get qa.db_read_allowlist --json 2>/dev/null)"; then
+    DB_READ_SET=1
+    DB_READ_LIST="$(jq -r '.[]' <<<"$list" | sort -u | tr '\n' ' ')"
+    DB_READ_LIST="${DB_READ_LIST% }"
+  fi
+  if [ -n "$QA_ZONE" ]; then
+    QA_ON=1
+  else
+    report warn qa "qa.zone is not set, so the app has no QA environments, and the QA checks are skipped" \
+      "set qa.zone in mroom.toml to give pull requests QA environments (README, QA environments)"
+  fi
+}
+
+BOX_TAG="v$(tr -d '[:space:]' <"$MROOM_ROOT/VERSION")"
+
+# pin_fix <ref>: how to bring a pin and the box's release together.
+pin_fix() {
+  if ! [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "pin it to the release tag the box runs, @$BOX_TAG, never a branch or a commit"
+  elif [ "$(printf '%s\n%s\n' "$1" "$BOX_TAG" | sort -V | tail -n1)" = "$1" ]; then
+    echo "upgrade the box to $1 first (install.sh --version $1, then the root recipe), since the box goes before the pins (design 9)"
+  else
+    echo "pin it to @$BOX_TAG, the release the box runs"
+  fi
+}
+
+# app_workflows: each of mroom's QA workflows is called from one of the app's, pinned to the box's release, with
+# the secrets it takes; any other use of mroom's workflows or actions is pinned to that release too.
+app_workflows() {
+  local dir="$APP_ROOT/.github/workflows" file line target ref name rel uses
+  local re="^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[\"']?${MROOM_REPO}/([^@\"'[:space:]]+)@([^\"'[:space:]]+)"
+  : >"$WORK/uses"
+  if [ -d "$dir" ]; then
+    for file in "$dir"/*.yml "$dir"/*.yaml; do
+      [ -f "$file" ] || continue
+      rel="${file#"$APP_ROOT"/}"
+      while IFS= read -r line; do
+        [[ "$line" =~ $re ]] || continue
+        printf '%s\t%s\t%s\n' "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "$rel" >>"$WORK/uses"
+      done <"$file"
+    done
+  fi
+  for name in "${QA_WORKFLOWS[@]}"; do
+    uses="$(awk -F'\t' -v t=".github/workflows/$name.yml" '$1 == t' "$WORK/uses")"
+    if [ -z "$uses" ]; then
+      report fail "workflow $name" "no workflow in .github/workflows calls $MROOM_REPO/.github/workflows/$name.yml" \
+        "add the caller the README shows (README, QA environments, set up once, step 3), pinned to @$BOX_TAG"
+      continue
+    fi
+    while IFS=$'\t' read -r target ref rel; do
+      if [ "$ref" != "$BOX_TAG" ]; then
+        report fail "workflow $name" "$rel calls it at @$ref, and the box runs mroom $BOX_TAG" "$(pin_fix "$ref")"
+      elif ! app_secrets_passed "$name" "$APP_ROOT/$rel"; then
+        report fail "workflow $name" "$rel does not pass the secrets $name takes: $MISSING_SECRETS" \
+          "pass each by name under secrets: in the caller; secrets: inherit reaches only the same organisation's workflows"
+      else
+        report ok "workflow $name" "$rel calls it at @$ref, the box's release"
+      fi
+      : "$target"
+    done <<<"$uses"
+  done
+  # Anything else of mroom's the app uses: the CI templates' actions, the PR checks.
+  while IFS=$'\t' read -r target ref rel; do
+    [ -n "$target" ] || continue
+    if [[ "$target" =~ ^\.github/workflows/(qa-plan|qa-up|qa-down|qa-reap)\.yml$ ]]; then continue; fi
+    if [ "$ref" = "$BOX_TAG" ]; then
+      report ok pins "$rel uses $target at @$ref"
+    else
+      report fail pins "$rel uses $MROOM_REPO/$target at @$ref, and the box runs mroom $BOX_TAG" "$(pin_fix "$ref")"
+    fi
+  done <"$WORK/uses"
+}
+
+MISSING_SECRETS=""
+# app_secrets_passed <workflow> <file>: whether the caller passes each secret the workflow takes (README).
+app_secrets_passed() {
+  local want=() key
+  case "$1" in
+    qa-up) want=(MROOM_FORGE_TOKEN MROOM_QA_SSH_KEY MROOM_QA_ENV_TEMPLATE) ;;
+    qa-down) want=(MROOM_FORGE_TOKEN MROOM_QA_SSH_KEY) ;;
+    qa-reap) want=(MROOM_FORGE_TOKEN) ;;
+  esac
+  MISSING_SECRETS=""
+  for key in "${want[@]}"; do
+    grep -Eq "^[[:space:]]*$key:[[:space:]]*[^[:space:]]" "$2" || MISSING_SECRETS+="${MISSING_SECRETS:+, }$key"
+  done
+  [ -z "$MISSING_SECRETS" ]
+}
+
+# app_parity: every [qa.parity] value that is not production's service is a swap, a known gap (D12, design 9).
+app_parity() {
+  local swaps=()
+  [ "$MAIL" = catcher ] || swaps+=("mail = \"$MAIL\" (mail is logged, not sent to the box's catcher)")
+  [ "$FILES" = same ] || swaps+=("files = \"$FILES\" (files go to the local disk, not a bucket of the environment's own)")
+  [ "$BROADCAST" = same ] || swaps+=("broadcast = \"$BROADCAST\" (events are logged, not sent to a Reverb app)")
+  [ "$(cfg qa.parity.database seeded)" = seeded ] || swaps+=("database = \"snapshot\" (a masked copy of production's data, under design 9's rules)")
+  if [ "${#swaps[@]}" = 0 ]; then
+    report ok parity "QA runs production's services: no swap in [qa.parity]"
+    return 0
+  fi
+  local swap
+  for swap in "${swaps[@]}"; do
+    report warn parity "a swap, a known gap from production: $swap" "none, if that is meant; otherwise set it to the default in [qa.parity]"
+  done
+}
+
+# app_reverb_frontend: with broadcast = "same", a frontend of its own that opens sockets takes its Reverb app from
+# the four values Laravel Echo reads (design 9).
+app_reverb_frontend() {
+  [ "$BROADCAST" = same ] && [ -n "$FRONTEND_DIR" ] || return 0
+  local env missing=() key
+  env="$(cfg_json app.build.frontend_env '{}')"
+  for key in APP_KEY HOST PORT SCHEME; do
+    [ "$(jq -r --arg k "VITE_REVERB_$key" '.[$k] // ""' <<<"$env")" = "env:REVERB_$key" ] || missing+=("VITE_REVERB_$key")
+  done
+  if [ "${#missing[@]}" = 0 ]; then
+    report ok sockets "app.build.frontend_env gives the frontend its Reverb app"
+  else
+    report warn sockets "app.build.frontend_env does not map ${missing[*]}, so a frontend that opens sockets gets none in QA" \
+      "map each VITE_REVERB_<X> to \"env:REVERB_<X>\" in [app.build.frontend_env] (README, sockets in the frontend), or ignore this if the frontend opens none"
+  fi
+}
+
+# app_redis_commands: nothing in QA's deploy or schedule runs a command the environment's Redis user is refused
+# (design 9): phpredis reports a refused FLUSHDB as done, so the step seems to work and does nothing.
+app_redis_commands() {
+  local backend="$APP_ROOT/$BACKEND_DIR" found=0 command file hit
+  while IFS= read -r command; do
+    if [[ "$command" =~ ^($REFUSED_COMMANDS)([[:space:]]|$) ]]; then
+      report fail redis-commands "app.build.after_deploy runs $command, which the environment's Redis user is refused" \
+        "take it out of after_deploy; the gate's redis-clear empties an environment"
+      found=1
+    fi
+  done < <(cfg_json app.build.after_deploy '[]' | jq -r '.[]')
+  for file in "$APP_ROOT/.mroom/hooks/qa-deploy" "$backend/routes/console.php" "$backend/app/Console/Kernel.php" \
+    "$backend/bootstrap/app.php"; do
+    [ -f "$file" ] || continue
+    while IFS= read -r hit; do
+      report fail redis-commands "${file#"$APP_ROOT"/}:${hit%%:*} runs ${hit#*:}, which the environment's Redis user is refused" \
+        "do not run it in QA (or at all on a shared Redis): it needs FLUSHDB or SCAN; the gate's redis-clear empties an environment"
+      found=1
+    done < <(grep -n -o -E "($REFUSED_COMMANDS)" "$file" || true)
+  done
+  [ "$found" = 1 ] || report ok redis-commands "no deploy step or scheduled command needs FLUSHDB or SCAN"
+}
+
+# honours <KEY> [<config file>]: whether the backend reads KEY. A config file the app has not published leaves
+# Laravel's (or the package's) own, which reads it; one it has must read it itself.
+honours() {
+  local backend="$APP_ROOT/$BACKEND_DIR" dir
+  if [ -n "${2:-}" ]; then
+    [ -f "$backend/$2" ] || return 0
+    grep -qw -- "$1" "$backend/$2"
+    return
+  fi
+  for dir in config app bootstrap routes; do
+    [ -d "$backend/$dir" ] && grep -rqw --include='*.php' -- "$1" "$backend/$dir" && return 0
+  done
+  return 1
+}
+
+# app_isolation: the backend honours each setting that keeps environments on one box apart (design 8.7, 9).
+app_isolation() {
+  local backend="$APP_ROOT/$BACKEND_DIR" missing=() pair key file where
+  if [ ! -f "$backend/artisan" ]; then
+    report fail isolation "$BACKEND_DIR has no artisan, so it is not the Laravel app" "set app.backend_dir to the Laravel app's folder"
+    return 0
+  fi
+  local pairs=(DB_DATABASE:config/database.php DB_USERNAME:config/database.php REDIS_USERNAME:config/database.php
+    REDIS_PREFIX:config/database.php CACHE_PREFIX:config/cache.php SESSION_COOKIE:config/session.php
+    SESSION_DOMAIN:config/session.php XSRF_COOKIE_NAME:)
+  if [ -f "$backend/config/horizon.php" ] || grep -qs '"laravel/horizon"' "$backend/composer.json"; then
+    pairs+=(HORIZON_PREFIX:config/horizon.php)
+  fi
+  if [ -n "$FRONTEND_DIR" ] && [ "$FRONTEND_DIR" != . ]; then
+    pairs+=(CLIENT_URL: CORS_ALLOWED_ORIGINS: SANCTUM_STATEFUL_DOMAINS:config/sanctum.php)
+  fi
+  for pair in "${pairs[@]}"; do
+    key="${pair%%:*}" file="${pair#*:}"
+    honours "$key" "$file" || missing+=("$pair")
+  done
+  if [ "${#missing[@]}" = 0 ]; then
+    report ok isolation "the backend reads every setting that keeps environments apart"
+    return 0
+  fi
+  for pair in "${missing[@]}"; do
+    key="${pair%%:*}" file="${pair#*:}"
+    if [ -n "$file" ]; then where="$file, which the app has published, never reads it"; else where="nothing in the backend reads it"; fi
+    report fail isolation "qa-up sets $key for each environment, and $where" \
+      "read it with env('$key') where Laravel takes that setting (design 8.7)"
+  done
+}
+
+# app_health: the two paths a deploy waits on, by a look at the routes (design 9). A warn: a route may be built
+# in a way a search does not find.
+app_health() {
+  local backend="$APP_ROOT/$BACKEND_DIR" path part
+  if grep -rqsE "health:[[:space:]]*['\"]/up['\"]|['\"]/?up['\"]" "$backend/bootstrap/app.php" "$backend/routes" 2>/dev/null; then
+    report ok health "the backend has /up"
+  else
+    report warn health "no /up route found in bootstrap/app.php or routes/" \
+      "Laravel 11 and later: ->withRouting(health: '/up'); earlier, a route that answers 200"
+  fi
+  path="$(cfg app.version_path /version)"
+  part="${path#/}"
+  if [ -n "$part" ] && grep -rqsF -e "'/$part'" -e "\"/$part\"" -e "'$part'" -e "\"$part\"" "$backend/routes" "$backend/bootstrap/app.php"; then
+    report ok health "the backend has $path"
+  else
+    report warn health "no $path route found in routes/ (app.version_path)" \
+      "answer {\"release\": <tag>, \"commit\": <sha>} there with Cache-Control: no-store (design 9)"
+  fi
+}
+
+# ---- the box ------------------------------------------------------------------------------------------------
+
+BOX_OK=0
+box_env() {
+  if load_box 2>"$WORK/err"; then
+    BOX_OK=1
+    report ok box.env "$(home_short "$(python3 "$MROOM_ROOT/lib/core/config.py" path --box)") reads"
+  else
+    report fail box.env "$(grep -m1 . "$WORK/err" | sed 's/^mroom config: //')" "fix that line of box.env (README, box.env)"
+  fi
+}
+
+# same_as <check> <box key> <box value> <toml key> <toml value> [<fail|warn>]: a box.env value that must be the
+# app's.
+same_as() {
+  if [ "$3" = "$5" ]; then
+    report ok "$1" "box.env's $2 is mroom.toml's $4 ($3)"
+  else
+    report "${6:-fail}" "$1" "box.env's $2 is ${3:-not set}, and mroom.toml's $4 is ${5:-not set}" \
+      "set $2=$5 in box.env, or $4 in mroom.toml, so the two agree"
+  fi
+}
+
+box_names() {
+  local app="${BOX[MROOM_APP_NAME]:-}" zone="${BOX[MROOM_QA_ZONE]:-}" template="${BOX[MROOM_QA_TEMPLATE]:-}"
+  if [ "$APP_MODE" = 1 ]; then
+    same_as names MROOM_APP_NAME "$app" app.name "$APP_NAME"
+    same_as names MROOM_QA_ZONE "$zone" qa.zone "$QA_ZONE"
+    same_as names MROOM_QA_BACKEND_DIR "${BOX[MROOM_QA_BACKEND_DIR]:-.}" app.backend_dir "$BACKEND_DIR"
+    same_as names MROOM_QA_PERSONA_DOMAIN "${BOX[MROOM_QA_PERSONA_DOMAIN]:-.test}" qa.persona_domain "$PERSONA_DOMAIN"
+    if [ -n "$APP_PHP" ] && [ -n "${BOX[MROOM_QA_PHP]:-}" ] && [ "${BOX[MROOM_QA_PHP]}" != "php$APP_PHP" ]; then
+      report warn names "box.env's MROOM_QA_PHP is ${BOX[MROOM_QA_PHP]}, and mroom.toml's app.php is $APP_PHP" \
+        "set MROOM_QA_PHP=php$APP_PHP in box.env, so the gate runs the PHP the sites run"
+    fi
+    if [ -n "$TEMPLATE_DB" ] && [ "$TEMPLATE_DB" != "$template" ]; then
+      report warn names "mroom.toml's qa.template_database is $TEMPLATE_DB, and the gate clones box.env's MROOM_QA_TEMPLATE (${template:-not set})" \
+        "make them the same; the gate reads only box.env"
+    fi
+  else
+    if [ -n "$app" ]; then report ok names "MROOM_APP_NAME is $app"; fi
+    [ -n "$zone" ] || report fail names "MROOM_QA_ZONE is not set in box.env" "set MROOM_QA_ZONE to mroom.toml's qa.zone"
+  fi
+  [ -n "$template" ] || report fail names "MROOM_QA_TEMPLATE is not set in box.env, so the gate has nothing to clone" \
+    "set MROOM_QA_TEMPLATE=${app:-<app>}_qa_template in box.env (README, QA gate, step 11)"
+}
+
+# box_db_read: the gate's copy of browser QA's allowlist is the app's (design 8.6).
+box_db_read() {
+  local box_list
+  box_list="$(tr ' ' '\n' <<<"${BOX[MROOM_QA_DB_READ]:-}" | grep . | sort -u | tr '\n' ' ' || true)"
+  box_list="${box_list% }"
+  if [ "$APP_MODE" = 0 ]; then
+    [ -z "$box_list" ] || report ok db-read "MROOM_QA_DB_READ lists $(wc -w <<<"$box_list" | tr -d ' ') columns"
+    return 0
+  fi
+  if [ "$DB_READ_SET" = 0 ]; then
+    if [ -n "$box_list" ]; then
+      report warn db-read "box.env's MROOM_QA_DB_READ lets db-read read $box_list, and mroom.toml has no qa.db_read_allowlist" \
+        "add qa.db_read_allowlist to mroom.toml with those entries, or take MROOM_QA_DB_READ out of box.env"
+    fi
+    return 0
+  fi
+  if [ "$box_list" = "$DB_READ_LIST" ]; then
+    report ok db-read "box.env's MROOM_QA_DB_READ is mroom.toml's qa.db_read_allowlist"
+    return 0
+  fi
+  local only_app only_box
+  only_app="$(comm -23 <(tr ' ' '\n' <<<"$DB_READ_LIST" | grep .) <(tr ' ' '\n' <<<"$box_list" | grep .) | tr '\n' ' ' || true)"
+  only_box="$(comm -13 <(tr ' ' '\n' <<<"$DB_READ_LIST" | grep .) <(tr ' ' '\n' <<<"$box_list" | grep .) | tr '\n' ' ' || true)"
+  report fail db-read "box.env's MROOM_QA_DB_READ is not mroom.toml's qa.db_read_allowlist:${only_app:+ only in mroom.toml: ${only_app% };}${only_box:+ only in box.env: ${only_box% }}" \
+    "set MROOM_QA_DB_READ=\"$DB_READ_LIST\" in box.env (the gate never reads the app's repository)"
+}
+
+# box_keys: the gate's forced-command keys in authorized_keys, each restricted, and forced to an mroom that runs.
+box_keys() {
+  local line cmd opts role path roles=" "
+  local forced='command="([^"]*)"' fields='^([^[:space:]"]*)command="[^"]*"([^[:space:]]*)[[:space:]]'
+  if [ -f "$AUTHORIZED_KEYS" ]; then
+    while IFS= read -r line; do
+      [[ "$line" != \#* ]] || continue
+      [[ "$line" =~ $forced ]] || continue
+      cmd="${BASH_REMATCH[1]}"
+      [[ "$cmd" =~ (^|[[:space:]/])mroom[[:space:]]+gate([[:space:]]|$) ]] || continue
+      # The options are the line's first field: what comes before command="..." and after it, up to a space.
+      opts=""
+      if [[ "$line" =~ $fields ]]; then
+        opts="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+      fi
+      if ! [[ "$cmd" =~ ^([^[:space:]]+)[[:space:]]+gate[[:space:]]+(provision|browser|template)$ ]]; then
+        report fail gate-keys "a key in ~/.ssh/authorized_keys is forced to \"$cmd\", which is not mroom gate provision, browser or template" \
+          "force each key to <path to mroom> gate <role> alone (README, QA gate, step 1)"
+        continue
+      fi
+      path="${BASH_REMATCH[1]}" role="${BASH_REMATCH[2]}"
+      if [[ ",$opts," != *,restrict,* ]]; then
+        report fail gate-keys "the $role key in ~/.ssh/authorized_keys is not restrict-ed, so it may forward ports or get a terminal" \
+          "start its line with restrict,command=\"...\" (README, QA gate, step 1)"
+      fi
+      if [ ! -x "$path" ]; then
+        report fail gate-keys "the $role key is forced to $path, which is not an mroom that runs" \
+          "point command= at the installed mroom, such as $(home_short "$HOME/.local/bin/mroom")"
+      fi
+      roles+="$role "
+    done <"$AUTHORIZED_KEYS"
+  fi
+  if [[ "$roles" == *" provision "* ]]; then
+    report ok gate-keys "a key is forced to mroom gate provision"
+  else
+    report fail gate-keys "no key in ~/.ssh/authorized_keys is forced to mroom gate provision, so qa-up and qa-down cannot reach the box" \
+      "add the provision key's line (README, QA gate, step 1)"
+  fi
+  if [[ "$roles" == *" template "* ]]; then
+    report ok gate-keys "a key is forced to mroom gate template"
+  else
+    report warn gate-keys "no key is forced to mroom gate template, so no job can load the QA template" \
+      "add the template key's line when the job that builds the template exists (README, QA gate, steps 1 and 3)"
+  fi
+  if [[ "$roles" == *" browser "* ]]; then
+    report ok gate-keys "a key is forced to mroom gate browser"
+  elif [ "$DB_READ_SET" = 1 ] || [ -n "${BOX[MROOM_QA_DB_READ]:-}" ]; then
+    report warn gate-keys "no key is forced to mroom gate browser, so browser QA cannot read the environment's data" \
+      "add the browser key's line when browser QA runs (README, QA gate, step 1)"
+  fi
+}
+
+# secret_ready <file> <what> <fix> <key...>: a gate secret file is there, private, and sets each key, none of
+# which is printed.
+secret_ready() {
+  local file="$1" what="$2" fix="$3" key missing=()
+  shift 3
+  if [ ! -f "$file" ]; then
+    report fail secrets "$(home_short "$file") is missing; it holds $what" "$fix"
+    return 1
+  fi
+  if ! secret_file_ok "$file"; then
+    report fail secrets "$(home_short "$file") must be yours and mode 600, since it holds $what" "chmod 600 $(home_short "$file")"
+    return 1
+  fi
+  for key in "$@"; do
+    grep -Eq "^[[:space:]]*${key}[[:space:]]*=[[:space:]]*[^[:space:]]" "$file" || missing+=("$key")
+  done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    report fail secrets "$(home_short "$file") sets no ${missing[*]}" "$fix"
+    return 1
+  fi
+  report ok secrets "$(home_short "$file") is private and complete"
+}
+
+# box_site_op: the installed site-op is root's, out of the box user's reach, and this release's own (D17, D21).
+box_site_op() {
+  local path
+  if [ ! -f "$SITE_OP" ] || [ -L "$SITE_OP" ]; then
+    report fail site-op "$SITE_OP is not installed, or is a link, so the gate can put no code into a QA site" \
+      "run mroom's root recipe with site-op in its parts (README, QA gate, step 10)"
+    return 0
+  fi
+  for path in "$SITE_OP" "$(dirname "$SITE_OP")"; do
+    if [ "$(stat -c %u "$path")" != "${MROOM_GATE_SITE_OP_OWNER:-0}" ] || [ -w "$path" ]; then
+      report fail site-op "$path must belong to root, and $(id -un) must not be able to change it" \
+        "run mroom's root recipe again (README, QA gate, step 10)"
+      return 0
+    fi
+  done
+  if cmp -s "$SITE_OP" "$MROOM_ROOT/lib/site-op"; then
+    report ok site-op "$SITE_OP is root's and this release's"
+  else
+    report fail site-op "$SITE_OP is not this release's site-op, so the gate refuses work in a site" \
+      "run mroom's root recipe at $BOX_TAG (README, QA gate, the root recipe)"
+  fi
+}
+
+# pg <name>: the SQL on stdin, as the gate's role, through its libpq service; rows unaligned, errors to a file.
+pg() {
+  PGSERVICEFILE="$PG_SERVICES" PGSERVICE=mroom-gate PGCONNECT_TIMEOUT=10 \
+    psql -X -q -A -t -v ON_ERROR_STOP=1 -d postgres 2>"$WORK/psql.err"
+}
+pg_error() { grep -m1 -E '^(ERROR|FATAL|psql):' "$WORK/psql.err" 2>/dev/null | tr -cd '[:print:]' || echo "no message"; }
+
+# box_postgres: Postgres 16 or later, the gate's groups with ADMIN OPTION, the template loaded with no load left
+# half done, the objects role owning no database or tablespace, and PUBLIC kept out of the QA databases (D18).
+box_postgres() {
+  local app="${BOX[MROOM_APP_NAME]}" template="${BOX[MROOM_QA_TEMPLATE]:-}" version role answer
+  if ! command -v psql >/dev/null 2>&1; then
+    report fail postgres "this box has no psql, which the gate needs" "install Postgres's client of the server's version"
+    return 0
+  fi
+  if ! version="$(pg <<<"SELECT current_setting('server_version_num'); -- doctor:version")"; then
+    report fail postgres "cannot reach Postgres as the gate's role: $(pg_error)" \
+      "check the [mroom-gate] service in $(home_short "$PG_SERVICES") and pg_hba.conf's lines (README, QA gate, steps 5 and 6)"
+    return 0
+  fi
+  if ! [[ "$version" =~ ^[0-9]+$ ]] || ((version < 160000)); then
+    report fail postgres "Postgres is older than 16, where a role that may create roles may grant itself any (D18)" "upgrade Postgres to 16 or later"
+    return 0
+  fi
+  report ok postgres "Postgres $((version / 10000)) answers the gate's role"
+  for role in "${app}_qa_objects" "${app}_qa_envs" "${app}_qa_readers"; do
+    answer="$(pg <<SQL
+SELECT (SELECT count(*) FROM pg_roles WHERE rolname = '$role') || ' ' ||
+  (SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
+    WHERE r.rolname = '$role' AND m.admin_option AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user));
+-- doctor:role $role
+SQL
+)" || { report fail postgres "cannot read the role $role: $(pg_error)" ""; continue; }
+    case "$answer" in
+      "0 "*) report fail postgres "the role $role does not exist" "create it as the README says (QA gate, step 2)" ;;
+      "1 0") report fail postgres "the gate's role does not hold $role WITH ADMIN OPTION" "GRANT $role TO the gate's role WITH ADMIN OPTION (README, QA gate, step 2)" ;;
+      *) report ok postgres "the gate holds $role with ADMIN OPTION" ;;
+    esac
+  done
+  answer="$(pg <<SQL
+SELECT (SELECT count(*) FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE r.rolname = '${app}_qa_objects')
+  + (SELECT count(*) FROM pg_tablespace t JOIN pg_roles r ON r.oid = t.spcowner WHERE r.rolname = '${app}_qa_objects');
+-- doctor:objects-owns
+SQL
+)" || answer="?"
+  if [ "$answer" != 0 ]; then
+    report fail postgres "${app}_qa_objects owns a database or a tablespace, so the gate refuses to make environments" \
+      "ALTER DATABASE (or TABLESPACE) ... OWNER TO another role; that role owns only the template's objects (D18)"
+  fi
+  if [ -n "$template" ]; then
+    answer="$(pg <<SQL
+SELECT datname FROM pg_database WHERE datname IN ('$template', '${template}_next', '${template}_old') ORDER BY 1;
+-- doctor:template
+SQL
+)" || answer=""
+    if grep -qx -- "$template" <<<"$answer"; then
+      report ok template "the QA template $template is loaded"
+    else
+      report fail template "the QA template $template is not loaded, so no environment can be made" \
+        "send its pg_dump -Fc archive to the gate's template-load (README, QA gate, step 3)"
+    fi
+    if grep -qx -E -- "${template}_(next|old)" <<<"$answer"; then
+      report warn template "a template load was cut short: $(grep -x -E -- "${template}_(next|old)" <<<"$answer" | tr '\n' ' ')is left" \
+        "load the template again; template-load puts that right"
+    fi
+  fi
+  answer="$(pg <<SQL
+SELECT datname FROM pg_database WHERE datallowconn AND datname NOT IN ('postgres', 'template0', 'template1')
+  AND has_database_privilege('public', datname, 'CONNECT') ORDER BY 1;
+-- doctor:public-connect
+SQL
+)" || { report fail postgres "cannot read which databases PUBLIC may connect to: $(pg_error)" ""; return 0; }
+  local db qa_open=() other_open=()
+  while IFS= read -r db; do
+    [ -n "$db" ] || continue
+    if [ "$db" = "$template" ] || [[ "$db" =~ ^${app}_qa_[0-9]+$ ]]; then qa_open+=("$db"); else other_open+=("$db"); fi
+  done <<<"$answer"
+  if [ "${#qa_open[@]}" -gt 0 ]; then
+    report fail postgres "any role may connect to ${qa_open[*]}" "REVOKE CONNECT ON DATABASE <name> FROM PUBLIC for each (D18)"
+  else
+    report ok postgres "PUBLIC may connect to neither the template nor any environment's database"
+  fi
+  if [ "${#other_open[@]}" -gt 0 ]; then
+    report warn postgres "any role may connect to ${other_open[*]}" \
+      "REVOKE CONNECT ON DATABASE <name> FROM PUBLIC on the app's own databases, the dev site's among them (README, QA gate, step 4)"
+  fi
+}
+
+# box_redis: Redis 7 or later, with its users in an aclfile and the default user off (D15).
+box_redis() {
+  local user pass host port info major reply
+  if ! command -v redis-cli >/dev/null 2>&1; then
+    report fail redis "this box has no redis-cli, which the gate needs" "install Redis's client"
+    return 0
+  fi
+  user="$(sed -n 's/^REDIS_GATE_USER=//p' "$REDIS_SECRETS" | head -n1 | tr -d '\r')"
+  pass="$(sed -n 's/^REDIS_GATE_PASSWORD=//p' "$REDIS_SECRETS" | head -n1 | tr -d '\r')"
+  host="$(sed -n 's/^REDIS_GATE_HOST=//p' "$REDIS_SECRETS" | head -n1 | tr -d '\r')"
+  port="$(sed -n 's/^REDIS_GATE_PORT=//p' "$REDIS_SECRETS" | head -n1 | tr -d '\r')"
+  rcli() {
+    REDISCLI_AUTH="$pass" redis-cli --no-auth-warning -e -h "${host:-127.0.0.1}" -p "${port:-6379}" --user "$user" "$@" 2>/dev/null
+  }
+  if ! info="$(rcli INFO server)"; then
+    report fail redis "cannot reach Redis as the gate's user" \
+      "check $(home_short "$REDIS_SECRETS") and the gate's line in Redis's aclfile (README, QA gate, steps 7 and 8)"
+    return 0
+  fi
+  major="$(tr -d '\r' <<<"$info" | sed -n 's/^redis_version:\([0-9][0-9]*\).*/\1/p')"
+  if ! [[ "$major" =~ ^[0-9]+$ ]] || ((major < 7)); then
+    report fail redis "Redis is older than 7, so it cannot keep each environment's user to its keys (D15)" "upgrade Redis to 7 or later"
+    return 0
+  fi
+  report ok redis "Redis $major answers the gate's user"
+  reply="$(rcli CONFIG GET aclfile | tr -d '\r' | sed -n 2p)" || reply=""
+  if [ -n "$reply" ]; then
+    report ok redis "Redis keeps its users in an aclfile"
+  else
+    report fail redis "Redis has no aclfile, so the users the gate gives would vanish on a restart" "README, QA gate, step 8"
+  fi
+  if ! reply="$(rcli ACL LIST)"; then
+    report fail redis "cannot list Redis's users as the gate's user" "give the gate's user +@all (README, QA gate, step 8)"
+  elif tr -d '\r' <<<"$reply" | grep -q -E '^user default on( |$)'; then
+    report fail redis "Redis's default user is on, so every process on the box reaches every key, and the gate refuses Redis requests" \
+      "give every other client a user of its own, then ACL SETUSER default off, ACL SAVE and CLIENT KILL USER default (README, QA gate, step 9)"
+  else
+    report ok redis "Redis's default user is off"
+  fi
+}
+
+# answers <socket> <path>: the service behind the Unix socket answers the path with 200.
+answers() {
+  [ "$(curl -q -s --max-time 3 --unix-socket "$1" -o /dev/null -w '%{http_code}' "http://localhost$2" 2>/dev/null)" = 200 ]
+}
+
+# box_service <name> <needed: 1, 0 or "box"> <socket> <path> <file>: a QA service mroom baseline set up, and answering.
+box_service() {
+  local name="$1" needed="$2" socket="$3" path="$4" file="$5"
+  if [ "$needed" = 0 ]; then return 0; fi
+  if [ ! -d "$SERVICES/$name" ]; then
+    [ "$needed" = box ] && return 0
+    report fail "$name" "$SERVICES/$name does not exist, and mroom.toml's [qa.parity] needs $name" \
+      "run mroom's root recipe with $name in its parts, then mroom baseline $name (README, QA gate)"
+    return 0
+  fi
+  if [ ! -f "$file" ] || ! secret_file_ok "$file"; then
+    report fail "$name" "$(home_short "$file") is missing, or not yours and mode 600" "run mroom baseline $name"
+    return 0
+  fi
+  if answers "$socket" "$path"; then
+    report ok "$name" "it is set up and answers"
+  else
+    report fail "$name" "it does not answer on $(home_short "$socket")" \
+      "check mroom-$name.service (systemctl status), and run mroom baseline $name"
+  fi
+}
+
+box_services() {
+  local mail=box files=box broadcast=box
+  if [ "$APP_MODE" = 1 ]; then
+    mail=0 files=0 broadcast=0
+    [ "$MAIL" != catcher ] || mail=1
+    [ "$FILES" != same ] || files=1
+    [ "$BROADCAST" != same ] || broadcast=1
+  fi
+  box_service mailpit "$mail" "$SERVICES/mailpit/run/http.sock" /livez "$SECRETS/mailpit.env"
+  box_service garage "$files" "$SERVICES/garage/run/admin.sock" /health "$SERVICES/garage/etc/garage-admin-token"
+  box_service reverb "$broadcast" "$SERVICES/reverb/run/reverb.sock" /up "$SERVICES/reverb/apps/apps.json"
+}
+
+# box_memory: the slots the box's RAM holds once it keeps its reserve (design 9).
+box_memory() {
+  local reserve="${BOX[MROOM_QA_RESERVE_MB]:-4096}" slots
+  if ! memory_read; then
+    report warn memory "cannot read MemTotal, MemAvailable and SwapFree from ${MROOM_PROC:-/proc}/meminfo" ""
+    return 0
+  fi
+  slots="$(memory_slots "$MEM_TOTAL" "$reserve" "$ENV_MEMORY" "$MAX_ENVS")" || slots=0
+  if [ "$slots" = 0 ]; then
+    report fail memory "the box's $MEM_TOTAL MB, less its reserve of $reserve MB, holds no QA environment of $ENV_MEMORY MB" \
+      "lower MROOM_QA_RESERVE_MB in box.env or qa.env_memory_mb in mroom.toml, or give the box more RAM"
+  elif ((slots < MAX_ENVS)); then
+    report warn memory "the box's $MEM_TOTAL MB, less its reserve of $reserve MB, holds $slots QA environments of $ENV_MEMORY MB, fewer than qa.max_envs ($MAX_ENVS)" \
+      "none, if $slots will do; otherwise lower MROOM_QA_RESERVE_MB or qa.env_memory_mb, or give the box more RAM"
+  else
+    report ok memory "the box's $MEM_TOTAL MB, less its reserve of $reserve MB, holds qa.max_envs ($MAX_ENVS) QA environments"
+  fi
+}
+
+# box_kernel_and_ssh: hard links to others' files are refused, and sshd lets no QA site's user in and forwards no
+# developer's agent (design 8.9).
+box_kernel_and_ssh() {
+  local file="${MROOM_PROC:-/proc}/sys/fs/protected_hardlinks" texts=() conf
+  if [ "$(cat "$file" 2>/dev/null)" = 1 ]; then
+    report ok kernel "fs.protected_hardlinks is 1"
+  else
+    report fail kernel "fs.protected_hardlinks is not 1, so a QA site's user can link another user's file into its own tree" \
+      "sysctl -w fs.protected_hardlinks=1, and keep it in /etc/sysctl.d"
+  fi
+  if [ ! -r "$SSHD_CONFIG" ]; then
+    report warn sshd "cannot read $SSHD_CONFIG" "check DenyGroups isolated and AllowAgentForwarding no by hand (sshd -T, as root)"
+    return 0
+  fi
+  # Ubuntu's sshd_config includes sshd_config.d/*.conf on its first line, so those come first.
+  for conf in "$(dirname "$SSHD_CONFIG")"/sshd_config.d/*.conf; do
+    if [ -r "$conf" ]; then texts+=("$conf"); fi
+  done
+  texts+=("$SSHD_CONFIG")
+  # The first value sshd reads wins, and Match blocks apply only to some connections: what this reads is the global
+  # part of each file, which is a strong hint, not sshd -T's answer.
+  if awk 'tolower($1) == "match" { exit } tolower($1) == "denygroups" { for (i = 2; i <= NF; i++) if ($i == "isolated") found = 1 } END { exit !found }' "${texts[@]}"; then
+    report ok sshd "DenyGroups isolated: a QA site's user cannot log in with a key its code adds"
+  else
+    report fail sshd "sshd_config has no DenyGroups isolated, so a QA site's code can add a key and log in" \
+      "add DenyGroups isolated to $SSHD_CONFIG and reload sshd (README, QA gate, step 10)"
+  fi
+  if awk 'tolower($1) == "match" { exit } tolower($1) == "allowagentforwarding" { v = tolower($2); exit } END { exit v != "no" }' "${texts[@]}"; then
+    report ok sshd "AllowAgentForwarding no: no developer's keys reach a session"
+  else
+    report fail sshd "sshd forwards SSH agents, so a developer who connects with ssh -A lends their keys to every session" \
+      "add AllowAgentForwarding no to $SSHD_CONFIG and reload sshd (design D22)"
+  fi
+}
+
+box_checks() {
+  section "box"
+  box_env
+  [ "$BOX_OK" = 1 ] || return 0
+  local gate=1
+  if [ "$APP_MODE" = 1 ] && [ "$QA_ON" = 0 ]; then gate=0; fi
+  if [ "$APP_MODE" = 0 ] && [ -z "${BOX[MROOM_APP_NAME]:-}" ]; then
+    gate=0
+    report warn names "MROOM_APP_NAME is not set in box.env, so this box has no QA gate, and its checks are skipped" \
+      "set MROOM_APP_NAME and the QA keys when the box should run QA environments (README, QA gate, step 11)"
+  fi
+  if [ "$gate" = 1 ]; then
+    box_names
+    box_db_read
+    box_keys
+    local pg_ok=0 redis_ok=0
+    if secret_ready "$PG_SERVICES" "the gate's Postgres login" "write the [mroom-gate] service (README, QA gate, step 6)" user password; then
+      if grep -Eq '^[[:space:]]*\[mroom-gate\][[:space:]]*$' "$PG_SERVICES"; then
+        pg_ok=1
+      else
+        report fail secrets "$(home_short "$PG_SERVICES") has no [mroom-gate] service" "name the gate's service [mroom-gate] (README, QA gate, step 6)"
+      fi
+    fi
+    secret_ready "$REDIS_SECRETS" "the gate's Redis login" "make it as the README says (QA gate, step 7)" \
+      REDIS_GATE_USER REDIS_GATE_PASSWORD && redis_ok=1
+    if [ -n "${BOX[MROOM_APP_NAME]:-}" ]; then
+      [ "$pg_ok" = 0 ] || box_postgres
+      [ "$redis_ok" = 0 ] || box_redis
+    fi
+    box_site_op
+    box_services
+    box_memory
+  fi
+  box_kernel_and_ssh
+}
+
+app_checks() {
+  section "app"
+  app_config
+  [ "$CONFIG_OK" = 1 ] || return 0
+  [ "$QA_ON" = 1 ] || return 0
+  app_workflows
+  app_parity
+  app_reverb_frontend
+  app_redis_commands
+  app_isolation
+  app_health
+}
+
+echo "mroom doctor: mroom $BOX_TAG"
+if [ "$APP_MODE" = 1 ]; then app_checks; fi
+box_checks
+printf '\n%s ok, %s warn, %s fail\n' "$N_OK" "$N_WARN" "$N_FAIL"
+[ "$N_FAIL" = 0 ]

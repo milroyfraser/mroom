@@ -540,6 +540,18 @@ Invariants, each with a test:
      push on the app's repository but neither maintain nor admin, no key in `~/.ssh` signs in as any other
      account, no checkout's remote holds a token, the default branch's ruleset requires code-owner review with
      no bypass for the agents' account, and `production` has required reviewers.
+   - Phase 2a's doctor (README, Doctor) checks, as the box user, what it can see from there without root or a
+     GitHub call: box.env and its names against `mroom.toml`, `MROOM_QA_DB_READ` against `qa.db_read_allowlist`
+     (a difference fails, since the gate never reads the app's repository), the gate's keys and secret files,
+     Postgres (16 or later, the gate's groups with `ADMIN OPTION`, the template loaded, the objects role owning no
+     database, `PUBLIC` kept from connecting to the template and the environments' databases), Redis (7 or later,
+     an `aclfile`, the default user off), `site-op`, the QA services `[qa.parity]` needs, the memory slots,
+     `fs.protected_hardlinks`, and sshd's `DenyGroups isolated` and `AllowAgentForwarding no` (read from its
+     files, a hint, since `sshd -T` needs root). With `--app` it also checks the app's calls of mroom's
+     workflows, pinned to the box's release with the secrets each takes, and the parts of section 9 a look at the
+     repository can show. Later: `PUBLIC`'s `CREATE` on each database's `public` schema, the nginx guard and the
+     workers' users of each QA site, `/home/forge`'s ACL, PHP-FPM's sockets, the Forge token's servers, the
+     GitHub checks (D22), and a queued mail's tries (D19).
 
 ## 9. The app contract
 
