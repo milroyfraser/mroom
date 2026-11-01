@@ -379,6 +379,30 @@ t_the_alarm_sends_nothing_it_cannot_record() {
   expect_true "a refused ping was sent again" [ "$(count_ops slack)" = 1 ]
 }
 
+t_only_the_personas_day_issue_silences_the_alarm() {
+  pworld
+  jobs_with_a_failed_step
+  export SLACK_BOT_TOKEN="$CHAT_TOKEN"
+  # A person's issue holding a month of day keys, today's among them: it is not the alarm's record.
+  local d markers=""
+  for d in $(seq 1 31); do markers+="<!-- mroom-alert key=triage:202610$(printf '%02d' "$d") -->"$'\n'; done
+  add_issue ENG-50 u-person "Copied markers.
+$markers"
+  alarm
+  expect_rc 0
+  expect_true "a person's issue silenced the alarm: $out" [ "$(count_ops slack) $(count_ops linear issueCreate)" = "1 1" ]
+  alarm
+  expect_rc 0; expect_out_has "already pinged today (ENG-1)"
+  expect_true "the alarm's own issue did not silence it" [ "$(count_ops slack)" = 1 ]
+  # The check fails (the tracker does not say who the token's user is): no ping, and the run fails.
+  world_set '.viewer = ""'
+  export MROOM_NOW=$((NOW_EPOCH + 86400))
+  add_issue ENG-51 u-persona "<!-- mroom-alert key=triage:20261029 -->"
+  alarm
+  expect_rc 1; expect_err_has "does not ping"
+  expect_true "it pinged though the check failed" [ "$(count_ops slack)" = 1 ]
+}
+
 t_the_alarm_needs_a_chat_token_and_hands_over_lost_markers() {
   pworld
   jobs_with_a_failed_step
@@ -449,6 +473,7 @@ test_case redacted t_event_data_is_redacted_before_it_reaches_an_issue
 test_case markers-lost t_the_stop_when_markers_are_lost_and_the_switch_off
 test_case alarm-once-a-day t_the_alarm_pings_once_a_utc_day
 test_case alarm-records-first t_the_alarm_sends_nothing_it_cannot_record
+test_case alarm-own-issue-only t_only_the_personas_day_issue_silences_the_alarm
 test_case alarm-token-and-lost t_the_alarm_needs_a_chat_token_and_hands_over_lost_markers
 test_case filed-never-crowd-out t_filed_alerts_never_crowd_out_a_new_one
 test_case ten-a-run t_at_most_ten_filed_and_the_rest_wait
