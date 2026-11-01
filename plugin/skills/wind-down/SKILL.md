@@ -1,6 +1,6 @@
 ---
 name: wind-down
-description: End the working day. Turn the session Room to its wind-down mood, bring every piece of running work to a state that can be paused and restarted later, and run a retrospective of the day's learnings, one card at a time: an observation and its recommended action items. Never merges.
+description: End the working day. Turn the session Room to its wind-down mood, bring every piece of running work to a state that can be paused and restarted later, and run a retrospective of the day's learnings, one card at a time, each an observation with its recommended action items. Never merges.
 ---
 
 # /mroom:wind-down: pause the day and look back
