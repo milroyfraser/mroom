@@ -194,6 +194,21 @@ def flatten(data: dict, prefix: str = "") -> dict:
     return out
 
 
+def dotted_names(data: dict, prefix: str = "") -> list[tuple[str, str]]:
+    """(key, name) for each quoted key whose own name holds a dot and spells a key mroom reads, or a table of
+    them. flatten reads "issues.token_env" = ... as issues.token_env, while lookup walks the tables, so the checks
+    could pass one value while get returns another. A name that spells no such key stays an unknown key."""
+    found = []
+    for name, value in data.items():
+        key = f"{prefix}{name}"
+        if "." in name:
+            if any(known == key or known.startswith(key + ".") for known in SCHEMA):
+                found.append((key, name))
+        elif key not in SCHEMA and isinstance(value, dict):
+            found.extend(dotted_names(value, key + "."))
+    return found
+
+
 def type_error(key: str, kind, value) -> str | None:
     if isinstance(kind, tuple):
         if not isinstance(value, str) or value not in kind:
@@ -218,7 +233,7 @@ def type_error(key: str, kind, value) -> str | None:
 
 def rule_error(key: str, value) -> str | None:
     """Checks beyond the type, for keys that other names are built from."""
-    if key == "app.name" and not APP_NAME_RE.match(value):
+    if key == "app.name" and not APP_NAME_RE.fullmatch(value):
         return f"{key} must match [a-z][a-z0-9_]* and be at most 32 characters (got {json.dumps(value)})"
     if key == "tests.database_pattern" and "{slug}" not in value:
         return f"{key} must contain {{slug}}, so each worktree gets its own database"
@@ -301,6 +316,12 @@ def example(key: str) -> str:
 def check(path: str, data: dict) -> tuple[list[tuple[str, str]], list[str]]:
     """(key, message) errors and unknown-key warnings for a parsed mroom.toml."""
     errors, warnings = [], []
+    # Each key is written once, as tables and keys: never one quoted key with a dot, which could give it two values.
+    for key, name in dotted_names(data):
+        parent, leaf = key.rsplit(".", 1)
+        hint = f"[{key}]" if key in SECTIONS else f"[{parent}] and {leaf} = ..."
+        errors.append((key, f"{key} must not be one quoted key with a dot ({json.dumps(name)}): write it as tables "
+                            f"and keys, such as {hint}"))
     flat = flatten(data)
     for key, value in flat.items():
         if key not in SCHEMA:

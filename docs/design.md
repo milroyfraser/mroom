@@ -356,6 +356,10 @@ agrees; `mroom config keys` shows it.
   `GH_*`, `GITHUB_*`, `AWS_*`, `FORGE_*`, `SSH_*`), and the two differ.
 - `issues.id_pattern` and `errors.id_pattern` compile as **Python** regular expressions (`re`), not POSIX ERE;
   patterns used by shell tools later must stay in the common subset.
+- A key or table mroom reads is written as tables and keys, never as one quoted name with a dot
+  (`"issues.token_env" = ...`, `"qa.parity" = { ... }`), which fails: TOML keeps it apart from `[issues]` and
+  `token_env = ...`, so the file could hold two values for one key, and the checks pass one while `get` returns
+  the other.
 - An unknown key warns (with a close match, if any) and is ignored; it never fails.
 
 ### 5.2 Box config (`~/.config/mroom/`)
@@ -783,9 +787,15 @@ The deploy template (`templates/github/workflows/deploy-production.yml`) runs th
 concurrency group that never cancels a deploy. `release`, in `production`, checks out the run's own tag with the
 deploy key and runs `release-branch.sh`, which also stops when the branch is at a commit off the default branch or
 neither before nor after the tag, since then someone else moved it; that job runs no action but `actions/checkout`
-beside the key. `verify` holds no secret and runs `deploy-verify` on the commit `release` pushed; a poll counts only
-when the app's `/up` answers 200 too, and a release name other than the tag, for the right commit, is a warning. The
-run takes no input: a rollback is a dispatch from the older tag.
+beside the key. It stops too while a tag named `release` exists: git takes a tag over a branch of the same short
+name, anyone with Write can push one, and the branch's ruleset does not cover it. That stop is a backstop, since a
+tag can come after it; the host fetches `refs/heads/release` by its full name, and the tag ruleset covers the name
+`release` as well. That script's check that the tag is on the default branch runs from the tag, so it holds only for
+a tag a person made and no one can move: the tag ruleset restricts updates and deletions too, and a draft release's
+target, which Write can change, is where publishing makes the tag. `verify` holds no secret and runs `deploy-verify`
+on the commit `release` pushed; a poll counts only when the app's `/up` answers 200 too, and a release name other
+than the tag, for the right commit, is a warning. The run takes no input: a rollback is a dispatch from the older
+tag.
 
 **Sharded jobs.** The frontend unit tests came next: four vitest shards, the slowest shard's job 254 s, and a
 count the ruleset held in place, because it required each shard by name. With six shards the slowest shard's job
