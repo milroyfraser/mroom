@@ -27,18 +27,19 @@ its own) is in `room.html`.
 | `meta/session` | `{issue, title, url, branch, startedAt, pr?, checks?}` | The header. Before the tracker connects, write `{issue, startedAt}`. Add `pr`, and keep `checks` current, once the PR exists. |
 | `meta/next` | `{title, recommend, how, text, cardId?, cardIds?, url?, at}` | The developer's one next action (below). |
 | `meta/settings` | `{waitStepSeconds}` | Optional. How long each waiting colour lasts; 600 by default. |
-| `todos/<id>` | a card (below) | Issue, PR and investigation cards, decisions, other to-dos. |
+| `todos/<id>` | a card (below) | Issue, PR and investigation cards, decisions, other to-dos. Live or Plans, never both. |
 | `work/<id>` | `{title, state: doing\|waiting\|watching\|next\|done, updatedAt}` | Your own work; only the status pill shows it. |
-| `boards/plans` | `{updatedAt, sections}` | The Plans tab. |
+| `boards/plans` | `{updatedAt, sections}` | Plan steps, shown in Plans above their group's cards. |
 | `boards/box` | `{title: "Engine", updatedAt, slots, sections}` | The Engine tab. |
 | `boards/session` | `{updatedAt, sections}` | "Research" and "Open questions": your notes, not shown. |
 
 A board's `sections` are `[{title, hint?, items: [{label, line, state, who?, url?}]}]`, with `state` one of `done`,
 `doing`, `todo`, `you`, `ok`, `warn`, `bad` and `who` one of `you`, `claude`, `ci`.
 
-- **Plans.** One section per plan ("Plan 1 · <goal>"), a row per PR or step, in the PR cards' priority order. Every
-  PR step on a plan has a ranked PR card, written in the same batch; reorder both together. Drop a step once it is
-  done, and write each `line` about what is left.
+- **Plans.** One section per plan, titled like its cards' `group` ("Plan 1 · <goal>"), a row per step left, in
+  the PR cards' priority order. Its open steps show above that group's cards. Every PR step on a plan has a ranked
+  PR card in the group, written in the same batch; reorder both together. Drop a step once it is done, and write
+  each `line` about what is left.
 - **Engine.** `slots` is `{max, used: [{pr, author, up: <HTTP status>, qa, url, siteUrl}], waiting, mine,
   checkedAt}`, from the project's QA slot script and config. Box sessions share the agent account's slots: say how
   many are free. Then a "Dev box" section (load: `uptime` against `nproc`) and a "Worktree" section (path, branch,
@@ -68,9 +69,13 @@ Each wake re-reads the whole conversation, so wake only for a change, and write 
 
 ## Cards
 
-A card reaches the Live stack with a `priority` (lower first) or `when: "now"`, and a `brief` or `kind: "review"`;
-investigations always show. Common fields: `title`, `links`, `priority`, `when` (`now`, `decide`, `soon`,
-`whenever`), `checks`, `addedAt`.
+**Where a card shows.** Live holds "Your next step" and only the cards `meta/next` names. Every other open card is
+in Plans, in its `group`: give cards that belong together (one plan, one goal, one area) the same short `group`.
+Groups follow `boards/plans`, then their best `priority`; cards with no group go under "Other", last. A card the
+developer must act on reaches Live only through `meta/next`.
+
+Common fields: `title`, `group`, `links`, `priority` (lower first), `when` (`now`, `decide`, `soon`, `whenever`),
+`checks`, `addedAt`.
 
 - **Decision.** `{when: "decide", detail, decision: {question, facts, options: [{label, note, recommended}]}}`. A
   pick sets `choice` and comes back as a comment. Other to-dos may carry `actions: [{label}]`; a click sets `asked`.
@@ -102,8 +107,8 @@ investigations always show. Common fields: `title`, `links`, `priority`, `when` 
   never recommend past a No-go.
 - **`how`**: the exact instruction, such as `Type "release" in the Claude Code chat` or `On GitHub: <PR> → Review
   changes → Approve, then Squash and merge`.
-- **`cardId` / `cardIds`** name the card(s) it is about; create a missing card with a full brief first. With no card,
-  leave them out and point `url` at what it concerns. **`at`** is when the developer's wait for it began.
+- **`cardId` / `cardIds`** name the card(s) it is about, and are the only cards Live shows; create a missing card
+  with a full brief first. With no card, leave them out and point `url` at what it concerns. **`at`** is when the developer's wait for it began.
 - **Never stale.** Rewrite it at every check and event, and in the same write that closes a card it names. It
   describes now, not the last event.
 - **Never idle while a card is ready.** If an open card has a `who: "you"` step with a Go, name the highest-ranked
