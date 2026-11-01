@@ -428,3 +428,25 @@ say(not any(r.startswith("Bash(gh release") and r != "Bash(gh release list:*)" a
             for r in frag["allow"]), "no settings fragment allows a release write")
 say("Bash(gh release delete:*)" in frag["deny"] and "Bash(gh pr merge:*)" in frag["deny"],
     "the settings deny a release delete and a merge")
+
+# --- Attribution comes from the harness ------------------------------------------------------------------
+# A co-author line or a session link written into a skill, command, doc or template would put one model's or
+# one session's name on every commit and PR made from it. The skills say to use the attribution the harness
+# gives instead (implement step 4).
+fixed_attribution = re.compile(
+    r"co-authored-by:\s*\S|claude-session:\s*\S|claude\.ai/code/session|generated with \[claude code\]", re.I)
+shipped = [skills_dir, commands_dir, os.path.join(root, "docs"), os.path.join(root, "templates"),
+           os.path.join(root, "examples"), os.path.join(root, "README.md")]
+hits = []
+for top in shipped:
+    paths = [top] if os.path.isfile(top) else [os.path.join(d, f) for d, _, fs in os.walk(top) for f in fs]
+    for path in sorted(paths):
+        try:
+            text = read(path)
+        except (UnicodeDecodeError, OSError):
+            continue
+        if fixed_attribution.search(text):
+            hits.append(os.path.relpath(path, root))
+say(not hits, f"no skill, command, doc or template hard-codes a co-author line or session link {hits[:3]}")
+implement = read(os.path.join(skills_dir, "implement", "SKILL.md"))
+say("the attribution your harness gives" in implement, "implement takes commit and PR attribution from the harness")

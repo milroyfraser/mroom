@@ -104,7 +104,8 @@ the branch.
 2. **Then fix it** where the system first went wrong, as `/mroom:implement` step 2 says. Run the
    test again and see it pass.
 3. **Commit.** End the message of the commit that fixes it with `Fixes <error id>` on a line of its
-   own, before any trailers. These lines are the only link to the error issue.
+   own, before any trailers (the attribution your harness gives, as `/mroom:implement` step 4
+   says). These lines are the only link to the error issue.
    - The error tracker's SCM integration links the commit to the issue as soon as the branch is
      pushed, and may assign the issue to the commit's author. So never put the line on a commit
      that does not fix the issue.
