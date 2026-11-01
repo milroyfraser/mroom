@@ -310,6 +310,7 @@ BOX_KEYS = {
     "MROOM_QA_PHP": "the PHP binary QA sites run, such as php8.4; php by default",
     "MROOM_QA_PERSONA_DOMAIN": "the domain QA personas' addresses end in, such as .test (the default)",
     "MROOM_QA_SMTP_PORT": "the port on 127.0.0.1 where mroom's mail relay takes QA apps' mail; 1025 by default",
+    "MROOM_QA_DB_READ": "the table.column entries the gate's db-read may read, space-separated (qa.db_read_allowlist)",
 }
 # Names the gate builds SQL from, so each is a plain Postgres identifier (design 5.1, D18), matched as a
 # whole (fullmatch: "$" alone would let a trailing newline through).
@@ -326,6 +327,8 @@ PERSONA_DOMAIN = re.compile(r"(?=.{2,200}$)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-
 # A persona domain is made up: under a name reserved for that (RFC 2606, 6761), or a subdomain of a domain of
 # your own (three labels or more), so never a public suffix such as .com, .co.uk or .github.io, where real
 # people's addresses live.
+# One MROOM_QA_DB_READ entry: a table and one of its columns, each a plain Postgres name the gate quotes.
+DB_READ_ITEM = re.compile(r"[a-z_][a-z0-9_]{0,62}\.[a-z_][a-z0-9_]{0,62}")
 RESERVED_SUFFIXES = (".test", ".example", ".invalid", ".localhost", ".example.com", ".example.net", ".example.org")
 # One MROOM_WATCH_MCP item: an optional name=, then an http(s) URL of plain characters with no query,
 # fragment or credentials. A bare URL is named by its host, and no two items may share a name.
@@ -372,6 +375,8 @@ def box_value_error(key: str, value: str) -> str | None:
             PERSONA_DOMAIN.fullmatch(value) and (value.endswith(RESERVED_SUFFIXES) or value.count(".") >= 3)):
         return ("MROOM_QA_PERSONA_DOMAIN must be a domain suffix starting with a dot: a reserved name such as .test, "
                 "or a subdomain of your own such as .qa.example.com")
+    if key == "MROOM_QA_DB_READ" and not all(DB_READ_ITEM.fullmatch(item) for item in value.split()):
+        return "MROOM_QA_DB_READ must be space-separated table.column entries, each a plain Postgres name"
     if key == "MROOM_QA_SMTP_PORT" and not (value.isascii() and value.isdigit() and 1024 <= int(value) <= 65535
                                              and value == str(int(value))):
         return "MROOM_QA_SMTP_PORT must be a port number from 1024 to 65535"

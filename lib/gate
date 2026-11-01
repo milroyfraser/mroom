@@ -55,6 +55,17 @@
 #                                      the same while it has one), REVERB_HOST, REVERB_PORT and REVERB_SCHEME
 #               reverb-app-remove <N>  the environment's app; its sockets already open stay until they close
 #
+#   browser     db-read <N> <table> <column>[,<column>...] [<column>=<value>...] [asc:|desc:<column>] [limit:<n>]
+#                                      at most 100 rows of one table of the environment's database, as JSON, read
+#                                      as its read-only role (D18) and only from the table.column entries
+#                                      MROOM_QA_DB_READ lists, filtered and ordered by those alone
+#               signin-code, mail-read and env-sha, as above: what a browser check needs, and nothing that changes
+#                                      the environment
+#
+#   template    template-load          the QA template, rebuilt from a pg_dump archive in custom format on stdin
+#                                      (pg_dump -Fc), restored as the role that owns the template's objects while
+#                                      a temporary login lasts, then swapped in for the old template whole
+#
 # A password or the app key is made once and kept (secrets_file), so every later request gives the same one and a
 # deploy changes nothing under the running app: its users stay signed in and its connections stay up. --rotate
 # makes a new one. Each teardown operation deletes those of its own service, and user-clean the app key. A
@@ -113,9 +124,9 @@ refuse() { gate_log "refused: $*"; echo "mroom gate: refused: $*" >&2; exit 1; }
 fail() { gate_log "failed: $*"; echo "mroom gate: $*" >&2; exit 1; }
 
 case "$role" in
-  provision) ;;
+  provision | browser | template) ;;
   -h | --help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; exit 0 ;;
-  *) echo "mroom gate: run it as an SSH forced command: mroom gate provision" >&2; exit 2 ;;
+  *) echo "mroom gate: run it as an SSH forced command: mroom gate provision (or browser, or template)" >&2; exit 2 ;;
 esac
 
 line="${SSH_ORIGINAL_COMMAND-}"
@@ -135,6 +146,8 @@ case "$role:$op" in
   provision:mail-user-add | provision:mail-user-remove | provision:mail-read | provision:mail-clear) ;;
   provision:bucket-create | provision:bucket-drop) ;;
   provision:reverb-app-add | provision:reverb-app-remove) ;;
+  browser:db-read | browser:signin-code | browser:mail-read | browser:env-sha) ;;
+  template:template-load) ;;
   *) refuse "$role may not run '${op:0:24}'" ;;
 esac
 
@@ -156,6 +169,7 @@ GATE_TMP=""
 # gate_cleanup: what a request leaves behind however it ends: a drop's key of its own, a login file half
 # written, the scratch folder.
 gate_cleanup() {
+  if [ "${LOAD_LOGIN:-0}" = 1 ]; then objects_lock_out >/dev/null 2>&1 || true; fi
   if [ -n "${DROP_KEY:-}" ]; then garage_api POST "/v2/DeleteKey?id=$DROP_KEY" >/dev/null 2>&1 || true; fi
   if [ -n "${LOGIN_TMP:-}" ]; then rm -f -- "$LOGIN_TMP"; fi
   rm -rf -- "$GATE_TMP"
@@ -291,11 +305,73 @@ secrets_forget() {
 PASSWORD_RE='^[0-9a-f]{48}$'
 APP_KEY_RE='^base64:[A-Za-z0-9+/]{43}=$'
 
+# template_lock -s|-x: the template, shared by clones (db-create) and held alone while template-load swaps it
+# (fd 7; env_lock holds fd 9 and secrets_lock fd 8).
+template_lock() {
+  exec 7>"$(mroom_state_dir)/gate-template.lock"
+  flock "$1" -w "${MROOM_GATE_LOCK_WAIT:-900}" 7 || fail "the template is held by another request; try again later"
+}
+template_unlock() { exec 7>&-; }
+
+# pg_service_value <key>: one value of the [mroom-gate] service, for a connection as another role, which must
+# not take the gate's own password from the service file.
+pg_service_value() {
+  awk -v key="$1" '
+    /^[ \t]*\[/ { inside = ($0 ~ /^[ \t]*\[mroom-gate\][ \t]*$/); next }
+    inside { line = $0; sub(/^[ \t]+/, "", line)
+      if (match(line, "^" key "[ \t]*=")) { line = substr(line, RLENGTH + 1); sub(/^[ \t]+/, "", line); sub(/[ \t\r]+$/, "", line); print line; exit } }
+  ' "$PG_SERVICES"
+}
+PG_HOST="" PG_PORT=""
+# pg_endpoint: the host and port the gate's service names, for pg_as.
+pg_endpoint() {
+  PG_HOST="$(pg_service_value host)" PG_PORT="$(pg_service_value port)"
+  PG_HOST="${PG_HOST:-127.0.0.1}" PG_PORT="${PG_PORT:-5432}"
+  [[ "$PG_HOST" =~ ^[A-Za-z0-9.:-]{1,253}$ ]] || fail "the [mroom-gate] service's host is not a plain host name or address"
+  [[ "$PG_PORT" =~ ^[0-9]{1,5}$ ]] || fail "the [mroom-gate] service's port is not a number"
+}
+# pg_as <role> <password> <database> [<program>]: psql (or another libpq program, given its own arguments by the
+# caller) as that role, over TCP to the gate's host and port. The password travels in the environment, which
+# only the box user and root can read, never on a command line; no service file is read.
+pg_as() {
+  local who="$1" secret="$2" database="$3"
+  shift 3
+  if [ "$#" = 0 ]; then set -- psql -X -q -A -t -v ON_ERROR_STOP=1 -v VERBOSITY=verbose -d "$database"; fi
+  env -u PGSERVICE -u PGSERVICEFILE -u PGPASSFILE PGHOST="$PG_HOST" PGPORT="$PG_PORT" PGUSER="$who" \
+    PGPASSWORD="$secret" PGDATABASE="$database" PGCONNECT_TIMEOUT=10 "$@" 2>"$PG_ERR"
+}
+
+# read_role_ready <N>: environment N's read-only role, <app>_qa_<N>_read (D18), which db-read signs in as. No app
+# holds its password and nothing prints it. It is in <app>_qa_readers, which pg_hba.conf lets reach QA
+# environments' databases alone, has CONNECT on its own environment's only, holds SELECT there and no other
+# privilege, and every session it opens is read-only, with a statement timeout.
+read_role_ready() {
+  local reader="${app}_qa_$1_read" readers="${app}_qa_readers" verifier exists
+  secret_keep "$1" DB_READ_PASSWORD "$PASSWORD_RE"
+  verifier="$(printf '%s' "$SECRET" | python3 "$MROOM_ROOT/lib/core/scram.py")" || fail "could not make the password verifier"
+  exists="$(pg postgres <<<"SELECT count(*) FROM pg_roles WHERE rolname = '$reader';")" \
+    || fail "db-create $1: $(pg_error)"
+  if [ "$exists" = 1 ]; then
+    pg postgres >/dev/null <<SQL || fail "db-create $1: the read-only role: $(pg_error)"
+ALTER ROLE "$reader" LOGIN NOINHERIT CONNECTION LIMIT 5 PASSWORD '$verifier';
+GRANT "$readers" TO "$reader";
+ALTER ROLE "$reader" SET default_transaction_read_only = on;
+ALTER ROLE "$reader" SET statement_timeout = '30s';
+SQL
+  else
+    pg postgres >/dev/null <<SQL || fail "db-create $1: the read-only role: $(pg_error)"
+CREATE ROLE "$reader" LOGIN NOINHERIT CONNECTION LIMIT 5 IN ROLE "$readers" PASSWORD '$verifier';
+ALTER ROLE "$reader" SET default_transaction_read_only = on;
+ALTER ROLE "$reader" SET statement_timeout = '30s';
+SQL
+  fi
+}
+
 cmd_db_create() {
   rotate_or_not
   env_number "${words[1]}"
   local template="${BOX[MROOM_QA_TEMPLATE]:-}" db="${app}_qa_${words[1]}" objects="${app}_qa_objects"
-  local group="${app}_qa_envs" password verifier owned role_exists db_exists attempt
+  local group="${app}_qa_envs" reader="${db}_read" password kept verifier owned role_exists db_exists attempt
   [ -n "$template" ] || fail "MROOM_QA_TEMPLATE is not set in box.env"
   pg_ready
   env_lock "$db"
@@ -313,7 +389,7 @@ SQL
   # The password kept for the environment, or a new one (secret_keep): setting the same one again changes
   # nothing for the app's connections.
   secret_keep "${words[1]}" DB_PASSWORD "$PASSWORD_RE"
-  password="$SECRET"
+  password="$SECRET" kept="$KEPT"
   verifier="$(printf '%s' "$password" | python3 "$MROOM_ROOT/lib/core/scram.py")" || fail "could not make the password verifier"
 
   # The role, with that password (the client writes it into the environment's .env), always in the group
@@ -333,16 +409,21 @@ CREATE ROLE "$db" LOGIN NOINHERIT CONNECTION LIMIT 30 IN ROLE "$group" PASSWORD 
 GRANT "$db" TO CURRENT_USER;
 SQL
   fi
+  read_role_ready "${words[1]}"
 
   db_exists="$(pg postgres <<<"SELECT count(*) FROM pg_database WHERE datname = '$db';")" \
     || fail "db-create ${words[1]}: $(pg_error)"
   if [ "$db_exists" = 1 ]; then
     # The PR's code owns this database and may have changed its settings, so the gate never connects to
     # it again: database privileges live in the cluster's catalog and are revoked from postgres.
-    pg postgres >/dev/null <<<"REVOKE CONNECT, TEMPORARY ON DATABASE \"$db\" FROM PUBLIC;" \
-      || fail "db-create ${words[1]}: $(pg_error)"
+    pg postgres >/dev/null <<SQL || fail "db-create ${words[1]}: $(pg_error)"
+REVOKE CONNECT, TEMPORARY ON DATABASE "$db" FROM PUBLIC;
+GRANT CONNECT ON DATABASE "$db" TO "$reader";
+SQL
     echo "database $db: exists"
   else
+    # Not while template-load swaps the template (it holds the lock alone); clones share it.
+    template_lock -s
     # CREATE DATABASE … TEMPLATE fails (SQLSTATE 55006) while a session is connected to the template:
     # wait and try again.
     for attempt in 1 2 3 4 5 6; do
@@ -354,12 +435,20 @@ SQL
       echo "template $template is in use, trying again ($attempt)" >&2
       sleep "${MROOM_GATE_RETRY_SLEEP:-20}"
     done
-    # A new database gives PUBLIC CONNECT again: take it back first. Then hand over the template's
-    # objects, whose owner owns nothing else. The database is new, so no PR code has touched it yet; if
-    # the hand-over fails, the database goes again, so a later request starts clean.
-    pg postgres >/dev/null <<<"REVOKE CONNECT, TEMPORARY ON DATABASE \"$db\" FROM PUBLIC;" \
-      || fail "db-create ${words[1]}: $(pg_error)"
-    if ! pg "$db" >/dev/null <<<"REASSIGN OWNED BY \"$objects\" TO \"$db\";"; then
+    template_unlock
+    # A new database gives PUBLIC CONNECT again: take it back first, and let the read-only role in. Then
+    # hand over the template's objects, whose owner owns nothing else, and let the read-only role read
+    # them and every table the environment's role makes later in public. The database is new, so no PR
+    # code has touched it yet; if this fails, the database goes again, so a later request starts clean.
+    pg postgres >/dev/null <<SQL || fail "db-create ${words[1]}: $(pg_error)"
+REVOKE CONNECT, TEMPORARY ON DATABASE "$db" FROM PUBLIC;
+GRANT CONNECT ON DATABASE "$db" TO "$reader";
+SQL
+    if ! pg "$db" >/dev/null <<SQL; then
+REASSIGN OWNED BY "$objects" TO "$db";
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO "$reader";
+ALTER DEFAULT PRIVILEGES FOR ROLE "$db" IN SCHEMA public GRANT SELECT ON TABLES TO "$reader";
+SQL
       local why
       why="$(pg_error)"
       pg postgres >/dev/null <<<"DROP DATABASE IF EXISTS \"$db\" WITH (FORCE);" || true
@@ -368,7 +457,7 @@ SQL
     echo "database $db: created"
   fi
 
-  gate_log "db-create ${words[1]}: $db ready ($([ "$KEPT" = 1 ] && echo "its password kept" || echo "a new password"))"
+  gate_log "db-create ${words[1]}: $db ready ($([ "$kept" = 1 ] && echo "its password kept" || echo "a new password"))"
   printf 'DB_DATABASE=%s\nDB_USERNAME=%s\nDB_PASSWORD=%s\n' "$db" "$db" "$password"
 }
 
@@ -388,9 +477,17 @@ DROP DATABASE "$db" WITH (FORCE);
 SQL
   fi
   # A grant the role was given in another environment's database stops DROP ROLE. Then it can at least
-  # never sign in again.
+  # never sign in again. The read-only role goes first, the same way.
+  local why reader="${db}_read"
+  if ! pg postgres >/dev/null <<<"DROP ROLE IF EXISTS \"$reader\";"; then
+    why="$(pg_error)"
+    pg postgres >/dev/null <<<"ALTER ROLE \"$reader\" NOLOGIN PASSWORD NULL;" \
+      || fail "db-drop ${words[1]}: the read-only role could neither be dropped nor locked: $why"
+    gate_log "db-drop ${words[1]}: $reader locked, not dropped: $why"
+    echo "role $reader locked, since it could not be dropped: $why"
+  fi
+  secrets_forget "${words[1]}" DB_READ_PASSWORD
   if ! pg postgres >/dev/null <<<"DROP ROLE IF EXISTS \"$db\";"; then
-    local why
     why="$(pg_error)"
     pg postgres >/dev/null <<<"ALTER ROLE \"$db\" NOLOGIN PASSWORD NULL;" \
       || fail "db-drop ${words[1]}: the role could neither be dropped nor locked: $why"
@@ -402,6 +499,207 @@ SQL
   secrets_forget "${words[1]}" DB_PASSWORD
   gate_log "db-drop ${words[1]}: $db dropped"
   echo "database $db: dropped"
+}
+
+# db-read (design 8.6): what a browser check may read is what MROOM_QA_DB_READ lists, table.column entries a
+# person sets in box.env to match qa.db_read_allowlist in the app's mroom.toml. The client names a table, its
+# columns, and the columns to filter and order by, all from that list (a filter on another column would tell
+# its values apart too); the gate builds the one SELECT itself, every name quoted, every value a literal psql
+# quotes. It signs in as the environment's read-only role, never as its own: the PR's code owns the database,
+# and a view or a function it planted runs as whoever reads it.
+DB_READ_MAX_ROWS=100
+DB_READ_MAX_BYTES=1048576
+DB_READ_LIST=""
+PG_IDENT_RE='^[a-z_][a-z0-9_]{0,62}$'
+
+# db_read_column <table> <column>: refuses a column that is no plain name or is not in MROOM_QA_DB_READ.
+db_read_column() {
+  [[ "$2" =~ $PG_IDENT_RE ]] || refuse "db-read: a column's name is not [a-z_][a-z0-9_]{0,62}"
+  [[ " $DB_READ_LIST " == *" $1.$2 "* ]] || refuse "db-read: $1.$2 is not in MROOM_QA_DB_READ"
+}
+
+cmd_db_read() {
+  if [ "${#words[@]}" -lt 4 ] || [ "${#words[@]}" -gt 11 ]; then
+    refuse "db-read takes <N> <table> <columns>, then at most 5 filters, an order and a limit"
+  fi
+  env_number "${words[1]}"
+  local n="${words[1]}" table="${words[2]}" db="${app}_qa_${words[1]}" reader="${app}_qa_${words[1]}_read"
+  local column columns=() seen=" " select="" where="" order="" limit="$DB_READ_MAX_ROWS" word value filters=0
+  local sets="" secret rows code why
+  DB_READ_LIST="${BOX[MROOM_QA_DB_READ]:-}"
+  [ -n "$DB_READ_LIST" ] || refuse "db-read: MROOM_QA_DB_READ in box.env lists no table.column a check may read (design 8.6)"
+  [[ "$table" =~ $PG_IDENT_RE ]] || refuse "db-read: the table's name is not [a-z_][a-z0-9_]{0,62}"
+  [[ "${words[3]}" =~ ^[a-z_][a-z0-9_]{0,62}(,[a-z_][a-z0-9_]{0,62}){0,31}$ ]] \
+    || refuse "db-read: the columns are not names separated by commas (32 at most)"
+  IFS=, read -r -a columns <<<"${words[3]}"
+  for column in "${columns[@]}"; do
+    db_read_column "$table" "$column"
+    [[ "$seen" != *" $column "* ]] || refuse "db-read: $column is named twice"
+    seen+="$column "
+    select+="${select:+, }\"$column\""
+  done
+  for word in "${words[@]:4}"; do
+    case "$word" in
+      asc:* | desc:*)
+        [ -z "$order" ] || refuse "db-read: one order at most"
+        column="${word#*:}"
+        db_read_column "$table" "$column"
+        if [ "${word%%:*}" = asc ]; then order="ORDER BY \"$column\" ASC NULLS LAST"; else order="ORDER BY \"$column\" DESC NULLS LAST"; fi
+        ;;
+      limit:*)
+        value="${word#limit:}"
+        if ! [[ "$value" =~ ^[1-9][0-9]{0,2}$ ]] || [ "$value" -gt "$DB_READ_MAX_ROWS" ]; then
+          refuse "db-read: limit: takes 1 to $DB_READ_MAX_ROWS"
+        fi
+        limit="$value"
+        ;;
+      *=*)
+        column="${word%%=*}" value="${word#*=}"
+        db_read_column "$table" "$column"
+        ((${#value} <= 256)) || refuse "db-read: a filter's value is longer than 256 characters"
+        filters=$((filters + 1))
+        [ "$filters" -le 5 ] || refuse "db-read: 5 filters at most"
+        # The request's characters hold no quote or backslash, and psql quotes the value as a literal anyway.
+        sets+="\\set v$filters '$value'"$'\n'
+        where+="${where:+ AND }(\"$column\")::pg_catalog.text OPERATOR(pg_catalog.=) :'v$filters'"
+        ;;
+      *) refuse "db-read: an argument is neither <column>=<value>, asc:<column>, desc:<column> nor limit:<n>" ;;
+    esac
+  done
+  need jq
+  pg_ready
+  pg_endpoint
+  secret="$(secret_get "$n" DB_READ_PASSWORD)"
+  [[ "$secret" =~ $PASSWORD_RE ]] \
+    || fail "db-read $n: environment $n has no read-only role yet; db-create makes it (one made before this release: tear it down and bring it up again)"
+  # A read-only transaction, the catalog first on the search path, so no function or operator of the PR's
+  # stands in for Postgres's own, and a statement timeout the role's own settings also hold.
+  if ! rows="$(pg_as "$reader" "$secret" "$db" <<SQL
+${sets}BEGIN READ ONLY;
+SET LOCAL search_path = pg_catalog, pg_temp;
+SET LOCAL statement_timeout = '30s';
+SELECT pg_catalog.json_agg(r) FROM (SELECT $select FROM public."$table"${where:+ WHERE $where}${order:+ $order} LIMIT $limit) AS r;
+ROLLBACK;
+SQL
+)"; then
+    # Only the SQLSTATE: Postgres's message can quote a value.
+    code="$(grep -m1 -oE '^(ERROR|FATAL): +[0-9A-Z]{5}' "$PG_ERR" 2>/dev/null | grep -oE '[0-9A-Z]{5}$')" || code=""
+    case "$code" in
+      42P01) why="there is no table $table in public" ;;
+      42703) why="$table has no such column" ;;
+      42501) why="the read-only role may not read $table (one made before this release has no grants: tear the environment down and bring it up again)" ;;
+      57014) why="the query took longer than 30 s" ;;
+      28000 | 28P01) why="the read-only role cannot sign in (SQLSTATE $code; README, QA gate, step 5)" ;;
+      "") why="psql failed, with no SQLSTATE" ;;
+      *) why="the query failed (SQLSTATE $code)" ;;
+    esac
+    fail "db-read $n: $why"
+  fi
+  ((${#rows} <= DB_READ_MAX_BYTES)) || fail "db-read $n: the rows are larger than $DB_READ_MAX_BYTES bytes; ask for fewer columns or rows"
+  rows="$(jq -c 'if type == "array" then . elif . == null then [] else error("not rows") end' <<<"${rows:-null}" 2>/dev/null)" \
+    || fail "db-read $n: Postgres gave no rows as JSON"
+  gate_log "db-read $n: $table, ${#columns[@]} column(s), $filters filter(s)"
+  printf '%s\n' "$rows"
+}
+
+# template-load (design 9): the QA template, from a pg_dump archive in custom format on stdin, made where PR code
+# never runs: the app's seeded database (qa.parity.database = "seeded") or its masked snapshot. It is restored
+# into a new database as the role that owns the template's objects, signed in as that role for the restore
+# alone, so whatever the archive holds runs with that role's rights, never the gate's. pg_hba.conf lets that role
+# reach the new database and nothing else. Then the new database takes the template's name, while no clone runs.
+TEMPLATE_MAX_BYTES="${MROOM_GATE_TEMPLATE_MAX_BYTES:-4294967296}"
+LOAD_LOGIN=0
+
+# objects_lock_out: the objects role without a login again, and any session it still has ended.
+objects_lock_out() {
+  pg postgres <<SQL
+ALTER ROLE "${app}_qa_objects" NOLOGIN PASSWORD NULL VALID UNTIL 'infinity';
+SELECT count(pg_catalog.pg_terminate_backend(pid)) FROM pg_catalog.pg_stat_activity WHERE usename = '${app}_qa_objects';
+SQL
+}
+db_exists() { pg postgres <<<"SELECT count(*) FROM pg_database WHERE datname = '$1';"; }
+
+cmd_template_load() {
+  words_are 1
+  local template="${BOX[MROOM_QA_TEMPLATE]:-}" objects="${app}_qa_objects" next old archive bytes secret verifier
+  local until had_old had_template restore_error why
+  [ -n "$template" ] || fail "MROOM_QA_TEMPLATE is not set in box.env"
+  ((${#template} <= 58)) || fail "MROOM_QA_TEMPLATE is longer than 58 characters, leaving no room for <template>_next"
+  [[ "$TEMPLATE_MAX_BYTES" =~ ^[1-9][0-9]{0,14}$ ]] || fail "MROOM_GATE_TEMPLATE_MAX_BYTES is not a number"
+  next="${template}_next" old="${template}_old"
+  pg_ready
+  pg_endpoint
+  need pg_restore
+  archive="$GATE_TMP/template.dump"
+  head -c "$((TEMPLATE_MAX_BYTES + 1))" >"$archive" || fail "template-load: the archive could not be kept; is the disk full?"
+  bytes="$(stat -c %s "$archive")"
+  [ "$bytes" -le "$TEMPLATE_MAX_BYTES" ] || fail "template-load: the archive is larger than $TEMPLATE_MAX_BYTES bytes"
+  [ "$(head -c 5 "$archive")" = PGDMP ] || fail "template-load: stdin is not a pg_dump archive in custom format (pg_dump -Fc)"
+  pg_restore -l "$archive" >/dev/null 2>"$PG_ERR" || fail "template-load: pg_restore cannot read the archive: $(pg_error)"
+
+  template_lock -x
+  # What a load that stopped halfway left: the old template set aside, and a new one half built.
+  had_old="$(db_exists "$old")" || fail "template-load: $(pg_error)"
+  had_template="$(db_exists "$template")" || fail "template-load: $(pg_error)"
+  if [ "$had_old" = 1 ] && [ "$had_template" = 1 ]; then
+    pg postgres >/dev/null <<<"DROP DATABASE \"$old\" WITH (FORCE);" || fail "template-load: $(pg_error)"
+  elif [ "$had_old" = 1 ]; then
+    pg postgres >/dev/null <<<"ALTER DATABASE \"$old\" RENAME TO \"$template\";" || fail "template-load: $(pg_error)"
+    had_template=1
+  fi
+  pg postgres >/dev/null <<SQL || fail "template-load: the new database: $(pg_error)"
+DROP DATABASE IF EXISTS "$next" WITH (FORCE);
+CREATE DATABASE "$next" TEMPLATE template0;
+REVOKE CONNECT, TEMPORARY ON DATABASE "$next" FROM PUBLIC;
+GRANT CONNECT, CREATE ON DATABASE "$next" TO "$objects";
+SQL
+  pg "$next" >/dev/null <<<"GRANT CREATE ON SCHEMA public TO \"$objects\";" || fail "template-load: the new database: $(pg_error)"
+
+  # A login for the restore alone: a password no one else is given, and one that lapses by itself should the gate
+  # be killed before it takes the login back (gate_cleanup does too).
+  secret="$(new_password)"
+  [[ "$secret" =~ $PASSWORD_RE ]] || fail "could not read random bytes for a password"
+  verifier="$(printf '%s' "$secret" | python3 "$MROOM_ROOT/lib/core/scram.py")" || fail "could not make the password verifier"
+  until="$(date -u -d '+2 hours' '+%Y-%m-%d %H:%M:%S+00')"
+  LOAD_LOGIN=1
+  pg postgres >/dev/null <<<"ALTER ROLE \"$objects\" LOGIN CONNECTION LIMIT 2 PASSWORD '$verifier' VALID UNTIL '$until';" \
+    || fail "template-load: $objects could not be given a login: $(pg_error) (the gate's role holds it WITH ADMIN OPTION: README, QA gate, step 2)"
+  if ! pg_as "$objects" "$secret" "$next" pg_restore --no-owner --no-privileges --no-comments --no-publications \
+    --no-subscriptions --no-security-labels --no-tablespaces --single-transaction --exit-on-error \
+    -d "$next" "$archive" >/dev/null; then
+    # pg_restore's first error goes back to the caller, whose archive it is, never to the log: it can quote a row.
+    restore_error="$(grep -m1 -E '^pg_restore: (error|fatal|FATAL)' "$PG_ERR" 2>/dev/null | head -c 300 | tr -cd '[:print:]')" || true
+    objects_lock_out >/dev/null || true
+    LOAD_LOGIN=0
+    pg postgres >/dev/null <<<"DROP DATABASE IF EXISTS \"$next\" WITH (FORCE);" || true
+    echo "mroom gate: template-load: ${restore_error:-pg_restore failed}" >&2
+    fail "template-load: the restore failed, so the template is as it was"
+  fi
+  objects_lock_out >/dev/null || fail "template-load: $objects keeps its login, which must be taken back by hand: $(pg_error)"
+  LOAD_LOGIN=0
+  pg postgres >/dev/null <<<"REVOKE CONNECT, CREATE ON DATABASE \"$next\" FROM \"$objects\";" \
+    || fail "template-load: $(pg_error)"
+
+  # The swap: the old template aside, the new one under its name, the old one dropped. A step that fails puts the
+  # old one back; a gate killed between them leaves what the next load puts right, above.
+  if [ "$had_template" = 1 ]; then
+    if ! pg postgres >/dev/null <<<"ALTER DATABASE \"$template\" RENAME TO \"$old\";"; then
+      why="$(pg_error)"
+      pg postgres >/dev/null <<<"DROP DATABASE IF EXISTS \"$next\" WITH (FORCE);" || true
+      fail "template-load: the template could not be set aside, so it is as it was: $why"
+    fi
+  fi
+  if ! pg postgres >/dev/null <<<"ALTER DATABASE \"$next\" RENAME TO \"$template\";"; then
+    why="$(pg_error)"
+    if [ "$had_template" = 1 ]; then pg postgres >/dev/null <<<"ALTER DATABASE \"$old\" RENAME TO \"$template\";" || true; fi
+    fail "template-load: the new template could not take its name: $why"
+  fi
+  if [ "$had_template" = 1 ] && ! pg postgres >/dev/null <<<"DROP DATABASE \"$old\" WITH (FORCE);"; then
+    echo "mroom gate: the old template stays as $old ($(pg_error)); the next template-load drops it" >&2
+  fi
+  template_unlock
+  gate_log "template-load: $template loaded from $bytes bytes"
+  echo "template $template: loaded from $bytes bytes"
 }
 
 REDIS_SECRETS="$HOME/.config/mroom/secrets/redis-gate.env"
@@ -1329,6 +1627,8 @@ gate_log "request: $op $first"
 case "$op" in
   db-create) cmd_db_create ;;
   db-drop) cmd_db_drop ;;
+  db-read) cmd_db_read ;;
+  template-load) cmd_template_load ;;
   redis-user-add) cmd_redis_user_add ;;
   redis-user-remove) cmd_redis_user_remove ;;
   redis-clear) cmd_redis_clear ;;

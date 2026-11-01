@@ -21,10 +21,12 @@ world() {
   cat >"$T/bin/psql" <<'FAKE'
 #!/usr/bin/env bash
 # Refuses to run without -X and ON_ERROR_STOP=1: without them psql exits 0 after a failed statement read
-# from stdin. Logs "db=<database> service=<PGSERVICE> <sql on one line>" to $T/psql.log and answers from
-# $T/pg/*: version (t or f), role-exists, db-exists, objects-owns, busy (how many CREATE DATABASE calls
-# are refused as in use first), noise (a WARNING on stderr for every call), fail-<word> (a statement
-# holding <word> fails, with the word's SQLSTATE in a verbose message).
+# from stdin. Logs "db=<database> service=<PGSERVICE> <sql on one line>" to $T/psql.log, with user=<PGUSER>
+# after the service when that is set, and answers from $T/pg/*: version (t or f), role-exists, db-exists (or
+# databases, the names that exist, one per line), objects-owns, busy (how many CREATE DATABASE calls are refused
+# as in use first), noise (a WARNING on stderr for every call), fail-<word> (a statement holding <word> fails,
+# with the word's SQLSTATE in a verbose message), rows (what a db-read's SELECT returns) and read-error (the
+# error it fails with instead).
 db="" x=0 stop=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -36,9 +38,9 @@ while [ "$#" -gt 0 ]; do
 done
 if [ "$x" != 1 ] || [ "$stop" != 1 ]; then echo "fake psql: run me with -X and -v ON_ERROR_STOP=1" >&2; exit 2; fi
 sql="$(cat)"
-printf 'db=%s service=%s %s\n' "$db" "${PGSERVICE:-}" "$(tr '\n' ' ' <<<"$sql")" >>"$T/psql.log"
+printf 'db=%s service=%s %s%s\n' "$db" "${PGSERVICE:-}" "${PGUSER:+user=$PGUSER }" "$(tr '\n' ' ' <<<"$sql")" >>"$T/psql.log"
 if [ -f "$T/pg/noise" ]; then echo 'WARNING:  database "postgres" has a collation version mismatch' >&2; fi
-for word in REASSIGN 'CREATE ROLE' 'ALTER ROLE' 'DROP ROLE' 'CREATE DATABASE' REVOKE; do
+for word in REASSIGN 'CREATE ROLE' 'ALTER ROLE' 'DROP ROLE' 'CREATE DATABASE' REVOKE 'ALTER DATABASE' 'VALID UNTIL' 'DROP DATABASE'; do
   key="${word// /-}"
   if [[ "$sql" == *"$word"* ]] && [ -f "$T/pg/fail-$key" ]; then
     echo "ERROR:  42501: permission denied for $word (fake)" >&2; exit 3
@@ -48,7 +50,13 @@ case "$sql" in
   *server_version_num*) cat "$T/pg/version" 2>/dev/null || echo t ;;
   *"FROM pg_tablespace"*) cat "$T/pg/objects-owns" 2>/dev/null || echo 0 ;;
   *"FROM pg_roles"*) if [ -f "$T/pg/role-exists" ]; then echo 1; else echo 0; fi ;;
-  *"FROM pg_database"*) if [ -f "$T/pg/db-exists" ]; then echo 1; else echo 0; fi ;;
+  *"FROM pg_database"*)
+    name="$(sed -n "s/.*datname = '\([a-z0-9_]*\)'.*/\1/p" <<<"$sql")"
+    if [ -f "$T/pg/databases" ]; then grep -qx -- "$name" "$T/pg/databases" && echo 1 || echo 0
+    elif [ -f "$T/pg/db-exists" ]; then echo 1; else echo 0; fi ;;
+  *json_agg*)
+    if [ -f "$T/pg/read-error" ]; then cat "$T/pg/read-error" >&2; exit 3; fi
+    cat "$T/pg/rows" 2>/dev/null || echo ;;
   *"CREATE DATABASE"*)
     n="$(cat "$T/pg/busy" 2>/dev/null || echo 0)"
     if [ "$n" -gt 0 ]; then
@@ -67,7 +75,25 @@ FAKE
 #!/bin/sh
 echo "$*" >>"$T/syslog"
 FAKE
-  chmod +x "$T/bin/psql" "$T/bin/sleep" "$T/bin/logger"
+  cat >"$T/bin/pg_restore" <<'FAKE'
+#!/usr/bin/env bash
+# Logs "user=<PGUSER> db=<PGDATABASE> password=<set|none> service=<PGSERVICE> <arguments>" to $T/pg_restore.log,
+# and the password it was given to $T/pg_restore.password. -l lists an archive (fails with bad-archive); a
+# restore fails with fail-restore, quoting a value as Postgres does.
+printf 'user=%s db=%s password=%s service=%s %s\n' "${PGUSER:-}" "${PGDATABASE:-}" "${PGPASSWORD:+set}" \
+  "${PGSERVICE:-}" "$*" >>"$T/pg_restore.log"
+printf '%s\n' "${PGPASSWORD:-}" >"$T/pg_restore.password"
+if [ "$1" = -l ]; then
+  if [ -f "$T/pg/bad-archive" ]; then echo "pg_restore: error: did not find magic string in file header" >&2; exit 1; fi
+  exit 0
+fi
+if [ -f "$T/pg/fail-restore" ]; then
+  echo 'pg_restore: error: could not execute query: ERROR:  invalid input syntax for type integer: "ada@example.test"' >&2
+  exit 1
+fi
+exit 0
+FAKE
+  chmod +x "$T/bin/psql" "$T/bin/sleep" "$T/bin/logger" "$T/bin/pg_restore"
   export T PATH="$T/bin:$PATH"
 }
 
@@ -245,7 +271,7 @@ t_db_create_makes_a_role_and_a_database_of_their_own() {
   expect_true "the objects role's ownership is not checked first" has "$log" "datdba = 'shop_qa_objects'::regrole"
   expect_true "the role is not created in its group with a SCRAM verifier" has "$log" \
     'CREATE ROLE "shop_qa_12" LOGIN NOINHERIT CONNECTION LIMIT 30 IN ROLE "shop_qa_envs" PASSWORD '"'"'SCRAM-SHA-256$4096:'
-  expect_true "an existing role's statement was sent" lacks "$log" 'ALTER ROLE'
+  expect_true "an existing role's statement was sent" lacks "$log" 'ALTER ROLE "shop_qa_12" '
   expect_true "the gate is not made a member" has "$log" 'GRANT "shop_qa_12" TO CURRENT_USER;'
   expect_true "the clone is wrong" has "$log" 'CREATE DATABASE "shop_qa_12" TEMPLATE "shop_qa_template" OWNER "shop_qa_12";'
   local revoke reassign
@@ -289,11 +315,11 @@ t_db_create_keeps_its_password_until_it_is_rotated_or_dropped() {
   # Set again with a verifier of its own salt, so nothing the app holds stops working.
   run grep -c "ALTER ROLE \"shop_qa_12\" LOGIN NOINHERIT CONNECTION LIMIT 30 PASSWORD 'SCRAM-SHA-256" "$T/psql.log"; expect_out 1
   run stat -c %a "$HOME/.local/state/mroom/qa/shop_qa_12.secrets"; expect_out 600
-  run kept 12; expect_out "DB_PASSWORD=$first"
+  run kept 12; expect_out_has "DB_PASSWORD=$first"
   gate provision "db-create 12 --rotate"; expect_rc 0
   third="$(password_of "$out")"
   expect_true "--rotate kept the password" [ "$third" != "$first" ]
-  run kept 12; expect_out "DB_PASSWORD=$third"
+  run kept 12; expect_out_has "DB_PASSWORD=$third"
   gate provision "db-drop 12"; expect_rc 0
   expect_no_file "$HOME/.local/state/mroom/qa/shop_qa_12.secrets"
   # A kept value that is not a password the gate makes is replaced, never used.
@@ -722,6 +748,252 @@ t_the_gates_redis_login_must_be_in_place() {
   expect_true "redis-cli ran" eval '[ ! -s "$T/redis.log" ]'
 }
 
+t_db_create_makes_a_read_only_role_that_no_app_is_given() {
+  world
+  gate provision "db-create 12"; expect_rc 0
+  local log reader grant reassign
+  log="$(sql)"
+  expect_true "the read-only role is not created in the readers' group" has "$log" \
+    'CREATE ROLE "shop_qa_12_read" LOGIN NOINHERIT CONNECTION LIMIT 5 IN ROLE "shop_qa_readers" PASSWORD '"'"'SCRAM-SHA-256$4096:'
+  expect_true "its sessions are not read-only" has "$log" 'ALTER ROLE "shop_qa_12_read" SET default_transaction_read_only = on;'
+  expect_true "its sessions have no statement timeout" has "$log" "ALTER ROLE \"shop_qa_12_read\" SET statement_timeout = '30s';"
+  expect_true "it may not connect to its database" has "$log" \
+    'db=postgres service=mroom-gate REVOKE CONNECT, TEMPORARY ON DATABASE "shop_qa_12" FROM PUBLIC; GRANT CONNECT ON DATABASE "shop_qa_12" TO "shop_qa_12_read";'
+  reassign="$(line_of 'db=shop_qa_12 service=mroom-gate REASSIGN OWNED BY "shop_qa_objects" TO "shop_qa_12"; GRANT SELECT ON ALL TABLES IN SCHEMA public TO "shop_qa_12_read"; ALTER DEFAULT PRIVILEGES FOR ROLE "shop_qa_12" IN SCHEMA public GRANT SELECT ON TABLES TO "shop_qa_12_read";')"
+  expect_true "it cannot read the template's tables or the environment's later ones" [ "$reassign" -gt 0 ]
+  reader="$(sed -n 's/^DB_READ_PASSWORD=//p' <<<"$(kept 12)")"
+  expect_true "its password is not kept: $reader" eval '[[ "$reader" =~ ^[0-9a-f]{48}$ ]]'
+  expect_true "its password was printed for the app" lacks "$out" "$reader"
+  expect_true "its password reached Postgres" lacks "$log" "$reader"
+  expect_true "its password reached the gate log" lacks "$(gate_log_text)" "$reader"
+  # Again, on the existing environment: the same password, back in its group, never inside the PR's database.
+  : >"$T/pg/db-exists"; : >"$T/pg/role-exists"; : >"$T/psql.log"
+  gate provision "db-create 12"; expect_rc 0
+  log="$(sql)"
+  expect_true "the existing read-only role is not set again" has "$log" \
+    'ALTER ROLE "shop_qa_12_read" LOGIN NOINHERIT CONNECTION LIMIT 5 PASSWORD '"'"'SCRAM-SHA-256$4096:'
+  expect_true "it is not put back in its group" has "$log" 'GRANT "shop_qa_readers" TO "shop_qa_12_read";'
+  grant="$(line_of 'GRANT CONNECT ON DATABASE "shop_qa_12" TO "shop_qa_12_read";')"
+  expect_true "it loses CONNECT on its database" [ "$grant" -gt 0 ]
+  expect_true "the gate connected to the PR's own database" lacks "$log" "db=shop_qa_12 "
+  expect_true "its password changed" [ "$(sed -n 's/^DB_READ_PASSWORD=//p' <<<"$(kept 12)")" = "$reader" ]
+}
+
+t_db_drop_drops_the_read_only_role_first() {
+  world
+  gate provision "db-create 12"; expect_rc 0
+  : >"$T/pg/db-exists"; : >"$T/psql.log"
+  gate provision "db-drop 12"; expect_rc 0; expect_out "database shop_qa_12: dropped"
+  local reader env
+  reader="$(line_of 'DROP ROLE IF EXISTS "shop_qa_12_read";')" env="$(line_of 'DROP ROLE IF EXISTS "shop_qa_12";')"
+  expect_true "the read-only role is not dropped" [ "$reader" -gt 0 ]
+  expect_true "the read-only role outlives the environment's" [ "$reader" -lt "$env" ]
+  expect_no_file "$HOME/.local/state/mroom/qa/shop_qa_12.secrets"
+}
+
+# reads <list>: box.env with the tables and columns db-read may read.
+reads() { printf 'MROOM_APP_NAME=shop\nMROOM_QA_TEMPLATE=shop_qa_template\nMROOM_QA_DB_READ="%s"\n' "$1" >"$HOME/.config/mroom/box.env"; }
+pg_restore_log() { cat "$T/pg_restore.log" 2>/dev/null || true; }
+# before <line> <line>...: each psql.log line number is found, and comes before the next.
+before() {
+  [ "$1" -gt 0 ] || return 1
+  while [ "$#" -gt 1 ]; do [ "$1" -lt "$2" ] || return 1; shift; done
+}
+
+t_each_role_runs_its_own_operations_alone() {
+  world; reads "users.email"
+  gate provision "db-read 12 users email"; expect_rc 1; expect_err_has "provision may not run 'db-read'"
+  gate provision "template-load"; expect_rc 1; expect_err_has "provision may not run 'template-load'"
+  local op
+  for op in "db-create 12" "db-drop 12" "code-put 12 $(printf 'a%.0s' $(seq 40))" "env-put 12" "redis-clear 12" "user-clean 12" \
+    "mail-clear 12" "app-key 12" "template-load"; do
+    gate browser "$op"; expect_rc 1; expect_err_has "browser may not run"
+  done
+  for op in "db-read 12 users email" "db-create 12" "db-drop 12" "signin-code 12 ada@shop.test" "env-sha 12"; do
+    gate template "$op"; expect_rc 1; expect_err_has "template may not run"
+  done
+  expect_true "psql ran for a refused request" no_psql_calls
+  run "$MROOM" gate other; expect_rc 2; expect_err_has "mroom gate provision (or browser, or template)"
+}
+
+t_db_read_reads_listed_columns_as_the_read_only_role() {
+  world; reads "users.id users.email users.created_at"
+  gate provision "db-create 12"; expect_rc 0
+  local reader log
+  reader="$(sed -n 's/^DB_READ_PASSWORD=//p' <<<"$(kept 12)")"
+  : >"$T/psql.log"
+  printf '[{"id":1,"email":"ada@shop.test"}, \n {"id":2,"email":"ada@shop.test"}]\n' >"$T/pg/rows"
+  gate browser "db-read 12 users id,email email=ada@shop.test desc:created_at limit:5"
+  expect_rc 0; expect_out '[{"id":1,"email":"ada@shop.test"},{"id":2,"email":"ada@shop.test"}]'
+  log="$(sql)"
+  expect_true "it did not read as the read-only role, in the environment's database, without the service file" has "$log" \
+    "db=shop_qa_12 service= user=shop_qa_12_read \\set v1 'ada@shop.test' BEGIN READ ONLY; SET LOCAL search_path = pg_catalog, pg_temp; SET LOCAL statement_timeout = '30s'; SELECT pg_catalog.json_agg(r) FROM (SELECT \"id\", \"email\" FROM public.\"users\" WHERE (\"email\")::pg_catalog.text OPERATOR(pg_catalog.=) :'v1' ORDER BY \"created_at\" DESC NULLS LAST LIMIT 5) AS r; ROLLBACK;"
+  expect_true "the gate read as itself" lacks "$log" "db=shop_qa_12 service=mroom-gate"
+  expect_true "the read-only role's password reached the SQL" lacks "$log" "$reader"
+  expect_true "a filter's value reached the gate log" lacks "$(gate_log_text)" "ada@shop.test"
+  run grep -c "browser db-read 12: users, 2 column(s), 1 filter(s)" "$HOME/.local/state/mroom/gate.log"; expect_out 1
+  # No row: an empty list. No filter, no order: the most rows.
+  rm "$T/pg/rows"; : >"$T/psql.log"
+  gate browser "db-read 12 users id"; expect_rc 0; expect_out '[]'
+  expect_true "the default limit is not 100" has "$(sql)" 'SELECT "id" FROM public."users" LIMIT 100) AS r;'
+}
+
+t_db_read_refuses_what_the_list_does_not_name() {
+  world; reads "users.id users.email notes.body"
+  local c
+  for c in "db-read 12 users password" "db-read 12 users id,password" "db-read 12 users id password=x" \
+    "db-read 12 users id asc:password" "db-read 12 sessions id" "db-read 12 notes id"; do
+    gate browser "$c"; expect_rc 1; expect_err_has "is not in MROOM_QA_DB_READ"
+  done
+  gate browser "db-read 12 public.users id"; expect_rc 1; expect_err_has "the table's name is not"
+  gate browser "db-read 12 Users id"; expect_rc 1; expect_err_has "the table's name is not"
+  gate browser "db-read 12 users id,,email"; expect_rc 1; expect_err_has "the columns are not names separated by commas"
+  gate browser "db-read 12 users id,email,id"; expect_rc 1; expect_err_has "id is named twice"
+  gate browser "db-read 12 users id asc:id desc:email"; expect_rc 1; expect_err_has "one order at most"
+  for c in limit:0 limit:101 limit:01 limit:x; do
+    gate browser "db-read 12 users id $c"; expect_rc 1; expect_err_has "limit: takes 1 to 100"
+  done
+  gate browser "db-read 12 users id email"; expect_rc 1; expect_err_has "an argument is neither"
+  gate browser "db-read 12 users id id=1 id=2 id=3 id=4 id=5 id=6"; expect_rc 1; expect_err_has "5 filters at most"
+  gate browser "db-read 12 users id email=$(printf 'a%.0s' $(seq 257))"; expect_rc 1; expect_err_has "longer than 256"
+  gate browser "db-read 12 users"; expect_rc 1; expect_err_has "db-read takes <N> <table> <columns>"
+  gate browser "db-read x users id"; expect_rc 1; expect_err_has "is not an environment number"
+  reads ""
+  gate browser "db-read 12 users id"; expect_rc 1; expect_err_has "MROOM_QA_DB_READ in box.env lists no table.column"
+  expect_true "psql ran for a refused request" no_psql_calls
+}
+
+t_db_read_needs_the_read_only_role_and_names_only_a_sqlstate() {
+  world; reads "users.id users.email"
+  gate browser "db-read 12 users id"; expect_rc 1; expect_err_has "environment 12 has no read-only role yet"
+  gate provision "db-create 12"; expect_rc 0
+  echo 'ERROR:  42703: column "email" does not exist, near "ada@shop.test"' >"$T/pg/read-error"
+  gate browser "db-read 12 users id email=ada@shop.test"; expect_rc 1; expect_err_has "db-read 12: users has no such column"
+  expect_err_lacks "ada@shop.test"
+  echo 'FATAL:  28000: no pg_hba.conf entry for host "127.0.0.1", user "shop_qa_12_read"' >"$T/pg/read-error"
+  gate browser "db-read 12 users id"; expect_rc 1; expect_err_has "the read-only role cannot sign in (SQLSTATE 28000"
+  echo 'ERROR:  XX000: something "ada@shop.test"' >"$T/pg/read-error"
+  gate browser "db-read 12 users id"; expect_rc 1; expect_err_has "the query failed (SQLSTATE XX000)"
+  expect_err_lacks "ada@shop.test"
+  rm "$T/pg/read-error"; echo 'not json' >"$T/pg/rows"
+  gate browser "db-read 12 users id"; expect_rc 1; expect_err_has "Postgres gave no rows as JSON"
+  expect_true "a value reached the gate log" lacks "$(gate_log_text)" "ada@shop.test"
+}
+
+# load <archive>: template-load as sshd runs it, the archive on stdin.
+load() { run env SSH_ORIGINAL_COMMAND=template-load "$MROOM" gate template <"$1"; }
+
+t_template_load_restores_as_the_objects_role_then_swaps_the_template() {
+  world; printf 'shop_qa_template\n' >"$T/pg/databases"
+  printf 'PGDMP fake archive' >"$T/archive"
+  load "$T/archive"
+  expect_rc 0; expect_out "template shop_qa_template: loaded from 18 bytes"
+  local log restore login lockout revoke aside rename drop secret
+  log="$(sql)"
+  expect_true "the new database is not built from template0, closed to PUBLIC, and open to the objects role" has "$log" \
+    'db=postgres service=mroom-gate DROP DATABASE IF EXISTS "shop_qa_template_next" WITH (FORCE); CREATE DATABASE "shop_qa_template_next" TEMPLATE template0; REVOKE CONNECT, TEMPORARY ON DATABASE "shop_qa_template_next" FROM PUBLIC; GRANT CONNECT, CREATE ON DATABASE "shop_qa_template_next" TO "shop_qa_objects";'
+  expect_true "the objects role may not create in its schema" has "$log" 'db=shop_qa_template_next service=mroom-gate GRANT CREATE ON SCHEMA public TO "shop_qa_objects";'
+  login="$(line_of 'ALTER ROLE "shop_qa_objects" LOGIN CONNECTION LIMIT 2 PASSWORD '"'"'SCRAM-SHA-256$4096:')"
+  expect_true "the objects role is given no login that lapses" has "$log" "VALID UNTIL '20"
+  restore="$(pg_restore_log)"
+  expect_true "the archive is not checked first" has "$restore" "-l $T/home/.local/state/mroom/gate-tmp."
+  expect_true "the restore does not run as the objects role, in the new database, without the service file" has "$restore" \
+    'user=shop_qa_objects db=shop_qa_template_next password=set service= --no-owner --no-privileges --no-comments --no-publications --no-subscriptions --no-security-labels --no-tablespaces --single-transaction --exit-on-error -d shop_qa_template_next'
+  lockout="$(line_of 'ALTER ROLE "shop_qa_objects" NOLOGIN PASSWORD NULL VALID UNTIL '"'"'infinity'"'"';')"
+  revoke="$(line_of 'REVOKE CONNECT, CREATE ON DATABASE "shop_qa_template_next" FROM "shop_qa_objects";')"
+  aside="$(line_of 'ALTER DATABASE "shop_qa_template" RENAME TO "shop_qa_template_old";')"
+  rename="$(line_of 'ALTER DATABASE "shop_qa_template_next" RENAME TO "shop_qa_template";')"
+  drop="$(line_of 'DROP DATABASE "shop_qa_template_old" WITH (FORCE);')"
+  expect_true "the steps are out of order: $login $lockout $revoke $aside $rename $drop" \
+    before "$login" "$lockout" "$revoke" "$aside" "$rename" "$drop"
+  expect_true "the objects role's sessions are not ended" has "$log" "pg_terminate_backend(pid)) FROM pg_catalog.pg_stat_activity WHERE usename = 'shop_qa_objects'"
+  secret="$(cat "$T/pg_restore.password")"
+  expect_true "the restore's password is not 48 hex characters" eval '[[ "$secret" =~ ^[0-9a-f]{48}$ ]]'
+  expect_true "the restore's password reached Postgres" lacks "$log" "$secret"
+  expect_true "the restore's password reached the gate log" lacks "$(gate_log_text)" "$secret"
+  expect_true "the restore's password was printed" lacks "$out$err" "$secret"
+  expect_true "the restore's password is kept" lacks "$(cat "$HOME"/.local/state/mroom/qa/* 2>/dev/null || true)" "$secret"
+  expect_true "the archive stays behind" eval '! ls -d "$HOME"/.local/state/mroom/gate-tmp.* >/dev/null 2>&1'
+}
+
+t_a_first_template_load_has_no_template_to_set_aside() {
+  world
+  printf 'PGDMP' >"$T/archive"
+  load "$T/archive"; expect_rc 0
+  expect_true "a template that is not there was set aside" lacks "$(sql)" 'RENAME TO "shop_qa_template_old"'
+  expect_true "the new template does not take its name" has "$(sql)" 'ALTER DATABASE "shop_qa_template_next" RENAME TO "shop_qa_template";'
+  expect_true "an old template that is not there was dropped" lacks "$(sql)" 'DROP DATABASE "shop_qa_template_old"'
+}
+
+t_template_load_puts_right_what_a_stopped_load_left() {
+  world; printf 'shop_qa_template_old\n' >"$T/pg/databases"
+  printf 'PGDMP' >"$T/archive"
+  load "$T/archive"; expect_rc 0
+  local back next
+  back="$(line_of 'ALTER DATABASE "shop_qa_template_old" RENAME TO "shop_qa_template";')"
+  next="$(line_of 'CREATE DATABASE "shop_qa_template_next"')"
+  expect_true "the template set aside is not put back first" before "$back" "$next"
+  : >"$T/psql.log"; printf 'shop_qa_template_old\nshop_qa_template\n' >"$T/pg/databases"
+  load "$T/archive"; expect_rc 0
+  back="$(line_of 'DROP DATABASE "shop_qa_template_old" WITH (FORCE);')"
+  next="$(line_of 'CREATE DATABASE "shop_qa_template_next"')"
+  expect_true "an old template beside the template is not dropped first" before "$back" "$next"
+}
+
+t_template_load_takes_only_a_custom_format_archive_within_its_size() {
+  world
+  printf 'CREATE ROLE x SUPERUSER;' >"$T/archive"
+  load "$T/archive"; expect_rc 1; expect_err_has "stdin is not a pg_dump archive in custom format (pg_dump -Fc)"
+  printf 'PGDMP' >"$T/archive"; : >"$T/pg/bad-archive"
+  load "$T/archive"; expect_rc 1; expect_err_has "pg_restore cannot read the archive: pg_restore: error: did not find magic string"
+  rm "$T/pg/bad-archive"
+  printf 'PGDMP and more' >"$T/archive"
+  run env MROOM_GATE_TEMPLATE_MAX_BYTES=8 SSH_ORIGINAL_COMMAND=template-load "$MROOM" gate template <"$T/archive"
+  expect_rc 1; expect_err_has "the archive is larger than 8 bytes"
+  expect_true "a database was made for a refused archive" lacks "$(sql)" "CREATE DATABASE"
+  expect_true "a refused archive was restored" lacks "$(pg_restore_log)" "--single-transaction"
+  printf 'MROOM_APP_NAME=shop\nMROOM_QA_TEMPLATE=%s\n' "$(printf 'a%.0s' $(seq 59))" >"$HOME/.config/mroom/box.env"
+  printf 'PGDMP' >"$T/archive"
+  load "$T/archive"; expect_rc 1; expect_err_has "MROOM_QA_TEMPLATE is longer than 58 characters"
+}
+
+t_a_failed_restore_leaves_the_template_as_it_was() {
+  world; printf 'shop_qa_template\n' >"$T/pg/databases"; : >"$T/pg/fail-restore"
+  printf 'PGDMP' >"$T/archive"
+  load "$T/archive"
+  expect_rc 1; expect_err_has "the restore failed, so the template is as it was"
+  expect_err_has 'invalid input syntax for type integer'
+  local lockout drop
+  lockout="$(line_of 'ALTER ROLE "shop_qa_objects" NOLOGIN PASSWORD NULL')"
+  drop="$(grep -n -F -- 'DROP DATABASE IF EXISTS "shop_qa_template_next" WITH (FORCE);' "$T/psql.log" | tail -n1 | cut -d: -f1)"
+  expect_true "the login is not taken back, or the half-built database stays" before "$lockout" "$drop"
+  expect_true "the template was swapped anyway" lacks "$(sql)" "RENAME"
+  expect_true "a row's value reached the gate log" lacks "$(gate_log_text)" "ada@example.test"
+}
+
+t_template_load_stops_when_the_objects_role_cannot_sign_in() {
+  world; : >"$T/pg/fail-VALID-UNTIL"
+  printf 'PGDMP' >"$T/archive"
+  load "$T/archive"
+  expect_rc 1; expect_err_has "shop_qa_objects could not be given a login"; expect_err_has "WITH ADMIN OPTION"
+  expect_true "the archive was restored anyway" lacks "$(pg_restore_log)" "--single-transaction"
+}
+
+t_clones_and_a_template_load_take_turns() {
+  world
+  export MROOM_GATE_LOCK_WAIT=0
+  mkdir -p "$HOME/.local/state/mroom"
+  exec 8>"$HOME/.local/state/mroom/gate-template.lock"
+  flock -x 8
+  gate provision "db-create 12"; expect_rc 1; expect_err_has "the template is held by another request"
+  expect_true "a clone ran while the template was held" lacks "$(sql)" "CREATE DATABASE"
+  flock -u 8; flock -s 8
+  printf 'PGDMP' >"$T/archive"
+  load "$T/archive"; expect_rc 1; expect_err_has "the template is held by another request"
+  gate provision "db-create 13"; expect_rc 0
+  exec 8>&-
+}
+
 # The README's pg_hba.conf lines are the ones CI's real Postgres runs with (tests/pg/pg_hba.conf).
 t_the_readme_shows_the_pg_hba_lines_ci_tests() {
   local line
@@ -776,4 +1048,17 @@ test_case redis-clear t_redis_clear_deletes_the_prefix_inside_redis_in_every_dat
 test_case redis-clear-cursor t_redis_clear_follows_the_cursor
 test_case redis-clear-database-count t_redis_clear_refuses_a_strange_database_count
 test_case redis-login-in-place t_the_gates_redis_login_must_be_in_place
+test_case db-create-read-only-role t_db_create_makes_a_read_only_role_that_no_app_is_given
+test_case db-drop-read-only-role t_db_drop_drops_the_read_only_role_first
+test_case roles-own-operations t_each_role_runs_its_own_operations_alone
+test_case db-read t_db_read_reads_listed_columns_as_the_read_only_role
+test_case db-read-allowlist t_db_read_refuses_what_the_list_does_not_name
+test_case db-read-errors t_db_read_needs_the_read_only_role_and_names_only_a_sqlstate
+test_case template-load t_template_load_restores_as_the_objects_role_then_swaps_the_template
+test_case template-load-first t_a_first_template_load_has_no_template_to_set_aside
+test_case template-load-recovers t_template_load_puts_right_what_a_stopped_load_left
+test_case template-load-archive t_template_load_takes_only_a_custom_format_archive_within_its_size
+test_case template-load-restore-fails t_a_failed_restore_leaves_the_template_as_it_was
+test_case template-load-no-login t_template_load_stops_when_the_objects_role_cannot_sign_in
+test_case template-lock t_clones_and_a_template_load_take_turns
 finish
