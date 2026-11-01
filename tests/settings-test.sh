@@ -252,6 +252,13 @@ want allow 'mroom status'
 want allow 'mroom config get app.name'
 want allow 'mroom guard check "git status"'
 want none 'mroom guard hook'
+# Throwaway folders: made and removed without a prompt (mroom scratch keeps to its root), while rm -rf stays
+# denied.
+want allow 'mroom scratch new --bare'
+want allow 'mroom scratch ls'
+want allow 'mroom scratch rm 20260101-000000-abc123'
+want allow 'mroom scratch prune --older-than 24'
+want deny 'rm -rf /tmp/x'
 want none 'mroom init'
 
 echo "$count cases, $failures failed"

@@ -22,6 +22,10 @@ step applies, Read that skill's `SKILL.md` in full first. If it is not installed
 - Tracker writes: only the state of the issue being worked, and comments on it.
 - Ask the person before you create an issue or a label.
 - Never touch production. Never read secrets, tokens or credential files.
+- Throwaway copies and repositories (a clone to try something in, a remote to push a test tag to)
+  go in `mroom scratch new` (`--git` for a repository, `--bare` for a remote; it prints the path),
+  never in a folder you pick. Clean up with `mroom scratch rm <id>`, never `rm -rf`. The guard lets
+  a push to a scratch repository carry a tag; name the tag (`git push <scratch path> v1.2.3`).
 - The error tracker is for reading only. Never resolve, ignore, assign, merge or delete an error
   issue yourself. The fix links to it only through the `Fixes` lines (steps 4 and 5).
 - No production data from an event goes into code, tests, commits, the PR, the tracker or chat: no

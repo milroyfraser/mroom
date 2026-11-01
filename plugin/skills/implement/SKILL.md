@@ -25,6 +25,10 @@ on without it.
 - Tests run only against a test database: the worktree's own, named by `tests.database_pattern`.
   Never point tests at a dev, QA or production database.
 - Never add the `qa` label. It is a person's switch.
+- Throwaway copies and repositories (a clone to try something in, a remote to push a test tag to)
+  go in `mroom scratch new` (`--git` for a repository, `--bare` for a remote; it prints the path),
+  never in a folder you pick. Clean up with `mroom scratch rm <id>`, never `rm -rf`. The guard lets
+  a push to a scratch repository carry a tag; name the tag (`git push <scratch path> v1.2.3`).
 - Write every PR body, comment, note and commit message with a body to a fresh file, never a
   fixed name such as `note.md` in a shared folder, where another session's PR picks up your text,
   or you pick up its. Shell variables do not survive between Bash calls, so either use the path

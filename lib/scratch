@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# scratch — mroom scratch: throwaway folders and repositories for agents, all under one fixed root, so a check
+# needs neither `rm -rf` nor a path of its own choosing.
+#
+#   mroom scratch new [--git | --bare]
+#                              a fresh, empty folder under the scratch root, a git repository with --git or a
+#                              bare one with --bare (a remote to push to in an offline test); prints its path
+#   mroom scratch ls           the folders: id, kind (plain, git, bare or link), age in hours, path
+#   mroom scratch rm <id|path>...
+#                              remove folders by id (the last part of the path `new` printed) or by that path
+#   mroom scratch prune --older-than <hours>
+#                              remove every folder whose own modification time is more than <hours> old
+#   mroom scratch root         the scratch root
+#   mroom scratch help
+#
+# The root is ${XDG_CACHE_HOME:-~/.cache}/mroom/scratch (lib/core/scratch.sh). rm and prune remove only whole
+# folders directly inside it. They resolve the physical path and refuse anything that lands outside the root:
+# an entry that is itself a link, a path through a link, `..`, or a folder above or beside the root. Removing
+# never follows a link: `find -P` deletes a link inside a folder as a link, and stays on the folder's own
+# filesystem. The root itself must be a folder this user owns, not a link (nor its `mroom` folder).
+#
+# `mroom guard` lets a `git push` of tags or of any branch through when its remote resolves inside this root
+# (a file:// URL or an absolute path), so tag and release flows can be tested offline.
+#
+# Exit 0 done, 1 refused or failed (saying why), 2 a usage error.
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+HERE="$(cd "$(dirname "$SELF")" && pwd)"
+# shellcheck source=lib/core/scratch.sh
+. "$HERE/core/scratch.sh"
+
+die() { echo "mroom scratch: $1" >&2; exit "${2:-1}"; }
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF" | sed -n '/^  *mroom scratch new/,/^$/p'; }
+
+ROOT_DIR=$(scratch_root) || die "neither XDG_CACHE_HOME nor HOME is an absolute path, so there is no scratch root"
+[ -n "${ROOT_DIR%/mroom/scratch}" ] || die "the scratch root would be /mroom/scratch; set HOME or XDG_CACHE_HOME"
+
+# real_root [create]: the root's physical path in REAL_ROOT; with create, makes the root first (mode 700).
+real_root() {
+  if [ "${1:-}" = create ] && [ ! -e "$ROOT_DIR" ] && [ ! -L "$ROOT_DIR" ]; then
+    [ -L "${ROOT_DIR%/scratch}" ] && die "${ROOT_DIR%/scratch} is a link; the scratch root must not be reached through one"
+    mkdir -p "${ROOT_DIR%/scratch}"
+    mkdir -m 700 "$ROOT_DIR"
+  fi
+  if [ -L "$ROOT_DIR" ] || [ -L "${ROOT_DIR%/scratch}" ]; then
+    die "$ROOT_DIR is reached through a link; refusing to use it as the scratch root"
+  fi
+  [ -e "$ROOT_DIR" ] || return 1
+  REAL_ROOT=$(scratch_real_root) || die "$ROOT_DIR is not a folder you own; refusing to use it as the scratch root"
+}
+
+valid_id() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && [ "${#1}" -le 128 ]; }
+
+kind_of() {
+  if [ -L "$1" ]; then echo link
+  elif [ -e "$1/.git" ]; then echo git
+  elif [ -f "$1/HEAD" ] && [ -d "$1/objects" ] && [ -d "$1/refs" ]; then echo bare
+  else echo plain
+  fi
+}
+
+mtime() { stat -c %Y -- "$1" 2>/dev/null || stat -f %m -- "$1"; }
+
+# remove ARG: one folder, by id or by path, after every check; returns 1 (saying why) when refused.
+remove() {
+  local arg=$1 id path parent real
+  case $arg in
+    */*)
+      id=${arg%/}
+      id=${id##*/}
+      parent=${arg%/}
+      parent=${parent%/*}
+      [ -n "$parent" ] || parent=/
+      real=$(scratch_physical "$parent") || { echo "mroom scratch: refusing $arg: its folder does not exist" >&2; return 1; }
+      if [ "$real" != "$REAL_ROOT" ]; then
+        echo "mroom scratch: refusing $arg: it is not a folder directly inside the scratch root ($REAL_ROOT)" >&2
+        return 1
+      fi
+      ;;
+    *) id=$arg ;;
+  esac
+  if ! valid_id "$id"; then
+    echo "mroom scratch: refusing '$arg': an id is letters, digits, '.', '_' and '-', not starting with a dot" >&2
+    return 1
+  fi
+  path="$REAL_ROOT/$id"
+  if [ -L "$path" ]; then
+    echo "mroom scratch: refusing $id: it is a link, and mroom scratch never follows one (remove the link with rm)" >&2
+    return 1
+  fi
+  [ -d "$path" ] || { echo "mroom scratch: no scratch folder $id" >&2; return 1; }
+  real=$(scratch_physical "$path") || { echo "mroom scratch: refusing $id: cannot resolve it" >&2; return 1; }
+  if [ "$real" != "$path" ]; then
+    echo "mroom scratch: refusing $id: it resolves outside the scratch root ($real)" >&2
+    return 1
+  fi
+  # git makes its objects read-only, and a test may lock a folder: make every folder writable first. find -P
+  # never follows a link, and -type d never matches one, so nothing outside the folder changes mode.
+  find -P "$path" -xdev -type d ! -perm -700 -exec chmod u+rwx {} + 2>/dev/null || true
+  if ! find -P "$path" -xdev -depth -delete; then
+    echo "mroom scratch: could not remove all of $id (what is left is still in $path)" >&2
+    return 1
+  fi
+  echo "removed $id"
+}
+
+cmd=${1:-help}
+[ "$#" -gt 0 ] && shift
+
+case "$cmd" in
+  help | -h | --help) usage ;;
+  root)
+    [ "$#" = 0 ] || die "root takes no arguments" 2
+    echo "$ROOT_DIR"
+    ;;
+  new)
+    kind=plain
+    for a in "$@"; do
+      case "$a" in
+        --git) [ "$kind" = plain ] || die "new takes --git or --bare, not both" 2; kind=git ;;
+        --bare) [ "$kind" = plain ] || die "new takes --git or --bare, not both" 2; kind=bare ;;
+        *) die "new takes only --git or --bare" 2 ;;
+      esac
+    done
+    real_root create || die "could not make the scratch root $ROOT_DIR"
+    path=$(mktemp -d "$REAL_ROOT/$(date -u +%Y%m%d-%H%M%S)-XXXXXX")
+    case "$kind" in
+      git) git -c init.defaultBranch=main init -q -- "$path" >&2 ;;
+      bare) git -c init.defaultBranch=main init -q --bare -- "$path" >&2 ;;
+    esac
+    echo "$path"
+    ;;
+  ls)
+    [ "$#" = 0 ] || die "ls takes no arguments" 2
+    real_root || { echo "no scratch folders (no root yet at $ROOT_DIR)"; exit 0; }
+    now=$(date +%s)
+    found=0
+    for entry in "$REAL_ROOT"/* "$REAL_ROOT"/.[!.]* "$REAL_ROOT"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      found=1
+      id=${entry##*/}
+      kind=$(kind_of "$entry")
+      if [ "$kind" = link ]; then
+        printf '%s\t%s\t%s\t%s\n' "$id" link - "(a link: never followed, never removed by mroom scratch)"
+      else
+        age=$(((now - $(mtime "$entry")) / 3600))
+        printf '%s\t%s\t%sh\t%s\n' "$id" "$kind" "$age" "$entry"
+      fi
+    done
+    [ "$found" = 1 ] || echo "no scratch folders in $REAL_ROOT"
+    ;;
+  rm)
+    [ "$#" -gt 0 ] || die "usage: mroom scratch rm <id|path>..." 2
+    real_root || die "there is no scratch root yet ($ROOT_DIR), so nothing to remove"
+    status=0
+    for a in "$@"; do remove "$a" || status=1; done
+    exit "$status"
+    ;;
+  prune)
+    if [ "${1:-}" != --older-than ] || [ "$#" != 2 ] || ! [[ ${2:-} =~ ^[0-9]{1,6}$ ]]; then
+      die "usage: mroom scratch prune --older-than <hours>" 2
+    fi
+    hours=$((10#$2))
+    real_root || exit 0
+    status=0
+    while IFS= read -r -d '' entry; do
+      remove "${entry##*/}" || status=1
+    done < <(find -P "$REAL_ROOT" -mindepth 1 -maxdepth 1 -type d -mmin +$((hours * 60)) -print0)
+    while IFS= read -r -d '' entry; do
+      echo "mroom scratch: left ${entry##*/} alone: it is a link, and mroom scratch never follows one" >&2
+    done < <(find -P "$REAL_ROOT" -mindepth 1 -maxdepth 1 -type l -print0)
+    exit "$status"
+    ;;
+  *) die "new, ls, rm, prune, root or help (mroom scratch help)" 2 ;;
+esac

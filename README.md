@@ -244,6 +244,48 @@ usage error;
 mroom memory-preflight 4096 "the frontend build" && pnpm build
 ```
 
+## Scratch folders
+
+`mroom scratch` gives agents throwaway folders and repositories under one fixed root,
+`${XDG_CACHE_HOME:-~/.cache}/mroom/scratch`, so a check needs neither `rm -rf` nor a path of its own
+choosing.
+
+```bash
+mroom scratch new                  # prints a fresh empty folder; --git for a repository, --bare for a remote
+mroom scratch ls                   # id, kind (plain, git, bare or link), age in hours, path
+mroom scratch rm <id-or-path>...   # remove folders made by new
+mroom scratch prune --older-than 24
+```
+
+`rm` and `prune` remove only whole folders directly inside the root. They resolve the real path and
+refuse anything that resolves outside the root. They delete with `find -P`, which never follows a
+link: a link inside a folder is removed as a link, and what it points at stays. The root itself must be
+a folder you own, and neither it nor its `mroom` folder may be a link; the `mroom` folder must be yours
+and not world-writable. `base.json` allows every `mroom scratch` command, while `rm -rf` stays denied.
+
+**Offline tag and release tests.** `mroom guard` lets a `git push` of tags, or of any branch, through
+when its remote is a repository inside the root, named by the literal absolute path (or `file:///` URL)
+that `mroom scratch new --bare` printed:
+
+```bash
+git push /home/me/.cache/mroom/scratch/20260101-120000-AbC123 v1.2.3   # allowed: name the tag
+git push origin v1.2.3             # still refused, as is a file:// push outside the root
+```
+
+Name the tag: `base.json` still denies `--tags` by prefix. The push must be the line's only command,
+written as `git push <path> ...`: no `-C`, `--git-dir`, `-c`, `env` or `GIT_DIR` before it, and no
+`--repo`, `--no-repo`, `--` or `--end-of-options`. The guard's check is a snapshot of the files when the
+hook runs, so what changes them afterwards is not seen: a command on the same line (a clone or init that
+writes config, a link swapped in), or a process an earlier command left running. Nor does the guard see
+any difference between its own environment or git and the Bash tool's (another `HOME`, `PATH` or git
+version). Force, mirror, `--all`, `--prune` and `+` refspecs stay refused there too. A remote that
+resolves out of the root through a link or `..`, that holds a link anywhere inside it, that is not a
+repository itself (with a valid HEAD), that reaches another repository (`commondir`, alternates, a
+`PATH.git` beside it, a repository-looking `PATH` behind its `.git`), or that the git configuration could
+rewrite (`url.*.insteadOf`, or a remote configured under that name) is treated like any other remote, as
+it is when the hook gives no working folder. The check runs under a five-second limit; past it, the
+remote is not scratch.
+
 ## Doctor
 
 `mroom doctor` says whether the box is as mroom needs it, and `mroom doctor --app [<dir>]` also whether an app's
@@ -367,8 +409,9 @@ refuses, among others:
 - `gh pr merge`, `gh pr review --approve`, and `gh api` writes to `/merge`, `/merges`, `/reviews`
   with `APPROVE`, `/releases` and `/git/refs`, and GraphQL merges, ref updates and deploy approvals;
 - `git push` with any form of force (`-f`, `--force`, `--force-with-lease`, `--mirror`, a `+`
-  refspec, abbreviations too), with tags, or to `main`, `master` or `release`; git config or aliases
-  that would make a later push do one of those; `gh pr update-branch --rebase`;
+  refspec, abbreviations too), with tags, or to `main`, `master` or `release` (tags and any branch
+  may go to a [scratch repository](#scratch-folders)); git config or aliases that would make a later
+  push do one of those, or rewrite where it goes (`url.*.insteadOf`); `gh pr update-branch --rebase`;
 - reading `.env*` (not `*.example`), `~/.ssh` (not `*.pub`), `~/.config/gh*`,
   `~/.config/mroom/secrets`, any `*.env` under `~/.config`, `~/.forge-token` and Claude's
   credentials, through the common readers, interpreters, uploads and redirections, or a `cd` into
