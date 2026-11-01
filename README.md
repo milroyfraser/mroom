@@ -17,6 +17,8 @@ composite actions, and a box CLI with an installer. Each app describes itself in
 company, host, id or channel.
 
 The full design, including how each requirement is measured, is in [docs/design.md](docs/design.md).
+Who may see an app's production data, and the read-only check a session hands to a person instead, is
+in [docs/production-access.md](docs/production-access.md).
 
 ## Status
 
@@ -619,6 +621,11 @@ that Claude Code reads; in a session they are `/mroom:<name>`.
 - **Rules in every skill:** an agent never merges, approves, deploys or releases; a person does.
   Tracker writes are only the state of the issue being worked and comments on it. A skill asks
   before it files an issue or a label, never touches production, and never reads a secret.
+- **Production facts come from a person:** `implement`, `fix-issue` and `deliver` never read production.
+  When one needs a production fact, it writes a check that a person runs, after confirming six points:
+  read-only by construction, aggregate and non-personal output, bounded, tested first on a local or masked
+  copy, explained, and recorded in the tracker issue. [docs/production-access.md](docs/production-access.md)
+  has the access levels and the full rule; the app's own runbook wins.
 - **Earlier work is the app's own:** `deliver`, `implement` and `fix-issue` resume only a pull
   request whose branch is in the app's repository, `implement` stacks a new branch only on such a
   pull request, and no workflow skill checks out or runs a fork's pull request on the box, just as

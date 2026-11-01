@@ -32,27 +32,23 @@ installed, go on without it.
 ## Production checks a person runs
 
 A session never reads production. When it needs a production fact, it writes a check and a person
-runs it. Before handing the check over, confirm each point below and say so; rewrite a check that
-fails one.
+runs it, as mroom's `docs/production-access.md` sets out (its access levels, and who runs a check).
+Before handing the check over, confirm each point below and say so; rewrite a check that fails one.
 
-1. **Read-only by construction.** For a SQL database, the whole check runs in one transaction that
-   starts with the database's read-only mode (Postgres: `SET TRANSACTION READ ONLY` and
-   `SET LOCAL statement_timeout = '30s'`; MySQL: `START TRANSACTION READ ONLY`), so any write is
-   refused and a slow query stops. No app methods that save, queue jobs, send mail or call an API.
-2. **Aggregate, non-personal output.** Counts, yes or no, sums, distributions, and the names or
-   domains of organisations when the decision needs them. Never a person's name, email, phone or
-   IP address, and never free text (titles, notes, descriptions, messages). The query may filter on
-   free text, as long as only a count comes out. Ids only when the next step needs them, and never
-   a user's.
-3. **Bounded.** Indexed filters or a time window. Name any scan of a large table before handing the
-   check over.
-4. **Tested first** on a local database or a masked QA copy. Say the result came from there.
-5. **Explained.** What each number means, and which decision each outcome leads to.
-6. **Recorded.** The person notes the command and its output in the tracker issue it serves (with
-   no tracker, on the pull request). Only that output comes back to the session.
+1. **Read-only by construction:** one transaction that starts read-only, with a statement timeout
+   (Postgres: `SET TRANSACTION READ ONLY` and `SET LOCAL statement_timeout = '30s'`), so any write
+   is refused and a slow query stops. No app methods that save, queue jobs, send mail or call an API.
+2. **Aggregate, non-personal output:** counts, yes or no, sums, distributions, and organisations'
+   names or domains when the decision needs them. Never a person's name, email, phone or IP address,
+   never free text (filtering on it is fine when only a count comes out), and never a user's id.
+3. **Bounded:** indexed filters or a time window; name any scan of a large table.
+4. **Tested first** on a local database or a masked QA copy; say the result came from there.
+5. **Explained:** what each number means, and which decision each outcome leads to.
+6. **Recorded:** the person notes the command and its output in the tracker issue it serves (or on
+   the pull request). Only that output comes back to the session.
 
-A project may keep its own production-access rules, such as a runbook its `CLAUDE.md` or docs name.
-When it has them, point the person to them: they win over this section.
+When the project keeps its own production-access rules, such as a runbook its `CLAUDE.md` names,
+point the person to them: they win.
 
 ## Routing
 

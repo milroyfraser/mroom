@@ -380,24 +380,24 @@ say(bool(fix) and "**Build to the threat model**" in fix[3] and bool(deliver_doc
     "fix-issue and deliver build from implement's threat-model questions, and deliver's re-review looks at what is new")
 
 # A session never reads production: a skill that may need a production fact hands a person a check, and the check
-# passes six points first. Each point is pinned, so a dropped or softened one fails here.
+# passes six points first. The full rule is docs/production-access.md; each skill keeps the six points, since the
+# app's checkout has no mroom docs. Each point is pinned, so a dropped or softened one fails here.
 PROD_CHECK = [
-    "A session never reads production. When it needs a production fact, it writes a check and a person runs it.",
+    "A session never reads production. When it needs a production fact, it writes a check and a person runs it, "
+    "as mroom's `docs/production-access.md` sets out",
     "confirm each point below and say so; rewrite a check that fails one.",
-    "1. **Read-only by construction.** For a SQL database, the whole check runs in one transaction that starts with "
-    "the database's read-only mode (Postgres: `SET TRANSACTION READ ONLY` and `SET LOCAL statement_timeout = '30s'`;",
-    "so any write is refused and a slow query stops. No app methods that save, queue jobs, send mail or call an API.",
-    "2. **Aggregate, non-personal output.** Counts, yes or no, sums, distributions, and the names or domains of "
-    "organisations when the decision needs them. Never a person's name, email, phone or IP address, and never free "
-    "text (titles, notes, descriptions, messages). The query may filter on free text, as long as only a count comes "
-    "out. Ids only when the next step needs them, and never a user's.",
-    "3. **Bounded.** Indexed filters or a time window. Name any scan of a large table before handing the check over.",
-    "4. **Tested first** on a local database or a masked QA copy. Say the result came from there.",
-    "5. **Explained.** What each number means, and which decision each outcome leads to.",
-    "6. **Recorded.** The person notes the command and its output in the tracker issue it serves",
+    "1. **Read-only by construction:** one transaction that starts read-only, with a statement timeout (Postgres: "
+    "`SET TRANSACTION READ ONLY` and `SET LOCAL statement_timeout = '30s'`), so any write is refused and a slow query "
+    "stops. No app methods that save, queue jobs, send mail or call an API.",
+    "2. **Aggregate, non-personal output:** counts, yes or no, sums, distributions, and organisations' names or domains "
+    "when the decision needs them. Never a person's name, email, phone or IP address, never free text (filtering on it "
+    "is fine when only a count comes out), and never a user's id.",
+    "3. **Bounded:** indexed filters or a time window; name any scan of a large table.",
+    "4. **Tested first** on a local database or a masked QA copy; say the result came from there.",
+    "5. **Explained:** what each number means, and which decision each outcome leads to.",
+    "6. **Recorded:** the person notes the command and its output in the tracker issue it serves",
     "Only that output comes back to the session.",
-    "A project may keep its own production-access rules",
-    "When it has them, point the person to them: they win over this section.",
+    "When the project keeps its own production-access rules", "point the person to them: they win.",
 ]
 for name in ("implement", "fix-issue", "deliver"):
     doc = docs.get(f"skill {name}")
@@ -410,9 +410,38 @@ room_readme = one_line(read(os.path.join(skills_dir, "implement", "room", "READM
 rollout = re.search(r"4\. \*\*Rollout:.*?(?= 5\. \*\*DoD)", room_readme)
 say(bool(rollout) and all(p in rollout.group(0) for p in (
         "A person runs that query, never the session", "\"Production checks a person runs\" in `../SKILL.md`",
-        "read-only by construction", "aggregate and non-personal output", "tested first on a local or masked QA copy",
-        "recorded in the tracker issue it serves", "The project's own production-access rules, when it has them, win.")),
+        "`docs/production-access.md`", "read-only by construction", "aggregate and non-personal output",
+        "tested first on a local or masked QA copy", "recorded in the tracker issue it serves",
+        "The project's own production-access rules, when it has them, win.")),
     "room/README.md's Rollout query follows the production-check rule")
+# The runbook itself: the four levels, agents at level 0, the six points and who runs a check. It is generic like
+# every skill: no host, address, person or private word.
+access_path = os.path.join(root, "docs/production-access.md")
+access = one_line(read(access_path)) if os.path.isfile(access_path) else ""
+say(all(p in access for p in (
+        "| 0, default | everyone, every agent | No production personal data.", "| 1, support |",
+        "| 2, read-only data | named developers, rarely | One personal role that expires (30 days at most) on the read replica",
+        "| 3, break-glass | the lead developer, during an incident | An incident issue first, and a second person told.",
+        "A production console (a shell on a server, a REPL in the app) is level 3",
+        "A session or an agent never holds a production role, a key or a token, and never reads production.",
+        "makes that provider a sub-processor of the app",
+        "the lead developer may run a check that meets all six points without opening an incident",
+        "A question asked a second time becomes an admin screen",
+        "The app's own runbook, when it has one, wins over this page.", "This is engineering practice, not legal advice")),
+    "docs/production-access.md keeps the four levels, agents at level 0 and who runs a check")
+say(all(
+        w in access for w in ("1. **Read-only by construction.**", "2. **Aggregate, non-personal output.**",
+                              "3. **Bounded.**", "4. **Tested first**", "5. **Explained.**", "6. **Recorded.**",
+                              "`SET LOCAL statement_timeout = '30s'`", "Never a person's name, email, phone or IP address")),
+    "docs/production-access.md has the six points of a read-only check")
+access_text = read(access_path) if os.path.isfile(access_path) else ""
+private_hits = (re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}|/Users/|/home/", access_text)
+                + re.findall(r"https?://[^\s)]+", access_text))
+words = os.environ.get("MROOM_PRIVATE_WORDS")
+if words:
+    private_hits += [w for w in (x.strip() for x in read(words).split("\n")) if w and re.search(w, access_text, flags=re.I)]
+say(bool(access_text) and not private_hits, f"docs/production-access.md names no host, address or private word ({len(private_hits)})")
+say("[docs/production-access.md](docs/production-access.md)" in readme_flat, "README.md links docs/production-access.md")
 
 # A PR body, commit message, comment or note goes in a fresh mktemp file, never a fixed name in a shared folder,
 # where one session's PR picks up another's text. Every file a gh, git or mroom command reads its text from, by a
