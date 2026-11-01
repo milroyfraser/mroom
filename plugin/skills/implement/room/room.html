@@ -758,7 +758,8 @@ html[data-winddown] body::before{background:
   function renderLearning() {
     const box = document.getElementById("learnCard");
     if (!box) return;
-    const on = !!(windDown && windDown.on === true);
+    /* A closed retrospective also ends the wind-down mood, even if `on` was left true. */
+    const on = !!(windDown && windDown.on === true && !windDown.retroClosedAt);
     if (on) document.documentElement.dataset.winddown = "1"; else delete document.documentElement.dataset.winddown;
     windSky(on);
     box.replaceChildren();
@@ -824,6 +825,8 @@ html[data-winddown] body::before{background:
         }
         box.append(end);
       }
+      /* Never leave an empty card on the page. */
+      if (!box.childElementCount) box.hidden = true;
       return;
     }
     const head = el("div", "lchead");
