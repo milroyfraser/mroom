@@ -170,6 +170,40 @@ t_text_is_checked_marked_only_by_the_guard_and_defanged() {
   create --key sentry:1002 --title t; expect_rc 4; expect_err_has "the limit is 30000"
 }
 
+# Escaping and defanging lengthen text. Text within the guard's limits as given, but past the tracker's once
+# lengthened, is refused (4) before anything is sent, in a dry run too: the tracker's own refusal would be a failed
+# create, which stops alert triage's whole run rather than one alert.
+t_text_the_guard_lengthens_is_refused_before_the_tracker() {
+  pworld
+  local name ours theirs
+  for name in TRACKER_MAX_TITLE TRACKER_MAX_BODY; do
+    ours="$(sed -n "s/^$name=//p" "$ROOT/lib/persona")"
+    theirs="$(sed -n "s/^$name=//p" "$ROOT/lib/core/tracker.sh")"
+    expect_true "the guard's $name ($ours) is not the tracker's ($theirs)" [ "${ours:-none}" = "${theirs:-unset}" ]
+  done
+  body "x"
+  # 160 characters as given; each <!-- becomes &lt;!--, so 280 once escaped.
+  create --key sentry:1001 --title "$(printf '<!--%.0s' {1..40})"
+  expect_rc 4; expect_err_has "once escaped and defanged"
+  # A link to another host: each dot of its host becomes [.]. 160 characters either way; 200 and 202 once defanged.
+  create --key sentry:1002 --title "http://$(printf 'a.%.0s' {1..20})$(printf 'b%.0s' {1..113})"
+  expect_rc 0
+  create --key sentry:1003 --title "http://$(printf 'a.%.0s' {1..21})$(printf 'b%.0s' {1..111})"
+  expect_rc 4; expect_err_has "the tracker takes 200"
+  # A body of 29900 bytes as given, about 88000 once its links are defanged: past the tracker's 64 KiB.
+  local line
+  line="http://$(printf '.%.0s' {1..290})"
+  body "$(for _ in $(seq 1 100); do printf '%s\n' "$line"; done)"
+  create --key sentry:1004 --title t
+  expect_rc 4; expect_err_has "the tracker takes 65536"
+  expect_true "expected only the one create within the limits: $(ops linear issueCreate | jq -c .vars.i.title)" \
+    [ "$(count_ops linear issueCreate)" = 1 ]
+  export MROOM_PERSONA_LIVE=""
+  body "x"
+  create --key sentry:1005 --title "$(printf '<!--%.0s' {1..40})"
+  expect_rc 4; expect_err_has "once escaped and defanged"
+}
+
 t_a_failed_read_back_is_not_a_lost_marker() {
   pworld
   body "x"
@@ -219,6 +253,7 @@ test_case create-run-alerts t_create_only_for_this_runs_alerts
 test_case comment-own-only t_comment_only_on_the_personas_own_issues
 test_case markers-lost t_markers_lost_stops_every_write
 test_case text-checked t_text_is_checked_marked_only_by_the_guard_and_defanged
+test_case text-lengthened t_text_the_guard_lengthens_is_refused_before_the_tracker
 test_case forged-marker-stops t_a_marker_the_guard_did_not_write_stops_every_write
 test_case unsearchable-marker-stops t_a_marker_the_search_cannot_find_stops_every_write
 test_case search-catches-up t_a_search_that_catches_up_is_no_lost_marker

@@ -23,7 +23,8 @@
 #     job (actions/triage, switch-off.sh);
 #   - a body or a title that holds a token this command can see, or anything shaped like one, is refused;
 #     a link to a host other than the trackers', GitHub's or the app's is defanged; a body is at most
-#     30000 bytes and a title 160 characters;
+#     30000 bytes and a title 160 characters, and what goes out, escaped and defanged, stays within the
+#     tracker's own limits (a title of 200 characters, a text of 65536 bytes), or it is refused here;
 #   - at most 10 creates and 30 comments a run.
 #
 # Every description and comment ends with a footer naming persona.name and the run. Without
@@ -52,6 +53,12 @@ MAX_CREATES=10
 MAX_COMMENTS=30
 MAX_BODY=30000
 MAX_TITLE=160
+# The tracker's own limits (lib/core/tracker.sh: issue_create's title and TRACKER_MAX_BODY). Escaping and
+# defanging lengthen text, so what goes out can pass them though what came in was within the limits above.
+# Such text is refused here (4): the tracker's own refusal would be a failed write (2), and alert triage passes
+# over a refused alert but stops its whole run at a failed write.
+TRACKER_MAX_TITLE=200
+TRACKER_MAX_BODY=65536
 
 say() { echo "$NAME: $*" >&2; }
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; }
@@ -129,6 +136,13 @@ guarded() {
   persona_unmarked <"$in" | persona_text defang "${hosts[@]}" >"$out" || { say "the text could not be checked"; exit 1; }
 }
 
+# sendable <file>: refuses a description or a comment, as it will go out, that the tracker would refuse for its size.
+sendable() {
+  local size
+  size="$(wc -c <"$1")"
+  [ "$size" -le "$TRACKER_MAX_BODY" ] || refuse "the text is $size bytes once escaped and defanged; the tracker takes $TRACKER_MAX_BODY"
+}
+
 # footer <verb>: the line that ends every description and comment.
 footer() {
   local run="${MROOM_PERSONA_RUN_URL:-}" link=""
@@ -192,6 +206,10 @@ cmd_create() {
   title="$(cat "$tmp/title")"
   for k in "${keys[@]}"; do markers+="$(persona_marker "$k")"$'\n'; done
   { cat "$tmp/body.ok"; footer Filed; printf '\n%s' "$markers"; } >"$tmp/desc"
+  # Counted as the tracker counts it, in the same locale.
+  [ "${#title}" -le "$TRACKER_MAX_TITLE" ] \
+    || refuse "the title is ${#title} characters once escaped and defanged; the tracker takes $TRACKER_MAX_TITLE"
+  sendable "$tmp/desc"
   count create "$MAX_CREATES"
   if [ "$LIVE" != true ]; then
     n="$(cat "$STATE/count-create")"
@@ -265,6 +283,7 @@ cmd_comment() {
   body_in "$tmp/body"
   guarded "$MAX_BODY" "$tmp/body" "$tmp/body.ok"
   footer Noted >>"$tmp/body.ok"
+  sendable "$tmp/body.ok"
   if [ "$LIVE" != true ] && [[ "$id" =~ ^DRY-[0-9]+$ ]]; then
     count comment "$MAX_COMMENTS"
     log dry-run "comment on $id"
