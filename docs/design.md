@@ -472,7 +472,8 @@ Invariants, each with a test:
    agent runs in a worktree or on the dev site runs as `forge`, and is trusted as they are, with what `forge`
    holds: on GitHub, only the agents' account (D22). A fork's pull request is never part of that: qa-plan and
    qa-up refuse one, and a workflow skill resumes only a pull request whose branch is in the app's repository,
-   so no agent checks a fork's code out on the box.
+   so no workflow skill checks a fork's code out on the box. That rule is the skills' own; the guard does not
+   refuse such a checkout.
 2. **QA provisioning keeps PR code away from every secret:**
    - `qa-plan` (`pull_request`, no secrets): scope the change with path rules, build the frontend from the PR with
      public values only, upload `dist/` as an artifact; qa-up scopes the change again itself, since nothing a job

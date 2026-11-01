@@ -44,7 +44,8 @@ follow it through `/mroom:implement`'s branch and PR.
 ## Resume: carry on where a stopped session left off
 
 Sessions get stopped mid-task. `/mroom:deliver <id>` (and `/mroom:implement <id>`) first looks for
-the issue's earlier work and continues it. Never start a second branch or PR.
+the issue's earlier work and continues it. Never start a second branch or PR beside this
+repository's own; a PR from a fork does not count (step 1).
 
 1. **Its PR.** `gh pr list --state open --search "<id> in:title,body" --json number,isDraft,isCrossRepository,headRefName,url`,
    and `gh pr list --head <branch> --json number,isDraft,isCrossRepository,url` for the issue's
@@ -60,7 +61,11 @@ the issue's earlier work and continues it. Never start a second branch or PR.
      the default branch, `gh pr update-branch <pr>`.
 2. **A worktree with unpushed work.** `git worktree list`, then `git -C <path> log @{u}..` (or
    `git -C <path> log origin/<default>..` for a branch never pushed). If one is on the issue's
-   branch, work there. Push it first (`git push -u origin <branch>`), so it is saved, then open the
+   branch and that branch is this repository's own, work there. A branch is this repository's own
+   when `git -C <path> config branch.<branch>.remote` prints nothing or `origin`, and
+   `git -C <path> config branch.<branch>.merge` prints nothing or a ref under `refs/heads/`. A branch
+   that tracks anything else came from someone else's pull request: leave it, and name it in the
+   report. Push the branch first (`git push -u origin <branch>`), so it is saved, then open the
    draft PR and continue. Never `git reset --hard` or delete it to start over.
 3. **Neither:** start fresh with `/mroom:implement`.
 
