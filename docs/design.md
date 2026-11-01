@@ -757,6 +757,14 @@ the tag. The deploy template adds three patterns instead:
     safe because migrations are expand/contract (section 9); the old code must also run jobs that the new code
     queued, and the deploy restarts workers and clears caches.
 
+The deploy template (`templates/github/workflows/deploy-production.yml`) runs these as two jobs under one
+concurrency group that never cancels a deploy. `release`, in `production`, checks out the run's own tag with the
+deploy key and runs `release-branch.sh`, which also stops when the branch is at a commit off the default branch or
+neither before nor after the tag, since then someone else moved it; that job runs no action but `actions/checkout`
+beside the key. `verify` holds no secret and runs `deploy-verify` on the commit `release` pushed; a poll counts only
+when the app's `/up` answers 200 too, and a release name other than the tag, for the right commit, is a warning. The
+run takes no input: a rollback is a dispatch from the older tag.
+
 **Sharded jobs.** The frontend unit tests came next: four vitest shards, the slowest shard's job 254 s, and a
 count the ruleset held in place, because it required each shard by name. With six shards the slowest shard's job
 took 152 to 181 s over four runs, and its `Test` step 105 to 135 s, from 201 s. The CI templates add two patterns

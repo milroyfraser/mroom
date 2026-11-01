@@ -4,14 +4,20 @@
 # request's own code would answer the app's path. The caller sets MROOM_ROOT and, for qa_version, has called
 # qa_gate_init (lib/core/qa.sh).
 
-# version_url <origin>: the address to ask for the running release, <origin><app.version_path>, with a query no
-# cache has seen (?mroom=<time>-<random>). <origin> is https://<host>, or http:// for a test, with an optional port
-# and no path.
+# version_url <origin> [<path>]: the address to ask for the running release, <origin><app.version_path>, with a
+# query no cache has seen (?mroom=<time>-<random>). <origin> is https://<host>, or http:// for a test, with an
+# optional port and no path. <path> asks another path of the same kind instead, such as a separate SPA's
+# /version.json.
 version_url() {
-  local path
+  local path="${2:-}"
   [[ "$1" =~ ^https?://[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?$ ]] \
     || { echo "version_url: $1 is not an origin such as https://shop.example.dev" >&2; return 2; }
-  path="$(python3 "$MROOM_ROOT/lib/core/config.py" get app.version_path)" || return 1
+  if [ -n "$path" ]; then
+    [[ "$path" =~ ^(/[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}){1,8}$ ]] \
+      || { echo "version_url: $path is not a path such as /version.json" >&2; return 2; }
+  else
+    path="$(python3 "$MROOM_ROOT/lib/core/config.py" get app.version_path)" || return 1
+  fi
   printf '%s%s?mroom=%s-%s\n' "$1" "$path" "$(mroom_now)" "$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')"
 }
 

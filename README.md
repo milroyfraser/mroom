@@ -1400,6 +1400,8 @@ and fill the placeholders below.
 | `actions/setup-frontend/` | Node, pnpm (for pnpm), the package store (restore only) and the frontend's install |
 | `actions/e2e-frontend-build/` | the e2e build: restored when its inputs are unchanged, built otherwise |
 | `scripts/vitest-file-times.mjs` | a vitest reporter that records each test file's time |
+| `workflows/deploy-production.yml` | the production deploy: the `release` branch at the tag, then `deploy-verify` ([below](#the-production-deploy)) |
+| `scripts/release-branch.sh` | points the `release` branch at a release tag's commit, for the deploy |
 
 What they do, in short:
 
@@ -1462,6 +1464,62 @@ supported yet: the Node steps would build their paths from the repository's root
 | `<<fill:frontend_src>>` | the frontend's source folder inside its own: `src` for a separate SPA, `resources` for Vite inside Laravel (then add the other folders Tailwind scans to the build's key) |
 | `<<fill:e2e_build>>` | the build without source maps but minified, with the env it needs, such as `VITE_API_URL=http://127.0.0.1:8000 pnpm exec vite build --sourcemap false` |
 | `<<fill:e2e_command>>` | the browser tests, failing when none are found, such as `php artisan test --testsuite=Browser --fail-on-empty-test-suite` |
+| `<<mroom_version>>` | the mroom release whose actions the deploy uses, such as `v0.6.0` (the one `mroom init` runs as) |
+| `<<fill:backend_origin>>` | the Laravel app's production origin, such as `https://api.shop.example.dev` |
+| `<<fill:frontend_origin>>` | a separate SPA's production origin, whose `/version.json` the deploy also waits on; empty for none |
+| `<<fill:tag_pattern>>` | the release tags, as a bash regular expression, such as `^v[0-9]+\.[0-9]+\.[0-9]+$` |
+
+### The production deploy
+
+`workflows/deploy-production.yml` ships a release tag, never a branch tip, and waits until production runs it
+([design section 10](docs/design.md#10-cicd-defaults-measured), patterns 8 to 10). Publishing a GitHub release
+starts it; a person deploys another tag, a rollback included, with
+`gh workflow run deploy-production.yml --ref <tag>`. The run takes no input: the tag is the ref it runs for.
+
+- **`release`**, in the GitHub environment `production`: checks out the tag with the deploy key, and
+  `scripts/release-branch.sh` points the `release` branch at the tag's commit. It refuses a run that is not from a
+  tag matching `<<fill:tag_pattern>>`, a release whose tag is not the run's, and a tag whose commit is not on the
+  default branch. The branch moves forward for a release, back for a rollback (with a warning), or stays for a
+  re-run; when someone else moved it (to a commit off the default branch, or neither before nor after the tag),
+  the job stops for a person. Then, when `MROOM_DEPLOY_HOOK` is set, it calls the host's deploy hook. This job
+  builds and installs nothing, and runs no action but `actions/checkout`, since it holds the key.
+- **`verify`**, with no environment and no secret: `deploy-verify` asks `app.version_path` (and a separate
+  SPA's `/version.json`) with a query no cache has seen, every 10 seconds, until each reports the tag's commit
+  three times in a row with `/up` answering 200, and fails after 10 minutes. A fixed sleep and a health ping
+  pass when the host's deploy failed, since the old release answers too; the commit cannot. When the app names
+  another release for the right commit (two tags on one commit, or no tag found), it warns and still passes.
+- **One deploy at a time:** the whole run takes the group `deploy-production` and never cancels one in
+  progress, so a second deploy waits until the first is verified.
+
+What the app sets up once:
+
+1. **The version endpoint** (design section 9): `app.version_path` answers `{"release": "<tag>", "commit":
+   "<sha>"}` with `Cache-Control: no-store`, from a file the host's deploy script writes from the code it
+   checked out (`git describe --tags --exact-match`, `git rev-parse HEAD`), never from config set separately.
+   A separate SPA's build writes the same to `version.json`.
+2. **The host deploys `release`:** the Forge site's branch is `release`, with Quick Deploy on, or Quick Deploy off
+   and the site's deploy hook URL in the `production` secret `MROOM_DEPLOY_HOOK` (one or the other: with both, it
+   deploys twice). A separate SPA's host deploys the same branch, or the app adds a job of its own between
+   `release` and `verify` that builds the tag. The deploy script restarts the workers and clears caches, so a
+   rollback runs the old code.
+3. **A deploy key** with write access (`ssh-keygen -t ed25519 -N '' -f release-key`; Settings, Deploy keys, Allow
+   write access), its private half in the `production` secret `MROOM_RELEASE_KEY`, and no other deploy key with
+   write access.
+4. **The GitHub environment `production`:** deployment branches and tags limited to tags matching the release
+   tags (such as `v*`), required reviewers who are people, and "Prevent self-review", so each deploy is approved
+   by a person other than the one who started it (design 8.8, D22).
+5. **A ruleset on `release`** (target `refs/heads/release`): restrict creations, updates and deletions, and block
+   force pushes, with deploy keys as the only bypass. Without it, any account with Write, the agents' included,
+   could push the branch production deploys.
+6. **Who may create release tags:** a tag ruleset, so that only people can make one. The environment admits any
+   tag that matches, and the workflow file at that tag is the one that runs with the deploy key.
+
+A re-run of the same tag leaves the branch where it is: Quick Deploy then deploys nothing and `verify` passes at
+once, while a deploy hook deploys again.
+
+`actions/deploy-verify` can also be used on its own, from any job after a deploy: its inputs are `origin`,
+`frontend-origin`, `commit` (the full SHA), `tag`, `health-path` (`/up`; empty for none), `timeout` (`10m`),
+`interval` (`10s`) and `config` (the app's `mroom.toml`, for `app.version_path`).
 
 ## Regression label
 

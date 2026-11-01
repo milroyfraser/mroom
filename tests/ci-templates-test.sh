@@ -162,7 +162,8 @@ t_the_vitest_reporter_writes_each_files_phases() {
 # render_all <example>: renders every template from examples/<example>/mroom.toml into $T/<example>.
 render_all() {
   local file rel
-  for file in "$TPL"/workflows/*.yml "$TPL"/actions/*/action.yml; do
+  # The production deploy renders in tests/deploy-test.sh.
+  for file in "$TPL"/workflows/ci-*.yml "$TPL"/actions/*/action.yml; do
     rel="${file#"$TPL"/}"
     mkdir -p "$T/$1/$(dirname "$rel")"
     run python3 "$RENDER" "$file" "$ROOT/examples/$1/mroom.toml" node_version=22 backend_static_checks="vendor/bin/pint --test" \
