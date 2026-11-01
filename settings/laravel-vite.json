@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(php artisan test:*)",
+      "Bash(php artisan route:list:*)",
+      "Bash(php artisan make:*)",
+      "Bash(php artisan list:*)",
+      "Bash(php artisan about:*)",
+      "Bash(php artisan db:show:*)",
+      "Bash(composer install:*)",
+      "Bash(composer dump-autoload:*)",
+      "Bash(composer test:*)",
+      "Bash(vendor/bin/pint:*)",
+      "Bash(vendor/bin/pest:*)",
+      "Bash(vendor/bin/phpstan:*)",
+      "Bash(pnpm install:*)",
+      "Bash(pnpm test:*)",
+      "Bash(pnpm build:*)",
+      "Bash(pnpm typecheck:*)",
+      "Bash(pnpm lint:*)",
+      "Bash(pnpm fix:*)",
+      "Bash(pnpm eslint:*)",
+      "Bash(npm ci:*)",
+      "Bash(npm install:*)",
+      "Bash(npm test:*)",
+      "Bash(npm run test:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm run lint:*)"
+    ],
+    "ask": [
+      "Bash(php artisan migrate:*)",
+      "Bash(php artisan config:show:*)",
+      "Bash(php artisan db:wipe:*)",
+      "Bash(php artisan db:seed:*)",
+      "Bash(php artisan tinker:*)"
+    ]
+  }
+}

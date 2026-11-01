@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(forge-api GET:*)"
+    ],
+    "deny": [
+      "Bash(forge:*)",
+      "Bash(cat ~/.forge-token)",
+      "Read(~/.forge-token)",
+      "Read(~/.laravel-forge/**)",
+      "Read(~/.config/forge/**)"
+    ]
+  }
+}
