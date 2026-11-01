@@ -11,7 +11,7 @@
 #   MROOM_SANDBOX_KNOWN_HOSTS  pinned SSH host key lines for the holder's wrapper; root-owned, so not even the holder
 #                              can change which host it trusts
 #   MROOM_SANDBOX_COPY         paths below the current folder, one per line, copied root-owned and read-only into
-#                              /opt/mroom-sandbox at the same relative path (a harness and the packages it loads)
+#                              /usr/lib/mroom-sandbox/copies at the same relative path (a harness and the packages it loads)
 #   MROOM_SANDBOX_PATH         absolute folders, one per line, put first on the step's PATH (node's, for example)
 #   MROOM_SANDBOX_ENV          NAME=value lines the step gets; never a credential (common.sh refuses those names)
 #   MROOM_SANDBOX_EPHEMERAL    1 on a self-hosted runner that is thrown away after the job; refused otherwise
@@ -24,7 +24,7 @@
 #                   /usr/lib/mroom-sandbox/holder, a root-owned copy of MROOM_SANDBOX_HOLDER.
 #   the runner's PATH  no folder on it left writable by other users (GitHub's images leave /usr/local/bin
 #                   open to all), or a step could put a `git` there that the runner's next step runs
-#   /opt/mroom-sandbox             the copies, root-owned
+#   /usr/lib/mroom-sandbox/copies             the copies, root-owned
 #   /var/lib/mroom-sandbox/inputs  written by the runner (mroom-step --input), read-only to the step
 #   /var/lib/mroom-sandbox/evidence  written by the step, read by the runner afterwards
 # The runner may run anything as mroom-step and only the wrapper as mroom-holder; mroom-step only the wrapper.
@@ -38,7 +38,7 @@ HERE="$(dirname "$SELF")"
 . "$HERE/common.sh"
 LIB="$SANDBOX_LIB"
 
-die() { echo "runner-sandbox: $*" >&2; exit "${2:-2}"; }
+die() { echo "runner-sandbox: $1" >&2; exit "${2:-2}"; }
 
 secret="${MROOM_SANDBOX_SECRET:-}" holder="${MROOM_SANDBOX_HOLDER:-}" known="${MROOM_SANDBOX_KNOWN_HOSTS:-}"
 copies=() paths=() envs=() line="" why=""
@@ -87,7 +87,7 @@ if [ "${RUNNER_ENVIRONMENT:-}" = self-hosted ] && [ "${MROOM_SANDBOX_EPHEMERAL:-
   die "a self-hosted runner keeps the sandbox's users, secret and sudoers after the job; set MROOM_SANDBOX_EPHEMERAL=1 only on one thrown away after it" 1
 fi
 [ ! -e "$SANDBOX_SUDOERS" ] || die "already set up on this runner ($SANDBOX_SUDOERS exists); a sandbox is set up once" 1
-[ ! -e "$SANDBOX_OPT" ] || die "$SANDBOX_OPT exists already" 1
+[ ! -e "$LIB" ] || die "$LIB exists already" 1
 command -v visudo >/dev/null || die "visudo is missing" 1
 
 # --- Users, and the runner's home closed ---
@@ -104,7 +104,9 @@ chmod 0700 "$home"
 
 IFS=: read -ra runner_path <<<"/usr/local/bin:/usr/local/sbin:${MROOM_SANDBOX_RUNNER_PATH:-}"
 for dir in "${runner_path[@]}"; do
-  [[ "$dir" == /* && -d "$dir" && ! -L "$dir" ]] || continue
+  [[ "$dir" == /* && -d "$dir" ]] || continue
+  # A link's own mode is 777; what counts is the folder it leads to.
+  dir="$(readlink -f "$dir")"
   if [ -n "$(find "$dir" -maxdepth 0 -perm -o+w)" ]; then
     chmod o-w "$dir"
     echo "runner-sandbox: $dir was writable by every user; closed (o-w)" >&2
@@ -163,6 +165,7 @@ if [ -n "$secret" ]; then held="readable by $SANDBOX_HOLDER_USER only"; else hel
 runner_uid="$(id -u "$runner")" runner_gid="$(id -g "$runner")"
 for path in "$LIB" "$SANDBOX_ETC" "$SANDBOX_OPT" "$SANDBOX_VAR" "$(dirname "$SANDBOX_STEP_BIN")" "${runner_path[@]}"; do
   [[ "$path" == /* && -e "$path" ]] || continue
+  path="$(readlink -f "$path")"
   while :; do
     read -r owner group mode <<<"$(stat -c '%u %g %a' "$path")"
     if [ "$owner" != 0 ] && [ "$owner" != "$runner_uid" ]; then die "$path is owned by uid $owner, which the step might be" 1; fi

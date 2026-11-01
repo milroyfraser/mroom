@@ -55,17 +55,17 @@ EOF
   expect_true "the runner reads the step's evidence" [ "$(cat /var/lib/mroom-sandbox/evidence/result.txt)" = found ]
 
   expect_true "no folder on the runner's PATH is left writable by all" \
-    [ -z "$(IFS=:; for d in $PATH; do [ -d "$d" ] && find "$d" -maxdepth 0 -perm -o+w; done)" ]
+    [ -z "$(IFS=:; for d in $PATH; do [ -d "$d" ] && find -H "$d" -maxdepth 0 -perm -o+w; done)" ]
   expect_true "the secret is the holder's, mode 600" [ "$(sudo stat -c '%U %a' /etc/mroom-sandbox/holder/secret)" = "mroom-holder 600" ]
   run cat /etc/mroom-sandbox/holder/secret
   expect_rc 1
   # (The runner's own sudo is GitHub's, to anything; the runner is trusted code. The step is not.)
   run mroom-step -- sudo -n -u mroom-holder cat /etc/mroom-sandbox/holder/secret
   expect_true "the step gets nothing but the wrapper as the holder" [ "$rc" != 0 ]
-  expect_true "the copy is root's" [ "$(stat -c %U /opt/mroom-sandbox/harness/drive.mjs)" = root ]
-  expect_true "a link in the copy stays a link" [ -L /opt/mroom-sandbox/harness/lib/shadow ]
+  expect_true "the copy is root's" [ "$(stat -c %U /usr/lib/mroom-sandbox/copies/harness/drive.mjs)" = root ]
+  expect_true "a link in the copy stays a link" [ -L /usr/lib/mroom-sandbox/copies/harness/lib/shadow ]
   expect_true "root's chown never followed it" [ "$(stat -c '%U:%G %a' /etc/shadow)" = "root:shadow 640" ]
-  run mroom-step -- cat /opt/mroom-sandbox/harness/lib/shadow
+  run mroom-step -- cat /usr/lib/mroom-sandbox/copies/harness/lib/shadow
   expect_true "the step cannot read through it" [ "$rc" != 0 ]
 
   run sudo -E "$RS/sandbox.sh"

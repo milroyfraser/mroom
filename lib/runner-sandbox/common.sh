@@ -14,12 +14,13 @@ SANDBOX_STEP_USER=mroom-step
 SANDBOX_HOLDER_USER=mroom-holder
 SANDBOX_ETC="${MROOM_SANDBOX_ETC:-/etc/mroom-sandbox}"
 SANDBOX_VAR="${MROOM_SANDBOX_VAR:-/var/lib/mroom-sandbox}"
-SANDBOX_OPT=/opt/mroom-sandbox
 # The scripts and the holder's wrapper live under /usr/lib, which the distribution keeps root's: on GitHub's images
 # /usr/local/bin is writable by every user, and a step could swap a file there for its own.
 SANDBOX_LIB=/usr/lib/mroom-sandbox
 SANDBOX_STEP_BIN=/usr/local/bin/mroom-step
 SANDBOX_HOLDER_BIN=$SANDBOX_LIB/holder
+# The copies: not under /opt, which GitHub's images leave writable by every user.
+SANDBOX_OPT=$SANDBOX_LIB/copies
 SANDBOX_SUDOERS=/etc/sudoers.d/mroom-sandbox
 
 # A variable name that reads like a credential. step-env refuses such a name, and the probe counts one in the

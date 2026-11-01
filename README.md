@@ -1464,11 +1464,11 @@ a self-hosted runner unless `MROOM_SANDBOX_EPHEMERAL=1` says the runner is throw
   with:
     holder: .mroom/qa-box.sh           # the trusted wrapper that uses the secret
     known-hosts: ${{ vars.QA_SSH_KNOWN_HOSTS }}
-    copy: harness                      # root-owned, read-only in /opt/mroom-sandbox/harness
+    copy: harness                      # root-owned, read-only in /usr/lib/mroom-sandbox/copies/harness
     path: /opt/node/bin                # node's folder, outside the runner's home
     step-env: |
       QA_SITE=https://12.qa.example.dev
-- run: mroom-step --input recipe.mjs -- node /opt/mroom-sandbox/harness/drive.mjs inputs/recipe.mjs
+- run: mroom-step --input recipe.mjs -- node /usr/lib/mroom-sandbox/copies/harness/drive.mjs inputs/recipe.mjs
 ```
 
 What the step (user `mroom-step`, run through `mroom-step`) gets and does not:

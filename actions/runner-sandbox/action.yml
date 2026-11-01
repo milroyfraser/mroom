@@ -14,7 +14,7 @@ inputs:
     description: Pinned SSH host key lines ("<host> <type> <key>") for the holder's wrapper, root-owned
     default: ""
   copy:
-    description: Paths below the working directory, one per line, copied root-owned and read-only into /opt/mroom-sandbox
+    description: Paths below the working directory, one per line, copied root-owned and read-only into /usr/lib/mroom-sandbox/copies
     default: ""
   path:
     description: Absolute folders, one per line, put first on the step's PATH (such as node's)
