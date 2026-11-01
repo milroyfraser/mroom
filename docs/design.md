@@ -65,9 +65,10 @@ Commits do not show a person's work, because agents make almost all of them.
   against the description), works in a worktree whose branch names both ids, and reproduces the error with a failing
   test before it fixes it. It links the error issue to the fix through the repository's SCM integration: a
   `Fixes <id>` line on the fixing commit, which reaches the default branch in a merge commit, or in a squash merge
-  that keeps the commits' messages. The error tracker links the commit as soon as it is pushed, but resolves the
-  issue only when a release that contains the commit has its commits attached, which is why the deploy template
-  attaches them (phase 4). Principle skills named at the step that needs them.
+  that keeps the commits' messages, and the same line in the PR body, for a squash merge that uses it. The error
+  tracker links the commit as soon as it is pushed, but resolves the issue only when a release that contains the
+  commit has its commits attached, which is why the deploy template attaches them (phase 4). Principle skills named at
+  the step that needs them.
 - **Guardrails**: agents never merge, approve, deploy, release or read secrets; enforced by a command parser,
   not only prefix rules, and gated by GitHub, where only people's approvals count and a person approves each
   deploy (D22).
@@ -263,6 +264,8 @@ id_pattern = "SHOP-[0-9]+"         # worktree slugs, PR title scopes, issue link
 url = "https://linear.app/<workspace>/issue/{id}"
 team = "SHOP"                      # where the tracker adapter files new issues (Linear: the team's key)
 token_env = "LINEAR_API_KEY"       # the environment variable with the tracker's token (the default)
+state_started = "In Progress"      # the state /implement moves an issue to when work starts (the default)
+state_review = "In Review"         # the state it moves the issue to when the PR is ready (the default)
 
 [errors]
 provider = "sentry"                # leave the table out for no error tracker
@@ -273,6 +276,10 @@ token_env = "SENTRY_AUTH_TOKEN"    # the environment variable with the error tra
 
 [pr]
 required_checks = ["test", "lint", "unit-tests", "e2e", "check-title"]
+
+[release]
+production_url = "https://app.example.dev"   # /release reads app.version_path here after a deploy, read-only
+tag_prefix = ""                    # before the version in a release's tag ("release-" gives release-v1.2.3)
 
 [qa]
 zone = "<qa-zone>"                 # api.<PR>.<zone> (the Laravel app), <PR>.<zone> (a frontend of its own)
@@ -317,8 +324,9 @@ agrees; `mroom config keys` shows it.
 | `app.version_path` | never: optional | `/version`, mroom's own (phase 2a) |
 | `qa.max_envs`, `qa.env_memory_mb` | never: optional | `5` and `1024`, mroom's own (phase 2a) |
 | other `qa.*` (`qa.db_read_allowlist` has no default, ever; section 8.6) | phase 2 decides | phase 2 decides; `qa.parity.*` defaults to the values above |
-| `issues.*` | none (phase 3) | `issues.tracker`: none; `issues.token_env`: `LINEAR_API_KEY`; `issues.team` has no default, and only `create` needs it |
+| `issues.*` | none (phase 3) | `issues.tracker`: none; `issues.token_env`: `LINEAR_API_KEY`; `issues.state_started`: In Progress; `issues.state_review`: In Review; `issues.team` has no default, and only `create` needs it |
 | `errors.*` | none (phase 3) | none: without the table there is no error tracker; `errors.region`: us; `errors.token_env`: `SENTRY_AUTH_TOKEN`; `errors.org` has no default, and every call needs it |
+| `release.*` | none (phase 3) | `release.tag_prefix`: none; without `release.production_url`, `/release` skips its version check |
 | `pr.required_checks` | phase 4 decides | phase 4 decides |
 | `persona.*`, `github.agent_login` | none (phase 5) | `persona.name`: Agent; `persona.chat_users`: `.github/chat-users.json`; without `persona.channel` no pings go out; without `github.agent_login` an agent's pull request pings that account's developer only |
 
@@ -335,6 +343,9 @@ agrees; `mroom config keys` shows it.
   no query, since the checks add their own (section 10).
 - `tests.database_pattern` contains `{slug}`, so each worktree gets its own database.
 - `issues.url` contains `{id}`.
+- `issues.state_started` and `issues.state_review` are a state's name (letters, digits, spaces, `-` and `_`).
+  `release.production_url` is an `https://` origin with no path, `release.tag_prefix` empty or lowercase
+  letters, digits and `-`.
 - `issues.team` and `errors.org` are plain words (a team key, an organisation slug). Each `token_env` names a
   variable ending in `_TOKEN` or `_API_KEY`, never one of mroom's, GitHub's, a cloud's or a host's (`MROOM_*`,
   `GH_*`, `GITHUB_*`, `AWS_*`, `FORGE_*`, `SSH_*`), and the two differ.
@@ -392,7 +403,7 @@ Shell function interfaces in `lib/core/`, chosen by config. v1 implements the fi
 
 | Adapter | Functions | v1 | Later |
 |---|---|---|---|
-| tracker | `issue_get`, `issue_comment`, `issue_set_state`, `issue_create` (only with `--allow-create`); with the skills that need them: `issue_comment_upsert`, `issue_find_by_marker`, `issue_owned_by_bot`, `attach_image` | Linear; `none` (notes on the PR, images as artifact links) | GitHub Issues (search over hidden markers must be verified first) |
+| tracker | `issue_get`, `issue_list` (`--mine` or `--label`), `issue_comment`, `issue_set_state`, `issue_create` (only with `--allow-create`); with the skills that need them: `issue_comment_upsert`, `issue_find_by_marker`, `issue_owned_by_bot`, `attach_image` | Linear; `none` (notes on the PR, images as artifact links) | GitHub Issues (search over hidden markers must be verified first) |
 | chat | `chat_post`, `chat_update`, `chat_mention <github-login or commit email>` | Slack (bot token, `chat:write`) | Discord or Teams webhooks |
 | errors | `errors_issue_get`, `errors_search`, `errors_issue_resolve`; with the persona (phase 5): `errors_new_since`, `errors_count_for_release`, `errors_crons_failing` | Sentry (org, region from config), optional | |
 | host | `host_sites`, `host_site_create`, `host_daemon_*`, `host_jobs_*`, `host_cert_*`, `host_deploy` | Forge v2 (one client: retries, 429, pagination) | |
@@ -404,6 +415,24 @@ write that does the same thing twice, never another 4xx). Each token comes from 
 environment variable its `token_env` names, never from a file, and each host is fixed (`api.linear.app`,
 `<region>.sentry.io`). With `issues.tracker = "none"` or no `[errors]` table, every function returns 3, so a
 skill falls back to the pull request.
+
+The workflow skills (`plugin/skills/`: refine, deliver, implement, fix-issue, release, correct, forge)
+reach the trackers only through these two commands, never an API or an MCP server of their own. Each
+writes to the tracker only the state of the issue it works and comments on it, and asks a person before
+it files an issue. A design waiting for approval is a comment (`Design for review: <link>`, then
+`Design approved by <name>: <link>`), not a label. `tests/skills-test.sh` checks each skill against this
+contract.
+
+`issue_find_by_marker` (`mroom tracker find <key>`) lists the issues whose description holds the
+persona's hidden marker for an alert, `<!-- mroom-alert key=<provider>:<numeric id> -->`, with
+`:<kind>:...` after the id for a later alert (phase 5 writes it). The tracker's search is a substring
+match, so the adapter checks each description again and keeps an issue only when the marker ends there
+or goes on with `:`. It reads archived issues too. Phase 5 must check that the tracker keeps the marker
+in a description it stores, the way GitHub Issues must be checked first. `/fix-issue` reads it, and
+makes no tracker write beyond the state and comments of that issue. `issue_comment_upsert`,
+`issue_owned_by_bot` and `attach_image` wait for the persona (phase 5) and browser QA (phase 2b).
+The tracker's own SCM integration may read a `Fixes` line too, so an error tracker's project prefix
+should not be a tracker team's key.
 
 `errors_issue_get` gives an error issue with its latest event, its counts and its first release.
 `errors_issue_resolve` needs a token with write access, which only the persona's own profile or a person holds

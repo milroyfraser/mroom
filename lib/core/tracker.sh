@@ -1,8 +1,9 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2016  # GraphQL variables ($id) are not the shell's
-# tracker.sh — the tracker adapter (design section 7): read an issue, comment on it, set its state, and
-# create one, on the tracker mroom.toml names (issues.tracker). Sourced after api.sh by lib/tracker, never
-# run on its own; needs bash 5, curl, jq and python3 3.11. The caller sets MROOM_ROOT.
+# tracker.sh — the tracker adapter (design section 7): read an issue, list issues, find the issues
+# that hold an alert's marker, comment on one, set its state, and create one, on the tracker
+# mroom.toml names (issues.tracker). Sourced after api.sh by lib/tracker, never run on its own; needs
+# bash 5, curl, jq and python3 3.11. The caller sets MROOM_ROOT.
 #
 # v1 backends: linear, and none (no tracker: every operation returns 3, so a skill leaves its note on the
 # pull request instead). Each function takes the command line's words and prints JSON on stdout.
@@ -122,12 +123,13 @@ linear_gql() {
   cat "$API_TMP/body"
 }
 
-# linear_nodes <query> <variables json> <path>: every node of a paginated connection, one per line. The
-# query takes $after and asks for the connection's nodes and pageInfo { hasNextPage endCursor }; <path>
-# is where the connection is in the answer, such as .data.issue.comments. Fails on a page with no
-# connection, and after TRACKER_MAX_PAGES pages, so an API blip never reads as a shorter list.
+# linear_nodes <query> <variables json> <path> [<limit>]: every node of a paginated connection, one per
+# line, or the first <limit>. The query takes $after and asks for the connection's nodes and pageInfo
+# { hasNextPage endCursor }; <path> is where the connection is in the answer, such as
+# .data.issue.comments. Fails on a page with no connection, and after TRACKER_MAX_PAGES pages, so an API
+# blip never reads as a shorter list.
 linear_nodes() {
-  local query="$1" vars="$2" path="$3" after="" page pages=0 conn v next
+  local query="$1" vars="$2" path="$3" limit="${4:-0}" after="" page pages=0 conn v next seen=0
   while :; do
     pages=$((pages + 1))
     ((pages <= TRACKER_MAX_PAGES)) || { tracker_say "more than $TRACKER_MAX_PAGES pages at $path"; return 1; }
@@ -138,7 +140,13 @@ linear_nodes() {
       tracker_say "Linear: the answer holds no list at $path"
       return 1
     fi
-    jq -c '.nodes[]' <<<"$conn"
+    if [ "$limit" -gt 0 ]; then
+      jq -c --argjson n "$((limit - seen))" '.nodes[:$n][]' <<<"$conn"
+      seen=$((seen + $(jq '.nodes | length' <<<"$conn")))
+      [ "$seen" -lt "$limit" ] || return 0
+    else
+      jq -c '.nodes[]' <<<"$conn"
+    fi
     jq -e '.pageInfo.hasNextPage == true' <<<"$conn" >/dev/null || return 0
     next="$(jq -r '.pageInfo.endCursor // empty' <<<"$conn")"
     [ -n "$next" ] || { tracker_say "Linear: a next page with no cursor at $path"; return 1; }
@@ -148,8 +156,8 @@ linear_nodes() {
 }
 
 # An issue's first 50 labels: more on one issue is not a case worth a second query.
-LINEAR_ISSUE='id identifier title description url priority priorityLabel createdAt updatedAt
-  state { id name type } team { id key } creator { name } assignee { name } labels(first: 50) { nodes { name } }'
+LINEAR_ISSUE='id identifier title description url branchName priority priorityLabel createdAt updatedAt
+  state { id name type } team { id key } creator { name } assignee { name isMe } labels(first: 50) { nodes { name } }'
 
 # linear_issue <id>: the issue's fields (LINEAR_ISSUE) as JSON. Fails when there is no such issue.
 linear_issue() {
@@ -185,8 +193,10 @@ linear_issue_get() {
     "$(jq -nc --arg id "$1" '{id: $id}')" .data.issue.comments)" || return 1
   # The issue first, then its comments, on stdin: a long description must not become an argument.
   printf '%s\n%s\n' "$issue" "$comments" | jq -sc '.[0] as $i | .[1:] |
-    {identifier: $i.identifier, title: $i.title, url: $i.url, state: $i.state.name, state_type: $i.state.type,
+    {identifier: $i.identifier, title: $i.title, url: $i.url, branch: $i.branchName,
+     state: $i.state.name, state_type: $i.state.type,
      team: $i.team.key, priority: $i.priority, creator: $i.creator.name, assignee: $i.assignee.name,
+     assigned_to_me: ($i.assignee.isMe // false),
      labels: [$i.labels.nodes[].name], created_at: $i.createdAt, updated_at: $i.updatedAt,
      description: ($i.description // ""),
      comments: ([.[] | select(. != null) | {by: (.user.name // "an integration"), at: .createdAt, body}] | sort_by(.at))}' \
@@ -220,6 +230,48 @@ linear_issue_set_state() {
     "$(jq -nc --arg i "$(jq -r .id <<<"$issue")" --arg s "$state" '{i: $i, s: $s}')")" || return 1
   jq -e '.data.issueUpdate.success == true' <<<"$answer" >/dev/null || { tracker_say "Linear did not change the state"; return 1; }
   jq -c '.data.issueUpdate.issue | {identifier, state: .state.name, changed: true}' <<<"$answer"
+}
+
+# linear_issue_list <mine 0|1> <open 0|1> <label or ""> <limit>: the <limit> most recently updated issues, in
+# issues.team when it is set, as one JSON list sorted by priority (urgent first, none last), then the most
+# recently updated first. An issue older than the first <limit> is not in the list.
+linear_issue_list() {
+  local mine="$1" open="$2" label="$3" limit="$4" team_key filter nodes
+  team_key="$(tracker_config issues.team --optional)" || return 1
+  linear_auth || return 1
+  filter="$(jq -nc --arg team "$team_key" --arg label "$label" --argjson mine "$mine" --argjson open "$open" '
+    {} + (if $team == "" then {} else {team: {key: {eq: $team}}} end)
+       + (if $mine == 1 then {assignee: {isMe: {eq: true}}} else {} end)
+       + (if $open == 1 then {state: {type: {nin: ["completed", "canceled"]}}} else {} end)
+       + (if $label == "" then {} else {labels: {some: {name: {eqIgnoreCase: $label}}}} end)')" || return 1
+  nodes="$(linear_nodes 'query($f: IssueFilter, $after: String) { issues(first: 50, after: $after, filter: $f, orderBy: updatedAt) { nodes { identifier title url branchName priority updatedAt state { name type } assignee { name } labels(first: 50) { nodes { name } } } pageInfo { hasNextPage endCursor } } }' \
+    "$(jq -nc --argjson f "$filter" '{f: $f}')" .data.issues "$limit")" || return 1
+  printf '%s\n' "$nodes" | jq -sc '[.[] | select(. != null) |
+    {identifier, title, url, branch: .branchName, state: .state.name, state_type: .state.type, priority,
+     assignee: .assignee.name, labels: [.labels.nodes[].name], updated_at: .updatedAt}]
+    | sort_by(.updated_at) | reverse | sort_by(if .priority == 0 then 5 else .priority end)' \
+    || { tracker_say "Linear: the issues could not be read"; return 1; }
+}
+
+# linear_issue_find <marker>: the issues, in issues.team when it is set, whose description holds the marker.
+# Linear's search is a plain substring match, so the marker for sentry:10 also finds sentry:1001's issues:
+# each description is checked again here, and kept only when the marker ends there (" -->"), or goes on
+# with a later alert's ":". One JSON list, the issue filed first at the top. Every page is read, archived
+# issues too, so the oldest is never cut off.
+linear_issue_find() {
+  local marker="$1" team_key filter nodes
+  team_key="$(tracker_config issues.team --optional)" || return 1
+  linear_auth || return 1
+  filter="$(jq -nc --arg team "$team_key" --arg m "$marker" '{description: {contains: $m}}
+    + (if $team == "" then {} else {team: {key: {eq: $team}}} end)')" || return 1
+  nodes="$(linear_nodes 'query($f: IssueFilter, $after: String) { issues(first: 50, after: $after, filter: $f, orderBy: createdAt, includeArchived: true) { nodes { identifier title url branchName description createdAt state { name type } creator { name } labels(first: 50) { nodes { name } } } pageInfo { hasNextPage endCursor } } }' \
+    "$(jq -nc --argjson f "$filter" '{f: $f}')" .data.issues)" || return 1
+  printf '%s\n' "$nodes" | jq -sc --arg m "$marker" '[.[] | select(. != null)
+    | select((.description // "") as $d | ($d | contains($m + " -->")) or ($d | contains($m + ":")))
+    | {identifier, title, url, branch: .branchName, state: .state.name, state_type: .state.type,
+       creator: .creator.name, labels: [.labels.nodes[].name], created_at: .createdAt}]
+    | sort_by(.created_at)' \
+    || { tracker_say "Linear: the issues could not be read"; return 1; }
 }
 
 # linear_issue_create <title> <state name or ""> <priority or ""> <label...>: a new issue in issues.team.
@@ -274,6 +326,60 @@ issue_get() {
   case "$backend" in
     none) tracker_none "read an issue" ;;
     linear) tracker_id_ok "$1" || return; linear_issue_get "$1" ;;
+  esac
+}
+
+# issue_list [--mine] [--open] [--label <name>] [--limit <n>]: issues in issues.team (or the whole
+# workspace when it is not set): --mine those assigned to the token's user, --open those not done or
+# canceled, --label those with that label (any case). The --limit most recently updated (50 by default,
+# 250 at most), then sorted by priority.
+issue_list() {
+  local mine=0 open=0 label="" limit=50 backend
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --mine) mine=1; shift ;;
+      --open) open=1; shift ;;
+      --label | --limit)
+        if [ "$#" -lt 2 ] || [[ "$2" == --* ]]; then tracker_say "$1 takes a value"; return 2; fi
+        if [ "$1" = --label ]; then label="$2"; else limit="$2"; fi
+        shift 2 ;;
+      *) tracker_say "list: unknown option '$1'"; return 2 ;;
+    esac
+  done
+  if [ "$mine" = 0 ] && [ -z "$label" ]; then
+    tracker_say "list needs --mine or --label, so it never reads a whole backlog"
+    return 2
+  fi
+  if ! [[ "$limit" =~ ^[1-9][0-9]{0,2}$ ]] || [ "$limit" -gt 250 ]; then
+    tracker_say "--limit is 1 to 250"
+    return 2
+  fi
+  if [ -n "$label" ] && { [ "${#label}" -gt 80 ] || [[ "$label" == *[[:cntrl:]]* ]]; }; then
+    tracker_say "the --label is too long or holds a control character"
+    return 2
+  fi
+  backend="$(tracker_backend)" || return 1
+  case "$backend" in
+    none) tracker_none "list issues in" ;;
+    linear) linear_issue_list "$mine" "$open" "$label" "$limit" ;;
+  esac
+}
+
+# issue_find_by_marker <key>: the issues whose description holds the persona's hidden marker for an alert
+# key, `<!-- mroom-alert key=<key> -->` (a later alert adds `:<kind>:...` after the key). The key is the
+# error tracker's name and the error issue's numeric id, such as sentry:1001. Every state, archived too,
+# the oldest first; an empty list when none holds it.
+issue_find_by_marker() {
+  [ "$#" = 1 ] || { tracker_say "usage: find <alert key, such as sentry:1001>"; return 2; }
+  [[ "$1" =~ ^[a-z][a-z0-9_-]{0,31}:[0-9]{1,20}$ ]] || {
+    tracker_say "not an alert key (the error tracker and the error issue's numeric id, such as sentry:1001): ${1:0:80}"
+    return 2
+  }
+  local backend
+  backend="$(tracker_backend)" || return 1
+  case "$backend" in
+    none) tracker_none "find an issue in" ;;
+    linear) linear_issue_find "<!-- mroom-alert key=$1" ;;
   esac
 }
 
