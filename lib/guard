@@ -58,8 +58,13 @@
 #
 # Refused on purpose, though they can be harmless: setting a git key that runs a command (`git config
 # core.editor vim`; `git -c` checks the value instead, since it lasts one command), opening or editing a secret
-# (`vim .env`, `sed -i ... .env`), loading one (`node --env-file=.env`), and httpie to api.github.com without
-# an explicit GET or HEAD (it sends its stdin as the body).
+# (`vim .env`, `sed -i ... .env`), loading one (`node --env-file=.env`), httpie to api.github.com without
+# an explicit GET or HEAD (it sends its stdin as the body), and some spellings bash may read differently
+# from the tokeniser, which would let a line after them run unchecked (the tokeniser's header lists them):
+# an unusual heredoc (`<<'E O F'`, $( in an unquoted one's text, one inside backquotes), a <<, # or quote
+# inside $((...)), ((...)), $[...], ${...}, [...], backquotes or an extglob pattern (`echo $((1<<20))`),
+# a backslash-newline right after $, ( or <, and the bytes \033 to \037. The tokeniser is not bash, so
+# other differences may remain.
 #
 # Allowed on purpose: reading code, every `gh api` GET (including GET .../pulls/N/merge, which only
 # asks "is it merged?"), gh pr view/list/checks/create/edit/comment, `gh release create/edit` (an
@@ -1742,6 +1747,12 @@ analyze() {
   PARSES=$((PARSES + 1))
   [ "$PARSES" -le "$MAX_PARSES" ] || { block "the command holds more than $MAX_PARSES commands to check inside it, too many to check in time"; return; }
   out=$(printf '%s' "$s" | "$AWK" -f "$TOKENIZER") || status=$?
+  if [ "$status" = 3 ]; then
+    # Where bash would end a heredoc, or start one, a comment or a quote, cannot be told here (see the
+    # tokeniser's header for the list).
+    block "bash may read it differently from the guard: write a heredoc with a plain end word in quotes ('EOF'), outside backquotes, with no \$( or \` in the text of an unquoted one, and keep <<, #, quotes and bare ( ) out of \$((...)), ((...)), \$[...], \${...}, [...], backquotes and extglob patterns"
+    return
+  fi
   if [ "$status" != 0 ]; then
     block "the command could not be parsed to check it"
     return
@@ -1774,6 +1785,10 @@ if [ ! -r "$TOKENIZER" ]; then
   block "its tokeniser ($TOKENIZER) is missing"
 elif [ "${#command}" -gt "$MAX_BYTES" ]; then
   block "the command is over $MAX_BYTES bytes, too long to check in time"
+elif [[ $command == *[$'\033\034\035\036\037']* ]]; then
+  # The tokeniser uses these bytes as its own markers and newline (\035), so one in the command would split
+  # a line, or end a heredoc, where bash does not.
+  block "it holds a control byte (\\033 to \\037) the guard uses as its own marker"
 else
   analyze "$command" 0
 fi
