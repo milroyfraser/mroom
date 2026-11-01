@@ -330,7 +330,8 @@ def check(path: str, data: dict) -> tuple[list[tuple[str, str]], list[str]]:
                 continue
             hint = difflib.get_close_matches(key, SCHEMA.keys(), n=1)
             tip = f"; did you mean {hint[0]}?" if hint else ""
-            warnings.append(f"unknown key {key} (ignored){tip}")
+            # As JSON: a quoted key can hold escape characters and line breaks, which must not reach a terminal.
+            warnings.append(f"unknown key {json.dumps(key)} (ignored){tip}")
             continue
         kind = SCHEMA[key][0]
         problem = type_error(key, kind, value) or rule_error(key, value)

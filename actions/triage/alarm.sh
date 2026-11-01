@@ -7,8 +7,8 @@
 # which, links the run and the day's issue, and ends with the question for a person.
 #
 # The dedupe is the tracker's, as triage's is: the day's alarm is an issue the persona files through its
-# guard, keyed triage:<yyyymmdd>, and it is filed before the message goes out. A day whose issue exists
-# sends nothing; a failure to file it sends nothing either, so a failure costs a missed ping, never one
+# guard, keyed triage:<yyyymmdd>, and it is filed before the message goes out. A day whose issue the
+# persona filed sends nothing (an issue someone else wrote the key into does not count); a failure to file it sends nothing either, so a failure costs a missed ping, never one
 # every 15 minutes. Without a tracker (mroom tracker exits 3) there is nowhere to record the ping, and
 # without persona.channel nowhere to send it: the alarm says so in the job's log and sends nothing.
 #
@@ -66,10 +66,20 @@ if [ "$tracker" = none ]; then
 fi
 
 found="$("$MROOM" persona find "$key")" || { triage_say "the tracker could not be searched, so the alarm does not ping"; exit 1; }
-if [ "$(jq 'length' <<<"$found")" -gt 0 ]; then
-  echo "The alarm already pinged today ($(jq -r '.[0].identifier' <<<"$found")); nothing sent."
-  exit 0
-fi
+# Only a day issue the persona filed records the ping: anyone can write the day's marker into an issue of
+# their own, and that must not silence the alarm. The newest few holding exactly today's key are checked;
+# a check that fails sends nothing.
+candidates="$(jq -r --arg k "$key" '[.[] | select(.keys | index($k) != null)] | reverse | .[0:3][].identifier' <<<"$found")" \
+  || { triage_say "the tracker's answer could not be read, so the alarm does not ping"; exit 1; }
+while IFS= read -r candidate; do
+  [ -n "$candidate" ] || continue
+  owned="$("$MROOM" persona owned "$candidate" </dev/null)" \
+    || { triage_say "the tracker could not say who filed $candidate, so the alarm does not ping"; exit 1; }
+  if [ "$(jq -r '.owned' <<<"$owned" 2>/dev/null)" = true ]; then
+    echo "The alarm already pinged today ($candidate); nothing sent."
+    exit 0
+  fi
+done <<<"$candidates"
 
 {
   echo "Alert triage could not run on $day: $what."
