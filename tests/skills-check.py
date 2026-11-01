@@ -637,3 +637,31 @@ say(not any(r.startswith("Bash(gh release") and r != "Bash(gh release list:*)" a
             for r in frag["allow"]), "no settings fragment allows a release write")
 say("Bash(gh release delete:*)" in frag["deny"] and "Bash(gh pr merge:*)" in frag["deny"],
     "the settings deny a release delete and a merge")
+
+# --- Attribution comes from the harness ------------------------------------------------------------------
+# A co-author line or a session link written into any file mroom ships (a skill, a command, a doc, a template,
+# a workflow, a script) would put one model's or one session's name on every commit and PR made from it. The
+# skills say to use the attribution the harness gives instead (implement step 4). The whole repository is
+# scanned, but tests/, whose fixtures may spell one out. A placeholder that explains the trailer, such as
+# `Co-authored-by: <name>`, is allowed.
+fixed_attribution = re.compile(
+    r"(?:co-authored-by|claude-session):[ \t]*(?!<)\S|claude\.ai/code/session|generated with \[claude code\]", re.I)
+listed = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True, text=True, check=True).stdout
+paths = [f for f in listed.split("\0") if f and not f.startswith("tests/")]
+# SKILLS_DIR and COMMANDS_DIR can point at a copy (mutation checks): scan those in place of the tracked ones.
+for override, tracked in ((skills_dir, "plugin/skills/"), (commands_dir, "plugin/commands/")):
+    if os.path.realpath(override) != os.path.realpath(os.path.join(root, tracked)):
+        paths = [f for f in paths if not f.startswith(tracked)]
+        paths += [os.path.join(d, f) for d, _, fs in os.walk(override) for f in fs]
+hits = []
+for path in sorted(paths):
+    full = path if os.path.isabs(path) else os.path.join(root, path)
+    try:
+        text = read(full)
+    except (UnicodeDecodeError, OSError):
+        continue
+    if fixed_attribution.search(text):
+        hits.append(os.path.relpath(full, root))
+say(not hits, f"no file outside tests/ hard-codes a co-author line or session link {hits[:3]}")
+implement = read(os.path.join(skills_dir, "implement", "SKILL.md"))
+say("the attribution your harness gives" in implement, "implement takes commit and PR attribution from the harness")

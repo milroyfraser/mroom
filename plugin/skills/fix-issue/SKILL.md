@@ -106,8 +106,9 @@ cause in two sentences, and the branch: `mroom tracker comment <id> < "$f"`, a f
    ask above all whether it reaches a shell, SQL, a path or a log. Run the test again and see it
    pass.
 3. **Commit.** End the message of the commit that fixes it with `Fixes <error id>` on a line of its
-   own, before any trailers. Commit with `git commit -F "$msg"`, a fresh file as
-   `/mroom:implement`'s Rules say. These lines are the only link to the error issue.
+   own, before any trailers (the attribution your harness gives, as `/mroom:implement` step 4
+   says). Commit with `git commit -F "$msg"`, a fresh file as `/mroom:implement`'s Rules say.
+   These lines are the only link to the error issue.
    - The error tracker's SCM integration links the commit to the issue as soon as the branch is
      pushed, and may assign the issue to the commit's author. So never put the line on a commit
      that does not fix the issue.

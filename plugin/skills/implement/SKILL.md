@@ -186,6 +186,9 @@ behaviour breaks, and keep passing when only the inside changes
 ## 4. Commit and push early
 
 A Conventional Commit with the issue id as scope: `fix(SHOP-123): handle an empty seat override`.
+End the message with the attribution your harness gives (its co-author and session lines, as
+this session's instructions spell them). Never copy a fixed co-author line or session link from
+another commit, a brief or this file: they name another model or session. With none given, add none.
 A message with a body goes through a fresh file, as the Rules say: `git commit -F "$msg"`. Only a
 one-line message may use `-m`.
 Push with `git push -u origin <branch>`; let the pre-push hook run. Retry network failures only.
@@ -216,6 +219,7 @@ Fill in the draft PR (`gh pr edit <pr> --body-file "$body"`, a fresh file as the
 - **Body:** the repository's PR template, if it has one. The issue link, Summary, Changes, Testing
   and `## QA`. When the PR fixes a problem a release caused in production, fill the `Breaks:` line
   with that release (`Breaks: v1.2.3`) and add the `regression` label. Otherwise leave it empty.
+  End the body with the attribution your harness gives for pull requests, as for commits (step 4).
 
 ## 6. QA: mark ready, then check the head commit
 
