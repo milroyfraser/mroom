@@ -2,7 +2,7 @@
 """skills-check.py: the checks of tests/skills-test.sh, which runs this with SKILLS_DIR, COMMANDS_DIR and
 MROOM_ROOT_DIR set. Prints one line per check, "ok <what>" or "FAIL <what>". Python 3.9 or newer, standard
 library only."""
-import json, os, re, subprocess, sys
+import json, os, re, shutil, subprocess, sys
 
 root = os.environ["MROOM_ROOT_DIR"]
 skills_dir = os.environ["SKILLS_DIR"]
@@ -415,6 +415,55 @@ if "room.html" in room_files:
         "room/room.html's cardRef reads only a card's id, and names it only when it is plain")
     say(re.search(r"\bconst rows = [^\n]*d\.data\(\)[^\n]*\{ id: d\.id \}", page) is not None,
         "room/room.html keeps a row's id its document's, whatever its data holds")
+
+    # One rule decides whether a card is blocked (cardBlock), and every verdict the page shows goes through it:
+    # the card's tabs, each step's verdict and the "Your next step" box's fallback.
+    def fn(name):
+        m = re.search(rf"\n  function {name}\(.*?\n  \}}\n", page, flags=re.S)
+        return m.group(0) if m else ""
+    say(len(re.findall(r"\bfunction cardBlock\(", page)) == 1 and len(re.findall(r"\bfunction blockVerdict\(", page)) == 1,
+        "room/room.html has one cardBlock and one blockVerdict")
+    say(all("blockVerdict(" in fn(f) for f in ("focusCard", "stepVerdict", "renderNextStep")),
+        "room/room.html's card tabs, step verdicts and next-step box all go through blockVerdict")
+    outside = page.replace(fn("cardBlock"), "")
+    say(re.search(r"behindBy\s*>\s*0|Array\.isArray\(it\.blockers\)|checks === \"red\"", outside) is None,
+        "room/room.html reads behindBy, blockers and red checks as blocks only in cardBlock")
+    say("it.kind !== \"issue\" &&" not in page and "isIssueBeforePr(it, steps)" in fn("focusCard"),
+        "room/room.html drops the QA placeholder only for an Issue card before its PR")
+    # The same three functions, run: a blocked card never reads Go, and an Issue card keeps its QA placeholder
+    # once its PR opens.
+    node = shutil.which("node")
+    if node:
+        js = fn("safeUrl") + fn("goodLinks") + fn("cardBlock") + fn("blockVerdict") + fn("isIssueBeforePr") + r"""
+const go = { go: true, call: "Go: merge it.", why: "All green." };
+const out = {
+  red: blockVerdict(go, "Review", { checks: "red" }).go,
+  running: blockVerdict(go, "Review", { checks: "running" }).go,
+  behind: blockVerdict(go, "Review", { checks: "behind" }).go,
+  blocker: blockVerdict(go, "Review", { blockers: ["waits on a decision"] }).call,
+  behindBy: blockVerdict(go, "QA", { pr: { behindBy: 2 } }).go,
+  redQa: blockVerdict(go, "QA", { checks: "red" }).go,
+  clear: blockVerdict(go, "Review", { checks: "green", pr: { behindBy: 0 } }) === go,
+  issue: isIssueBeforePr({ kind: "issue" }, [{ title: "Plan" }]),
+  issueWithPr: isIssueBeforePr({ kind: "issue", links: [{ url: "https://github.com/o/r/pull/7" }] }, []),
+  issueReviewed: isIssueBeforePr({ kind: "issue" }, [{ title: "Review", verdict: { call: "Go" } }]),
+  review: isIssueBeforePr({ kind: "review" }, []),
+};
+console.log(JSON.stringify(out));
+"""
+        r = subprocess.run([node, "-e", "function el(){}" + js], capture_output=True, text=True)
+        got = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else {}
+        say(got.get("red") is False and got.get("running") is False and got.get("behind") is False
+            and got.get("blocker") == "No-go: waits on a decision." and got.get("behindBy") is False,
+            f"room/room.html turns a blocked card's Go into a No-go ({got or r.stderr.strip()[:200]})")
+        say(got.get("redQa") is True and got.get("clear") is True,
+            "room/room.html leaves an unblocked verdict, and a red check on a step other than Review, as written")
+        say(got.get("issue") is True and got.get("issueWithPr") is False and got.get("issueReviewed") is False
+            and got.get("review") is False,
+            "room/room.html treats a card as an Issue before its PR only with no PR link and no Review verdict")
+    readme_text = read(os.path.join(room_dir, "README.md")) if "README.md" in room_files else ""
+    say("summarised, leaving out personal data and secrets" in readme_text,
+        "room/README.md has the issue's problem summarised without personal data or secrets")
 
 # --- The settings fragments still ask on a release --------------------------------------------------------
 frag = {}
