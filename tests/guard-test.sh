@@ -943,8 +943,10 @@ has "$err" "taking too long"
 expect "deadline leaves a fast command alone" 0 env MROOM_GUARD_DEADLINE=5 "$mroom" guard check 'git status; ls; echo hi'
 # One find with many -exec groups is a single analyze record but many check_segment calls, so the deadline has
 # to live in check_segment to interrupt it. Made costly by a large filler word that each `gh api graphql`
-# rescans, this must be refused, not run to the end and (as the last record) allowed.
-dl_filler=$(head -c 200000 /dev/zero | tr '\0' a)
+# rescans, this must be refused, not run to the end and (as the last record) allowed. The filler keeps the
+# whole command (passed as one argument) under Linux's 128 KB per-argument limit; at the default deadline this
+# find still runs for seconds, so the test fails if the check ever moves back out of check_segment.
+dl_filler=$(head -c 100000 /dev/zero | tr '\0' a)
 dl_find="find ."
 for _ in $(seq 1 390); do dl_find+=" -exec gh api graphql ';'"; done
 expect "deadline interrupts a heavy find" 2 env MROOM_GUARD_DEADLINE=1 "$mroom" guard check "echo $dl_filler; $dl_find"

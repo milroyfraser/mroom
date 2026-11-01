@@ -140,15 +140,16 @@ PARSES=0
 # timeout, after which the hook is non-blocking and the command runs unchecked. So check_segment, the one
 # entry every simple command (and every find -exec group) goes through, stops and fails closed once checking
 # has run this many seconds ($SECONDS is a bash builtin, no fork). The guarantee is then DEADLINE plus the
-# work of one more simple command (a single scan, well under a second), kept under hooks.json's 60s and far
-# above any real command (which decides in under a second). Overridable for tests and for an operator who sets
-# a lower hook timeout; see the sanitiser below.
+# work of one more simple command (a single scan: well under a second on a fast host, a few seconds on a much
+# slower one), kept under hooks.json's 60s and far above any real command (which decides in under a second).
+# Overridable for tests and for an operator who sets a lower hook timeout; see the sanitiser below.
 DEADLINE=${MROOM_GUARD_DEADLINE:-30}
-# A plain one- or two-digit count of seconds, no leading zero (so never 0), and at most 55 so it always fires
-# before hooks.json's 60s timeout. Anything else — empty, non-numeric, zero, or too many digits (which would
-# overflow the `-ge` test and silently disable the deadline) — falls back to the default.
+# A plain one- or two-digit count of seconds, no leading zero (so never 0), and at most 45, which leaves room
+# for that last simple command's check before hooks.json's 60s timeout. Anything else — empty, non-numeric,
+# zero, or too many digits (which would overflow the `-ge` test and silently disable the deadline) — falls back
+# to the default.
 case $DEADLINE in '' | *[!0-9]* | 0* | ???*) DEADLINE=30 ;; esac
-[ "$DEADLINE" -le 55 ] || DEADLINE=30
+[ "$DEADLINE" -le 45 ] || DEADLINE=30
 
 if [ "$mode" = hook ]; then
   command -v jq >/dev/null 2>&1 || warn_off jq
@@ -1734,6 +1735,9 @@ check_interpreter() {
 # analyze STRING DEPTH: tokenise STRING and check each simple command.
 analyze() {
   local s=$1 depth=$2 out rec prev="" status=0
+  # Already refused (BLOCKED is never cleared): stop at once rather than tokenise what is left, so unwinding
+  # after a block — the deadline's included — forks nothing more.
+  [ -n "$BLOCKED" ] && return
   [ "$depth" -le 8 ] || { block "the command nests shells too deeply to check"; return; }
   PARSES=$((PARSES + 1))
   [ "$PARSES" -le "$MAX_PARSES" ] || { block "the command holds more than $MAX_PARSES commands to check inside it, too many to check in time"; return; }
