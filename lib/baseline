@@ -12,11 +12,14 @@
 #                            file the gate fills, whether its systemd unit is this release's, and the nginx
 #                            config of its host
 #
-# It runs as the box user and changes nothing outside the box user's home. It can run again: a binary that
-# matches its pin and logins that exist are kept. Services live in ~/.local/share/mroom-services, which an
-# uninstall of mroom leaves alone, and their logins in ~/.config/mroom/secrets, files mode 600 and folders
-# 700, where no site user can read them. Installing the systemd units takes root (D20), which runs nothing
-# this prints: a person installs them with mroom's root recipe in Forge, from a release (D21).
+# It runs as the box user and changes only what the box user owns. It can run again: a binary that matches
+# its pin and logins that exist are kept. Services live in /var/lib/mroom/services, in folders of the box
+# user's own, mode 700, inside folders root owns, which mroom's root recipe makes with the units: systemd, as
+# root, resolves the units' binds, so no part of their paths but the last may be the box user's (D21). The
+# gate's own logins stay in ~/.config/mroom/secrets, files mode 600 and folders 700, where no site user can
+# read them. Root runs nothing this prints: a person runs mroom's root recipe in Forge, from a release (D21).
+# A box whose services lived in ~/.local/share/mroom-services moves their data on the first run after the
+# recipe installed this release's units.
 set -euo pipefail
 shopt -s inherit_errexit
 umask 077
@@ -30,9 +33,12 @@ MROOM_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 . "$MROOM_ROOT/lib/root-setup"
 
 PINS="${MROOM_PINS:-$MROOM_ROOT/lib/core/pins.txt}"
-SERVICES="$HOME/.local/share/mroom-services"
+# SERVICES_DIR and each part's folders (MAILPIT_TREE and the others) come from lib/root-setup.
+SERVICES="${MROOM_SERVICES_DIR:-$SERVICES_DIR}"
 SECRETS="$HOME/.config/mroom/secrets"
-WORK="" SECRET_TMP="" CHANGED=""
+# Where the services lived before their folders moved under one root owns.
+OLD_SERVICES="$HOME/.local/share/mroom-services"
+WORK="" SECRET_TMP="" CHANGED="" MOVED=""
 trap '[ -z "$WORK" ] || rm -rf "$WORK"; [ -z "$SECRET_TMP" ] || rm -f "$SECRET_TMP"' EXIT
 
 die() { echo "mroom baseline: $*" >&2; exit 1; }
@@ -63,17 +69,18 @@ hash_of() {
   [ "$(printf '%s' "$1" | openssl passwd -6 -salt "${BASH_REMATCH[1]}" -stdin)" = "$2" ]
 }
 
-# put_secret <file> <content>: the file holding the content, mode 600, replaced in one step.
+# put_secret <file> <content>: the file holding the content, mode 600, replaced in one step, from a file
+# beside it.
 put_secret() {
-  SECRET_TMP="$(mktemp "$SECRETS/.baseline.XXXXXX")"
+  SECRET_TMP="$(mktemp "$(dirname "$1")/.baseline.XXXXXX")"
   printf '%s\n' "$2" >"$SECRET_TMP"
   mv -f "$SECRET_TMP" "$1"
   SECRET_TMP=""
 }
 
-# install_pinned <name>: the pinned build of <name> for this platform in $SERVICES/<name>/<version>, and
-# $SERVICES/<name>/current pointing at it. The archive and the binary must both match their SHA-256 pins,
-# or nothing is installed. Sets CHANGED when it installed a build.
+# install_pinned <name>: the pinned build of <name> for this platform in $SERVICES/<name>/builds/<version>,
+# and $SERVICES/<name>/builds/current pointing at it. The archive and the binary must both match their
+# SHA-256 pins, or nothing is installed. Sets CHANGED when it installed a build.
 install_pinned() {
   local name="$1" platform line version archive_sha binary_sha url dir got
   platform="$(platform)"
@@ -83,7 +90,7 @@ install_pinned() {
   [[ "$version" =~ ^v[0-9]+(\.[0-9]+)*$ && "$archive_sha" =~ ^[0-9a-f]{64}$ && "$binary_sha" =~ ^[0-9a-f]{64}$ ]] \
     || die "the $name pin in $(home_short "$PINS") is malformed"
   [[ "$url" =~ ^https://[A-Za-z0-9._/-]+$ ]] || die "the $name pin's URL is not a plain https URL"
-  dir="$SERVICES/$name/$version"
+  dir="$SERVICES/$name/builds/$version"
   if [ -f "$dir/$name" ] && [ "$(sha256sum "$dir/$name" | cut -d' ' -f1)" = "$binary_sha" ]; then
     echo "$name $version: installed, and matches its pin"
   else
@@ -110,16 +117,15 @@ install_pinned() {
     mv -f "$dir/.$name.new" "$dir/$name"
     echo "$name $version: installed, SHA-256 $binary_sha"
   fi
-  chmod 700 "$SERVICES" "$SERVICES/$name" "$dir"
-  ln -sfn "$version" "$SERVICES/$name/current"
+  chmod 700 "$SERVICES/$name/builds" "$dir"
+  ln -sfn "$version" "$SERVICES/$name/builds/current"
 }
 
 # install_relay: mroom's mail relay beside the services, so it keeps running however mroom is updated or
 # removed. Sets CHANGED when it installed or replaced it.
 install_relay() {
-  local dir="$SERVICES/mail-relay" had=""
-  mkdir -p "$dir"
-  chmod 700 "$SERVICES" "$dir"
+  local dir="$SERVICES/mail-relay/bin" had=""
+  chmod 700 "$dir"
   if [ -f "$dir/mail-relay" ]; then
     if cmp -s "$MROOM_ROOT/lib/mail-relay" "$dir/mail-relay"; then
       echo "mail relay: installed, and matches this mroom"
@@ -175,26 +181,45 @@ restart_unit() {
   done
 }
 
-# units_section <part> <port> <intro> <unit...>: whether the installed units are as this release writes them
-# (lib/root-setup holds their text), and when they are not, how a person installs them: mroom's root recipe
-# in Forge, which runs a release's lib/root-setup as root (README, "The root recipe"). Nothing this prints is
-# to be run as root: the box user's programs could have changed it.
-units_section() {
-  local part="$1" port="$2" intro="$3" systemd="${MROOM_SYSTEMD_DIR:-/etc/systemd/system}" unit stale=() states=()
-  local version source home="${HOME%/}" passwd_home
-  shift 3
+# units_stale <port> <unit...>: prints each unit that is not installed as this release writes it (lib/root-setup
+# holds their text).
+units_stale() {
+  local port="$1" systemd="${MROOM_SYSTEMD_DIR:-/etc/systemd/system}" unit
+  shift
   for unit in "$@"; do
     if ! [ -f "$systemd/$unit" ] \
-      || [ "$(cat "$systemd/$unit")" != "$(unit_text "$unit" "$(id -un)" "$(id -gn)" "$home" "${port:-1025}")" ]; then
-      stale+=("$unit")
+      || [ "$(cat "$systemd/$unit")" != "$(unit_text "$unit" "$(id -un)" "$(id -gn)" "${port:-1025}" "$SERVICES")" ]; then
+      echo "$unit"
     fi
   done
-  echo
-  passwd_home="$(getent passwd "$(id -un)" | cut -d: -f6)"
-  if [ "$home" != "$passwd_home" ]; then
-    echo "NOTE: HOME is $home, but /etc/passwd gives $(id -un) the home $passwd_home: the root recipe installs"
-    echo "units for the second, unless it passes --home $home."
+}
+
+# recipe_hint <part> <port>: how a person runs mroom's root recipe in Forge, which runs a release's
+# lib/root-setup as root (README, "The root recipe"). Nothing this prints is to be run as root: the box
+# user's programs could have changed it.
+recipe_hint() {
+  local version source
+  version="$(cat "$MROOM_ROOT/VERSION" 2>/dev/null || echo unknown)"
+  source="$(cat "$MROOM_ROOT/SOURCE" 2>/dev/null || true)"
+  cat <<EOF
+Root installs them with mroom's root recipe (README, "The root recipe"): $1 in its parts${2:+, smtp_port=$2}.
+Take its v and sum from the README of the latest release on GitHub, never from this box, which the box user's
+programs could change. This box runs mroom v$version: upgrade it to that release first. Then run mroom
+baseline $1 again.
+EOF
+  if [[ "$source" != release* ]]; then
+    echo "This mroom was installed from a checkout, not a release, and the recipe installs a release's units:"
+    echo "install a release first (install.sh --version)."
   fi
+}
+
+# units_section <part> <port> <intro> <unit...>: whether the installed units are as this release writes them,
+# and when they are not, how a person installs them.
+units_section() {
+  local part="$1" port="$2" intro="$3" systemd="${MROOM_SYSTEMD_DIR:-/etc/systemd/system}" unit stale=() states=()
+  shift 3
+  mapfile -t stale < <(units_stale "$port" "$@")
+  echo
   if [ "$systemd" != /etc/systemd/system ]; then
     echo "WARNING: MROOM_SYSTEMD_DIR is set, so this compares the units in $systemd, not /etc/systemd/system: a"
     echo "setting for tests."
@@ -206,44 +231,179 @@ units_section() {
     echo "systemd units: installed as this mroom writes them ($(printf '%s, ' "${states[@]}" | sed 's/, $//'))."
     return 0
   fi
-  version="$(cat "$MROOM_ROOT/VERSION" 2>/dev/null || echo unknown)"
-  source="$(cat "$MROOM_ROOT/SOURCE" 2>/dev/null || true)"
-  cat <<EOF
-$intro To be installed or updated: ${stale[*]}.
+  echo "$intro To be installed or updated: ${stale[*]}."
+  echo
+  recipe_hint "$part" "$port"
+}
 
-Root installs them with mroom's root recipe (README, "The root recipe"): $part in its parts${port:+, smtp_port=$port}.
-Take its v and sum from the README of the latest release on GitHub, never from this box, which the box user's
-programs could change. This box runs mroom v$version: upgrade it to that release first. Then run mroom
-baseline $part again.
-EOF
-  if [[ "$source" != release* ]]; then
-    echo "This mroom was installed from a checkout, not a release, and the recipe installs a release's units:"
-    echo "install a release first (install.sh --version)."
+# services_ready <part> <port> <service/folder>...: dies unless each folder the part's units bind is in place,
+# as the root recipe makes it: a folder of the box user's own, not a link, in a folder the box user cannot
+# change. Before the recipe has run, it says how to run it.
+services_ready() {
+  local part="$1" port="$2" leaf dir parent
+  shift 2
+  [[ "$SERVICES" =~ ^/[A-Za-z0-9._/-]+$ && "/$SERVICES/" != */../* ]] \
+    || die "systemd units need plain paths; $(printf '%q' "$SERVICES") is not"
+  if [ "$SERVICES" != "$SERVICES_DIR" ]; then
+    echo "WARNING: MROOM_SERVICES_DIR is set, so the services live in $SERVICES, not $SERVICES_DIR: a setting for tests."
+  fi
+  for leaf in "$@"; do
+    dir="$SERVICES/$leaf" parent="$SERVICES/${leaf%%/*}"
+    if ! [ -e "$dir" ] && ! [ -L "$dir" ]; then
+      echo "The folders of $part are not in place yet: root makes them in $SERVICES, with its systemd units."
+      echo
+      recipe_hint "$part" "$port"
+      exit 1
+    fi
+    if [ -L "$dir" ] || ! [ -d "$dir" ] || ! [ -O "$dir" ] || [ -L "$parent" ] || [ -w "$parent" ] || [ -w "$SERVICES" ]; then
+      die "$dir is not as mroom's root recipe makes it: a folder of $(id -un)'s own, in a folder only root can change; nothing changed"
+    fi
+  done
+}
+
+# runs_from <dir>: whether a process of this user runs a program from <dir>, or names a file in it.
+runs_from() {
+  local dir proc exe arg
+  dir="$(readlink -f "$1" 2>/dev/null)" || dir="$1"
+  for proc in /proc/[0-9]*; do
+    [ -O "$proc" ] || continue
+    exe="$(readlink "$proc/exe" 2>/dev/null)" || exe=""
+    if [[ "$exe" == "$dir"/* ]]; then return 0; fi
+    while IFS= read -r -d '' arg; do
+      if [[ "$arg" == "$dir"/* || "$arg" == "$1"/* ]]; then return 0; fi
+    done 2>/dev/null <"$proc/cmdline" || true
+  done
+  return 1
+}
+
+# move_entry <path> <dir>: <path>, a file or a folder, moved into <dir> under its own name. A copy already
+# there that is the same file is taken as an earlier move's, which stopped before removing the old one; any
+# other stops the run. It moves under a hidden name first, and renames that once it is whole, since a move
+# to another filesystem copies, then removes the old one. A hidden one an earlier run left is finished when
+# the old one is gone, which mv removes only once the copy is whole; while both are there, a person decides.
+# With MOVE_DRY set, it only checks, and changes nothing.
+move_entry() {
+  local name="${1##*/}" moving="$2/.${1##*/}.moving"
+  [[ "$name" != .*.moving ]] || die "$(home_short "$1") has the name mroom gives a move under way; rename it, then run this again; nothing changed"
+  if [ -e "$moving" ] || [ -L "$moving" ]; then
+    if [ -e "$1" ] || [ -L "$1" ] || [ -e "$2/$name" ] || [ -L "$2/$name" ]; then
+      die "$moving is what an earlier move left halfway, and $(home_short "$1") or $2/$name is still there: keep the complete one (if it is $moving, rename it to $name), remove the others, then run this again; nothing changed"
+    fi
+    [ -z "${MOVE_DRY:-}" ] || return 0
+    mv -T -- "$moving" "$2/$name"
+    MOVED=1
+    return 0
+  fi
+  if ! [ -e "$1" ] && ! [ -L "$1" ]; then return 0; fi
+  if [ -e "$2/$name" ] || [ -L "$2/$name" ]; then
+    if [ -f "$1" ] && ! [ -L "$1" ] && [ -f "$2/$name" ] && ! [ -L "$2/$name" ] && cmp -s "$1" "$2/$name"; then
+      [ -n "${MOVE_DRY:-}" ] || rm -f -- "$1"
+      return 0
+    fi
+    die "both $(home_short "$1") and $2/$name exist: keep the one that holds the service's data, remove the other, then run this again; nothing changed"
+  fi
+  [ -z "${MOVE_DRY:-}" ] || return 0
+  mv -- "$1" "$2/.$name.moving"
+  mv -T -- "$2/.$name.moving" "$2/$name"
+  MOVED=1
+}
+
+# move_contents <old dir> <dir>: each entry of <old dir> moved into <dir>, and <old dir> removed once empty;
+# and each move into <dir> an earlier run left halfway, finished or refused.
+move_contents() {
+  local entry name
+  while IFS= read -r -d '' entry; do
+    name="${entry##*/.}"
+    move_entry "$1/${name%.moving}" "$2"
+  done < <(find "$2" -mindepth 1 -maxdepth 1 -name '.*.moving' -print0)
+  [ -d "$1" ] || return 0
+  while IFS= read -r -d '' entry; do move_entry "$entry" "$2"; done < <(find "$1" -mindepth 1 -maxdepth 1 -print0)
+  [ -n "${MOVE_DRY:-}" ] || rmdir -- "$1" 2>/dev/null || true
+}
+
+# halfway <dir>...: whether a move into any of them was left halfway.
+halfway() { [ -n "$(find "$@" -mindepth 1 -maxdepth 1 -name '.*.moving' -print -quit 2>/dev/null)" ]; }
+
+# move_all <function>: the moves the function makes, all checked first, so a part either moves whole or not
+# at all.
+move_all() {
+  MOVE_DRY=1 "$1"
+  MOVE_DRY="" "$1"
+}
+
+# to_move <path>...: whether any of them is left to move: a file, or a folder with anything in it.
+to_move() {
+  local path
+  for path in "$@"; do
+    if [ -L "$path" ] || [ -f "$path" ]; then return 0; fi
+    if [ -d "$path" ] && [ -n "$(find "$path" -mindepth 1 -maxdepth 1 -print -quit)" ]; then return 0; fi
+  done
+  return 1
+}
+
+# old_ready <part> <port> <old dir> <unit...>: before a part's data moves from the home, its units must be this
+# release's, and nothing may run from its old folder any more: the root recipe restarts each service when
+# it installs its new unit, so none writes the data while it moves.
+old_ready() {
+  local part="$1" port="$2" old="$3"
+  shift 3
+  [ -z "$(units_stale "$port" "$@")" ] \
+    || die "$(home_short "$old") holds $part's data, which moves to $SERVICES once root has installed this release's units; run the root recipe ($part in its parts), then this again; nothing changed"
+  if runs_from "$old"; then
+    die "a process still runs from $(home_short "$old"), so $part's data cannot move yet; run the root recipe again ($part in its parts), which restarts its units, then this; nothing changed"
   fi
 }
 
+# moved_note <name> <old dir>: once a part's data moved, says so, and that what is left of its old folder is
+# not used any more.
+moved_note() {
+  [ -n "$MOVED" ] || return 0
+  echo "$1: its data moved from $(home_short "$2") to $SERVICES"
+  if [ -e "$2" ]; then echo "$1: what is left in $(home_short "$2") (old builds, sockets) is not used any more: remove it"; fi
+}
+
+# mailpit_moves, garage_moves, reverb_moves: what each part moves from where it lived before.
+mailpit_moves() {
+  move_contents "$OLD_SERVICES/mailpit/data" "$SERVICES/mailpit/data"
+  move_entry "$SECRETS/mailpit-smtp.passwd" "$SERVICES/mailpit/etc"
+  move_entry "$SECRETS/mailpit-ui.passwd" "$SERVICES/mailpit/etc"
+}
+garage_moves() {
+  local secret
+  move_contents "$OLD_SERVICES/garage/meta" "$SERVICES/garage/meta"
+  move_contents "$OLD_SERVICES/garage/data" "$SERVICES/garage/data"
+  for secret in garage-rpc-secret garage-admin-token garage-metrics-token; do move_entry "$SECRETS/$secret" "$SERVICES/garage/etc"; done
+}
+reverb_moves() { move_entry "$OLD_SERVICES/reverb/apps/apps.json" "$SERVICES/reverb/apps"; }
+
 setup_mailpit() {
-  local base="$SERVICES/mailpit" logins="$SECRETS/mailpit-smtp.passwd" ui="$SECRETS/mailpit-ui.passwd"
+  local base="$SERVICES/mailpit" logins="$SERVICES/mailpit/etc/mailpit-smtp.passwd" ui="$SERVICES/mailpit/etc/mailpit-ui.passwd"
   local env_file="$SECRETS/mailpit.env" port hash rest content password relay_changed="" mailpit_changed="" tries=1
-  local systemd="${MROOM_SYSTEMD_DIR:-/etc/systemd/system}" status
+  local status old="$OLD_SERVICES/mailpit"
   need curl tar sha256sum openssl python3 flock
   load_box || die "box.env could not be read"
   port="${BOX[MROOM_QA_SMTP_PORT]:-1025}"
   [ -x "$PYTHON" ] || die "$PYTHON is missing; the mail relay runs on it (apt-get install -y python3)"
-  # What the systemd units name, written plainly into them.
-  [[ "$HOME" =~ ^/[A-Za-z0-9._/-]+$ && "$systemd" =~ ^/[A-Za-z0-9._/-]+$ ]] \
-    || die "systemd units need plain paths; $(printf '%q' "$HOME") or $(printf '%q' "$systemd") is not"
   [[ "$(id -un)" =~ ^[a-z_][a-z0-9_-]*$ && "$(id -gn)" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "the box user's name is not plain"
+  services_ready mailpit "$port" "${MAILPIT_TREE[@]}"
+  chmod 700 "$base/builds" "$base/data" "$base/etc" "$base/run"
+  mkdir -p "$SECRETS"
+  chmod 700 "$SECRETS"
+  # The logins file is the gate's too: no login is changed while a request changes one.
+  exec 9>"$(mroom_state_dir)/gate-mailpit.lock"
+  flock -w "${MROOM_GATE_LOCK_WAIT:-900}" 9 || die "the gate is still changing Mailpit's logins; run this again in a moment"
+  # From the home, where it lived before: its mail and its logins, before its build, without which its new
+  # unit cannot start, so nothing writes them while they move.
+  if to_move "$old/data" "$SECRETS/mailpit-smtp.passwd" "$SECRETS/mailpit-ui.passwd" || halfway "$base/data" "$base/etc"; then
+    old_ready mailpit "$port" "$old" "${MAILPIT_UNITS[@]}"
+    move_all mailpit_moves
+    moved_note Mailpit "$old"
+  fi
   CHANGED=""
   install_pinned mailpit
   mailpit_changed="$CHANGED" CHANGED=""
   install_relay
   relay_changed="$CHANGED"
-  mkdir -p "$base/data" "$base/run" "$SECRETS"
-  chmod 700 "$base/data" "$base/run" "$SECRETS"
-  # The logins file is the gate's too: no login is changed while a request changes one.
-  exec 9>"$(mroom_state_dir)/gate-mailpit.lock"
-  flock -w "${MROOM_GATE_LOCK_WAIT:-900}" 9 || die "the gate is still changing Mailpit's logins; run this again in a moment"
 
   # The SMTP logins, one per environment, which the gate adds and removes. A login no one knows keeps the
   # file from ever being empty, which Mailpit would take as "no login needed".
@@ -283,7 +443,7 @@ setup_mailpit() {
   # A new build, relay or API login runs from the process's next start: systemd starts it again at once,
   # and holds the port meanwhile.
   if [ -n "$relay_changed" ]; then
-    if restart_unit mroom-mail-relay.service "$SERVICES/mail-relay/"; then echo "mail relay: restarted to run this one; systemd held the port meanwhile"
+    if restart_unit mroom-mail-relay.service "$SERVICES/mail-relay/bin/"; then echo "mail relay: restarted to run this one; systemd held the port meanwhile"
     else echo "mail relay: runs the new one from its next start (mroom-mail-relay.service)"; fi
   fi
   if [ -n "$mailpit_changed" ]; then
@@ -316,7 +476,7 @@ root, and the relay and Mailpit run as $(id -un)." "${MAILPIT_UNITS[@]}"
 garage_admin() {
   local args=(-q --silent --show-error --fail --max-time 30 --unix-socket "$SERVICES/garage/run/admin.sock" --request "$1" --header @-)
   if [ -n "${3-}" ]; then args+=(--header "Content-Type: application/json" --data-binary "$3"); fi
-  printf 'Authorization: Bearer %s\n' "$(cat "$SECRETS/garage-admin-token")" | curl "${args[@]}" "http://localhost$2"
+  printf 'Authorization: Bearer %s\n' "$(cat "$SERVICES/garage/etc/garage-admin-token")" | curl "${args[@]}" "http://localhost$2"
 }
 
 # garage_toml: Garage's config. Paths and settings only: its secrets stay in their files, mode 600, which
@@ -324,7 +484,7 @@ garage_admin() {
 # addressing under one host and its certificate (section 3); the web endpoint names a bucket by its host,
 # which nginx gives it from the path (`files.<zone>/<bucket>/…`).
 garage_toml() {
-  local base="$SERVICES/garage"
+  local base="$SERVICES/garage" etc="$SERVICES/garage/etc"
   cat <<EOF
 # Written by mroom baseline garage; it is written again on every run.
 metadata_dir = "$base/meta"
@@ -335,7 +495,7 @@ metadata_fsync = true
 replication_factor = 1
 rpc_bind_addr = "127.0.0.1:3901"
 rpc_public_addr = "127.0.0.1:3901"
-rpc_secret_file = "$SECRETS/garage-rpc-secret"
+rpc_secret_file = "$etc/garage-rpc-secret"
 
 [s3_api]
 s3_region = "garage"
@@ -347,40 +507,50 @@ root_domain = ".web.mroom.invalid"
 
 [admin]
 api_bind_addr = "$base/run/admin.sock"
-admin_token_file = "$SECRETS/garage-admin-token"
-metrics_token_file = "$SECRETS/garage-metrics-token"
+admin_token_file = "$etc/garage-admin-token"
+metrics_token_file = "$etc/garage-metrics-token"
 EOF
 }
 
 setup_garage() {
-  local base="$SERVICES/garage" zone token layout node version user
-  need curl tar sha256sum openssl jq
+  local base="$SERVICES/garage" etc="$SERVICES/garage/etc" old="$OLD_SERVICES/garage" zone token layout node version user
+  need curl tar sha256sum openssl jq flock
   load_box || die "box.env could not be read"
   zone="${BOX[MROOM_QA_ZONE]:-}" user="$(id -un)"
-  [[ "$HOME" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "systemd units need plain paths; $(printf '%q' "$HOME") is not"
   [[ "$user" =~ ^[a-z_][a-z0-9_-]*$ && "$(id -gn)" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "the box user's name is not plain"
+  services_ready garage "" "${GARAGE_TREE[@]}"
+  chmod 700 "$base/builds" "$base/data" "$etc" "$base/meta" "$base/run"
+  # From the home, where it lived before: its metadata, its data and its secrets, before its build, without
+  # which its new unit cannot start, so nothing writes them while they move. Not while the gate changes a bucket.
+  if to_move "$old/meta" "$old/data" "$SECRETS"/garage-{rpc-secret,admin-token,metrics-token} \
+    || halfway "$base/meta" "$base/data" "$etc"; then
+    exec 9>"$(mroom_state_dir)/gate-garage.lock"
+    flock -w "${MROOM_GATE_LOCK_WAIT:-900}" 9 || die "the gate is still changing Garage's buckets; run this again in a moment"
+    old_ready garage "" "$old" "${GARAGE_UNITS[@]}"
+    move_all garage_moves
+    moved_note Garage "$old"
+    exec 9>&-
+  fi
   CHANGED=""
-  install_pinned garage
-  mkdir -p "$base/meta" "$base/data" "$base/run" "$SECRETS"
-  chmod 700 "$base" "$base/meta" "$base/data" "$base/run" "$SECRETS"
-  # Its secrets, each made once.
-  if ! [ -s "$SECRETS/garage-rpc-secret" ]; then
-    put_secret "$SECRETS/garage-rpc-secret" "$(openssl rand -hex 32)"
+  # Its secrets, each made once, and its config, before its build, which its unit starts.
+  if ! [ -s "$etc/garage-rpc-secret" ]; then
+    put_secret "$etc/garage-rpc-secret" "$(openssl rand -hex 32)"
     echo "Garage RPC secret: made"
   fi
   for token in admin metrics; do
-    if ! [ -s "$SECRETS/garage-$token-token" ]; then
-      put_secret "$SECRETS/garage-$token-token" "$(new_password)"
+    if ! [ -s "$etc/garage-$token-token" ]; then
+      put_secret "$etc/garage-$token-token" "$(new_password)"
       echo "Garage $token token: made"
       CHANGED=1
     fi
   done
-  chmod 600 "$SECRETS/garage-rpc-secret" "$SECRETS/garage-admin-token" "$SECRETS/garage-metrics-token"
-  if ! [ -f "$base/garage.toml" ] || [ "$(cat "$base/garage.toml")" != "$(garage_toml)" ]; then
-    put_secret "$base/garage.toml" "$(garage_toml)"
-    echo "Garage config: $(home_short "$base/garage.toml") written"
+  chmod 600 "$etc/garage-rpc-secret" "$etc/garage-admin-token" "$etc/garage-metrics-token"
+  if ! [ -f "$etc/garage.toml" ] || [ "$(cat "$etc/garage.toml")" != "$(garage_toml)" ]; then
+    put_secret "$etc/garage.toml" "$(garage_toml)"
+    echo "Garage config: $(home_short "$etc/garage.toml") written"
     CHANGED=1
   fi
+  install_pinned garage
   if [ -n "$CHANGED" ]; then
     if restart_unit mroom-garage.service "$base/"; then echo "Garage: restarted to run its build and read its config"
     else echo "Garage: runs its build and reads its config from its next start (mroom-garage.service)"; fi
@@ -460,20 +630,29 @@ reverb_build_id() {
 }
 
 setup_reverb() {
-  local base="$SERVICES/reverb" zone user id build old apps answers count previous php="$PHP"
-  need composer jq sha256sum curl
+  local base="$SERVICES/reverb" zone user id build old apps answers count previous php="$PHP" home_old="$OLD_SERVICES/reverb"
+  need composer jq sha256sum curl flock
   load_box || die "box.env could not be read"
   zone="${BOX[MROOM_QA_ZONE]:-}" user="$(id -un)"
-  [[ "$HOME" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "systemd units need plain paths; $(printf '%q' "$HOME") is not"
   [[ "$user" =~ ^[a-z_][a-z0-9_-]*$ && "$(id -gn)" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "the box user's name is not plain"
   [ -d "$MROOM_ROOT/reverb-host" ] || die "this mroom has no reverb-host folder; install a release that has one"
   # The unit runs this php, so it is the one that must be new enough.
   [ -x "$php" ] || die "$php is missing; mroom's Reverb host needs PHP 8.3 or later"
   "$php" -r 'exit(PHP_VERSION_ID >= 80300 ? 0 : 1);' \
     || die "mroom's Reverb host needs PHP 8.3 or later; $php is $("$php" -r 'echo PHP_VERSION;')"
+  services_ready reverb "" "${REVERB_TREE[@]}"
   CHANGED=""
-  mkdir -p "$base/builds" "$base/run" "$base/apps"
-  chmod 700 "$SERVICES" "$base" "$base/builds" "$base/run" "$base/apps"
+  chmod 700 "$base/builds" "$base/run" "$base/apps"
+  # From the home, where it lived before: its apps, before its build, without which its new unit cannot
+  # start. Not while the gate changes an app.
+  if to_move "$home_old/apps/apps.json" || halfway "$base/apps"; then
+    exec 9>"$(mroom_state_dir)/gate-reverb.lock"
+    flock -w "${MROOM_GATE_LOCK_WAIT:-900}" 9 || die "the gate is still changing the Reverb host's apps; run this again in a moment"
+    old_ready reverb "" "$home_old" "${REVERB_UNITS[@]}"
+    move_all reverb_moves
+    moved_note "Reverb host" "$home_old"
+    exec 9>&-
+  fi
   # Its apps: none until the gate adds one. The gate replaces this file whole, and the unit binds its folder,
   # not the file, so the host sees each new one.
   apps="$base/apps/apps.json"
@@ -504,12 +683,12 @@ setup_reverb() {
     CHANGED=1
     echo "Reverb host: build $id installed (Reverb $(jq -r '.packages[] | select(.name == "laravel/reverb") | .version' "$build/composer.lock"))"
   fi
-  # current names the build, switched in one rename. A running host keeps the build it started from, since
-  # PHP resolves the link once, at start.
-  previous="$(readlink "$base/current" 2>/dev/null || true)"
-  if [ "$previous" != "builds/$id" ]; then
-    ln -sfn "builds/$id" "$base/.current.new"
-    mv -Tf "$base/.current.new" "$base/current"
+  # builds/current names the build, switched in one rename. A running host keeps the build it started from,
+  # since PHP resolves the link once, at start.
+  previous="$(readlink "$base/builds/current" 2>/dev/null || true)"
+  if [ "$previous" != "$id" ]; then
+    ln -sfn "$id" "$base/builds/.current.new"
+    mv -Tf "$base/builds/.current.new" "$base/builds/current"
     CHANGED=1
   fi
   if [ -n "$CHANGED" ]; then
@@ -519,7 +698,7 @@ setup_reverb() {
   # Older builds go. The one current named before this run stays until the next, since a host started earlier,
   # or one systemd did not restart in time, may still run from it.
   for old in "$base"/builds/*; do
-    if [ "$old" != "$build" ] && [ "builds/${old##*/}" != "$previous" ]; then rm -rf "$old"; fi
+    if [ "$old" != "$build" ] && [ "${old##*/}" != current ] && [ "${old##*/}" != "$previous" ]; then rm -rf "$old"; fi
   done
 
   units_section reverb "" "One systemd unit runs mroom's Reverb host, as $user: it listens only on a Unix socket in
