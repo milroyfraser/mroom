@@ -2,9 +2,10 @@
 # shellcheck disable=SC2317  # the t_* functions run indirectly, through test_case
 # Tests for the QA teardown (actions/qa-down: check.sh and down.sh) and what it shares (lib/core/qa.sh): the check
 # reads Forge and changes nothing; the teardown runs every step, skipping what is gone, so a run again finishes one
-# that stopped; daemons go first and are waited for, then user-clean, then the sites, then the box's side; a failed
-# user-clean keeps the sites; the comment says removing, removed, or which step failed; ssh never reads a loop's
-# input; and the SSH key never reaches a command line. Offline: Forge, GitHub and the gate are fakes.
+# that stopped; daemons go first and are waited for, then user-clean, then the sites, then the box's side, its
+# Reverb app included, an environment's of the old names too; a failed user-clean keeps the sites; the comment says
+# removing, removed, or which step failed; ssh never reads a loop's input; and the SSH key never reaches a command
+# line. Offline: Forge, GitHub and the gate are fakes.
 set -euo pipefail
 SUITE=qa-down
 # shellcheck source=tests/lib.sh
@@ -16,7 +17,7 @@ skip_unless has_tomllib "python3 has no tomllib (needs 3.11+)"
 
 DOWN="$ROOT/actions/qa-down/down.sh"
 CHECK="$ROOT/actions/qa-down/check.sh"
-BOX_SIDE=$'db-drop 7\nredis-user-remove 7\nredis-clear 7\nmail-user-remove 7\nmail-clear 7\nbucket-drop 7'
+BOX_SIDE=$'db-drop 7\nredis-user-remove 7\nredis-clear 7\nmail-user-remove 7\nmail-clear 7\nbucket-drop 7\nreverb-app-remove 7'
 
 # environment_7: pull request 7's two sites and its daemon, beside environment 70's.
 environment_7() {
@@ -39,17 +40,21 @@ t_an_environment_comes_down_in_order() {
   comment 7 302 'github-actions[bot]' $'## Another check\n\nNot this one.'
   run "$DOWN" 7 --reason closed --state present
   expect_rc 0; expect_out_has "environment 7: removed"
+  # The names of before mroom 0.5.0 are looked for, and said only when Forge has a site by one.
+  expect_true "the teardown said a name Forge has no site by" lacks "$out" "==> Site $(old_api_host 7)"
+  expect_true "the teardown said a name Forge has no site by" lacks "$out" "==> Site $(old_web_host 7)"
   # Daemons first, and gone before user-clean; the sites right after it; then the box's side.
   run order
   expect_out $'forge DELETE /background-processes/5\nforge DELETE /background-processes/6\ngate user-clean 7
 forge DELETE /sites/11\nforge DELETE /sites/12\ngate db-drop 7\ngate redis-user-remove 7\ngate redis-clear 7
-gate mail-user-remove 7\ngate mail-clear 7\ngate bucket-drop 7'
+gate mail-user-remove 7\ngate mail-clear 7\ngate bucket-drop 7\ngate reverb-app-remove 7'
   run grep -c '^GET /background-processes' "$FORGE_LOG"; expect_out 3
   # The comment says it is being removed before anything goes, then that it was removed.
   run gh_log
   expect_out $'PATCH 301 ### QA environment\\n<!-- mroom-qa: removing was=present -->\\n\\nBeing removed: the pull request closed.
 PATCH 301 ### QA environment\\n<!-- mroom-qa: removed -->\\n\\nRemoved: the pull request closed.'
-  run jq -r '[.sites[] | "\(.id) \(.status)"] | join(",")' "$FORGE_STATE"; expect_out "11 removing,12 removing,13 installed"
+  # Environment 7's sites are removing, or gone already; environment 70's stays.
+  run jq -r '[.sites[] | select(.status != "removing") | .id] | join(",")' "$FORGE_STATE"; expect_out "13"
   run jq -r '[.processes[].id] | join(",")' "$FORGE_STATE"; expect_out "7"
   # It held a slot, which the wake job gives on.
   run freed; expect_out true
@@ -63,9 +68,9 @@ t_the_ssh_key_stays_off_every_command_line() {
   # Batch mode, no config file, no agent, the pinned host key, and no stdin for any of these requests.
   run grep -c -x -e 'BatchMode=yes' -e 'StrictHostKeyChecking=yes' -e 'IdentitiesOnly=yes' -e 'IdentityAgent=none' \
     -e 'GlobalKnownHostsFile=/dev/null' "$GATE/ssh.argv"
-  expect_out 35
-  run grep -c -x -e '-n' "$GATE/ssh.argv"; expect_out 7
-  run grep -c -x 'forge@box.example.dev' "$GATE/ssh.argv"; expect_out 7
+  expect_out 40
+  run grep -c -x -e '-n' "$GATE/ssh.argv"; expect_out 8
+  run grep -c -x 'forge@box.example.dev' "$GATE/ssh.argv"; expect_out 8
   expect_true "the key folder was left in TMPDIR" tmp_empty
   expect_true "the Forge token was printed" lacks "$out$err" fake-forge-token
 }
@@ -227,6 +232,18 @@ t_one_box_step_failing_leaves_the_others_to_run() {
   run "$DOWN" 7
   expect_rc 1; expect_err_has "its sites are gone, but not the box's Redis user"
   run gate_log; expect_out $'user-clean 7\n'"$BOX_SIDE"
+  # The Reverb app, the last of them, is named too, and a run again removes it.
+  qa_world; environment_7
+  echo reverb-pw-7-1 >"$GATE/reverb-7"
+  echo 1 >"$GATE/reverb-app-remove.rc"
+  run "$DOWN" 7 --reason closed --state present
+  expect_rc 1; expect_err_has "environment 7: its sites are gone, but not the box's Reverb app"
+  run gh_log; expect_out_has "The teardown stopped at the box's Reverb app"
+  expect_file "$GATE/reverb-7"
+  rm "$GATE/reverb-app-remove.rc"
+  run "$DOWN" 7 --reason closed --state present
+  expect_rc 0; expect_out_has "    Reverb app $(reverb_app 7): removed"; expect_out_has "environment 7: removed"
+  expect_no_file "$GATE/reverb-7"
 }
 
 t_a_delete_that_finds_nothing_counts_as_done() {
@@ -249,7 +266,7 @@ t_a_delete_that_finds_nothing_counts_as_done() {
 
 t_services_qa_does_not_use_are_left_alone() {
   qa_world; environment_7
-  printf '\n[qa.parity]\nmail = "log"\nfiles = "local"\n' >>"$MROOM_CONFIG"
+  printf '\n[qa.parity]\nmail = "log"\nfiles = "local"\nbroadcast = "log"\n' >>"$MROOM_CONFIG"
   run "$DOWN" 7
   expect_rc 0
   run gate_log; expect_out $'user-clean 7\ndb-drop 7\nredis-user-remove 7\nredis-clear 7'
@@ -275,13 +292,49 @@ t_the_check_reads_forge_and_changes_nothing() {
   forge_set '.sites[0].status = "removing" | .sites[1].status = "removing"'
   run "$CHECK" 7; expect_out "state=removing"
   run "$CHECK" 8; expect_out "state=absent"
-  # The go site alone is an environment too.
+  # The frontend's site alone is an environment too.
   forge_set '.sites[1].status = "installed"'
   run "$CHECK" 7; expect_out "state=present"
   run forge_writes; expect_out ""
   run gate_log; expect_out ""
   forge_set '.fail["GET /sites"] = 500'
   run "$CHECK" 7; expect_rc 1; expect_out ""
+}
+
+t_an_environment_of_the_old_names_comes_down_too() {
+  qa_world
+  # Brought up before mroom 0.5.0, as api-7 and go-7, with a worker of its own and daemons of forge's that run from
+  # folders of its old names.
+  site 11 "$(old_api_host 7)" installed
+  site 12 "$(old_web_host 7)" installed
+  site 13 "$(api_host 70)" installed
+  process 5 "$(site_user 7)" "/home/$(site_user 7)/$(old_api_host 7)/."
+  process 6 forge "/var/www/$(old_web_host 7)"
+  process 8 forge "/var/www/$(old_api_host 7)"
+  run "$CHECK" 7; expect_rc 0; expect_out "state=present"
+  run "$DOWN" 7 --reason closed --state present
+  expect_rc 0; expect_out_has "environment 7: removed"
+  expect_out_has "==> Site $(old_api_host 7)"$'\n'"    deleted site 11"
+  expect_out_has "==> Site $(old_web_host 7)"$'\n'"    deleted site 12"
+  run order
+  expect_out $'forge DELETE /background-processes/5\nforge DELETE /background-processes/6\nforge DELETE /background-processes/8
+gate user-clean 7\nforge DELETE /sites/11\nforge DELETE /sites/12\n'"gate ${BOX_SIDE//$'\n'/$'\ngate '}"
+  run jq -r '[.sites[] | select(.status != "removing") | .id] | join(",")' "$FORGE_STATE"; expect_out "13"
+  run freed; expect_out true
+  # The reaper's teardown, past its time, takes its Reverb app too: the gate finds it by N alone.
+  qa_world
+  site 11 "$(old_api_host 7)" installed "$(ago $((9 * 86400)))"
+  echo reverb-pw-7-1 >"$GATE/reverb-7"
+  run "$DOWN" 7 --reason ttl
+  expect_rc 0; expect_out_has "==> Reverb app"$'\n'"    Reverb app $(reverb_app 7): removed"
+  expect_no_file "$GATE/reverb-7"
+  # Its frontend's site alone, as a teardown that stopped halfway leaves it, is the environment still; and once Forge
+  # is removing that, the environment is being removed.
+  qa_world
+  site 12 "$(old_web_host 7)" installed
+  run "$CHECK" 7; expect_rc 0; expect_out "state=present"
+  forge_set '.sites[0].status = "removing"'
+  run "$CHECK" 7; expect_rc 0; expect_out "state=removing"
 }
 
 t_an_environment_on_a_later_page_is_found() {
@@ -351,6 +404,7 @@ test_case delete-404-is-done t_a_delete_that_finds_nothing_counts_as_done
 test_case parity-swaps t_services_qa_does_not_use_are_left_alone
 test_case forge-unreadable t_a_forge_that_cannot_be_read_stops_it
 test_case check t_the_check_reads_forge_and_changes_nothing
+test_case old-names-come-down t_an_environment_of_the_old_names_comes_down_too
 test_case later-page t_an_environment_on_a_later_page_is_found
 test_case label-stops-wait t_a_label_off_a_waiting_pull_request_stops_its_wait
 test_case not-set-up t_a_qa_environment_not_set_up_has_nothing_to_tear_down
