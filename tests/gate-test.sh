@@ -26,7 +26,10 @@ world() {
 # databases, the names that exist, one per line), objects-owns, busy (how many CREATE DATABASE calls are refused
 # as in use first), noise (a WARNING on stderr for every call), fail-<word> (a statement holding <word> fails,
 # with the word's SQLSTATE in a verbose message), rows (what a db-read's SELECT returns) and read-error (the
-# error it fails with instead).
+# error it fails with instead). Its arguments go to $T/argv.log, and a password it was given in its environment
+# to $T/psql.password.
+printf '%s\n' "$*" >>"$T/argv.log"
+if [ -n "${PGPASSWORD:-}" ]; then printf '%s\n' "$PGPASSWORD" >"$T/psql.password"; fi
 db="" x=0 stop=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -79,7 +82,8 @@ FAKE
 #!/usr/bin/env bash
 # Logs "user=<PGUSER> db=<PGDATABASE> password=<set|none> service=<PGSERVICE> <arguments>" to $T/pg_restore.log,
 # and the password it was given to $T/pg_restore.password. -l lists an archive (fails with bad-archive); a
-# restore fails with fail-restore, quoting a value as Postgres does.
+# restore fails with fail-restore, quoting a value as Postgres does. Its arguments also go to $T/argv.log.
+printf '%s\n' "$*" >>"$T/argv.log"
 printf 'user=%s db=%s password=%s service=%s %s\n' "${PGUSER:-}" "${PGDATABASE:-}" "${PGPASSWORD:+set}" \
   "${PGSERVICE:-}" "$*" >>"$T/pg_restore.log"
 printf '%s\n' "${PGPASSWORD:-}" >"$T/pg_restore.password"
@@ -93,7 +97,14 @@ if [ -f "$T/pg/fail-restore" ]; then
 fi
 exit 0
 FAKE
-  chmod +x "$T/bin/psql" "$T/bin/sleep" "$T/bin/logger" "$T/bin/pg_restore"
+  # env(1) logs its arguments to $T/argv.log, then runs the real one. Every user on the box can read a running
+  # program's arguments (/proc/<pid>/cmdline), so a password must never be among them.
+  cat >"$T/bin/env" <<'FAKE'
+#!/bin/sh
+printf '%s\n' "$*" >>"$T/argv.log"
+exec /usr/bin/env "$@"
+FAKE
+  chmod +x "$T/bin/psql" "$T/bin/sleep" "$T/bin/logger" "$T/bin/pg_restore" "$T/bin/env"
   export T PATH="$T/bin:$PATH"
 }
 
@@ -107,6 +118,8 @@ password_of() { sed -n 's/^DB_PASSWORD=//p' <<<"$1"; }
 # line_of <text>: the number of the first psql.log line holding the text, or 0.
 line_of() { grep -n -F -m1 -- "$1" "$T/psql.log" 2>/dev/null | cut -d: -f1 || echo 0; }
 gate_log_text() { cat "$HOME/.local/state/mroom/gate.log" 2>/dev/null || true; }
+# argv_text: the arguments env, psql and pg_restore were run with, which every user on the box could read.
+argv_text() { cat "$T/argv.log" 2>/dev/null || true; }
 
 # redis_world: the world above, plus the gate's Redis login (mode 600) and a fake redis-cli.
 redis_world() {
@@ -830,6 +843,10 @@ t_db_read_reads_listed_columns_as_the_read_only_role() {
     "db=shop_qa_12 service= user=shop_qa_12_read \\set v1 'ada@shop.test' BEGIN READ ONLY; SET LOCAL search_path = pg_catalog, pg_temp; SET LOCAL statement_timeout = '30s'; SELECT pg_catalog.json_agg(r) FROM (SELECT \"id\", \"email\" FROM public.\"users\" WHERE (\"email\")::pg_catalog.text OPERATOR(pg_catalog.=) :'v1' ORDER BY \"created_at\" DESC NULLS LAST LIMIT 5) AS r; ROLLBACK;"
   expect_true "the gate read as itself" lacks "$log" "db=shop_qa_12 service=mroom-gate"
   expect_true "the read-only role's password reached the SQL" lacks "$log" "$reader"
+  expect_true "the read-only role's password was on a command line, which every user on the box can read" \
+    lacks "$(argv_text)" "$reader"
+  expect_true "psql was not given the read-only role's password in its environment" \
+    [ "$(cat "$T/psql.password" 2>/dev/null)" = "$reader" ]
   expect_true "a filter's value reached the gate log" lacks "$(gate_log_text)" "ada@shop.test"
   run grep -c "browser db-read 12: users, 2 column(s), 1 filter(s)" "$HOME/.local/state/mroom/gate.log"; expect_out 1
   # No row: an empty list. No filter, no order: the most rows.
@@ -912,6 +929,8 @@ t_template_load_restores_as_the_objects_role_then_swaps_the_template() {
   expect_true "the restore's password reached Postgres" lacks "$log" "$secret"
   expect_true "the restore's password reached the gate log" lacks "$(gate_log_text)" "$secret"
   expect_true "the restore's password was printed" lacks "$out$err" "$secret"
+  expect_true "the restore's password was on a command line, which every user on the box can read" \
+    lacks "$(argv_text)" "$secret"
   expect_true "the restore's password is kept" lacks "$(cat "$HOME"/.local/state/mroom/qa/* 2>/dev/null || true)" "$secret"
   expect_true "the archive stays behind" eval '! ls -d "$HOME"/.local/state/mroom/gate-tmp.* >/dev/null 2>&1'
 }
