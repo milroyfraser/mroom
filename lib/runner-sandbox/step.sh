@@ -12,8 +12,9 @@
 #   MROOM_SANDBOX=1, MROOM_INPUTS, MROOM_EVIDENCE (the folder the step writes for the runner to read)
 #   MROOM_HOLDER    /usr/lib/mroom-sandbox/holder, when the sandbox has a holder: run it with `sudo -n -u mroom-holder`
 #   the NAME=value lines of MROOM_SANDBOX_ENV, read as data and never sourced
-# Every process the step user has is killed before the command and after it, so nothing the step started outlives
-# it to watch the next one; so run one step at a time.
+# Every process the step user and the holder have is killed before the command and after it, so nothing the step
+# started outlives it to watch the next one; so run one step at a time. In a GitHub job (GITHUB_ACTIONS=true) the
+# step's output is wrapped in ::stop-commands::, so it cannot give the runner a workflow command.
 #
 # --collect copies the evidence into a folder of the runner's: read as mroom-step (`tar -h`, so a link the step left
 # gives only what the step itself could read), unpacked by the runner as plain files. Read evidence only this way:
@@ -29,16 +30,31 @@ die() { echo "mroom-step: $*" >&2; exit 2; }
 usage="usage: mroom-step [--input <file>]... -- <command> [<arg>...] | --collect <empty folder>"
 
 # stop_all: kill every process the step user has (pkill spares itself).
-stop_all() { sudo -n -u "$SANDBOX_STEP_USER" -- /usr/bin/pkill -KILL -u "$SANDBOX_STEP_USER" >/dev/null 2>&1 || true; }
+# stop_user <user>: kill every process the user has, as that user (`kill -KILL -1` reaches all of them, a child
+# forked a moment ago included), again until none is left. stop_all: the step's, and the holder's, so a wrapper the
+# step started in the background cannot outlive it either.
+stop_user() {
+  local round
+  for ((round = 1; round <= 50; round++)); do
+    sudo -n -u "$1" -- /usr/bin/kill -KILL -1 >/dev/null 2>&1 || true
+    pgrep -u "$1" >/dev/null 2>&1 || return 0
+    sleep 0.1
+  done
+  die "$1 still has processes after 50 rounds of kill -KILL -1"
+}
+stop_all() { stop_user "$SANDBOX_STEP_USER"; stop_user "$SANDBOX_HOLDER_USER"; }
 
 if [ "${1:-}" = --collect ]; then
   [[ "$#" = 2 && -d "$2" && ! -L "$2" && -O "$2" ]] || die "--collect takes an empty folder of yours"
   [ -z "$(ls -A "$2")" ] || die "--collect takes an empty folder: $2"
   [ -d "$SANDBOX_VAR/evidence" ] || die "the runner sandbox is not set up (run the runner-sandbox action first)"
+  # Absolute before the cd below: a relative name would then mean a folder in the evidence, which the step owns
+  # and could have made a link to the runner's home.
+  dest="$(cd "$2" && pwd -P)"
   stop_all
   cd "$SANDBOX_VAR/evidence"
   sudo -n -u "$SANDBOX_STEP_USER" -- /usr/bin/tar -chf - --hard-dereference --ignore-failed-read . \
-    | tar -xf - -C "$2" --no-same-owner --no-same-permissions
+    | tar -xf - -C "$dest" --no-same-owner --no-same-permissions
   exit 0
 fi
 
@@ -80,10 +96,27 @@ if [ -x "$SANDBOX_HOLDER_BIN" ]; then vars+=("MROOM_HOLDER=$SANDBOX_HOLDER_BIN")
 home="$(getent passwd "$SANDBOX_STEP_USER" 2>/dev/null | cut -d: -f6)" || true
 cd "$SANDBOX_VAR"
 stop_all
+# In a GitHub job the step's output reaches the job log, where a line like ::add-mask:: or ::error:: is a command
+# to the runner: between ::stop-commands::<token> and ::<token>:: none is. The step's stderr joins its stdout
+# there, so it falls inside the markers too.
+token=""
+if [ "${GITHUB_ACTIONS:-}" = true ]; then
+  token="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+  echo "::stop-commands::$token"
+fi
 rc=0
-sudo -n -u "$SANDBOX_STEP_USER" -- /usr/bin/env -i \
-  PATH="$path" HOME="${home:-/home/$SANDBOX_STEP_USER}" LANG=C.UTF-8 MROOM_SANDBOX=1 \
-  MROOM_INPUTS="$SANDBOX_VAR/inputs" MROOM_EVIDENCE="$SANDBOX_VAR/evidence" ${vars[@]+"${vars[@]}"} \
-  "$@" || rc=$?
+if [ -n "$token" ]; then
+  sudo -n -u "$SANDBOX_STEP_USER" -- /usr/bin/env -i \
+    PATH="$path" HOME="${home:-/home/$SANDBOX_STEP_USER}" LANG=C.UTF-8 MROOM_SANDBOX=1 \
+    MROOM_INPUTS="$SANDBOX_VAR/inputs" MROOM_EVIDENCE="$SANDBOX_VAR/evidence" ${vars[@]+"${vars[@]}"} \
+    "$@" 2>&1 || rc=$?
+  echo
+  echo "::$token::"
+else
+  sudo -n -u "$SANDBOX_STEP_USER" -- /usr/bin/env -i \
+    PATH="$path" HOME="${home:-/home/$SANDBOX_STEP_USER}" LANG=C.UTF-8 MROOM_SANDBOX=1 \
+    MROOM_INPUTS="$SANDBOX_VAR/inputs" MROOM_EVIDENCE="$SANDBOX_VAR/evidence" ${vars[@]+"${vars[@]}"} \
+    "$@" || rc=$?
+fi
 stop_all
 exit "$rc"

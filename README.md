@@ -1461,17 +1461,17 @@ a self-hosted runner unless `MROOM_SANDBOX_EPHEMERAL=1` says the runner is throw
   with: { persist-credentials: false }
 - uses: milroyfraser/mroom/actions/runner-sandbox@vX.Y.Z   # the first release with it
   env:
-    MROOM_SANDBOX_SECRET: ${{ secrets.QA_GATE_KEY }}   # an env, never an input
+    MROOM_SANDBOX_SECRET: ${{ secrets.SECRET_KEY }}    # an env, never an input
   with:
-    holder: .mroom/qa-box.sh           # the trusted wrapper that uses the secret
+    holder: .mroom/holder.sh           # the trusted wrapper that uses the secret
     holder-args: any                   # it checks each argument itself ("The holder", below)
-    known-hosts: ${{ vars.QA_SSH_KNOWN_HOSTS }}
+    known-hosts: ${{ vars.SSH_KNOWN_HOSTS }}
     copy: harness                      # root-owned, read-only in /usr/lib/mroom-sandbox/copies/harness
     path: /opt/node/bin                # node's folder, outside the runner's home
     step-env: |
-      QA_SITE=https://12.qa.example.dev
+      SITE_URL=https://12.qa.example.dev
 - run: mroom-step --input recipe.mjs -- node /usr/lib/mroom-sandbox/copies/harness/drive.mjs inputs/recipe.mjs
-- run: mkdir evidence && mroom-step --collect evidence
+- run: mkdir "$RUNNER_TEMP/evidence" && mroom-step --collect "$RUNNER_TEMP/evidence"
 ```
 
 What the step (user `mroom-step`, run through `mroom-step`) gets and does not:
@@ -1479,14 +1479,23 @@ What the step (user `mroom-step`, run through `mroom-step`) gets and does not:
 | | |
 |---|---|
 | **Gets** | `env -i` with only `PATH` (`path`, then `/usr/local/bin:/usr/bin:/bin`), `HOME`, `LANG`, `MROOM_SANDBOX`, `MROOM_INPUTS`, `MROOM_EVIDENCE`, `MROOM_HOLDER` and the `step-env` lines; read access to the copies and its inputs; write access to `/var/lib/mroom-sandbox/evidence` and its own home, and to `/tmp`, `/var/tmp` and other sticky folders; the holder's wrapper, through `sudo -n -u mroom-holder "$MROOM_HOLDER"`; the network |
-| **Never** | the job's environment (no `GITHUB_TOKEN`, Claude token or secret); the runner's home (closed to `0700`: the workspace, git's credentials in it, `RUNNER_TEMP`); a runner process's environment; the secret, which only `mroom-holder` reads; sudo to root or to anything but the wrapper; writing anything else on the local disks: the copies, the inputs, `/etc/mroom-sandbox`, the pinned host keys, the sandbox's scripts, any tool, library or folder (GitHub's images run `chmod -R 777` on `/usr/local/bin`, `/usr/local/lib/node_modules`, `/opt` and `/usr/share`; the action closes every such path, so a step cannot change `node`, `git` or debconf's Perl, which the runner or apt, as root, runs next); Docker's or containerd's socket; outliving its step (every process the step user has is killed before and after each one, so run one step at a time) |
+| **Never** | the job's environment (no `GITHUB_TOKEN`, Claude token or secret); the runner's home (closed to `0700`: the workspace, git's credentials in it, `RUNNER_TEMP`); a runner process's environment; the secret, which only `mroom-holder` reads; sudo to root or to anything but the wrapper; writing anything else on the local disks: the copies, the inputs, `/etc/mroom-sandbox`, the pinned host keys, the sandbox's scripts, any tool, library or folder (GitHub's images run `chmod -R 777` on `/usr/local/bin`, `/usr/local/lib/node_modules`, `/opt` and `/usr/share`; the action closes every such path, so a step cannot change `node`, `git` or debconf's Perl, which the runner or apt, as root, runs next); Docker's or containerd's socket; outliving its step (every process the step user and the holder have is killed before and after each one, so run one step at a time); giving the runner a workflow command |
+
+The sweep that closes what every user may write runs once, when the sandbox is set up: install every tool and
+package the job needs before it, or run `/usr/lib/mroom-sandbox/check.sh` again after installing one, since an
+installer may leave its files writable by all.
 
 `/tmp` stays shared: put nothing the step must not see there. The runner's own temporary files live in its home.
 
 **Evidence.** Take what the step wrote with `mroom-step --collect <empty folder>`, never by reading
 `/var/lib/mroom-sandbox/evidence` in place: the step may leave a link there to the runner's own files.
 `--collect` reads the folder as `mroom-step` (`tar -h`), so a link gives only what the step itself could read, and
-unpacks plain files.
+unpacks plain files into the folder named, resolved to an absolute path first.
+
+In a GitHub job, `mroom-step` puts the step's output (its stderr joined to its stdout) between
+`::stop-commands::<random token>` and `::<token>::`, so nothing the step prints is a workflow command to the
+runner (`::add-mask::`, `::error::`, `::set-output::` and the like). Every process `mroom-step` and `mroom-holder`
+have is killed (`kill -KILL -1` as each user, until none is left) before and after each step.
 
 **The holder.** sudo runs the wrapper with no arguments at all unless `holder-args: any`. With arguments
 allowed, the wrapper is the boundary: it checks each argument against its own allowlist (fixed commands, a strict

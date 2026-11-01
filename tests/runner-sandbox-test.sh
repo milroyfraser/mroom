@@ -89,9 +89,9 @@ t_setup_needs_root_through_sudo() {
 
 # --- step.sh (mroom-step) ---
 
-# argv_sudo: a fake sudo. A pkill call adds a line to $T/kills; any other writes each argument on a line of $T/argv.
+# argv_sudo: a fake sudo. A kill call adds a line to $T/kills; any other writes each argument on a line of $T/argv.
 argv_sudo() {
-  fake_bin sudo 'case " $* " in *" /usr/bin/pkill "*) echo "$*" >>"'"$T"'/kills"; exit 1 ;; esac
+  fake_bin sudo 'case " $* " in *" /usr/bin/kill "*) echo "$*" >>"'"$T"'/kills"; exit 1 ;; esac
 printf "%s\n" "$@" >"'"$T"'/argv"; pwd >"'"$T"'/cwd"'
 }
 
@@ -111,7 +111,8 @@ t_step_runs_as_the_step_user_with_a_clean_environment() {
   argv="$(cat "$T/argv")"
   expect_true "sudo -n -u mroom-step -- /usr/bin/env -i" [ "$(head -n 6 "$T/argv" | tr '\n' ' ')" = "-n -u mroom-step -- /usr/bin/env -i " ]
   expect_true "the step user's processes are killed before and after" \
-    [ "$(cat "$T/kills")" = "-n -u mroom-step -- /usr/bin/pkill -KILL -u mroom-step"$'\n'"-n -u mroom-step -- /usr/bin/pkill -KILL -u mroom-step" ]
+    [ "$(cat "$T/kills")" = "$(printf '%s\n' "-n -u mroom-step -- /usr/bin/kill -KILL -1" "-n -u mroom-holder -- /usr/bin/kill -KILL -1" \
+      "-n -u mroom-step -- /usr/bin/kill -KILL -1" "-n -u mroom-holder -- /usr/bin/kill -KILL -1")" ]
   expect_true "PATH from the sandbox's folders" grep -qx 'PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin' "$T/argv"
   expect_true "the step's variables" grep -qx 'QA_DB=qa_12' "$T/argv"
   expect_true "the sandbox's own" grep -qx "MROOM_INPUTS=$T/var/inputs" "$T/argv"
@@ -120,6 +121,26 @@ t_step_runs_as_the_step_user_with_a_clean_environment() {
   case "$argv" in *ghp_secret*) fail "the runner's token reached the step's command line" ;; *) ok ;; esac
   expect_true "the input copied" cmp -s "$T/recipe.mjs" "$T/var/inputs/recipe.mjs"
   expect_true "runs from the sandbox's folder" [ "$(cat "$T/cwd")" = "$(cd "$T/var" && pwd)" ]
+}
+
+t_step_output_gives_the_runner_no_workflow_command() {
+  world
+  fake_bin sudo 'case " $* " in *" /usr/bin/kill "*) exit 1 ;; esac
+echo "::add-mask::nothing"; echo "::error::from the step" >&2; printf "no newline at the end"'
+  run env GITHUB_ACTIONS=true "$RS/step.sh" -- true
+  expect_rc 0
+  local first last token
+  first="$(head -n 1 <<<"$out")" last="$(tail -n 1 <<<"$out")"
+  token="${first#::stop-commands::}"
+  expect_true "starts with ::stop-commands:: and a random token" grep -Eqx '[0-9a-f]{32}' <<<"$token"
+  expect_true "ends with ::<token>:: on a line of its own" [ "$last" = "::$token::" ]
+  expect_true "the step's stdout and stderr fall between" grep -qx '::error::from the step' <<<"$out"
+  expect_true "a last line with no newline still ends before the marker" grep -qx 'no newline at the end' <<<"$out"
+  run env GITHUB_ACTIONS=true "$RS/step.sh" -- true
+  expect_true "a new token each time" [ "$(head -n 1 <<<"$out")" != "$first" ]
+  # Outside a GitHub job, no markers.
+  run env -u GITHUB_ACTIONS "$RS/step.sh" -- true
+  case "$out" in *stop-commands*) fail "markers outside a GitHub job" ;; *) ok ;; esac
 }
 
 t_step_refuses_bad_calls() {
@@ -142,17 +163,17 @@ t_step_refuses_bad_calls() {
 
 t_step_passes_the_commands_status() {
   world
-  fake_bin sudo 'case " $* " in *" /usr/bin/pkill "*) echo kill >>"'"$T"'/kills"; exit 0 ;; esac; exit 7'
+  fake_bin sudo 'case " $* " in *" /usr/bin/kill "*) echo kill >>"'"$T"'/kills"; exit 0 ;; esac; exit 7'
   run "$RS/step.sh" -- true
   expect_rc 7
-  expect_true "and still kills what the step left" [ "$(wc -l <"$T/kills" | tr -d ' ')" = 2 ]
+  expect_true "and still kills what the step left" [ "$(wc -l <"$T/kills" | tr -d ' ')" = 4 ]
 }
 
 t_collect_copies_the_evidence_as_plain_files() {
   world
   has_gnu_tar || { ok; return; }
   # A fake sudo that runs the command after -- as the test's user (the real one runs it as mroom-step).
-  fake_bin sudo 'while [ "$1" != -- ]; do shift; done; shift; case "$1" in */pkill) exit 1 ;; esac; exec "$@"'
+  fake_bin sudo 'while [ "$1" != -- ]; do shift; done; shift; case "$1" in */kill) exit 1 ;; esac; exec "$@"'
   echo found >"$T/var/evidence/result.txt"
   echo runner-only >"$T/elsewhere"
   ln -s "$T/elsewhere" "$T/var/evidence/leak"
@@ -163,6 +184,15 @@ t_collect_copies_the_evidence_as_plain_files() {
   expect_true "the evidence copied" [ "$(cat "$T/out/result.txt")" = found ]
   expect_true "a link arrives as a plain file, read as the step" [ -f "$T/out/leak" ] && [ ! -L "$T/out/leak" ]
   run "$RS/step.sh" --collect "$T/full"; expect_rc 2; expect_err_has "empty folder"
+  # A relative folder: the evidence holds a link of the same name, waiting for the runner's tar after its cd.
+  mkdir -p "$T/caller/out" "$T/victim"
+  ln -s "$T/victim" "$T/var/evidence/out"
+  cd "$T/caller"
+  run "$RS/step.sh" --collect out
+  cd "$T"
+  expect_rc 0
+  expect_true "the evidence went to the caller's folder" [ "$(cat "$T/caller/out/result.txt")" = found ]
+  expect_true "nothing went where the step's link led" [ -z "$(ls -A "$T/victim")" ]
   run "$RS/step.sh" --collect "$T/missing"; expect_rc 2
   run "$RS/step.sh" --collect "$T/out" extra; expect_rc 2
 }
@@ -373,6 +403,7 @@ test_case step-env t_step_env_takes_plain_names_and_refuses_credentials
 test_case setup-inputs t_setup_refuses_bad_inputs_before_changing_anything
 test_case setup-root t_setup_needs_root_through_sudo
 test_case step t_step_runs_as_the_step_user_with_a_clean_environment
+test_case step-commands t_step_output_gives_the_runner_no_workflow_command
 test_case step-bad t_step_refuses_bad_calls
 test_case step-status t_step_passes_the_commands_status
 test_case collect t_collect_copies_the_evidence_as_plain_files

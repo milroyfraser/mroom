@@ -554,9 +554,12 @@ Invariants, each with a test:
      not made yet, the nearest above it) and every folder the sandbox trusts, up to `/`, is one only root or the runner
      can change. The holder's wrapper runs with no arguments unless the job allows them, for a wrapper that keeps the
      secret out of argv, calls its tools by absolute path, ignores its working folder and checks each argument against
-     an allowlist. Every process the step user has is killed before and after each step, and the runner takes the
-     step's evidence only through `mroom-step --collect`, which reads it as the step and so never follows a link to
-     the runner's own files. It refuses a
+     an allowlist. Every process the step user and the holder have is killed before and after each step; in a GitHub
+     job the step's output sits between `::stop-commands::` markers with a random token, so it gives the runner no
+     workflow command; the users are new system users, and setup refuses if any file outside their homes already has
+     their uids; and the runner takes the step's evidence only through `mroom-step --collect`, which reads it as the
+     step, so it never follows a link to the runner's own files, into a folder resolved to an absolute path before
+     it enters the evidence. It refuses a
      self-hosted runner that outlives the job.
    - Before any untrusted code runs, a hostile probe runs through `mroom-step` and tries the secret, the runner's
      files, git's config in the workspace, `RUNNER_TEMP` and a runner process's environment, sudo, Docker's socket,

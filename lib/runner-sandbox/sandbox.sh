@@ -100,7 +100,9 @@ command -v visudo >/dev/null || die "visudo is missing" 1
 # --- Users, and the runner's home closed ---
 
 for user in "$SANDBOX_STEP_USER" "$SANDBOX_HOLDER_USER"; do
-  id "$user" >/dev/null 2>&1 || useradd --create-home --shell /usr/sbin/nologin "$user"
+  ! id "$user" >/dev/null 2>&1 || die "the user $user exists already; the sandbox makes its own users, on a fresh runner" 1
+  # A system user: a uid below the ordinary ones, so no file a person or an earlier user left already has it.
+  useradd --system --create-home --shell /usr/sbin/nologin "$user"
 done
 home="$(getent passwd "$runner" | cut -d: -f6)"
 [ -d "$home" ] || die "no home for $runner" 1
@@ -129,10 +131,25 @@ for disk in "${disks[@]}"; do
     -o -path "$home" \) -prune -o -perm -o+w ! -type l ! \( -type d -perm -1000 \) -print0 2>/dev/null >>"$swept" || true
 done
 if [ -s "$swept" ]; then
-  xargs -0 -r chmod o-w -- <"$swept"
+  # A file that went between find and chmod is no matter; any other failure is.
+  if ! xargs -0 -r chmod o-w -- <"$swept" 2>"$swept.err"; then
+    if grep -v 'No such file or directory' "$swept.err" | grep -q .; then
+      die "could not close every path: $(grep -v 'No such file or directory' "$swept.err" | head -n 3 | tr '\n' ' ')" 1
+    fi
+  fi
+  rm -f "$swept.err"
   echo "runner-sandbox: closed $(tr -cd '\0' <"$swept" | wc -c) paths every user could write, such as $(tr '\0' '\n' <"$swept" | head -n 3 | tr '\n' ' ')" >&2
 fi
 rm -f "$swept"
+
+# Nothing outside their homes may already belong to the sandbox's users: the step owns what it owns.
+uids=(-uid "$(id -u "$SANDBOX_STEP_USER")" -o -uid "$(id -u "$SANDBOX_HOLDER_USER")")
+for disk in "${disks[@]}"; do
+  owned="$(find "$disk" -xdev \( -path /proc -o -path /sys -o -path /dev -o -path /run \
+    -o -path "$(getent passwd "$SANDBOX_STEP_USER" | cut -d: -f6)" -o -path "$(getent passwd "$SANDBOX_HOLDER_USER" | cut -d: -f6)" \) \
+    -prune -o \( "${uids[@]}" \) -print 2>/dev/null | head -n 3)" || true
+  [ -z "$owned" ] || die "files outside their homes already belong to the sandbox's users: $(tr '\n' ' ' <<<"$owned")" 1
+done
 
 # The runner's PATH and the step's: each folder, or for one that does not exist yet the nearest above it (where the
 # step could make it), and each folder above, must be closed: in an open folder the step could rename the one below
@@ -216,6 +233,8 @@ if [ -n "$holder" ]; then
   rules+="$runner ALL=($SANDBOX_HOLDER_USER) NOPASSWD: $command"$'\n'
   rules+="$SANDBOX_STEP_USER ALL=($SANDBOX_HOLDER_USER) NOPASSWD: $command"$'\n'
 fi
+# mroom-step kills the holder's processes after each step, as the holder.
+rules+="$runner ALL=($SANDBOX_HOLDER_USER) NOPASSWD: /usr/bin/kill -KILL -1"$'\n'
 tmp="$(mktemp)"
 printf 'Defaults:%s env_reset\n%s' "$SANDBOX_STEP_USER" "$rules" >"$tmp"
 visudo -cf "$tmp" >/dev/null || { rm -f "$tmp"; die "the sudoers rules do not parse" 1; }

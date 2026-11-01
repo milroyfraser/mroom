@@ -3,8 +3,8 @@
 # The runner sandbox (design 8.5) on a real, throwaway GitHub runner: what the offline fakes cannot show. sandbox.sh
 # makes the users, the sudoers rules and the root-owned copies; check.sh's hostile probe, run through mroom-step, is
 # denied everything; the step reaches the secret only through the holder's wrapper; a link in a copied tree hands root
-# nothing. Then the sandbox is weakened twice (the runner's home opened, a sudo rule added) and check.sh must fail
-# loudly each time. Last, bwrap-probe: bubblewrap works, and the sandbox's sudo hop is refused inside it.
+# nothing. Then the sandbox is weakened three times (the runner's home opened, a sudo rule added, a tool made writable
+# by every user again) and check.sh must fail loudly each time. Last, bwrap-probe: bubblewrap works, and the sandbox's sudo hop is refused inside it.
 # CI only: it adds users and sudoers rules and closes the runner's home, so tests/run.sh does not pick it up.
 set -euo pipefail
 SUITE=sandbox-real
@@ -22,6 +22,9 @@ SECRET="secret-$RANDOM$RANDOM$RANDOM"
 APP="$(mktemp -d)"
 cleanup() { sudo rm -f /etc/sudoers.d/zz-weakened; sudo chmod o-w "$TOOL"; chmod 0700 "$RUNNER_HOME"; rm -rf "$APP" "$TOP"; }
 trap cleanup EXIT
+
+# step_body: the step's output without the ::stop-commands:: markers mroom-step puts around it in a GitHub job.
+step_body() { out="$(grep -Ev -e '^$' -e '^::stop-commands::[0-9a-f]{32}$' -e '^::[0-9a-f]{32}::$' <<<"$out" || true)"; }
 
 no_leak() { ! grep -rqs -e "$SECRET" -e 'root:' "$1"; }
 
@@ -49,6 +52,8 @@ EOF
   [ "$rc" = 0 ] || echo "$out" >&2
 
   run mroom-step -- id -un
+  expect_true "the step's output is wrapped in ::stop-commands::" grep -Eqx '::stop-commands::[0-9a-f]{32}' <<<"$out"
+  step_body
   expect_out mroom-step
   run mroom-step -- env
   expect_out_has "QA_DB=qa_1"; expect_out_has "MROOM_HOLDER=/usr/lib/mroom-sandbox/holder"
@@ -56,6 +61,7 @@ EOF
   run mroom-step -- node -e 'console.log(process.version)'
   expect_rc 0
   run mroom-step -- sh -c 'sudo -n -u mroom-holder "$MROOM_HOLDER"'
+  step_body
   expect_rc 0; expect_out holder-ok
   run mroom-step -- sh -c 'echo found >"$MROOM_EVIDENCE/result.txt"'
   expect_true "the runner reads the step's evidence" [ "$(cat /var/lib/mroom-sandbox/evidence/result.txt)" = found ]
@@ -88,6 +94,8 @@ EOF
   run mroom-step -- /bin/sh -c 'nohup sleep 300 >/dev/null 2>&1 &'
   expect_rc 0
   expect_true "the step's background process was killed" [ -z "$(pgrep -u mroom-step || true)" ]
+  run mroom-step -- /bin/sh -c 'nohup sudo -n -u mroom-holder "$MROOM_HOLDER" >/dev/null 2>&1 &'
+  expect_true "and the holder's" [ -z "$(pgrep -u mroom-holder || true)" ]
 
   # --collect: a link the step left gives only what the step itself could read.
   printf 'runner-only-%s\n' "$SECRET" >"$HOME/runner-only"

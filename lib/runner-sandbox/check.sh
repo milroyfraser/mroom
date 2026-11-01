@@ -72,7 +72,7 @@ main() {
   MROOM_PROBE_TOKEN="$value" sleep 300 &
   holder=$!
   # shellcheck disable=SC2064  # the paths and pid are fixed now
-  trap "kill $holder 2>/dev/null; rm -f '$planted' '$report'" EXIT
+  trap "kill $holder 2>/dev/null; rm -f '$planted' '$report' '$report.raw'" EXIT
 
   args=(--value "$value" --secret "$SANDBOX_ETC/holder/secret" --holder-dir "$SANDBOX_ETC/holder"
     --runner-file "$planted" --runner-home "$HOME" --pid "$holder")
@@ -93,7 +93,10 @@ main() {
   # Where to look for anything the step may write: every local disk, but for the tests.
   if [ -n "${MROOM_SANDBOX_SCAN:-}" ]; then args+=(--scan "$MROOM_SANDBOX_SCAN"); fi
 
-  MROOM_PROBE_TOKEN="$value" "$step" -- /bin/bash "$HERE/probe.sh" "${args[@]}" >"$report" 2>&1 || rc=$?
+  MROOM_PROBE_TOKEN="$value" "$step" -- /bin/bash "$HERE/probe.sh" "${args[@]}" >"$report.raw" 2>&1 || rc=$?
+  # Without the markers mroom-step puts around the step's output in a GitHub job, and the blank line before the last.
+  grep -Ev -e '^$' -e '^::stop-commands::[0-9a-f]{32}$' -e '^::[0-9a-f]{32}::$' "$report.raw" >"$report" || true
+  rm -f "$report.raw"
   if [ "$rc" != 0 ]; then
     echo "::error::runner-sandbox: the probe did not run through mroom-step (exit $rc): $(grep -m1 . "$report" | cut -c1-160)"
     exit 1

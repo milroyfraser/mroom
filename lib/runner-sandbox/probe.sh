@@ -97,12 +97,10 @@ if [ "${#scans[@]}" = 0 ]; then
   while IFS= read -r disk; do scans+=("$disk"); done < <(findmnt -rn -o TARGET -t ext2,ext3,ext4,xfs,btrfs,f2fs,vfat 2>/dev/null)
   [ "${#scans[@]}" -gt 0 ] || scans=(/)
 fi
-own=()
-[ "$(id -un)" != mroom-step ] || own=(! -user mroom-step)
 found="$(for dir in "${scans[@]}"; do
   find "$dir" -xdev \( -path /proc -o -path /sys -o -path /dev -o -path /run -o -path /tmp -o -path /var/tmp \
     -o -path "${HOME:-/nonexistent}" -o -path "${MROOM_EVIDENCE:-/nonexistent}" \) -prune \
-    -o -writable ! -type l ! \( -type d -perm -1000 \) ${own[@]+"${own[@]}"} -print 2>/dev/null
+    -o -writable ! -type l ! \( -type d -perm -1000 \) -print 2>/dev/null
 done)"
 if [ -n "$found" ]; then
   report reached writable "may write $(wc -l <<<"$found" | tr -d ' ') paths, such as $(head -n 3 <<<"$found" | tr '\n' ' ')"
