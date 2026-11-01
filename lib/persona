@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+# persona — the guard: the persona's only way to write to the tracker (design D23), for alert triage.
+#
+#   mroom persona find <alert key>          the issues whose description holds the key's marker, with their
+#                                           keys (mroom tracker find)
+#   mroom persona owned <id>                whether the persona filed the issue (mroom tracker owned)
+#   mroom persona create --key <alert key> [--key <alert key>]... --title <title> < body
+#                                           files an issue for those alerts: in issues.team, in persona.state,
+#                                           with persona.label, assigned to no one, one hidden marker a key
+#   mroom persona comment <id> < body       comments on an issue the persona filed
+#
+# What it holds to:
+#   - it writes only to issues it filed (D23): a comment goes on an issue only when the tracker says the
+#     persona's token filed it. There is no command to edit, close, assign, label or delete; status and
+#     priority come with the persona's own backlog work;
+#   - it files an issue only for an alert key, and, when MROOM_PERSONA_ALERTS names a file (a JSON list of
+#     keys), only for one of this run's alerts, so nothing it is told can silence an alert to come;
+#   - the markers are its own: every "<!--" in a body is escaped, and create writes one marker a key. After
+#     a create it reads the issue back, and searches for it as the next run will. When the tracker did not
+#     keep a marker, or its search does not find it after three tries, the next run would file the issue
+#     again; when it holds one the guard did not write, alert text forged it. Either way it writes nothing
+#     more in this run (exit 5) and leaves the issue's id in markers-lost, for the workflow's switch-off
+#     job (actions/triage, switch-off.sh);
+#   - a body or a title that holds a token this command can see, or anything shaped like one, is refused;
+#     a link to a host other than the trackers', GitHub's or the app's is defanged; a body is at most
+#     30000 bytes and a title 160 characters;
+#   - at most 10 creates and 30 comments a run.
+#
+# Every description and comment ends with a footer naming persona.name and the run. Without
+# MROOM_PERSONA_LIVE=1 every write is a dry run: it prints what it would send and changes nothing (a dry
+# run's issue is DRY-<n>, and comments on it are dry runs too).
+#
+# Environment: MROOM_PERSONA_LIVE, MROOM_PERSONA_STATE (the run's folder: counts, markers-lost and the log
+# actions.jsonl; $RUNNER_TEMP/mroom-persona by default), MROOM_PERSONA_ALERTS, MROOM_PERSONA_RUN_URL (the
+# run's link, for the footer), and the tracker's own (MROOM_CONFIG, the token issues.token_env names).
+#
+# Exit codes: 0 done (or a dry run); 1 the tracker or the config failed; 2 a usage error; 3 there is no
+# tracker; 4 refused; 5 the tracker did not keep the markers (in this run or an earlier call), so writes stop.
+set -euo pipefail
+set +x
+umask 077
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+MROOM_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+export MROOM_ROOT
+# shellcheck source=lib/core/persona.sh
+. "$MROOM_ROOT/lib/core/persona.sh"
+
+NAME="mroom persona"
+TRACKER="$MROOM_ROOT/lib/tracker"
+MAX_CREATES=10
+MAX_COMMENTS=30
+MAX_BODY=30000
+MAX_TITLE=160
+
+say() { echo "$NAME: $*" >&2; }
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; }
+
+LIVE=false
+[ "${MROOM_PERSONA_LIVE:-}" = 1 ] && LIVE=true
+# The run's folder. On a runner, RUNNER_TEMP is the run's own; anywhere else, without MROOM_PERSONA_STATE,
+# a fresh folder for this call alone, removed when it ends, never a shared fixed path another user could
+# make first. The caps and the markers-lost stop hold within one folder: one run, on a runner.
+OWN_STATE=""
+if [ -n "${MROOM_PERSONA_STATE:-}" ]; then STATE="$MROOM_PERSONA_STATE"
+elif [ -n "${RUNNER_TEMP:-}" ]; then STATE="$RUNNER_TEMP/mroom-persona"
+else STATE="$(mktemp -d)"; OWN_STATE="$STATE"; fi
+tmp=""
+cleanup() { rm -rf ${tmp:+"$tmp"} ${OWN_STATE:+"$OWN_STATE"}; }
+trap cleanup EXIT
+
+# log <result> <detail>: one line in the run's actions.jsonl, for its summary (ids and keys, never a body).
+log() {
+  jq -nc --arg r "$1" --arg d "$2" --argjson live "$LIVE" '{tool: "persona", result: $r, detail: $d, live: $live}' \
+    >>"$STATE/actions.jsonl" 2>/dev/null || true
+}
+
+refuse() { log refused "$*"; say "refused: $*"; exit 4; }
+
+# count <kind> <limit>: one more write of this kind in this run. Refuses past the limit, and after the
+# tracker dropped the markers.
+count() {
+  local file="$STATE/count-$1" n=0
+  if [ -s "$STATE/markers-lost" ]; then
+    log refused "markers lost earlier in this run"
+    say "refused: the tracker did not keep the hidden markers on $(head -n1 "$STATE/markers-lost") earlier in this run; nothing more is written until a person checks"
+    exit 5
+  fi
+  [ ! -f "$file" ] || n="$(cat "$file")"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  [ "$n" -lt "$2" ] || refuse "already $n $1 write(s) in this run; the limit is $2"
+  echo $((n + 1)) >"$file"
+}
+
+# secrets_in <text file>: whether the file holds a token this command can see: the tracker's, the error
+# tracker's, the chat bot's or GitHub's. The token goes to grep through a file descriptor, never argv.
+secrets_in() {
+  local -
+  set +x
+  local name value
+  for name in "$(persona_config issues.token_env LINEAR_API_KEY)" "$(persona_config errors.token_env SENTRY_AUTH_TOKEN)" \
+    SLACK_BOT_TOKEN GH_TOKEN GITHUB_TOKEN; do
+    value="${!name:-}"
+    [ "${#value}" -ge 8 ] || continue
+    if grep -qFf <(printf '%s\n' "$value") "$1"; then return 0; fi
+  done
+  return 1
+}
+
+# link_hosts: the hosts a link may point to as it is: GitHub's, the trackers' and the app's own.
+link_hosts() {
+  local url
+  printf '%s\n' github.com linear.app sentry.io
+  for url in "$(persona_config issues.url "")" "$(persona_config release.production_url "")"; do
+    url="${url#https://}"; url="${url#http://}"; url="${url%%/*}"; url="${url%%:*}"
+    [ -z "$url" ] || printf '%s\n' "${url,,}"
+  done
+}
+
+# guarded <max bytes> <in file> <out file>: the text, checked: no token, no marker, links defanged.
+guarded() {
+  local max="$1" in="$2" out="$3" size hosts=()
+  size="$(wc -c <"$in")"
+  [ "$size" -le "$max" ] || refuse "the text is $size bytes; the limit is $max"
+  if [ "$(tr -d '\000' <"$in" | wc -c)" != "$size" ]; then refuse "the text holds a NUL byte"; fi
+  if secrets_in "$in"; then refuse "the text holds a token"; fi
+  persona_text no-token <"$in" || refuse "the text holds something shaped like a token or key"
+  mapfile -t hosts < <(link_hosts)
+  persona_unmarked <"$in" | persona_text defang "${hosts[@]}" >"$out" || { say "the text could not be checked"; exit 1; }
+}
+
+# footer <verb>: the line that ends every description and comment.
+footer() {
+  local run="${MROOM_PERSONA_RUN_URL:-}" link=""
+  [[ "$run" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+(/attempts/[0-9]+)?$ ]] && link=" · [run]($run)"
+  printf '\n\n---\n_%s by %s (alert triage)%s. A person decides whether it matters._\n' "$1" "$(persona_name)" "$link"
+}
+
+# body_in <file>: stdin into the file; refuses an empty body or one read from a terminal.
+body_in() {
+  [ ! -t 0 ] || { say "the body comes on stdin (for example: < body.md)"; exit 2; }
+  head -c $((MAX_BODY + 1)) >"$1"
+  [ -n "$(tr -d '[:space:]' <"$1")" ] || { say "the body on stdin is empty"; exit 2; }
+}
+
+# scratch: makes the private folder $tmp, removed when the command ends (cleanup).
+scratch() { tmp="$(mktemp -d)"; }
+
+# tracker <args...>: mroom tracker, its exit code kept (3: no tracker).
+tracker() { "$TRACKER" "$@"; }
+
+cmd_find() {
+  [ "$#" = 1 ] || { say "usage: find <alert key, such as sentry:1001>"; exit 2; }
+  tracker find "$1"
+}
+
+cmd_owned() {
+  [ "$#" = 1 ] || { say "usage: owned <id>"; exit 2; }
+  tracker owned "$1"
+}
+
+# allowed_key <key>: well formed and, when the run's alerts are known, one of them.
+allowed_key() {
+  persona_key_ok "$1" || { say "not an alert key: ${1:0:80}"; exit 2; }
+  [ -n "${MROOM_PERSONA_ALERTS:-}" ] || return 0
+  jq -e --arg k "$1" 'type == "array" and index($k) != null' "$MROOM_PERSONA_ALERTS" >/dev/null 2>&1 \
+    || refuse "--key $1 is not one of this run's alerts"
+}
+
+cmd_create() {
+  local title="" keys=() k markers="" answer id desc n
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --key) [ "$#" -ge 2 ] || { say "--key takes a value"; exit 2; }; allowed_key "$2"; keys+=("$2"); shift 2 ;;
+      --title) [ "$#" -ge 2 ] || { say "--title takes a value"; exit 2; }; title="$2"; shift 2 ;;
+      --assignee | --label | --state | --team | --priority | --allow-create)
+        refuse "$1: the team, state and label come from mroom.toml, and the persona assigns no one" ;;
+      *) say "create: unknown option '$1'"; exit 2 ;;
+    esac
+  done
+  [ "${#keys[@]}" -gt 0 ] || { say "create needs at least one --key, so the next run finds the issue"; exit 2; }
+  [ "$(tracker backend)" != none ] || { say "issues.tracker is none, so there is no tracker to file an issue in"; exit 3; }
+  title="${title//[$'\r\n\t']/ }"
+  [ -n "${title// /}" ] || { say "create needs --title"; exit 2; }
+  n="$(jq -Rr 'length' <<<"$title")"
+  [ "$n" -le "$MAX_TITLE" ] || refuse "the title is $n characters; the limit is $MAX_TITLE"
+  scratch
+  body_in "$tmp/body"
+  printf '%s' "$title" >"$tmp/title.in"
+  guarded 1000 "$tmp/title.in" "$tmp/title"
+  guarded "$MAX_BODY" "$tmp/body" "$tmp/body.ok"
+  title="$(cat "$tmp/title")"
+  for k in "${keys[@]}"; do markers+="$(persona_marker "$k")"$'\n'; done
+  { cat "$tmp/body.ok"; footer Filed; printf '\n%s' "$markers"; } >"$tmp/desc"
+  count create "$MAX_CREATES"
+  if [ "$LIVE" != true ]; then
+    n="$(cat "$STATE/count-create")"
+    log dry-run "create DRY-$n for ${keys[*]}"
+    jq -nc --arg id "DRY-$n" --arg t "$title" --rawfile d "$tmp/desc" --args '{dry_run: true, would: "create",
+      created: $id, title: $t, keys: $ARGS.positional, description: $d}' "${keys[@]}"
+    return 0
+  fi
+  local args=(create --allow-create --title "$title") label state
+  label="$(persona_config persona.label "")"
+  state="$(persona_config persona.state "")"
+  [ -z "$label" ] || args+=(--label "$label")
+  [ -z "$state" ] || args+=(--state "$state")
+  answer="$(tracker "${args[@]}" <"$tmp/desc")" || exit $?
+  id="$(jq -r '.created // empty' <<<"$answer")"
+  [ -n "$id" ] || { say "the tracker did not say which issue it created"; exit 1; }
+  log created "$id for ${keys[*]}"
+  # The dedupe rests on the markers: read the issue back.
+  # A read that fails is not a lost marker: exit 1, and the alarm says so, rather than turning triage off.
+  desc="$(tracker get "$id")" || { say "$id was filed, but it could not be read back"; exit 1; }
+  desc="$(jq -r '.description // ""' <<<"$desc")"
+  for k in "${keys[@]}"; do
+    if [[ "$desc" != *"$(persona_marker "$k")"* ]]; then
+      printf '%s\n' "$id" >"$STATE/markers-lost"
+      log markers-lost "$id: the tracker did not keep the hidden marker for $k"
+      say "$id was filed, but the tracker did not keep its hidden marker for $k, so the next run could not find it. Nothing more is written until a person checks."
+      exit 5
+    fi
+  done
+  # And no marker but these: a tracker that turned escaped text back into a comment would let alert text
+  # forge one, which silences that alert to come. The same stop: a person must look.
+  local stored wanted
+  stored="$(grep -oE '<!--[[:space:]]*mroom-[^>]*-->' <<<"$desc" | sort -u)" || true
+  wanted="$(for k in "${keys[@]}"; do persona_marker "$k"; echo; done | sort -u)"
+  if [ "$stored" != "$wanted" ]; then
+    printf '%s\n' "$id" >"$STATE/markers-lost"
+    log markers-lost "$id: the tracker stored a marker the persona did not write"
+    say "$id was filed, but the tracker stored a hidden marker the persona did not write, so alert text could forge one. Nothing more is written until a person checks."
+    exit 5
+  fi
+  # Stored is not enough: the next run finds the issue by the tracker's search, which may read another
+  # form of the description. Search for each error as the next run will, three times before a miss counts,
+  # in case the search lags the write.
+  local found base wait seen
+  for base in $(for k in "${keys[@]}"; do persona_base_key "$k"; echo; done | sort -u); do
+    for wait in 0 2 5; do
+      [ "$wait" = 0 ] || sleep "$wait"
+      found="$(tracker find "$base")" || { say "$id was filed, but it could not be checked: the tracker could not be searched"; exit 1; }
+      seen=1
+      for k in "${keys[@]}"; do
+        [ "$(persona_base_key "$k")" = "$base" ] || continue
+        jq -e --arg id "$id" --arg k "$k" 'any(.[]; .identifier == $id and ((.keys // []) | index($k) != null))' \
+          <<<"$found" >/dev/null || seen=""
+      done
+      [ -z "$seen" ] || break
+    done
+    if [ -z "$seen" ]; then
+      printf '%s\n' "$id" >"$STATE/markers-lost"
+      log markers-lost "$id: the tracker's search does not find its markers for $base"
+      say "$id was filed, but the tracker's search does not find its hidden markers for $base, so the next run would file it again. Nothing more is written until a person checks."
+      exit 5
+    fi
+  done
+  jq -c --args '. + {keys: $ARGS.positional}' "${keys[@]}" <<<"$answer"
+}
+
+cmd_comment() {
+  local id="${1:-}" owned
+  [ "$#" = 1 ] || { say "usage: comment <id> < body"; exit 2; }
+  scratch
+  body_in "$tmp/body"
+  guarded "$MAX_BODY" "$tmp/body" "$tmp/body.ok"
+  footer Noted >>"$tmp/body.ok"
+  if [ "$LIVE" != true ] && [[ "$id" =~ ^DRY-[0-9]+$ ]]; then
+    count comment "$MAX_COMMENTS"
+    log dry-run "comment on $id"
+    jq -nc --arg id "$id" --rawfile b "$tmp/body.ok" '{dry_run: true, would: "comment", issue: $id, body: $b}'
+    return 0
+  fi
+  owned="$(tracker owned "$id")" || exit $?
+  [ "$(jq -r '.owned' <<<"$owned")" = true ] || refuse "$id was not filed by the persona; it writes only to its own issues"
+  count comment "$MAX_COMMENTS"
+  if [ "$LIVE" != true ]; then
+    log dry-run "comment on $id"
+    jq -nc --arg id "$id" --rawfile b "$tmp/body.ok" '{dry_run: true, would: "comment", issue: $id, body: $b}'
+    return 0
+  fi
+  tracker comment "$id" <"$tmp/body.ok" || exit $?
+  log commented "$id"
+}
+
+for tool in jq python3; do
+  command -v "$tool" >/dev/null 2>&1 || { say "needs $tool, which this host does not have"; exit 1; }
+done
+mkdir -p "$STATE"
+
+cmd="${1:-help}"
+[ "$#" -gt 0 ] && shift
+case "$cmd" in
+  find) cmd_find "$@" ;;
+  owned) cmd_owned "$@" ;;
+  create) cmd_create "$@" ;;
+  comment) cmd_comment "$@" ;;
+  help | -h | --help) usage ;;
+  *) refuse "no command '$cmd' (find, owned, create, comment; nothing edits, closes, assigns or deletes)" ;;
+esac

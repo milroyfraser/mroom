@@ -245,6 +245,53 @@ t_usage_errors() {
   expect_true "Sentry was called" [ "$(calls)" = 0 ]
 }
 
+# sentry_issue <id> <first seen> <last seen>: one issue as Sentry's search answers it.
+sentry_issue() {
+  jq -nc --arg id "$1" --arg f "$2" --arg l "$3" '{id: $id, shortId: ("SHOP-" + $id), title: "t", culprit: "c",
+    permalink: "p", level: "error", status: "unresolved", count: "1", userCount: 1, firstSeen: $f, lastSeen: $l}'
+}
+
+t_new_reads_new_regressed_and_escalating_issues_of_the_window() {
+  world
+  MROOM_NOW="$(date -u -d 2026-10-28T12:00:00Z +%s)"
+  export MROOM_NOW
+  answer 200 "$PROJECTS"
+  answer 200 "[$(sentry_issue 1001 2026-10-28T11:50:00Z 2026-10-28T11:55:00Z),$(sentry_issue 1009 2026-10-28T11:00:00Z 2026-10-28T11:55:00Z)]"
+  answer 200 "$PROJECTS"
+  answer 200 "[$(sentry_issue 1002 2026-09-01T00:00:00Z 2026-10-28T11:45:00Z)]"
+  answer 200 "$PROJECTS"
+  answer 200 "[$(sentry_issue 1004 2026-09-01T00:00:00Z 2026-10-28T11:30:00Z),$(sentry_issue SHOP-X 2026-09-01T00:00:00Z 2026-10-28T11:30:00Z)]"
+  run "$MROOM" errors new 40 --limit 10
+  expect_rc 0; expect_err_empty
+  expect_true "expected 6 calls, got $(calls)" [ "$(calls)" = 6 ]
+  expect_true "the new search: $(call_line 2 2)" [ "$(call_line 2 2)" = "$BASE/issues/?project=-1&query=firstSeen%3A-40m&statsPeriod=24h&limit=10&sort=date&environment=production" ]
+  expect_true "the regressed search: $(call_line 4 2)" [ "$(call_line 4 2)" = "$BASE/issues/?project=-1&query=is%3Aregressed%20lastSeen%3A-40m&statsPeriod=24h&limit=10&sort=date&environment=production" ]
+  expect_true "the escalating search: $(call_line 6 2)" [ "$(call_line 6 2)" = "$BASE/issues/?project=-1&query=is%3Aescalating%20lastSeen%3A-40m&statsPeriod=24h&limit=10&sort=date&environment=production" ]
+  expect_true "the alerts, most urgent first, the window's own, numeric ids only: $out" json_is "$out" \
+    '[.[] | "\(.kind) \(.id) \(.at)"] == ["escalating 1004 2026-10-28T11:30:00Z", "regressed 1002 2026-10-28T11:45:00Z", "new 1001 2026-10-28T11:50:00Z"]'
+  expect_true "the token leaked" token_nowhere
+  expect_true "a file was left in TMPDIR" tmp_empty
+}
+
+t_new_fails_rather_than_reading_short_and_checks_its_words() {
+  world
+  answer 200 "$PROJECTS"; answer 200 '[]'; answer 200 "$PROJECTS"; answer 404 '{"detail":"no"}'
+  run "$MROOM" errors new 40
+  expect_rc 1; expect_out ""
+  reset; world
+  run "$MROOM" errors new; expect_rc 2; expect_err_has "usage: new <minutes"
+  run "$MROOM" errors new 0; expect_rc 2
+  run "$MROOM" errors new 1441; expect_rc 2
+  run "$MROOM" errors new 40m; expect_rc 2
+  run "$MROOM" errors new 40 50; expect_rc 2
+  run "$MROOM" errors new 40 --limit 101; expect_rc 2
+  run "$MROOM" errors new 40 --environment ''; expect_rc 2
+  run "$MROOM" errors new 40 --bogus; expect_rc 2
+  expect_true "Sentry was called" [ "$(calls)" = 0 ]
+  world -
+  run "$MROOM" errors new 40; expect_rc 3
+}
+
 test_case get-reads-issue-and-latest-event t_get_reads_the_issue_and_its_latest_event
 test_case region-picks-the-host t_the_region_picks_the_host
 test_case search-follows-the-cursor t_search_follows_the_cursor_until_no_more_results
@@ -261,4 +308,6 @@ test_case token t_a_missing_token_fails_clearly_and_an_echoed_one_is_cut
 test_case id-checked t_an_id_must_be_numeric_or_match_the_pattern
 test_case backend-from-config t_the_backend_comes_from_config
 test_case usage-errors t_usage_errors
+test_case new-of-the-window t_new_reads_new_regressed_and_escalating_issues_of_the_window
+test_case new-fails-whole t_new_fails_rather_than_reading_short_and_checks_its_words
 finish

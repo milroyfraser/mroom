@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 # errors.sh — the error-tracker adapter (design section 7): read an error issue with its latest event,
-# search issues, and resolve one, on the error tracker mroom.toml names (errors.provider). Sourced after
-# api.sh by lib/errors, never run on its own; needs bash 5, curl, jq and python3 3.11. The caller sets
-# MROOM_ROOT.
+# search issues, list a window's new ones (for alert triage), and resolve one, on the error tracker
+# mroom.toml names (errors.provider). Sourced after api.sh by lib/errors, never run on its own; needs
+# bash 5, curl, jq and python3 3.11. The caller sets MROOM_ROOT.
 #
 # v1 backend: sentry. Without an [errors] table there is no error tracker, and every operation returns 3.
 # Each function takes the command line's words and prints JSON on stdout.
@@ -156,6 +156,31 @@ sentry_search() {
   printf '%s\n' "${items[@]}" | jq -sc --argjson n "$limit" 'add | .[0:$n]'
 }
 
+# sentry_new_since <minutes> <environment> <limit>: the issues of the last <minutes> that are new (first seen in
+# them), regressed or escalating (seen in them while in that state), each with its kind and when; one JSON
+# list, escalating first, then regressed, then new, the newest first in each. Sentry's relative times are
+# rounded, so each answer is checked again against the window's start (MROOM_NOW, when set, is the end).
+sentry_new_since() {
+  local minutes="$1" environment="$2" limit="$3" now from new regressed escalating
+  now="${MROOM_NOW:-}"
+  [[ "$now" =~ ^[0-9]{1,12}$ ]] || now="$(date +%s)"
+  from="$(date -u -d "@$((now - minutes * 60))" +%Y-%m-%dT%H:%M:%SZ)" || { errors_say "the window's start could not be worked out"; return 1; }
+  new="$(sentry_search "firstSeen:-${minutes}m" "$environment" 24h "$limit")" || return 1
+  regressed="$(sentry_search "is:regressed lastSeen:-${minutes}m" "$environment" 24h "$limit")" || return 1
+  escalating="$(sentry_search "is:escalating lastSeen:-${minutes}m" "$environment" 24h "$limit")" || return 1
+  local kind list
+  for kind in new regressed escalating; do
+    list="${!kind}"
+    [ "$(jq 'length' <<<"$list")" -lt "$limit" ] \
+      || errors_say "the $kind search gave $limit issues, its limit, so some of the window's may be missed"
+  done
+  printf '%s\n%s\n%s\n' "$escalating" "$regressed" "$new" | jq -sc --arg from "$from" '
+    def since($kind; $at): [.[] | select((.id | type) == "string" and (.id | test("^[0-9]{1,20}$")))
+      | . + {kind: $kind, at: .[$at]} | select((.at // "") >= $from)] | sort_by(.at) | reverse;
+    (.[0] | since("escalating"; "last_seen")) + (.[1] | since("regressed"; "last_seen")) + (.[2] | since("new"; "first_seen"))' \
+    || { errors_say "Sentry: the new issues could not be read"; return 1; }
+}
+
 sentry_issue_resolve() {
   sentry_init || return 1
   sentry_call safe PUT "/issues/$1/" '{"status":"resolved"}' || return 1
@@ -200,6 +225,32 @@ errors_search() {
   case "$backend" in
     none) errors_none "search" ;;
     sentry) sentry_search "$query" "$environment" "$period" "$limit" ;;
+  esac
+}
+
+# errors_new_since <minutes> [--environment <name>] [--limit 1-100]: the error issues that are new,
+# regressed or escalating in the last <minutes> (1 to 1440), for alert triage (actions/triage). Each has
+# its kind (new | regressed | escalating) and at (when it was first seen, or seen in that state). The
+# environment defaults to production; --limit (25) caps each of the three searches.
+errors_new_since() {
+  local minutes="" environment=production limit=25 backend
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --environment) environment="${2-}"; shift 2 || { errors_say "--environment takes a value"; return 2; } ;;
+      --limit) limit="${2-}"; shift 2 || { errors_say "--limit takes a value"; return 2; } ;;
+      --*) errors_say "new: unknown option '$1'"; return 2 ;;
+      *) [ -z "$minutes" ] || { errors_say "new takes one window, in minutes"; return 2; }; minutes="$1"; shift ;;
+    esac
+  done
+  if ! [[ "$minutes" =~ ^[1-9][0-9]{0,3}$ ]] || ((minutes > 1440)); then
+    errors_say "usage: new <minutes, 1 to 1440> [--environment production] [--limit 25]"; return 2
+  fi
+  if ! [[ "$limit" =~ ^[1-9][0-9]{0,2}$ ]] || ((limit > 100)); then errors_say "--limit is 1 to 100"; return 2; fi
+  [[ "$environment" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || { errors_say "--environment is a plain name"; return 2; }
+  backend="$(errors_backend)" || return 1
+  case "$backend" in
+    none) errors_none "read new issues from" ;;
+    sentry) sentry_new_since "$minutes" "$environment" "$limit" ;;
   esac
 }
 

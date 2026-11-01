@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# A stand-in for the GitHub CLI, for the QA action tests (tests/qa-*-test.sh). It answers from files in $GH_FAKE
-# and logs each call that changes something to $GH_FAKE/gh.log, one line each:
+# A stand-in for the GitHub CLI, for the QA and triage action tests (tests/qa-*-test.sh, tests/triage-test.sh).
+# It answers from files in $GH_FAKE and logs each call that changes something to $GH_FAKE/gh.log, one line each:
 #
 #   gh api --paginate repos/<repo>/issues/<N>/comments --jq <filter>   comments-<N>.json (a list), filtered
 #   gh api -X PATCH repos/<repo>/issues/comments/<id> --input -        "PATCH <id> <body>"; edits the comment
@@ -8,6 +8,7 @@
 #   gh api --paginate repos/<repo>/pulls/<N>/files --jq <filter>       files-<N>.json (a list), filtered
 #   gh pr list --repo <repo> ... --json ... --jq <filter>              prs.json, filtered; its arguments go to reads.log
 #   gh workflow run <file> --repo <repo> [--ref <branch>] -f k=v...    "dispatch <file> <branch> k=v..."
+#   gh workflow disable <file> --repo <repo>                           "disable <file> --repo <repo>"
 #   gh api repos/<repo>/tarball/<sha>                                  tarball.tgz, as GitHub's of that commit
 #   gh api repos/<repo>/actions/runs/<id>/jobs --jq <filter>           jobs-<id>.json, filtered
 #   gh api repos/<repo>/actions/runs/<id>                              run-<id>.json
@@ -16,7 +17,8 @@
 #   gh pr view <N> --repo <repo> --json ... [--jq <filter>]            pr-<N>.json, filtered
 #
 # A body is logged with its newlines as \n. With $GH_FAKE/down, every call fails as GitHub being unreachable; with
-# $GH_FAKE/patch-fails-<id>, an edit of that comment fails; with $GH_FAKE/dispatch-fails, every dispatch does.
+# $GH_FAKE/patch-fails-<id>, an edit of that comment fails; with $GH_FAKE/dispatch-fails, every dispatch does;
+# with $GH_FAKE/disable-fails, every disable does.
 set -euo pipefail
 shopt -s nullglob
 log() { printf '%s\n' "$*" >>"$GH_FAKE/gh.log"; }
@@ -109,6 +111,10 @@ case "${args[0]} ${args[1]:-}" in
     done
     if [ -f "$GH_FAKE/dispatch-fails" ]; then echo "could not create workflow dispatch event: HTTP 422" >&2; exit 1; fi
     log "dispatch $file $ref${fields}"
+    ;;
+  "workflow disable")
+    if [ -f "$GH_FAKE/disable-fails" ]; then echo "could not disable the workflow: HTTP 403" >&2; exit 1; fi
+    log "disable ${args[2]} ${args[*]:3}"
     ;;
   *) echo "fake gh: unexpected ${args[*]}" >&2; exit 1 ;;
 esac
