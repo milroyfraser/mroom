@@ -337,7 +337,7 @@ t_the_gate_keys_are_restricted_and_forced_to_a_role() {
   rm "$HOME/.ssh/authorized_keys"
   doctor_app
   expect_rc 1
-  expect_out_has "fail  gate-keys: no key in ~/.ssh/authorized_keys is forced to mroom gate provision"
+  expect_out_has "fail  gate-keys: no key in ~/.ssh/authorized_keys or authorized_keys2 is forced to mroom gate provision"
   expect_out_has "warn  gate-keys: no key is forced to mroom gate template"
   {
     printf 'command="%s gate provision" ssh-ed25519 AAAAC3a qa-up\n' "$MROOM"
@@ -385,16 +385,28 @@ t_the_gate_keys_are_read_as_sshd_reads_them() {
     expect_rc 1
     expect_out_has "fail  gate-keys: the provision key in ~/.ssh/authorized_keys is not restrict-ed"
   done
-  # Options after the key are its comment to sshd, so that key gets no forced command at all.
+  # Options after the key are its comment to sshd, so that key gets no forced command at all, with mroom's path in
+  # the command or without one.
+  for word in "$MROOM" mroom; do
+    {
+      gate_line provision
+      printf 'ssh-ed25519 AAAAC3template mroom-qa-template restrict,command="%s gate template"\n' "$word"
+    } >"$HOME/.ssh/authorized_keys"
+    doctor_app
+    expect_rc 1
+    expect_out_has "fail  gate-keys: ~/.ssh/authorized_keys:2 names mroom gate after its key"
+  done
+  # Two command= options make sshd refuse the line, so its key gets nothing from it.
   {
-    gate_line provision
-    printf 'ssh-ed25519 AAAAC3template mroom-qa-template restrict,command="%s gate template"\n' "$MROOM"
+    printf 'restrict,command="%s gate shell",command="%s gate provision" ssh-ed25519 AAAAC3provision up\n' "$MROOM" "$MROOM"
+    gate_line template
   } >"$HOME/.ssh/authorized_keys"
   doctor_app
   expect_rc 1
-  expect_out_has "fail  gate-keys: ~/.ssh/authorized_keys:2 names mroom gate after its key"
-  # A copy of the key on a line of its own, as a host's key screen stores it: sshd takes the first line that holds
-  # the key, so the copy gives it a shell.
+  expect_out_has "fail  gate-keys: sshd refuses ~/.ssh/authorized_keys:1, which has two command= options"
+  expect_out_has "fail  gate-keys: no key in ~/.ssh/authorized_keys or authorized_keys2 is forced to mroom gate provision"
+  # A copy of the key on a line of its own, as a host's key screen stores it: sshd takes the first line holding the
+  # key that it accepts, so the copy gives it a shell.
   {
     printf 'ssh-ed25519 AAAAC3provision a-copy\n'
     gate_line provision
@@ -434,19 +446,20 @@ t_the_gate_keys_are_read_as_sshd_reads_them() {
   expect_rc 1
   expect_out_has "fail  gate-keys: the provision key is on 2 lines (~/.ssh/authorized_keys:1, ~/.ssh/authorized_keys:2)"
   expect_out_lacks "AAAAC3"
-  # sshd reads authorized_keys2 after authorized_keys, so a copy there counts as well.
+  # sshd reads authorized_keys2 after authorized_keys, so a copy there counts as well; a blank line before it counts
+  # in its line number.
   { gate_line provision; gate_line template; } >"$HOME/.ssh/authorized_keys"
-  printf 'ssh-ed25519 AAAAC3provision a-copy\n' >"$HOME/.ssh/authorized_keys2"
+  printf '\nssh-ed25519 AAAAC3provision a-copy\n' >"$HOME/.ssh/authorized_keys2"
   doctor_app
   expect_rc 1
-  expect_out_has "fail  gate-keys: the provision key is on 2 lines (~/.ssh/authorized_keys:1, ~/.ssh/authorized_keys2:1)"
+  expect_out_has "fail  gate-keys: the provision key is on 2 lines (~/.ssh/authorized_keys:1, ~/.ssh/authorized_keys2:2)"
   rm "$HOME/.ssh/authorized_keys2"
-  # What sshd reads as restricted passes: blanks before the options, a quoted option before command=, restrict in
-  # capitals, a word before restrict, restrict again, and a word turned off again, once or twice. A comment, after
-  # blanks or holding a gate key, is no line, so its key is no copy.
+  # What sshd reads as restricted passes: blanks before the options, two spaces or a tab between them and the key, a
+  # quoted option before command=, restrict in capitals, a word before restrict, restrict again, and a word turned
+  # off again, once or twice. A comment, after blanks or holding a gate key, is no line, so its key is no copy.
   {
-    printf '  restrict,pty,pty,no-pty,from="10.0.0.0/8,192.168.0.0/16",command="%s gate provision" ssh-ed25519 AAAAC3provision mroom-qa-up\n' "$MROOM"
-    printf 'port-forwarding,RESTRICT,command="%s gate template" ssh-ed25519 AAAAC3template mroom-qa-template\n' "$MROOM"
+    printf '  restrict,pty,pty,no-pty,from="10.0.0.0/8,192.168.0.0/16",command="%s gate provision"  ssh-ed25519 AAAAC3provision mroom-qa-up\n' "$MROOM"
+    printf 'port-forwarding,RESTRICT,command="%s gate template"\tssh-ed25519 AAAAC3template mroom-qa-template\n' "$MROOM"
     printf 'restrict,pty,restrict,port-forwarding,no-port-forwarding,command="%s gate browser" ssh-ed25519 AAAAC3browser b\n' "$MROOM"
     printf '\t# command="%s gate browser" ssh-ed25519 AAAAC3provision an old line\n' "$MROOM"
     printf '# ssh-ed25519 AAAAC3provision an old copy\n'
