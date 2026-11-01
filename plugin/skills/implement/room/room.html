@@ -194,6 +194,10 @@ div.invopt{cursor:default}
 .nextstep .nsrec{margin:0;padding:8px 10px;background:var(--ok-soft);border-radius:6px;color:var(--ink);max-width:70ch}
 .nextstep .nshow{margin:0;padding:8px 10px;background:var(--accent-soft);border-radius:6px;color:var(--ink);max-width:70ch}
 .nextstep .nsrow{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;color:var(--muted);font-size:13px}
+.nextstep .nsdraft{display:grid;gap:6px;margin:0;padding:10px 12px;border-left:3px solid var(--accent);border-radius:6px;background:color-mix(in srgb,var(--ink) 4%,var(--surface));max-width:70ch}
+.nextstep .nsdraft .nsdto{font-size:12px;color:var(--muted)}
+.nextstep .nsdraft blockquote{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink)}
+.nextstep .nsdraft button{justify-self:start;font:600 12.5px var(--body);padding:5px 10px;border-radius:6px;border:1px solid var(--line);background:var(--surface);color:var(--accent);cursor:pointer}
 .nextstep a.nstitle{color:var(--ink);text-decoration:none}.nextstep a.nstitle:hover{text-decoration:underline}
 .prodcheck{display:grid;gap:10px;background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:10px;padding:14px 16px;margin-block:0 14px;min-width:0;max-width:100%;box-sizing:border-box}
 .prodcheck>*{min-width:0}
@@ -1943,6 +1947,17 @@ html[data-winddown] body::before{background:
     /* meta/next.how: the exact instruction, where and what to type or click. */
     if (n.how) { const h = el("p", "nshow"); h.append(el("b", null, "How: "), document.createTextNode(String(n.how))); box.append(h); }
     if (n.text) box.append(el("p", "nstext", String(n.text)));
+    /* A step that is a message shows its draft in full, with where it goes and a copy button. */
+    const d = n.draft && typeof n.draft === "object" ? n.draft : (typeof n.draft === "string" ? { text: n.draft } : null);
+    if (d && d.text) {
+      const wrap = el("div", "nsdraft");
+      if (d.to) wrap.append(el("span", "nsdto", "Draft · to " + String(d.to)));
+      else wrap.append(el("span", "nsdto", "Draft"));
+      const q = el("blockquote", null, String(d.text)); wrap.append(q);
+      const cb = el("button", null, "Copy draft"); cb.type = "button";
+      cb.addEventListener("click", async () => { try { await navigator.clipboard.writeText(String(d.text)); cb.textContent = "Copied"; } catch { const r = document.createRange(); r.selectNodeContents(q); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); cb.textContent = "Select and copy"; } setTimeout(() => { cb.textContent = "Copy draft"; }, 1600); });
+      wrap.append(cb); box.append(wrap);
+    }
     const row = el("div", "nsrow");
     const url = safeUrl(n.url);
     if (url) row.append(anchor(n.cardId ? ((todos.find((t) => String(t.id) === String(n.cardId)) || {}).kind === "issue" ? "Open the issue ↗" : "Open the PR on GitHub ↗") : "Open ↗", url));
