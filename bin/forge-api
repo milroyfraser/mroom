@@ -4,8 +4,10 @@
 #   forge-api GET sites
 #   forge-api GET sites/123/nginx
 #   forge-api PUT sites/123/nginx --write --data '{"config":"..."}'
-#   jq -n '{...}' | forge-api POST sites/123/domains --write --data -
 #   forge-api --secret GET sites/123/environment
+#   forge-api --secret GET sites/123/environment \
+#     | jq '.data.attributes.content | strings | {environment: <the change of .>}' \
+#     | forge-api --secret PUT sites/123/environment --write --data -
 #
 # Every call goes to this box's server (MROOM_FORGE_ORG and MROOM_FORGE_SERVER), and a path is relative to
 # it: plain words joined by /, starting with a resource name such as sites, with no empty, "." or ".."
@@ -15,8 +17,10 @@
 # --secret. The two flags mark a call so that a permission rule allowing plain reads never matches it and
 # the call asks first. The token comes from ~/.config/mroom/secrets/forge-token (mode 600) and is never
 # printed. --data - reads the body from stdin: use it for a body with secrets in it, since an inline --data
-# shows in the process list. A path that needs --secret takes its body only that way: an inline --data is
-# refused there.
+# shows in the process list, which every user on the box can read. So does a value written into a jq
+# program (jq -n '{...}') or passed with jq --arg, and the text of a command an agent runs: change what you
+# read, as above, so the secret stays in the pipe. A path that needs --secret takes its body only on stdin:
+# an inline --data is refused there.
 #
 # Exit codes: 0 done, 1 Forge or the client failed, 2 refused before calling Forge.
 set -euo pipefail

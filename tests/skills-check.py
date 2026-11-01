@@ -518,6 +518,83 @@ if fix:
         and re.search(r"^Stop\. No merge, no deploy, no change in the error tracker\.$", last, flags=re.M) is not None,
         "fix-issue ends at a PR in review and stops")
 
+# --- A secret body never on a command line ----------------------------------------------------------------
+# Every user on the box, a QA site's too, can read every running program's arguments, and the text of a command
+# an agent runs is passed to its shell as one. So a body for a path that needs --secret reaches forge-api's
+# --data - through a pipe or from a private file: never from a jq program holding the value (jq -n '{...}'),
+# --arg, a here-document or here-string, echo, printf or an inline --data (which forge-api refuses there). These
+# are the forms the forge skill names; the check catches them, not every way a shell can spell a value.
+ARGV_RULE = "Never put a secret on a command line."
+ARGV_BODY = (r"\s--(?:arg|argjson|args|jsonargs)\b|<<|\becho\b|\bprintf\b"
+             # An inline body, after a space or an =. A lone - (stdin) may be followed by ; | & ) or a quote.
+             r"|--data(?:=|\s+(?!-(?![^\s;|&)'\"])))"
+             # jq -n or --null-input anywhere among jq's options before its program, unless that jq reads a file.
+             r"|\bjq\b(?![^|]*\s--(?:rawfile|slurpfile)\b)[^|'\"]*?\s(?:-[A-Za-z]*n[A-Za-z]*|--null-input)\b")
+SECRET_WRITE = r"forge-api\s+--secret\s+(?i:POST|PUT|PATCH|DELETE)\b"
+# forge's two examples: a change of what was read, and a value added from a private file. Each takes only a
+# string from the answer (strings), so an answer without one sends an empty body, which forge-api refuses.
+ENV_PROGRAM = r"'\.data\.attributes\.content\s*\|\s*strings\s*\|[^']*'"
+TO_PUT = r"\s*\|\s*forge-api\s+--secret\s+PUT\s[^|]*--write\s+--data\s+-"
+FROM_READ = r"forge-api\s+--secret\s+GET\s[^|]+\|\s*jq\s+" + ENV_PROGRAM + TO_PUT
+FROM_FILE = r"forge-api\s+--secret\s+GET\s[^|]+\|\s*jq\s+--rawfile\s+\w+\s+\S+\s+" + ENV_PROGRAM + TO_PUT
+
+
+def secret_units(body):
+    """What the check reads: each fenced block whole, its line continuations joined, since a body built on one
+    line may be sent on a later one; and each inline code span, joined across the lines it wraps over (code()
+    keeps inline code on one line)."""
+    fenced = re.findall(r"^ *```[a-z]*\n(.*?)^ *```$", body, flags=re.S | re.M)
+    rest = re.sub(r"^ *```[a-z]*\n.*?^ *```$", "", body, flags=re.S | re.M)
+    blocks = [re.sub(r"\\\n\s*", " ", b) for b in fenced]
+    return [one_line(s).strip() for s in blocks + re.findall(r"`([^`]+)`", rest)]
+
+
+def leaky_writes(body):
+    return [u for u in secret_units(body) if re.search(SECRET_WRITE, u) and re.search(ARGV_BODY, u)]
+
+
+for label, (name, kind, meta, body, text) in sorted(docs.items()):
+    leaky = leaky_writes(body)
+    say(not leaky, f"{label} builds no body for a --secret path on a command line ({leaky[:2]})")
+    if name == "forge":
+        writes = [u for u in secret_units(body) if re.search(SECRET_WRITE, u)]
+        say(any(re.search(FROM_READ, u) for u in writes),
+            "forge shows a --secret body changed from what it read, taking only a string (GET | jq '... strings ...' | PUT)")
+        say(any(re.search(FROM_FILE, u) for u in writes),
+            "forge shows a value added from a private file with jq --rawfile, taking only a string")
+        say(ARGV_RULE in one_line(body), f"forge keeps the rule: {ARGV_RULE}")
+# The check itself: each form the skill names is caught, wherever it sits, and the safe ways pass.
+PUT = "forge-api --secret PUT sites/1/environment --write"
+for bad in (f"jq -n '{{\"environment\":\"A=1\"}}' | {PUT} --data -",
+            f"jq -c -n '{{\"environment\":\"A=1\"}}' | {PUT} --data -",
+            f"jq --compact-output --null-input '{{\"environment\":\"A=1\"}}' | {PUT} --data -",
+            f"jq -n '{{\"environment\":\"A=1\"}}' | forge-api --secret put sites/1/environment --write --data -",
+            f"jq -n --arg e x '{{environment: $e}}' | {PUT} --data -",
+            f"{PUT} --data - <<'EOF'",
+            f"{PUT} --data - <<<'{{\"environment\":\"A=1\"}}'",
+            f"echo x | {PUT} --data -",
+            f"printf '%s' x | {PUT} --data -",
+            f"{PUT} --data '{{\"environment\":\"A=1\"}}'",
+            f"{PUT} --data='{{\"environment\":\"A=1\"}}'"):
+    say(bool(leaky_writes(f"`{bad}`")), f"the check catches a body on a command line ({bad[:56]})")
+# A body built on an earlier line of a fenced block, and an inline example that wraps onto the next line.
+built_before = f"```\njq -n --arg v \"$v\" '{{environment: $v}}' >\"$d/b.json\"\n{PUT} --data - <\"$d/b.json\"\n```\n"
+say(bool(leaky_writes(built_before)), "the check reads a fenced block whole: a body built on an earlier line is caught")
+wrapped = f"Run `jq -n '{{...}}' | forge-api --secret PUT\n  sites/1/environment --write --data -` here.\n"
+say(bool(leaky_writes(wrapped)), "the check joins an inline example that wraps over two lines")
+GET = "forge-api --secret GET sites/1/environment"
+PROGRAM = "'.data.attributes.content | strings | {environment: (. + \"x\")}'"
+for good in (f"{GET} | jq {PROGRAM} | {PUT} --data -",
+             f"{GET} | jq --rawfile v <file> {PROGRAM} | {PUT} --data -",
+             f"jq -n --rawfile e <file> '{{environment: $e}}' | {PUT} --data -",
+             f"jq --rawfile e <file> -n '{{environment: $e}}' | {PUT} --data -",
+             f"{GET} | jq {PROGRAM} | {PUT} --data -; true",
+             f"out=$({GET} | jq {PROGRAM} | {PUT} --data -)"):
+    say(not leaky_writes(f"`{good}`"), f"the check passes a body from a pipe or a file ({good[-56:]})")
+say(re.search(FROM_READ, f"{GET} | jq {PROGRAM} | {PUT} --data -") is not None
+    and re.search(FROM_READ, f"{GET} | jq '<the change>' | {PUT} --data -") is None,
+    "the check wants the change of what was read to take only a string")
+
 # --- The implement skill's Session Room -----------------------------------------------------------------
 room_dir = os.path.join(skills_dir, "implement", "room")
 room_files = sorted(os.listdir(room_dir)) if os.path.isdir(room_dir) else []

@@ -332,8 +332,19 @@ forge-api --secret GET sites/123/environment
   asks first.
 - The token reaches curl on stdin, never a command line or a file, and is not printed even under `bash -x`.
   `--data -` reads the body from stdin; use it for a body with secrets in it, since an inline `--data`
-  shows in the process list. A path that needs `--secret` takes its body only from stdin: an inline
-  `--data` is refused there.
+  shows in the process list, which every user on the box can read, a QA site's too. A path that needs
+  `--secret` takes its body only from stdin: an inline `--data` is refused there. Keep the secret off
+  every other command line on its way as well: pipe it from what you read or from a private file, never
+  through a value written into a jq program (`jq -n '{...}'`), `jq --arg`, `echo`, a here-string, or the
+  text of a command an agent runs, which is its shell's argument. Change what you read, in one pipe;
+  `strings` makes an answer with no env in it send an empty body, which is refused:
+
+  ```bash
+  forge-api --secret GET sites/123/environment \
+    | jq '.data.attributes.content | strings | {environment: <the change of .>}' \
+    | forge-api --secret PUT sites/123/environment --write --data -
+  ```
+
 - A 503 is retried, and so is a 502 for GET, PUT and DELETE. A 429 waits for Forge's `Retry-After` (up to
   120 seconds, else 20). A read that timed out is retried; a write never is, since it may have run.
 
@@ -581,8 +592,9 @@ channel = "C0123456789"            # the chat channel it pings when triage canno
   or written, the guard refused an alert, or a step failed or ran past its 11-minute limit), the alarm
   job pings `persona.channel` with the failed step and the run, at most once a UTC day. Its dedupe is
   the tracker's: before the ping it files the day's issue, keyed `triage:<yyyymmdd>`, and a day whose
-  issue exists sends nothing. When that issue cannot be filed, nothing is sent: a missed ping, never one
-  every 15 minutes.
+  issue the persona filed sends nothing; an issue someone else wrote the key into does not count. When
+  that issue cannot be filed, or the tracker cannot say who filed one, nothing is sent: a missed ping,
+  never one every 15 minutes.
 - **Without a tracker** (`issues.tracker = "none"`), nothing is filed: the run's summary lists the
   window's alerts. The alarm then has nowhere to record its ping, and sends none; nor does it without a
   chat token or `persona.channel`. A run GitHub cancelled, such as a waiting one a newer run replaced,
