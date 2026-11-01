@@ -422,6 +422,7 @@ BOX_KEYS = {
     "MROOM_QA_PERSONA_DOMAIN": "the domain QA personas' addresses end in, such as .test (the default)",
     "MROOM_QA_SMTP_PORT": "the port on 127.0.0.1 where mroom's mail relay takes QA apps' mail; 1025 by default",
     "MROOM_QA_RESERVE_MB": "the memory, in MB, the box keeps for all but QA environments; 4096 by default",
+    "MROOM_ROOM_TEMPLATE": "the claude.ai link of the Room template artifact each session Room copies its code from",
     "MROOM_QA_DB_READ": "the table.column entries the gate's db-read may read, space-separated (qa.db_read_allowlist)",
 }
 # Names the gate builds SQL from, so each is a plain Postgres identifier (design 5.1, D18), matched as a
@@ -466,6 +467,8 @@ RESERVED_SUFFIXES = (".test", ".example", ".invalid", ".localhost", ".example.co
 # fragment or credentials. A bare URL is named by its host, and no two items may share a name.
 WATCH_MCP_ITEM = re.compile(
     r"^(?:([a-z0-9][a-z0-9_-]{0,39})=)?(https?://([A-Za-z0-9.-]+(?::[0-9]{1,5})?)(?:/[A-Za-z0-9._~%+:=,/-]*)?)$")
+# A claude.ai artifact link, the only kind the Artifact tool copies files from.
+ARTIFACT_URL = re.compile(r"https://claude\.ai/(?:artifact/[A-Za-z0-9]{8,64}|code/artifact/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
 BOX_LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 BARE = re.compile(r"^[A-Za-z0-9_./:@%+,=-]*$")
 
@@ -495,6 +498,8 @@ def box_value_error(key: str, value: str) -> str | None:
             return "MROOM_APP_NAME must match [a-z][a-z0-9_]{0,31}, like app.name"
         if value == "pg" or value.startswith("pg_"):
             return "MROOM_APP_NAME may not be pg or start with pg_: Postgres reserves those role names"
+    if key == "MROOM_ROOM_TEMPLATE" and not ARTIFACT_URL.fullmatch(value):
+        return "MROOM_ROOM_TEMPLATE must be a claude.ai artifact link: https://claude.ai/artifact/<id>"
     if key == "MROOM_QA_TEMPLATE" and not PG_NAME.fullmatch(value):
         return "MROOM_QA_TEMPLATE must be a plain Postgres name: [a-z][a-z0-9_]{0,62}"
     if key == "MROOM_QA_ZONE" and not DNS_ZONE.fullmatch(value):

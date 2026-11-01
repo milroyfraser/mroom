@@ -130,6 +130,19 @@ t_unknown_key_asked() {
   run "$MROOM" config box MROOM_ENV MROOM_BOX_NAME; expect_rc 2; expect_err_has "at most one KEY"
 }
 
+t_room_template() {
+  box "MROOM_ROOM_TEMPLATE=https://claude.ai/artifact/AbCdEf123456"
+  run "$MROOM" config box MROOM_ROOM_TEMPLATE; expect_rc 0; expect_out "https://claude.ai/artifact/AbCdEf123456"
+  box "MROOM_ROOM_TEMPLATE=https://claude.ai/code/artifact/0123abcd-0123-4567-89ab-0123456789ab"
+  run "$MROOM" config box MROOM_ROOM_TEMPLATE; expect_rc 0
+  local bad
+  for bad in https://example.com/artifact/AbCdEf123456 https://claude.ai/artifact/AbCd/../x http://claude.ai/artifact/AbCdEf123456; do
+    box "MROOM_ROOM_TEMPLATE=$bad"
+    run "$MROOM" config box MROOM_ROOM_TEMPLATE; expect_rc 1
+    expect_err_has "MROOM_ROOM_TEMPLATE must be a claude.ai artifact link"
+  done
+}
+
 t_watch_mcp() {
   box "MROOM_WATCH_MCP='app=https://mcp.example.dev/mcp https://docs.example.dev/v1/mcp'"
   run "$MROOM" config box MROOM_WATCH_MCP; expect_rc 0; expect_out "app=https://mcp.example.dev/mcp https://docs.example.dev/v1/mcp"
@@ -231,6 +244,7 @@ test_case shell-never-runs t_shell_never_runs
 test_case values-never-echoed t_values_never_echoed
 test_case duplicate-refused t_duplicate_refused
 test_case unknown-key-asked t_unknown_key_asked
+test_case room-template t_room_template
 test_case watch-mcp t_watch_mcp
 test_case gate-names t_gate_names_are_plain_postgres_names
 test_case qa-site-settings t_qa_site_settings
