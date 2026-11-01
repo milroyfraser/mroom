@@ -210,6 +210,12 @@ t_qa_site_settings() {
     box "MROOM_QA_SMTP_PORT=$bad"
     run "$MROOM" config box MROOM_QA_SMTP_PORT; expect_rc 1; expect_err_has "MROOM_QA_SMTP_PORT must be a port number"
   done
+  box 'MROOM_QA_DB_READ="users.email users.name bookmarks.user_id"'
+  run "$MROOM" config box MROOM_QA_DB_READ; expect_rc 0; expect_out "users.email users.name bookmarks.user_id"
+  for bad in users Users.email users.email.x '"users.email; select"' 'public.users.email' '"users.email pg-x.y"'; do
+    box "MROOM_QA_DB_READ=$bad"
+    run "$MROOM" config box MROOM_QA_DB_READ; expect_rc 1; expect_err_has "MROOM_QA_DB_READ must be space-separated table.column"
+  done
 }
 
 test_case reads-values t_reads_values

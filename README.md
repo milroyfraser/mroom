@@ -576,7 +576,8 @@ skills, read when installed), and `verify-app` with `qa-engineer` (phase 2b).
 
 CI never gets a shell on the box (design 8.2). The QA runner's SSH key is forced to `mroom gate`, which
 runs only the operations of its role and builds every name itself, so a request can reach nothing but its
-own environment. Phase 2a adds operations one PR at a time; today the `provision` role has:
+own environment. Each role is a key of its own: `provision` for qa-up and qa-down, `browser` for browser QA's
+checks, and `template` for the job that builds the QA template. The `provision` role has:
 
 | Operation | What it does |
 |---|---|
@@ -603,6 +604,19 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 | `reverb-app-remove <N>` | the environment's app; its sockets already open stay until they close |
 | `memory` | the box's memory, in MB: `total_mb`, `available_mb` and `swap_free_mb` from `/proc/meminfo`, and `reserve_mb`, what the box keeps for all but QA (`MROOM_QA_RESERVE_MB`, 4096 unless set); qa-up sizes its slots from them |
 
+The `browser` role reads and changes nothing:
+
+| Operation | What it does |
+|---|---|
+| `db-read <N> <table> <column>... [<column>=<value>...] [asc:\|desc:<column>] [limit:<n>]` | at most 100 rows (`limit:` fewer) of one table in the environment's database, as JSON, read as the environment's read-only role; every column it names, filters on (at most 5, each an exact match on the column's text) or orders by must be in `MROOM_QA_DB_READ` |
+| `signin-code`, `mail-read`, `env-sha` | as above |
+
+The `template` role has one:
+
+| Operation | What it does |
+|---|---|
+| `template-load` | the QA template, rebuilt from a `pg_dump -Fc` archive on stdin (at most 4 GiB), then swapped in for the old one whole; environments made before keep their own database, and the next clone gets the new template |
+
 The client sends only N, and the few words some operations also take, each of a fixed form. The
 database, role and Redis user are `<MROOM_APP_NAME>_qa_<N>`, and the database is cloned from
 `MROOM_QA_TEMPLATE`, both set by a person in `box.env`. A bucket is `<MROOM_APP_NAME>-qa-<N>-<disk>`, each
@@ -612,6 +626,41 @@ no disk's bucket is another environment's or another disk's. Its Reverb app's id
 PR is ever given an id whose sockets may still be open. A password reaches
 Postgres only as a SCRAM verifier, through stdin, and Redis only as its SHA-256. Each request and refusal
 is logged, never a secret, to `~/.local/state/mroom/gate.log` and to syslog.
+
+**The template database** (design 9) is what every environment's database is cloned from, so a deploy
+migrates only what its pull request adds, and seeds nothing. A job where pull requests' code never runs builds
+it: by default it migrates and seeds a database of its own with the default branch's code
+(`qa.parity.database = "seeded"`), or it takes the masked snapshot (`"snapshot"`, opt-in), and sends
+`pg_dump -Fc` of it to `template-load`:
+
+- **As the objects role.** The archive is restored into `<template>_next`, a new database built from
+  `template0`, by `pg_restore --no-owner --no-privileges --single-transaction --exit-on-error`, signed in as
+  `<app>_qa_objects` with a password made for that restore and a login that lapses after two hours, which the
+  gate takes back as soon as the restore ends. So whatever the archive holds runs with that role's rights, never
+  the gate's, and `pg_hba.conf` lets that role reach `<template>_next` alone. The template's objects belong to
+  it, as D18 needs.
+- **A swap.** Then, while no clone runs (`db-create` waits for it, and it for them), the old template is set
+  aside as `<template>_old`, the new one takes its name, and the old one is dropped. A step that fails puts the
+  old one back, a restore that fails leaves the template as it was, and a load that was killed halfway is put
+  right by the next one. `pg_restore` reads archives of its own Postgres version or older, so dump with a
+  `pg_dump` no newer than the box's Postgres.
+- **What the caller sees.** Only the gate's lines, and on a failed restore `pg_restore`'s first error, which
+  may quote a row of the caller's own archive: it never reaches the gate's log.
+
+**Read-only database access for browser QA** (design 8.6). Each environment also gets a read-only Postgres
+role, `<app>_qa_<N>_read`, made by `db-create` and dropped by `db-drop`. No app is given its password: the gate
+keeps it and signs in with it for `db-read` alone, never as itself, since the pull request's code owns the
+database and a view or function it planted runs as whoever reads it. The role holds `SELECT` on the tables in
+`public` (the template's, and every table the environment's role makes there later), `CONNECT` on its own
+environment's database alone, and no other privilege; its sessions are read-only with a 30 s statement timeout,
+and `pg_hba.conf` lets it reach environments' databases only. `db-read` builds the one `SELECT` itself from names
+it quotes and values psql quotes, with the catalog first on the search path, in a read-only transaction that is
+rolled back. What it may read is what `MROOM_QA_DB_READ` lists, the `table.column` entries a person sets on the
+box to match `qa.db_read_allowlist`: a check can name no other column, filter on none, and order by none, since
+a filter would tell its values apart too. An error names its SQLSTATE, never Postgres's message, which can quote
+a value. The pull request's code still decides what its own tables hold, so the list says what a check may ask
+for, not what the data is. An environment made before this release has no read-only role: tear it down and
+bring it up again.
 
 The gate makes an environment's passwords, its bucket keys and its app key once, and keeps them in
 `~/.local/state/mroom/qa/<app>_qa_<N>.secrets` (mode 600, beside the commit `code-put` records), so every
@@ -804,11 +853,16 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
 ```
 
 1. In the box user's `~/.ssh/authorized_keys`, by hand (Forge's SSH key screen stores a bare key, without
-   options):
+   options), a key for each role, each its own:
 
    ```
    restrict,command="/home/forge/.local/bin/mroom gate provision" ssh-ed25519 AAAA… mroom-qa-up
+   restrict,command="/home/forge/.local/bin/mroom gate browser" ssh-ed25519 AAAA… mroom-qa-browser
+   restrict,command="/home/forge/.local/bin/mroom gate template" ssh-ed25519 AAAA… mroom-qa-template
    ```
+
+   The `template` key belongs to the job that builds the template (step 3), and the `browser` key to browser
+   QA (phase 2b); add each when its job exists.
 
 2. As a Postgres superuser (`sudo -u postgres psql`). `\password` asks for each password, so none ends up
    in a history file or the server's log:
@@ -817,26 +871,23 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
    CREATE ROLE shop_qa_gate LOGIN CREATEDB CREATEROLE;
    \password shop_qa_gate
    CREATE ROLE shop_qa_objects NOLOGIN;      -- owns the template's objects; never a database or tablespace
-   GRANT shop_qa_objects TO shop_qa_gate;
+   GRANT shop_qa_objects TO shop_qa_gate WITH ADMIN OPTION;  -- template-load gives it a login for a restore
    CREATE ROLE shop_qa_envs NOLOGIN;         -- every environment's role joins it; never grant it anything
    GRANT shop_qa_envs TO shop_qa_gate WITH ADMIN OPTION;
-   CREATE DATABASE shop_qa_template OWNER shop_qa_gate;
-   GRANT CONNECT ON DATABASE shop_qa_template TO shop_qa_objects;
-   \c shop_qa_template
-   GRANT CREATE ON SCHEMA public TO shop_qa_objects;
+   CREATE ROLE shop_qa_readers NOLOGIN;      -- every read-only role joins it; never grant it anything
+   GRANT shop_qa_readers TO shop_qa_gate WITH ADMIN OPTION;
    ```
 
-3. Build the template as `shop_qa_objects`, so its objects belong to that role. Give it a login for now
-   (`ALTER ROLE shop_qa_objects LOGIN;` and `\password shop_qa_objects`), run the app's migrations and
-   seeders against `shop_qa_template` as that role, then take the login away:
+3. The template, through the gate: migrate and seed a database of its own where pull requests' code never runs
+   (a runner with the default branch's code, or a scratch database), then send its archive with the
+   `template` key. `template-load` makes the template on the first load and replaces it on every later one:
 
-   ```sql
-   ALTER ROLE shop_qa_objects NOLOGIN PASSWORD NULL;
-   REVOKE CONNECT ON DATABASE shop_qa_template FROM PUBLIC, shop_qa_objects;
+   ```sh
+   pg_dump -Fc --no-owner --no-privileges -d shop_seed | ssh -i mroom-qa-template forge@<box> template-load
    ```
 
-   `shop_qa_objects` must never own a database or a tablespace. Each new environment takes over what that
-   role owns, and the gate refuses to run while it owns one.
+   Its objects belong to `shop_qa_objects`, which must never own a database or a tablespace. Each new
+   environment takes over what that role owns, and the gate refuses to run while it owns one.
 
 4. Every new database lets any role connect, so take that back on each of the app's databases, the dev
    site's for one (not `postgres`, which the gate connects to):
@@ -846,16 +897,27 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
    ```
 
 5. At the very top of `pg_hba.conf`, above every `local` and `host` line, then reload Postgres. The first
-   matching line wins. The gate's own line comes first, since the gate belongs to `shop_qa_envs` and the
-   reject lines would match it too. Each environment's role then reaches only the database named after it:
+   matching line wins. The gate's own line comes first, since the gate belongs to `shop_qa_envs` and
+   `shop_qa_readers`, and the lines below would match it too. Each environment's role then reaches only the
+   database named after it, each read-only role only environments' databases (and of those only its own, the
+   one that grants it `CONNECT`), and the objects role only the database `template-load` builds the template in.
+   Postgres 16 reads a database that starts with `/` as a regular expression:
 
    ```
-   host   all       shop_qa_gate   127.0.0.1/32  scram-sha-256
-   host   all       shop_qa_gate   ::1/128       scram-sha-256
-   host   sameuser  +shop_qa_envs  127.0.0.1/32  scram-sha-256
-   host   sameuser  +shop_qa_envs  ::1/128       scram-sha-256
-   host   all       +shop_qa_envs  all           reject
-   local  all       +shop_qa_envs                reject
+   host   all                     shop_qa_gate      127.0.0.1/32  scram-sha-256
+   host   all                     shop_qa_gate      ::1/128       scram-sha-256
+   host   sameuser                +shop_qa_envs     127.0.0.1/32  scram-sha-256
+   host   sameuser                +shop_qa_envs     ::1/128       scram-sha-256
+   host   all                     +shop_qa_envs     all           reject
+   local  all                     +shop_qa_envs                   reject
+   host   /^shop_qa_[0-9]+$       +shop_qa_readers  127.0.0.1/32  scram-sha-256
+   host   /^shop_qa_[0-9]+$       +shop_qa_readers  ::1/128       scram-sha-256
+   host   all                     +shop_qa_readers  all           reject
+   local  all                     +shop_qa_readers                reject
+   host   shop_qa_template_next   shop_qa_objects   127.0.0.1/32  scram-sha-256
+   host   shop_qa_template_next   shop_qa_objects   ::1/128       scram-sha-256
+   host   all                     shop_qa_objects   all           reject
+   local  all                     shop_qa_objects                 reject
    ```
 
 6. The gate's connection, in `~/.config/mroom/secrets/pg_service.conf`, mode 600:
@@ -926,12 +988,14 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
     isolated users. Add `AllowAgentForwarding no` with it: a developer who connects with `ssh -A` would
     otherwise lend their own keys to every session on the box (design D22).
 
-11. In `box.env`: `MROOM_APP_NAME=shop`, `MROOM_QA_TEMPLATE=shop_qa_template` and
-    `MROOM_QA_ZONE=qa.example.dev`, and when they differ from the defaults, `MROOM_QA_BACKEND_DIR` (the
-    Laravel app's folder in the repository, `.`), `MROOM_QA_PHP` (`php`), `MROOM_QA_PERSONA_DOMAIN`
-    (`.test`) and `MROOM_QA_RESERVE_MB` (`4096`: the memory, in MB, the box keeps for the dev site, sessions
-    and builds, which no QA environment may count on). A site user's name is at most 32 characters, so an app
-    name of 19 characters or fewer always fits.
+11. In `box.env`: `MROOM_APP_NAME=shop`, `MROOM_QA_TEMPLATE=shop_qa_template` (58 characters at most, which
+    leaves room for `_next`), `MROOM_QA_ZONE=qa.example.dev`, for browser QA `MROOM_QA_DB_READ` (the
+    `table.column` entries `db-read` may read, space-separated, the same as `qa.db_read_allowlist`, such as
+    `MROOM_QA_DB_READ="users.id users.email bookmarks.user_id"`), and when they differ from the defaults,
+    `MROOM_QA_BACKEND_DIR` (the Laravel app's folder in the repository, `.`), `MROOM_QA_PHP` (`php`),
+    `MROOM_QA_PERSONA_DOMAIN` (`.test`) and `MROOM_QA_RESERVE_MB` (`4096`: the memory, in MB, the box keeps for
+    the dev site, sessions and builds, which no QA environment may count on). A site user's name is at most 32
+    characters, so an app name of 19 characters or fewer always fits.
 
 12. The mail catcher, when `qa.parity.mail` is `catcher` (the default): *as root*, the root recipe with
     `mailpit` in its parts, then `mroom baseline mailpit`. The recipe makes the services' folders and
