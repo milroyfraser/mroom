@@ -615,7 +615,7 @@ EOF
 gh pr merge 1
 #'"
   # An end word with a quoted or escaped blank, a quoted ; or a kept backslash, or continued on the next line.
-  refuse "cat <<'E O F'
+  refuse_for 'bash may read it differently' "cat <<'E O F'
 E O F
 gh pr merge 1
 E"
@@ -647,7 +647,7 @@ F
 gh pr merge 1
 EOF"
   # A << that bash reads as a shift or a pattern starts no heredoc, and a # inside \${...} starts no comment.
-  refuse 'echo $((1<<2))
+  refuse_for 'bash may read it differently' 'echo $((1<<2))
 gh pr merge 1'
   refuse '((x=1<<2))
 gh pr merge 1'

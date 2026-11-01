@@ -13,6 +13,14 @@
 # \033 marks an expansion ($X, ${X}, $(...), `...`): its value is unknown here.
 # Quotes are removed, $'...' escapes are decoded, $"..." is read as "...". Heredoc bodies are read
 # whichever command they belong to; the caller decides whether a body is commands or data.
+# A heredoc ends where bash ends it, since a line after it is a command only if bash runs it: its end word
+# is read as bash reads it, only <<- strips the tabs before the end line, and an unquoted heredoc joins a
+# line ending in a backslash to the next one. What this cannot read as bash does exits 3, and the caller
+# refuses the command: an end word that is not a plain word (letters, digits, _ . -), a << or a comment
+# inside $((...)), ((...)), $[...] or ${...} (a shift, a pattern, or no comment, to bash), a bare ( or )
+# inside ${...}, and a heredoc that waits across a newline inside $(...), `...` or <(...), or is left open
+# in one (bash reads its text after the next newline outside, or, for one left open, differently in 3.2
+# and 5).
 # Portable awk (macOS BWK awk, gawk, mawk): no gawk-only functions, and no array named after a
 # gawk built-in variable (RT, FPAT, ...).
 
@@ -42,6 +50,11 @@ function emit(   r, j) {
 }
 function sep() { emit(); PIN[d] = 0; LAST[d] = 0 }
 function pipe() { emit(); if (LAST[d]) OUT[LAST[d]] = "p"; PIN[d] = 1 }
+# refuse: the command holds what this tokeniser cannot read as bash does; the caller refuses it (exit 3).
+function refuse() { exit 3 }
+# AR: inside $((...)) or ((...)), which bash may read as arithmetic (kept by every frame inside).
+# SB, PE: how many $[...] and ${...} are open in this frame. SL: how many $(...), `...` and <(...) hold this
+# frame; bash reads a heredoc's text only after a newline at the level that declared it (PL).
 function push(kind) {
   syncbuf()
   d++
@@ -49,22 +62,58 @@ function push(kind) {
   BO[d] = 0; BC[d] = 0; BL[d] = 0; LC[d] = ""
   PIN[d] = (kind == "(") ? PIN[d - 1] : 0
   SUB[d] = SUB[d - 1] || kind != "("
+  AR[d] = AR[d - 1]; SB[d] = 0; PE[d] = 0
+  SL[d] = SL[d - 1] + (kind != "(")
   q = "n"
 }
-function pop() { emit(); q = QRET[d]; d-- }
-function readheredocs(   k, h, ln, t) {
+function pop(   k) {
+  # A heredoc declared inside a substitution and still open when it closes: bash 3.2 reads the lines after
+  # it as commands, bash 5 as its text.
+  if (KIND[d] != "(") for (k = 1; k <= NP; k++) if (PL[PEND[k]] == SL[d]) refuse()
+  emit(); q = QRET[d]; d--
+}
+# oddbs S: does S end in an odd number of backslashes (so a newline after it is escaped)?
+function oddbs(s,   n, k) {
+  n = 0
+  for (k = length(s); k > 0 && substr(s, k, 1) == "\\"; k--) n++
+  return n % 2
+}
+function readheredocs(   k, h, ln, t, pl, w) {
   for (k = 1; k <= NP; k++) {
     h = PEND[k]
+    w = length(HDL[h]) + 1
     while (li < NL) {
       li++
       ln = L[li]
+      pl = ln "\n"
+      # Only <<- strips the tabs before the end word; after a plain <<, a tab-indented end word is text.
       t = ln
-      sub(/^\t+/, "", t)
+      if (HT[h]) sub(/^\t+/, "", t)
+      # An unquoted heredoc joins a line ending in an odd number of backslashes to the next, and compares the
+      # joined line with its end word, as bash does. t, kept without its leading tabs for <<-, only grows once
+      # it holds anything else, so it stops growing once it is too long to match (keeping this linear).
+      while (!HQ[h] && oddbs(ln) && li < NL) {
+        li++
+        ln = L[li]
+        pl = pl ln "\n"
+        if (length(t) <= w) {
+          t = substr(t, 1, length(t) - 1) ln
+          if (HT[h]) sub(/^\t+/, "", t)
+        }
+      }
       if (t == HDL[h]) break
-      HB[h] = HB[h] ln "\n"
+      HB[h] = HB[h] pl
     }
   }
   NP = 0
+}
+# newline: an unquoted newline ends a command, and bash reads the waiting heredocs' text after it, unless
+# it is inside $((...)), ((...)), $[...] or ${...}, or the heredocs wait from outside this substitution.
+function newline(   k) {
+  if (NP && (AR[d] || SB[d] || PE[d])) refuse()
+  for (k = 1; k <= NP; k++) if (PL[PEND[k]] != SL[d]) refuse()
+  sep()
+  readheredocs()
 }
 function hexval(s,   v, k) {
   v = 0
@@ -90,6 +139,7 @@ BEGIN {
   }
   d = 0; q = "n"; R = 0; NH = 0; NP = 0; BUF = ""; NB = 0
   NT[0] = 0; TK[0] = ""; HV[0] = 0; PIN[0] = 0; LAST[0] = 0; KIND[0] = ""; SUB[0] = 0
+  AR[0] = 0; SB[0] = 0; PE[0] = 0; SL[0] = 0
 
   for (li = 1; li <= NL; li++) {
     m = split(L[li], C, "")
@@ -140,9 +190,15 @@ BEGIN {
           addc(c)
           continue
         }
-        if (c == "$" && nx == "(") { addc(DY "$()"); HV[d] = 1; i++; push("$("); continue }
+        if (c == "$" && nx == "(") { addc(DY "$()"); HV[d] = 1; i++; push("$("); if (C[i + 1] == "(") AR[d] = 1; continue }
+        if (c == "$" && nx == "[") { addc(c nx); i++; SB[d]++; continue }
+        if (c == "$" && nx == "{") { addc(DY "$" nx); i++; PE[d]++; continue }
         if (c == "$" && nx ~ EXP) { addc(DY "$"); continue }
         if (c == "`") { addc(DY "``"); HV[d] = 1; push("`"); continue }
+        if (SB[d] && c == "[") SB[d]++
+        else if (SB[d] && c == "]") SB[d]--
+        else if (PE[d] && c == "{") PE[d]++
+        else if (PE[d] && c == "}") PE[d]--
         addc(c)
         continue
       }
@@ -158,7 +214,8 @@ BEGIN {
       if (c == "$") {
         if (nx == "'") { q = "a"; HV[d] = 1; i++; continue }
         if (nx == "\"") { q = "d"; HV[d] = 1; i++; continue }
-        if (nx == "(") { addc(DY "$()"); HV[d] = 1; i++; push("$("); continue }
+        if (nx == "(") { addc(DY "$()"); HV[d] = 1; i++; push("$("); if (C[i + 1] == "(") AR[d] = 1; continue }
+        if (nx == "[") { addc(c nx); i++; SB[d]++; LC[d] = "["; continue }
         if (nx ~ EXP) { addc(DY "$"); LC[d] = "$"; continue }
         addc(c)
         continue
@@ -168,8 +225,10 @@ BEGIN {
         addc(DY "``"); HV[d] = 1; push("`")
         continue
       }
-      if (c == "(") { flushtok(); push("("); continue }
+      # A bare ( or ) inside ${...} is text to bash 5, but closes $(...) for bash 3.2.
+      if (c == "(") { if (PE[d]) refuse(); flushtok(); push("("); if (nx == "(") AR[d] = 1; continue }
       if (c == ")") {
+        if (PE[d]) refuse()
         if (d > 0 && KIND[d] != "`") pop(); else sep()
         continue
       }
@@ -190,24 +249,44 @@ BEGIN {
         pipe()
         continue
       }
-      if (c == "\n") { sep(); readheredocs(); continue }
+      if (c == "\n") { newline(); continue }
       if (c == " " || c == "\t") { flushtok(); continue }
       if (c == "<") {
         if (nx == "(") { flushtok(); addtok(MK "PS"); i++; push("<("); continue }
+        # Bash reads a << inside $((...)), ((...)), $[...] or ${...} as a shift or a pattern, not a heredoc.
+        if (nx == "<" && (AR[d] || SB[d] || PE[d])) refuse()
         if (nx == "<" && C[i + 2] == "<") { flushtok(); addtok(MK "HS"); i += 2; continue }
         if (nx == "<") {
           i += 2
-          if (C[i] == "-") i++
+          dash = 0
+          if (C[i] == "-") { dash = 1; i++ }
           while (C[i] == " " || C[i] == "\t") i++
-          dl = ""
+          # The end word, read as bash reads it: quotes and backslashes are removed, and a blank or a ; they
+          # quote stays in it. Only a plain word is taken; any other is refused (a quote left open, a
+          # backslash in "...", a backslash that continues the word on the next line, $ or `).
+          dl = ""; dq = 0; wq = ""
           while (i <= m) {
             c2 = C[i]
+            if (wq == "'") { if (c2 == "'") wq = ""; else dl = dl c2; i++; continue }
+            if (wq == "\"") {
+              if (c2 == "\\") refuse()
+              if (c2 == "\"") wq = ""; else dl = dl c2
+              i++
+              continue
+            }
             if (c2 == " " || c2 == "\t" || c2 == ";" || c2 == "&" || c2 == "|" || c2 == "(" || c2 == ")" || c2 == "<" || c2 == ">") break
-            if (c2 != "'" && c2 != "\"" && c2 != "\\") dl = dl c2
+            if (c2 == "'" || c2 == "\"") { wq = c2; dq = 1; i++; continue }
+            if (c2 == "\\") {
+              if (i == m) refuse()
+              dq = 1; i++; dl = dl C[i]; i++
+              continue
+            }
+            dl = dl c2
             i++
           }
+          if (wq != "" || dl !~ /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/) refuse()
           i--
-          NH++; HDL[NH] = dl; HB[NH] = ""; PEND[++NP] = NH
+          NH++; HDL[NH] = dl; HQ[NH] = dq; HT[NH] = dash; PL[NH] = SL[d]; HB[NH] = ""; PEND[++NP] = NH
           flushtok(); addtok(MK "HD"); addtok(MK "HB" NH)
           continue
         }
@@ -221,12 +300,20 @@ BEGIN {
         while (C[i + 1] == ">" || C[i + 1] == "|" || C[i + 1] == "&") i++
         continue
       }
-      if (c == "#" && TK[d] == "" && NB == 0 && !HV[d]) { i = m; continue }
-      # An unquoted brace list ({a,b} or {x..y}, not ${...}): the token gets a BL marker before it.
-      if (c == "{") { if (LC[d] != "$") BO[d]++ }
+      # A comment, which bash does not start inside $[...] or ${...}, and may not inside $((...)) or ((...)).
+      if (c == "#" && TK[d] == "" && NB == 0 && !HV[d]) {
+        if (AR[d] || SB[d] || PE[d]) refuse()
+        i = m
+        continue
+      }
+      if (SB[d] && c == "[") SB[d]++
+      else if (SB[d] && c == "]") SB[d]--
+      # An unquoted brace list ({a,b} or {x..y}, not ${...}): the token gets a BL marker before it. PE counts the
+      # braces of an open ${...}.
+      if (c == "{") { if (LC[d] == "$") PE[d]++; else { BO[d]++; if (PE[d]) PE[d]++ } }
       else if (c == "," && BO[d]) BC[d] = 1
       else if (c == "." && BO[d] && LC[d] == ".") BC[d] = 1
-      else if (c == "}" && BO[d]) { if (BC[d]) BL[d] = 1; BO[d]-- }
+      else if (c == "}") { if (PE[d]) PE[d]--; if (BO[d]) { if (BC[d]) BL[d] = 1; BO[d]-- } }
       LC[d] = c
       addc(c)
     }

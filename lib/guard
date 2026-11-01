@@ -58,8 +58,11 @@
 #
 # Refused on purpose, though they can be harmless: setting a git key that runs a command (`git config
 # core.editor vim`; `git -c` checks the value instead, since it lasts one command), opening or editing a secret
-# (`vim .env`, `sed -i ... .env`), loading one (`node --env-file=.env`), and httpie to api.github.com without
-# an explicit GET or HEAD (it sends its stdin as the body).
+# (`vim .env`, `sed -i ... .env`), loading one (`node --env-file=.env`), httpie to api.github.com without
+# an explicit GET or HEAD (it sends its stdin as the body), and what bash may read differently from the
+# tokeniser, which would let a line after it run unchecked: a heredoc end word that is not a plain word
+# (`<<'E O F'`, `<<E\ OF`), a heredoc that waits across a newline inside $(...), `...` or <(...) on its line,
+# and a <<, a # or a bare ( ) inside $((...)), ((...)), $[...] or ${...} (`echo $((1<<20))`).
 #
 # Allowed on purpose: reading code, every `gh api` GET (including GET .../pulls/N/merge, which only
 # asks "is it merged?"), gh pr view/list/checks/create/edit/comment, `gh release create/edit` (an
@@ -1742,6 +1745,11 @@ analyze() {
   PARSES=$((PARSES + 1))
   [ "$PARSES" -le "$MAX_PARSES" ] || { block "the command holds more than $MAX_PARSES commands to check inside it, too many to check in time"; return; }
   out=$(printf '%s' "$s" | "$AWK" -f "$TOKENIZER") || status=$?
+  if [ "$status" = 3 ]; then
+    # Where bash would end a heredoc, or start one or a comment, cannot be told here (see the tokeniser).
+    block "bash may read it differently from the guard: a heredoc whose end word is not a plain word such as 'EOF', or that waits across a newline inside \$(...), \`...\` or <(...), or a <<, # or bare ( ) inside \$((...)), ((...)), \$[...] or \${...}"
+    return
+  fi
   if [ "$status" != 0 ]; then
     block "the command could not be parsed to check it"
     return

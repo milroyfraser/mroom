@@ -383,7 +383,9 @@ mroom guard check 'git push -u origin feat/x'                # allowed
 command's output (`cat $(echo x)`), a script file (`bash x.sh`), an alias already in a config file,
 `ssh host 'cmd'` or `docker compose exec`, a recursive search of the project (`grep -r KEY .`
 reads its `.env` too) or a secret in the environment gets past it. `lib/guard`'s header lists the rest. Without jq or
-awk it is off and says so; a command it cannot parse is refused. The real gate is GitHub: the
+awk it is off and says so; a command it cannot parse is refused, and so is one bash may read differently (a
+heredoc end word that is not a plain word, or a `<<` or `#` inside `$((...))` or `${...}`), since a line after
+it could run unchecked. The real gate is GitHub: the
 default branch's ruleset, review by people, and the `production` environment (design D22).
 
 **The plugin** in `plugin/` runs the guard. Claude Code copies a plugin without the rest of this
