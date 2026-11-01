@@ -17,6 +17,8 @@
 #     footer copyright and naming no host but github.com and Google Fonts;
 #   - the Room is published with a db rule that lets only its owner and Editors write, and the page tells
 #     Claude which card changed without quoting a row;
+#   - the Room decides whether a card is blocked in one place, so no verdict it shows (the card's tabs, the
+#     next-step box) reads Go for a blocked card, and an Issue card keeps its QA placeholder once its PR opens;
 #   - no skill names a host, address, id or person (and none of the private words, which
 #     tools/privacy_check.py reads from $MROOM_PRIVATE_WORDS or the gitignored .private-words).
 #
