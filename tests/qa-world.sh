@@ -36,12 +36,16 @@ qa_world() {
   unset GITHUB_ACTIONS RUNNER_TEMP
 }
 
-# api_host <N> [<zone>], web_host <N> [<zone>], site_user <N>: the test side's one copy of how qa_names
-# (lib/core/qa.sh) names environment N's sites and their user, for the app shop in the zone qa.example.dev. Tests
-# build every such name with these, so a new naming scheme is an edit here and in the tests that pin it.
-api_host() { echo "api-$1.${2:-qa.example.dev}"; }
-web_host() { echo "go-$1.${2:-qa.example.dev}"; }
+# api_host <N> [<zone>], web_host <N> [<zone>], site_user <N>, reverb_app <N>: the test side's one copy of how
+# qa_names (lib/core/qa.sh) names environment N's sites, their user and its Reverb app, for the app shop in the zone
+# qa.example.dev. Tests build every such name with these, so a new naming scheme is an edit here and in the tests
+# that pin it. old_api_host and old_web_host are the names of before mroom 0.5.0, which teardown still finds.
+api_host() { echo "api.$1.${2:-qa.example.dev}"; }
+web_host() { echo "$1.${2:-qa.example.dev}"; }
+old_api_host() { echo "api-$1.${2:-qa.example.dev}"; }
+old_web_host() { echo "go-$1.${2:-qa.example.dev}"; }
 site_user() { echo "shop_qa_$1"; }
+reverb_app() { echo "shop-qa-$1"; }
 
 # ago <seconds>: the time that long before NOW, as Forge writes it.
 ago() { date -u -d "@$((NOW - $1))" +%Y-%m-%dT%H:%M:%SZ; }
@@ -123,11 +127,13 @@ qa_body() {
   printf '### QA environment\n<!-- mroom-qa: %s -->\n\nSomething.\n' "$marker"
 }
 
-# Logs and what the fakes saw.
-gate_log() { cat "$GATE/gate.log" 2>/dev/null || true; }
+# Logs and what the fakes saw. gate_log and order leave out the gate's memory, a question that changes nothing, as
+# forge_writes leaves out Forge's reads; gate_asked is every request.
+gate_log() { grep -vx memory "$GATE/gate.log" 2>/dev/null || true; }
+gate_asked() { cat "$GATE/gate.log" 2>/dev/null || true; }
 forge_writes() { grep -v '^GET ' "$FORGE_LOG" 2>/dev/null || true; }
 gh_log() { cat "$GH_FAKE/gh.log" 2>/dev/null || true; }
-order() { grep -v '^forge GET' "$ORDER_LOG" 2>/dev/null || true; }
+order() { grep -v -e '^forge GET' -e '^gate memory$' "$ORDER_LOG" 2>/dev/null || true; }
 output_of() { sed -n "s/^$1=//p" "$GITHUB_OUTPUT" 2>/dev/null || true; }
 tmp_empty() { [ -z "$(find "$T/tmp" -mindepth 1 -print -quit)" ]; }
 lacks() { case "$1" in *"$2"*) return 1 ;; esac; }
