@@ -41,18 +41,18 @@ job in Forge, since a token that can do it reaches root: tell them exactly what 
   never print the answer: sum it up instead.
 - Never put a secret on a command line. Every user on this box, a QA site's too, can read every
   running program's arguments, and the text of each command you run is passed to its shell as an
-  argument.
-  So a body for such a path reaches `--data -` through a pipe: change what you read, and take a
-  secret you add from a file you wrote with the Write tool, in a folder `mktemp -d` made (remove
-  the folder after):
+  argument. So a body for such a path reaches `--data -` through a pipe: change what you read, and
+  take a secret you add from a file you wrote with the Write tool, in a folder `mktemp -d` made
+  (delete the file after). `strings` passes only text, so an answer with no env in it sends an
+  empty body, which `forge-api` refuses, never a broken env:
 
   ```
-  forge-api --secret GET sites/<site id>/environment | jq '<the change>' | forge-api --secret PUT sites/<site id>/environment --write --data -
-  forge-api --secret GET sites/<site id>/environment | jq --rawfile v <file> '<the change, with $v>' | forge-api --secret PUT sites/<site id>/environment --write --data -
+  forge-api --secret GET sites/<site id>/environment | jq '.data.attributes.content | strings | {environment: <the change of .>}' | forge-api --secret PUT sites/<site id>/environment --write --data -
+  forge-api --secret GET sites/<site id>/environment | jq --rawfile v <file> '.data.attributes.content | strings | {environment: <the change of ., with $v>}' | forge-api --secret PUT sites/<site id>/environment --write --data -
   ```
 
-  Never `jq -n` or `--arg` holding the value, a here-document, `echo` or an inline `--data`, which
-  is refused there.
+  A secret never goes in `<the change>`, in a jq program of its own (`jq -n '{...}'`), `--arg`, a
+  here-string or here-document, `echo` or an inline `--data`, which is refused there.
 
 ## Finding things
 

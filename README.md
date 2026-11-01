@@ -335,7 +335,16 @@ forge-api --secret GET sites/123/environment
   shows in the process list, which every user on the box can read, a QA site's too. A path that needs
   `--secret` takes its body only from stdin: an inline `--data` is refused there. Keep the secret off
   every other command line on its way as well: pipe it from what you read or from a private file, never
-  through `jq --arg`, `echo` or the text of a command an agent runs, which is its shell's argument.
+  through a value written into a jq program (`jq -n '{...}'`), `jq --arg`, `echo`, a here-string, or the
+  text of a command an agent runs, which is its shell's argument. Change what you read, in one pipe;
+  `strings` makes an answer with no env in it send an empty body, which is refused:
+
+  ```bash
+  forge-api --secret GET sites/123/environment \
+    | jq '.data.attributes.content | strings | {environment: <the change of .>}' \
+    | forge-api --secret PUT sites/123/environment --write --data -
+  ```
+
 - A 503 is retried, and so is a 502 for GET, PUT and DELETE. A 429 waits for Forge's `Retry-After` (up to
   120 seconds, else 20). A read that timed out is retried; a write never is, since it may have run.
 

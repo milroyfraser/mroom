@@ -13,8 +13,9 @@
 #     checks a pull request's head out by its number, fetches from another repository or by a commit id,
 #     or applies a pull request's change as a patch;
 #   - the release skill asks before it drafts, only drafts, and the settings fragments still ask on a release;
-#   - no skill builds the body of a `forge-api --secret` write on a command line (jq -n or --arg holding the
-#     value, a here-document, echo, printf or an inline --data), and forge says why and shows the ways that work;
+#   - no skill builds the body of a `forge-api --secret` write in a form that puts it on a command line (a jq
+#     program or --arg holding the value, a here-document or here-string, echo, printf or an inline --data),
+#     reading each fenced block whole; forge says why, and shows the two ways that work, each failing closed;
 #   - implement publishes its Session Room first, and room/ holds the page and its README, each keeping the
 #     footer copyright and naming no host but github.com and Google Fonts;
 #   - the Room is published with a db rule that lets only its owner and Editors write, and the page tells
