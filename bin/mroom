@@ -28,12 +28,16 @@
 #                              the PreToolUse guard for Claude Code's Bash tool (design 8.3): refuses a
 #                              merge, an approval, a release, a force-push or a secret read; a speed bump,
 #                              not a boundary (GitHub is the gate)
-#   mroom tracker get|list|find|comment|state|create|backend
+#   mroom tracker get|list|find|owned|comment|state|create|backend
 #                              the tracker adapter (issues.tracker: linear or none): read, list or find
-#                              issues, comment, set a state, or file one (only with --allow-create)
-#   mroom errors get|search|resolve|backend
+#                              issues, tell whose one is, comment, set a state, or file one (only with
+#                              --allow-create)
+#   mroom errors get|search|new|resolve|backend
 #                              the error-tracker adapter (errors.provider: sentry): an issue and its
-#                              latest event, a search, or resolving one
+#                              latest event, a search, a window's new issues, or resolving one
+#   mroom persona find|owned|create|comment
+#                              the guard: the persona's only way to write to the tracker (D23): it files
+#                              an issue per alert key, assigns no one and comments only on its own issues
 #   mroom memory-preflight <MB> [<what>]
 #                              exit 1, saying why, when the box's RAM available and free swap hold less than
 #                              <MB> more (2 for a usage error): run it before work the kernel would end half
@@ -77,6 +81,7 @@ case "$cmd" in
   guard) exec "$ROOT/lib/guard" "$@" ;;
   tracker) exec "$ROOT/lib/tracker" "$@" ;;
   errors) exec "$ROOT/lib/errors" "$@" ;;
+  persona) exec "$ROOT/lib/persona" "$@" ;;
   memory-preflight)
     if ! [[ "${1:-}" =~ ^[1-9][0-9]{0,6}$ ]] || [ "$#" -gt 2 ]; then die "usage: mroom memory-preflight <MB> [<what>]" 2; fi
     # shellcheck source=lib/memory-preflight

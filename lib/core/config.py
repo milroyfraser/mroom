@@ -123,6 +123,13 @@ SCHEMA = {
     "qa.parity.files": (("same", "local"), False, 'files = "same"',
                         "same (a bucket per environment) | local"),
     "persona.name": ("str", False, 'name = "Agent"', "the bot persona's name"),
+    "persona.label": ("str", False, 'label = "found-by-agent"',
+                      "the label on every issue alert triage files; it must exist (mroom never creates labels)"),
+    "persona.state": ("str", False, 'state = "Triage"', "the state alert triage files issues in (default: the team's)"),
+    "persona.environment": ("str", False, 'environment = "production"',
+                            "the error tracker's environment alert triage reads (default production)"),
+    "persona.channel": ("str", False, 'channel = "C0123456789"',
+                        "the chat channel the persona pings when triage cannot run (a Slack channel id)"),
 }
 
 # What get gives for a single key the file leaves out, before any --default: only keys mroom has decided. A whole
@@ -221,7 +228,15 @@ def rule_error(key: str, value) -> str | None:
         return f"{key} must be a team key of capitals, digits and _ (got {json.dumps(value)})"
     if key == "errors.org" and not ORG_SLUG.fullmatch(value):
         return f"{key} must be an organisation slug: lowercase letters, digits, _ and - (got {json.dumps(value)})"
-    if key in ("issues.state_started", "issues.state_review") and not STATE_NAME.fullmatch(value):
+    if key == "persona.name" and not PERSONA_NAME.fullmatch(value):
+        return f"{key} must be a name of letters, digits, spaces, - and _, at most 40 (got {json.dumps(value)})"
+    if key == "persona.label" and not LABEL_NAME.fullmatch(value):
+        return f"{key} must be a label's name: at most 80 characters, none of them a control character (got {json.dumps(value)})"
+    if key == "persona.environment" and not ENV_NAME.fullmatch(value):
+        return f"{key} must be an environment's name: letters, digits, ., _ and -, at most 64 (got {json.dumps(value)})"
+    if key == "persona.channel" and not CHANNEL_ID.fullmatch(value):
+        return f"{key} must be a Slack channel id, such as C0123456789 (got {json.dumps(value)})"
+    if key in ("issues.state_started", "issues.state_review", "persona.state") and not STATE_NAME.fullmatch(value):
         return f"{key} must be a state's name: words of letters, digits, - and _, one space apart, at most 40 (got {json.dumps(value)})"
     # The release skill reads this origin's version path, so it is an https origin and nothing more.
     if key == "release.production_url" and not HTTPS_ORIGIN.fullmatch(value):
@@ -376,6 +391,7 @@ BOX_KEYS = {
     "MROOM_QA_PERSONA_DOMAIN": "the domain QA personas' addresses end in, such as .test (the default)",
     "MROOM_QA_SMTP_PORT": "the port on 127.0.0.1 where mroom's mail relay takes QA apps' mail; 1025 by default",
     "MROOM_QA_RESERVE_MB": "the memory, in MB, the box keeps for all but QA environments; 4096 by default",
+    "MROOM_QA_DB_READ": "the table.column entries the gate's db-read may read, space-separated (qa.db_read_allowlist)",
 }
 # Names the gate builds SQL from, so each is a plain Postgres identifier (design 5.1, D18), matched as a
 # whole (fullmatch: "$" alone would let a trailing newline through).
@@ -390,6 +406,12 @@ DISK = re.compile(r"[a-z][a-z0-9]{0,15}")
 TEAM_KEY = re.compile(r"[A-Z0-9][A-Z0-9_]{0,31}")
 ORG_SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,49}")
 STATE_NAME = re.compile(r"(?=.{1,40}$)[A-Za-z0-9_-]+(?: [A-Za-z0-9_-]+)*")
+# The persona's name goes into every note it writes, its label and state to the tracker, its environment to
+# the error tracker's search and its channel to chat (actions/triage): each a plain value.
+PERSONA_NAME = re.compile(r"(?=.{1,40}$)[A-Za-z0-9_-]+(?: [A-Za-z0-9_-]+)*")
+LABEL_NAME = re.compile(r"[^\x00-\x1f\x7f]{1,80}")
+ENV_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
+CHANNEL_ID = re.compile(r"[CG][A-Z0-9]{8,12}")
 HTTPS_ORIGIN = re.compile(r"https://(?=[^/]{1,200}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?")
 TAG_PREFIX = re.compile(r"(?:[a-z][a-z0-9-]{0,15})?")
 # A token's variable ends in _TOKEN or _API_KEY, and is none of the box's, GitHub's, a cloud's or a host's,
@@ -403,6 +425,8 @@ PERSONA_DOMAIN = re.compile(r"(?=.{2,200}$)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-
 # A persona domain is made up: under a name reserved for that (RFC 2606, 6761), or a subdomain of a domain of
 # your own (three labels or more), so never a public suffix such as .com, .co.uk or .github.io, where real
 # people's addresses live.
+# One MROOM_QA_DB_READ entry: a table and one of its columns, each a plain Postgres name the gate quotes.
+DB_READ_ITEM = re.compile(r"[a-z_][a-z0-9_]{0,62}\.[a-z_][a-z0-9_]{0,62}")
 RESERVED_SUFFIXES = (".test", ".example", ".invalid", ".localhost", ".example.com", ".example.net", ".example.org")
 # One MROOM_WATCH_MCP item: an optional name=, then an http(s) URL of plain characters with no query,
 # fragment or credentials. A bare URL is named by its host, and no two items may share a name.
@@ -449,6 +473,8 @@ def box_value_error(key: str, value: str) -> str | None:
             PERSONA_DOMAIN.fullmatch(value) and (value.endswith(RESERVED_SUFFIXES) or value.count(".") >= 3)):
         return ("MROOM_QA_PERSONA_DOMAIN must be a domain suffix starting with a dot: a reserved name such as .test, "
                 "or a subdomain of your own such as .qa.example.com")
+    if key == "MROOM_QA_DB_READ" and not all(DB_READ_ITEM.fullmatch(item) for item in value.split()):
+        return "MROOM_QA_DB_READ must be space-separated table.column entries, each a plain Postgres name"
     if key == "MROOM_QA_SMTP_PORT" and not (value.isascii() and value.isdigit() and 1024 <= int(value) <= 65535
                                              and value == str(int(value))):
         return "MROOM_QA_SMTP_PORT must be a port number from 1024 to 65535"

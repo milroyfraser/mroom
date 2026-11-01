@@ -26,8 +26,9 @@ part of phase 1: the [box watchdog](#box-watchdog) with its job records, the
 [regression label](#regression-label) check with its measures, and the
 [guard, the plugin's skeleton and the settings fragments](#guard-and-settings); from phase 3, the
 [tracker and error-tracker adapters](#tracker-and-error-tracker) and the [workflow skills](#workflow-skills);
-and, ahead of its phase, part of phase 4: the [Claude review](#claude-review) and its
-[review findings](#review-findings) check. Every other command prints
+ahead of its phase, part of phase 4: the [Claude review](#claude-review) and its
+[review findings](#review-findings) check; and, from phase 5, [alert triage](#alert-triage) with its alarm and
+its guard. Every other command prints
 `not yet: phase N`. The phases and what each delivers are in
 [section 11 of the design](docs/design.md#11-phases). Expect breaking changes in every `0.x` release.
 
@@ -346,11 +347,13 @@ The workflow skills of phase 3 reach the issue tracker and the error tracker thr
 mroom tracker get SHOP-12                    # title, state, labels, branch, description, every comment
 mroom tracker list --mine --open             # my 50 latest open issues, by priority; or --label lesson
 mroom tracker find sentry:1001               # the issues whose description holds the marker for an alert
+mroom tracker owned SHOP-12                  # whether the token's user filed the issue
 mroom tracker comment SHOP-12 < note.md      # adds a comment; the body comes on stdin
 mroom tracker state SHOP-12 "In Review"      # the team's state of that name, in any case
 mroom tracker create --allow-create --title "Checkout fails" --state Triage --label bug < body.md
 mroom errors get SHOP-1A2                    # the error issue and its latest event
 mroom errors search 'is:unresolved' --environment production --period 24h --limit 50
+mroom errors new 40 --environment production # new, regressed and escalating issues of the last 40 minutes
 mroom errors resolve SHOP-1A2
 ```
 
@@ -385,7 +388,8 @@ token_env = "SENTRY_AUTH_TOKEN"    # the default
   substring match, so `find` checks each description again and keeps an issue only when the marker
   ends there or goes on with `:`; the marker for `sentry:100` never finds `sentry:1001`'s issue. It
   reads every page, in `issues.team` when that is set, and lists the issues in every state,
-  archived ones too, the first filed at the top.
+  archived ones too, the first filed at the top, each with its `keys`: the keys of its markers that
+  are this error's.
 - **Creating an issue** needs `--allow-create`; without it, nothing is sent. It files in `issues.team`
   and uses labels that already exist, of that team or the whole workspace (not a parent team's); mroom
   never creates a label.
@@ -408,6 +412,113 @@ token_env = "SENTRY_AUTH_TOKEN"    # the default
 Sentry needs a user or internal integration token; an organisation auth token cannot read issues. It
 needs Issue & Event: read, and Organization: read for `search`, which first checks that the token sees
 a project. `resolve` also needs Issue & Event: write.
+
+## Alert triage
+
+The persona (design D23) files the error tracker's alerts into the tracker, one issue per alert key,
+and pings a person only when triage itself cannot run. It is a reusable workflow,
+`.github/workflows/triage.yml`, with the composite action `actions/triage`, which the app calls from a
+workflow of its own:
+
+```yaml
+# .github/workflows/alerts.yml
+name: Alert triage
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      live:
+        description: Write to the tracker (unticked, a dry run prints what it would file)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  triage:
+    permissions:
+      actions: write # the switch-off job turns this workflow off when the tracker drops the markers
+      contents: read
+    uses: milroyfraser/mroom/.github/workflows/triage.yml@v0.5.0 # the first release with alert triage
+    with:
+      live: ${{ github.event_name == 'schedule' || inputs.live }}
+    secrets:
+      MROOM_TRACKER_TOKEN: ${{ secrets.MROOM_TRACKER_TOKEN }}
+      MROOM_ERRORS_TOKEN: ${{ secrets.MROOM_ERRORS_TOKEN }}
+      MROOM_CHAT_TOKEN: ${{ secrets.MROOM_CHAT_TOKEN }}
+```
+
+```toml
+[persona]
+name = "Agent"                     # the name on every issue, comment and ping it writes
+label = "found-by-agent"           # on every issue it files; it must exist, mroom never creates labels
+state = "Triage"                   # the state it files issues in (default: the team's)
+environment = "production"         # the error tracker's environment it reads (the default)
+channel = "C0123456789"            # the chat channel it pings when triage cannot run (a Slack channel id)
+```
+
+- **Alerts.** Every 15 minutes it reads the error issues that are new, regressed or escalating in the
+  last 40 minutes (`mroom errors new`), since GitHub often starts a scheduled run late. An alert's key is
+  `sentry:<id>` for a new issue, and `sentry:<id>:regressed:<day>` or `sentry:<id>:escalating:<day>`
+  for a later alert of it. Every alert of the window is looked up, the most urgent first, but at most 10
+  issues are filed a run; the rest wait for the next run, which files them while they are still in its
+  window. Each of the three searches takes at most 100 issues, and the summary says when one was full:
+  alerts past that, or past a longer gap, are missed, so look at the error tracker then.
+- **One issue per alert key.** The issue holding an alert carries its hidden marker, `<!-- mroom-alert
+  key=sentry:1001 -->`. Triage looks for the key with `mroom tracker find` and files an issue only when
+  no issue in any state holds it, archived ones too, so a second run files nothing new, and a cancelled
+  issue is not filed again. A later alert of an error is a new issue that links the 20 newest of the
+  earlier ones, and a comment on the newest earlier one when the persona filed it. The alerts of one
+  error in one run go on one issue. Until an issue of the same kind for that error is done, a later
+  alert counts as filed, so a regression that goes on for days, or one a person cancelled, is one issue;
+  once that issue is done, the next regression is filed.
+- **What an issue holds.** The error, its counts, releases and culprit, and the latest event's exception
+  and in-app frames, all redacted first (`lib/core/text.py`): known token and key shapes, bearer tokens,
+  `password=`, `secret=`, `token=` and `api_key=` values, a URL's password, email addresses, phone
+  numbers and IBANs. It knows shapes, so a secret of no known shape can still pass. The run's summary is
+  redacted the same way. An issue shows the last 3 chained exceptions with 8 in-app frames each, takes
+  out control and text-direction characters, and is cut at 28000 bytes.
+- **The guard** (`mroom persona`) is the persona's only way to write. It files issues only for an alert
+  key of this run, in `issues.team`, `persona.state` and with `persona.label`, and assigns no one. It
+  comments only on an issue the tracker says the persona's token filed (`mroom tracker owned`), and has
+  no command to edit, close, assign, label or delete. An issue filed by an app rather than a user has no
+  creator, so it never counts as the persona's. The markers are its own: it escapes every `<!--` in a
+  body, so no text, however it nests one, can hold a marker, and it writes one per key; reading an issue
+  back, it stops as for a lost marker when it finds one it did not write. It refuses text holding a
+  token, defangs links to hosts other than GitHub's, the trackers' and the app's, and caps a run at 10
+  issues and 30 comments. A dispatch is a dry run unless `live` is ticked: it prints what it would file,
+  and writes nothing.
+- **When the tracker drops the markers.** After each issue it files, the guard reads the issue back.
+  When a marker is missing, the next run could not find the issue and would file it again, every 15
+  minutes. It also searches for each issue as the next run will, three times, since a tracker's search
+  may read another form of the description than the one it stores; an issue the search cannot find
+  counts as lost too. So nothing more is written in that run, and the workflow's switch-off job turns
+  the app's workflow off (`gh workflow disable`) and pings `persona.channel` once. To recover, read the
+  issue's description through the tracker's API and check the `<!-- mroom-alert ... -->` lines; if the
+  tracker strips HTML comments, or stores them but leaves them out of its search (check how its
+  description filter reads the text), the marker's format must change before triage runs again. Merge
+  any duplicates, then turn the workflow on again (`gh workflow enable alerts.yml`). If the workflow
+  cannot be turned off, the ping asks a person to do it by hand, and repeats every run until someone
+  does. A failed read of the issue is not a lost marker: the run fails, and the alarm says so.
+- **The alarm.** When a live run's triage job fails (the error tracker or the tracker could not be read
+  or written, the guard refused an alert, or a step failed or ran past its 11-minute limit), the alarm
+  job pings `persona.channel` with the failed step and the run, at most once a UTC day. Its dedupe is
+  the tracker's: before the ping it files the day's issue, keyed `triage:<yyyymmdd>`, and a day whose
+  issue exists sends nothing. When that issue cannot be filed, nothing is sent: a missed ping, never one
+  every 15 minutes.
+- **Without a tracker** (`issues.tracker = "none"`), nothing is filed: the run's summary lists the
+  window's alerts. The alarm then has nowhere to record its ping, and sends none; nor does it without a
+  chat token or `persona.channel`. A run GitHub cancelled, such as a waiting one a newer run replaced,
+  raises no alarm. Without an `[errors]`
+  table there is nothing to triage.
+- **Secrets** are the `persona` environment's (design 8.8; default branch only): the persona's own
+  tracker token (D23, never a developer's), a read-only error-tracker token, and the chat bot's token
+  (`chat:write`, invited to the channel). Keep them in the `persona` environment only, never as
+  repository or organisation secrets: the called jobs read the environment's own, but where the
+  environment has none, the caller's would be used, and a repository secret is readable from any
+  branch. Each job checks out only the default branch's `mroom.toml`
+  and mroom at the commit of the workflow; the triage job's token reads nothing but the repository,
+  and only the switch-off job may turn workflows off.
 
 ## Workflow skills
 
@@ -450,8 +561,9 @@ tag_prefix = ""                              # "release-" gives release-v1.2.3
 ```
 
 The settings fragment `base.json` allows the adapters' reads (`mroom tracker get`, `list`,
-`find`, `backend`; `mroom errors get`, `search`, `backend`) and asks before `mroom tracker create` and
-`mroom errors resolve`. `tests/skills-test.sh` checks the skills as a contract: their frontmatter,
+`find`, `owned`, `backend`; `mroom errors get`, `search`, `new`, `backend`; `mroom persona find`,
+`owned`) and asks before `mroom tracker create`, `mroom errors resolve` and the guard's writes
+(`mroom persona create`, `comment`). `tests/skills-test.sh` checks the skills as a contract: their frontmatter,
 that every `mroom` command, skill and key they name exists, the rules above, the release's draft and
 question, that no skill resolves an error issue, and that none names a host, an IP address, an id or
 an email address. For `fix-issue` it also checks that the branch names both ids, that a failing test
@@ -466,7 +578,8 @@ skills, read when installed), and `verify-app` with `qa-engineer` (phase 2b).
 
 CI never gets a shell on the box (design 8.2). The QA runner's SSH key is forced to `mroom gate`, which
 runs only the operations of its role and builds every name itself, so a request can reach nothing but its
-own environment. Phase 2a adds operations one PR at a time; today the `provision` role has:
+own environment. Each role is a key of its own: `provision` for qa-up and qa-down, `browser` for browser QA's
+checks, and `template` for the job that builds the QA template. The `provision` role has:
 
 | Operation | What it does |
 |---|---|
@@ -493,6 +606,19 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 | `reverb-app-remove <N>` | the environment's app; its sockets already open stay until they close |
 | `memory` | the box's memory, in MB: `total_mb`, `available_mb` and `swap_free_mb` from `/proc/meminfo`, and `reserve_mb`, what the box keeps for all but QA (`MROOM_QA_RESERVE_MB`, 4096 unless set); qa-up sizes its slots from them |
 
+The `browser` role reads and changes nothing:
+
+| Operation | What it does |
+|---|---|
+| `db-read <N> <table> <column>... [<column>=<value>...] [asc:\|desc:<column>] [limit:<n>]` | at most 100 rows (`limit:` fewer) of one table in the environment's database, as JSON, read as the environment's read-only role; every column it names, filters on (at most 5, each an exact match on the column's text) or orders by must be in `MROOM_QA_DB_READ` |
+| `signin-code`, `mail-read`, `env-sha` | as above |
+
+The `template` role has one:
+
+| Operation | What it does |
+|---|---|
+| `template-load` | the QA template, rebuilt from a `pg_dump -Fc` archive on stdin (at most 4 GiB), then swapped in for the old one whole; environments made before keep their own database, and the next clone gets the new template |
+
 The client sends only N, and the few words some operations also take, each of a fixed form. The
 database, role and Redis user are `<MROOM_APP_NAME>_qa_<N>`, and the database is cloned from
 `MROOM_QA_TEMPLATE`, both set by a person in `box.env`. A bucket is `<MROOM_APP_NAME>-qa-<N>-<disk>`, each
@@ -502,6 +628,41 @@ no disk's bucket is another environment's or another disk's. Its Reverb app's id
 PR is ever given an id whose sockets may still be open. A password reaches
 Postgres only as a SCRAM verifier, through stdin, and Redis only as its SHA-256. Each request and refusal
 is logged, never a secret, to `~/.local/state/mroom/gate.log` and to syslog.
+
+**The template database** (design 9) is what every environment's database is cloned from, so a deploy
+migrates only what its pull request adds, and seeds nothing. A job where pull requests' code never runs builds
+it: by default it migrates and seeds a database of its own with the default branch's code
+(`qa.parity.database = "seeded"`), or it takes the masked snapshot (`"snapshot"`, opt-in), and sends
+`pg_dump -Fc` of it to `template-load`:
+
+- **As the objects role.** The archive is restored into `<template>_next`, a new database built from
+  `template0`, by `pg_restore --no-owner --no-privileges --single-transaction --exit-on-error`, signed in as
+  `<app>_qa_objects` with a password made for that restore and a login that lapses after two hours, which the
+  gate takes back as soon as the restore ends. So whatever the archive holds runs with that role's rights, never
+  the gate's, and `pg_hba.conf` lets that role reach `<template>_next` alone. The template's objects belong to
+  it, as D18 needs.
+- **A swap.** Then, while no clone runs (`db-create` waits for it, and it for them), the old template is set
+  aside as `<template>_old`, the new one takes its name, and the old one is dropped. A step that fails puts the
+  old one back, a restore that fails leaves the template as it was, and a load that was killed halfway is put
+  right by the next one. `pg_restore` reads archives of its own Postgres version or older, so dump with a
+  `pg_dump` no newer than the box's Postgres.
+- **What the caller sees.** Only the gate's lines, and on a failed restore `pg_restore`'s first error, which
+  may quote a row of the caller's own archive: it never reaches the gate's log.
+
+**Read-only database access for browser QA** (design 8.6). Each environment also gets a read-only Postgres
+role, `<app>_qa_<N>_read`, made by `db-create` and dropped by `db-drop`. No app is given its password: the gate
+keeps it and signs in with it for `db-read` alone, never as itself, since the pull request's code owns the
+database and a view or function it planted runs as whoever reads it. The role holds `SELECT` on the tables in
+`public` (the template's, and every table the environment's role makes there later), `CONNECT` on its own
+environment's database alone, and no other privilege; its sessions are read-only with a 30 s statement timeout,
+and `pg_hba.conf` lets it reach environments' databases only. `db-read` builds the one `SELECT` itself from names
+it quotes and values psql quotes, with the catalog first on the search path, in a read-only transaction that is
+rolled back. What it may read is what `MROOM_QA_DB_READ` lists, the `table.column` entries a person sets on the
+box to match `qa.db_read_allowlist`: a check can name no other column, filter on none, and order by none, since
+a filter would tell its values apart too. An error names its SQLSTATE, never Postgres's message, which can quote
+a value. The pull request's code still decides what its own tables hold, so the list says what a check may ask
+for, not what the data is. An environment made before this release has no read-only role: tear it down and
+bring it up again.
 
 The gate makes an environment's passwords, its bucket keys and its app key once, and keeps them in
 `~/.local/state/mroom/qa/<app>_qa_<N>.secrets` (mode 600, beside the commit `code-put` records), so every
@@ -694,11 +855,16 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
 ```
 
 1. In the box user's `~/.ssh/authorized_keys`, by hand (Forge's SSH key screen stores a bare key, without
-   options):
+   options), a key for each role, each its own:
 
    ```
    restrict,command="/home/forge/.local/bin/mroom gate provision" ssh-ed25519 AAAA… mroom-qa-up
+   restrict,command="/home/forge/.local/bin/mroom gate browser" ssh-ed25519 AAAA… mroom-qa-browser
+   restrict,command="/home/forge/.local/bin/mroom gate template" ssh-ed25519 AAAA… mroom-qa-template
    ```
+
+   The `template` key belongs to the job that builds the template (step 3), and the `browser` key to browser
+   QA (phase 2b); add each when its job exists.
 
 2. As a Postgres superuser (`sudo -u postgres psql`). `\password` asks for each password, so none ends up
    in a history file or the server's log:
@@ -707,26 +873,23 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
    CREATE ROLE shop_qa_gate LOGIN CREATEDB CREATEROLE;
    \password shop_qa_gate
    CREATE ROLE shop_qa_objects NOLOGIN;      -- owns the template's objects; never a database or tablespace
-   GRANT shop_qa_objects TO shop_qa_gate;
+   GRANT shop_qa_objects TO shop_qa_gate WITH ADMIN OPTION;  -- template-load gives it a login for a restore
    CREATE ROLE shop_qa_envs NOLOGIN;         -- every environment's role joins it; never grant it anything
    GRANT shop_qa_envs TO shop_qa_gate WITH ADMIN OPTION;
-   CREATE DATABASE shop_qa_template OWNER shop_qa_gate;
-   GRANT CONNECT ON DATABASE shop_qa_template TO shop_qa_objects;
-   \c shop_qa_template
-   GRANT CREATE ON SCHEMA public TO shop_qa_objects;
+   CREATE ROLE shop_qa_readers NOLOGIN;      -- every read-only role joins it; never grant it anything
+   GRANT shop_qa_readers TO shop_qa_gate WITH ADMIN OPTION;
    ```
 
-3. Build the template as `shop_qa_objects`, so its objects belong to that role. Give it a login for now
-   (`ALTER ROLE shop_qa_objects LOGIN;` and `\password shop_qa_objects`), run the app's migrations and
-   seeders against `shop_qa_template` as that role, then take the login away:
+3. The template, through the gate: migrate and seed a database of its own where pull requests' code never runs
+   (a runner with the default branch's code, or a scratch database), then send its archive with the
+   `template` key. `template-load` makes the template on the first load and replaces it on every later one:
 
-   ```sql
-   ALTER ROLE shop_qa_objects NOLOGIN PASSWORD NULL;
-   REVOKE CONNECT ON DATABASE shop_qa_template FROM PUBLIC, shop_qa_objects;
+   ```sh
+   pg_dump -Fc --no-owner --no-privileges -d shop_seed | ssh -i mroom-qa-template forge@<box> template-load
    ```
 
-   `shop_qa_objects` must never own a database or a tablespace. Each new environment takes over what that
-   role owns, and the gate refuses to run while it owns one.
+   Its objects belong to `shop_qa_objects`, which must never own a database or a tablespace. Each new
+   environment takes over what that role owns, and the gate refuses to run while it owns one.
 
 4. Every new database lets any role connect, so take that back on each of the app's databases, the dev
    site's for one (not `postgres`, which the gate connects to):
@@ -736,16 +899,27 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
    ```
 
 5. At the very top of `pg_hba.conf`, above every `local` and `host` line, then reload Postgres. The first
-   matching line wins. The gate's own line comes first, since the gate belongs to `shop_qa_envs` and the
-   reject lines would match it too. Each environment's role then reaches only the database named after it:
+   matching line wins. The gate's own line comes first, since the gate belongs to `shop_qa_envs` and
+   `shop_qa_readers`, and the lines below would match it too. Each environment's role then reaches only the
+   database named after it, each read-only role only environments' databases (and of those only its own, the
+   one that grants it `CONNECT`), and the objects role only the database `template-load` builds the template in.
+   Postgres 16 reads a database that starts with `/` as a regular expression:
 
    ```
-   host   all       shop_qa_gate   127.0.0.1/32  scram-sha-256
-   host   all       shop_qa_gate   ::1/128       scram-sha-256
-   host   sameuser  +shop_qa_envs  127.0.0.1/32  scram-sha-256
-   host   sameuser  +shop_qa_envs  ::1/128       scram-sha-256
-   host   all       +shop_qa_envs  all           reject
-   local  all       +shop_qa_envs                reject
+   host   all                     shop_qa_gate      127.0.0.1/32  scram-sha-256
+   host   all                     shop_qa_gate      ::1/128       scram-sha-256
+   host   sameuser                +shop_qa_envs     127.0.0.1/32  scram-sha-256
+   host   sameuser                +shop_qa_envs     ::1/128       scram-sha-256
+   host   all                     +shop_qa_envs     all           reject
+   local  all                     +shop_qa_envs                   reject
+   host   /^shop_qa_[0-9]+$       +shop_qa_readers  127.0.0.1/32  scram-sha-256
+   host   /^shop_qa_[0-9]+$       +shop_qa_readers  ::1/128       scram-sha-256
+   host   all                     +shop_qa_readers  all           reject
+   local  all                     +shop_qa_readers                reject
+   host   shop_qa_template_next   shop_qa_objects   127.0.0.1/32  scram-sha-256
+   host   shop_qa_template_next   shop_qa_objects   ::1/128       scram-sha-256
+   host   all                     shop_qa_objects   all           reject
+   local  all                     shop_qa_objects                 reject
    ```
 
 6. The gate's connection, in `~/.config/mroom/secrets/pg_service.conf`, mode 600:
@@ -816,12 +990,14 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
     isolated users. Add `AllowAgentForwarding no` with it: a developer who connects with `ssh -A` would
     otherwise lend their own keys to every session on the box (design D22).
 
-11. In `box.env`: `MROOM_APP_NAME=shop`, `MROOM_QA_TEMPLATE=shop_qa_template` and
-    `MROOM_QA_ZONE=qa.example.dev`, and when they differ from the defaults, `MROOM_QA_BACKEND_DIR` (the
-    Laravel app's folder in the repository, `.`), `MROOM_QA_PHP` (`php`), `MROOM_QA_PERSONA_DOMAIN`
-    (`.test`) and `MROOM_QA_RESERVE_MB` (`4096`: the memory, in MB, the box keeps for the dev site, sessions
-    and builds, which no QA environment may count on). A site user's name is at most 32 characters, so an app
-    name of 19 characters or fewer always fits.
+11. In `box.env`: `MROOM_APP_NAME=shop`, `MROOM_QA_TEMPLATE=shop_qa_template` (58 characters at most, which
+    leaves room for `_next`), `MROOM_QA_ZONE=qa.example.dev`, for browser QA `MROOM_QA_DB_READ` (the
+    `table.column` entries `db-read` may read, space-separated, the same as `qa.db_read_allowlist`, such as
+    `MROOM_QA_DB_READ="users.id users.email bookmarks.user_id"`), and when they differ from the defaults,
+    `MROOM_QA_BACKEND_DIR` (the Laravel app's folder in the repository, `.`), `MROOM_QA_PHP` (`php`),
+    `MROOM_QA_PERSONA_DOMAIN` (`.test`) and `MROOM_QA_RESERVE_MB` (`4096`: the memory, in MB, the box keeps for
+    the dev site, sessions and builds, which no QA environment may count on). A site user's name is at most 32
+    characters, so an app name of 19 characters or fewer always fits.
 
 12. The mail catcher, when `qa.parity.mail` is `catcher` (the default): *as root*, the root recipe with
     `mailpit` in its parts, then `mroom baseline mailpit`. The recipe makes the services' folders and
@@ -1226,6 +1402,8 @@ and fill the placeholders below.
 | `actions/setup-frontend/` | Node, pnpm (for pnpm), the package store (restore only) and the frontend's install |
 | `actions/e2e-frontend-build/` | the e2e build: restored when its inputs are unchanged, built otherwise |
 | `scripts/vitest-file-times.mjs` | a vitest reporter that records each test file's time |
+| `workflows/deploy-production.yml` | the production deploy: the `release` branch at the tag, then `deploy-verify` ([below](#the-production-deploy)) |
+| `scripts/release-branch.sh` | points the `release` branch at a release tag's commit, for the deploy |
 
 What they do, in short:
 
@@ -1288,6 +1466,62 @@ supported yet: the Node steps would build their paths from the repository's root
 | `<<fill:frontend_src>>` | the frontend's source folder inside its own: `src` for a separate SPA, `resources` for Vite inside Laravel (then add the other folders Tailwind scans to the build's key) |
 | `<<fill:e2e_build>>` | the build without source maps but minified, with the env it needs, such as `VITE_API_URL=http://127.0.0.1:8000 pnpm exec vite build --sourcemap false` |
 | `<<fill:e2e_command>>` | the browser tests, failing when none are found, such as `php artisan test --testsuite=Browser --fail-on-empty-test-suite` |
+| `<<mroom_version>>` | the mroom release whose actions the deploy uses, such as `v0.6.0` (the one `mroom init` runs as) |
+| `<<fill:backend_origin>>` | the Laravel app's production origin, such as `https://api.shop.example.dev` |
+| `<<fill:frontend_origin>>` | a separate SPA's production origin, whose `/version.json` the deploy also waits on; empty for none |
+| `<<fill:tag_pattern>>` | the release tags, as a bash regular expression, such as `^v[0-9]+\.[0-9]+\.[0-9]+$` |
+
+### The production deploy
+
+`workflows/deploy-production.yml` ships a release tag, never a branch tip, and waits until production runs it
+([design section 10](docs/design.md#10-cicd-defaults-measured), patterns 8 to 10). Publishing a GitHub release
+starts it; a person deploys another tag, a rollback included, with
+`gh workflow run deploy-production.yml --ref <tag>`. The run takes no input: the tag is the ref it runs for.
+
+- **`release`**, in the GitHub environment `production`: checks out the tag with the deploy key, and
+  `scripts/release-branch.sh` points the `release` branch at the tag's commit. It refuses a run that is not from a
+  tag matching `<<fill:tag_pattern>>`, a release whose tag is not the run's, and a tag whose commit is not on the
+  default branch. The branch moves forward for a release, back for a rollback (with a warning), or stays for a
+  re-run; when someone else moved it (to a commit off the default branch, or neither before nor after the tag),
+  the job stops for a person. Then, when `MROOM_DEPLOY_HOOK` is set, it calls the host's deploy hook. This job
+  builds and installs nothing, and runs no action but `actions/checkout`, since it holds the key.
+- **`verify`**, with no environment and no secret: `deploy-verify` asks `app.version_path` (and a separate
+  SPA's `/version.json`) with a query no cache has seen, every 10 seconds, until each reports the tag's commit
+  three times in a row with `/up` answering 200, and fails after 10 minutes. A fixed sleep and a health ping
+  pass when the host's deploy failed, since the old release answers too; the commit cannot. When the app names
+  another release for the right commit (two tags on one commit, or no tag found), it warns and still passes.
+- **One deploy at a time:** the whole run takes the group `deploy-production` and never cancels one in
+  progress, so a second deploy waits until the first is verified.
+
+What the app sets up once:
+
+1. **The version endpoint** (design section 9): `app.version_path` answers `{"release": "<tag>", "commit":
+   "<sha>"}` with `Cache-Control: no-store`, from a file the host's deploy script writes from the code it
+   checked out (`git describe --tags --exact-match`, `git rev-parse HEAD`), never from config set separately.
+   A separate SPA's build writes the same to `version.json`.
+2. **The host deploys `release`:** the Forge site's branch is `release`, with Quick Deploy on, or Quick Deploy off
+   and the site's deploy hook URL in the `production` secret `MROOM_DEPLOY_HOOK` (one or the other: with both, it
+   deploys twice). A separate SPA's host deploys the same branch, or the app adds a job of its own between
+   `release` and `verify` that builds the tag. The deploy script restarts the workers and clears caches, so a
+   rollback runs the old code.
+3. **A deploy key** with write access (`ssh-keygen -t ed25519 -N '' -f release-key`; Settings, Deploy keys, Allow
+   write access), its private half in the `production` secret `MROOM_RELEASE_KEY`, and no other deploy key with
+   write access.
+4. **The GitHub environment `production`:** deployment branches and tags limited to tags matching the release
+   tags (such as `v*`), required reviewers who are people, and "Prevent self-review", so each deploy is approved
+   by a person other than the one who started it (design 8.8, D22).
+5. **A ruleset on `release`** (target `refs/heads/release`): restrict creations, updates and deletions, and block
+   force pushes, with deploy keys as the only bypass. Without it, any account with Write, the agents' included,
+   could push the branch production deploys.
+6. **Who may create release tags:** a tag ruleset, so that only people can make one. The environment admits any
+   tag that matches, and the workflow file at that tag is the one that runs with the deploy key.
+
+A re-run of the same tag leaves the branch where it is: Quick Deploy then deploys nothing and `verify` passes at
+once, while a deploy hook deploys again.
+
+`actions/deploy-verify` can also be used on its own, from any job after a deploy: its inputs are `origin`,
+`frontend-origin`, `commit` (the full SHA), `tag`, `health-path` (`/up`; empty for none), `timeout` (`10m`),
+`interval` (`10s`) and `config` (the app's `mroom.toml`, for `app.version_path`).
 
 ## Regression label
 

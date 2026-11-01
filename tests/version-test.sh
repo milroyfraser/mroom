@@ -42,6 +42,12 @@ t_the_address_follows_app_version_path() {
     https://user@shop.example.dev ftp://shop.example.dev shop.example.dev 'https://Shop.example.dev'; do
     lib "version_url '$bad'"; expect_rc 2; expect_err_has "is not an origin"
   done
+  # Another path of the same kind, such as a separate SPA's version.json, in place of app.version_path.
+  lib 'version_url https://shop.example.dev /version.json'
+  expect_rc 0; expect_out_has "https://shop.example.dev/version.json?mroom=$NOW-"
+  for bad in version.json /../version.json '/v?x=1' '/a b' //version.json; do
+    lib "version_url https://shop.example.dev '$bad'"; expect_rc 2; expect_err_has "is not a path"
+  done
   # A path that breaks the rule is refused by the one reader.
   printf '[app]\nname = "shop"\nversion_path = "/v?x=1"\n' >"$MROOM_CONFIG"
   lib 'version_url https://shop.example.dev'; expect_rc 1; expect_err_has "app.version_path must be a path"

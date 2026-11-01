@@ -3,8 +3,9 @@
 
 The tests' stand-in for what `mroom init` will do, following the README's "CI templates" rules: each
 <<key>> from `mroom config get` (through bin/mroom, so the real reader and its checks run), the derived
-ones (<<tests.database>>, <<pm.*>>, <<default_branch>>), and each <<fill:name>> from a name=value
-argument. A folder of "." followed by "/" renders as nothing, so <<app.backend_dir>>/vendor is vendor.
+ones (<<tests.database>>, <<pm.*>>, <<default_branch>>, <<mroom_version>> from this checkout's VERSION),
+and each <<fill:name>> from a name=value argument. A folder of "." followed by "/" renders as nothing,
+so <<app.backend_dir>>/vendor is vendor.
 Exits 1 naming any placeholder left unfilled.
 """
 
@@ -44,6 +45,8 @@ def values(config, fills):
     out["tests.database"] = pattern.replace("{app}", out["app.name"]).replace("{slug}", "ci")
     out.update(PM[out["app.package_manager"]])
     out["default_branch"] = fills.pop("default_branch", "main")
+    with open(os.path.join(ROOT, "VERSION"), encoding="utf-8") as fh:
+        out["mroom_version"] = "v" + fh.read().strip()
     out.update({f"fill:{name}": value for name, value in fills.items()})
     return out
 
