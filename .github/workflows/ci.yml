@@ -40,43 +40,6 @@ jobs:
           recipe="$(sed -n 's/^v=//p' README.md)"
           [ "$GITHUB_REF_NAME" = "$recipe" ] || { echo "tag $GITHUB_REF_NAME but the README's root recipe says v=$recipe"; exit 1; }
 
-  privacy:
-    # The pull request's added lines, paths, commit messages, title and body against the owner's private words
-    # (tools/privacy_check.py). The list is the secret MROOM_PRIVATE_WORDS, one case-insensitive regular
-    # expression per line. A hit names its place and the entry's number, never the word. Each entry is masked
-    # before the check runs, and nothing here traces commands (no set -x). With no secret (a fork, or before the
-    # owner adds it) the check passes with a notice.
-    name: privacy
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: private words
-        env:
-          WORDS: ${{ secrets.MROOM_PRIVATE_WORDS }}
-        run: |
-          [ -n "$WORDS" ] || exit 0
-          while IFS= read -r word; do
-            word="${word%$'\r'}"
-            word="${word#"${word%%[![:space:]]*}"}"
-            word="${word%"${word##*[![:space:]]}"}"
-            [ -z "$word" ] || printf '::add-mask::%s\n' "$word"
-          done <<<"$WORDS"
-          list="$RUNNER_TEMP/private-words"
-          (umask 077 && printf '%s\n' "$WORDS" >"$list")
-          printf 'MROOM_PRIVATE_WORDS=%s\n' "$list" >>"$GITHUB_ENV"
-      - name: check the pull request
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: python3 tools/privacy_check.py --base "$BASE_SHA" --head HEAD
-
   test:
     name: tests
     runs-on: ubuntu-latest

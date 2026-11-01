@@ -3,13 +3,15 @@
 # Tests for the privacy check (tools/privacy_check.py): a hit in an added line, a path, a commit message and the
 # pull request's title and body, each named by its place and the entry's number; no hit; no list (no secret);
 # the list from a file, from the variable itself and from the gitignored .private-words; an entry that is not a
-# regular expression; and no entry of the list ever in the output.
+# regular expression; and no entry of the list ever in the output. And the workflow: it holds the secret, so it runs
+# the default branch's copy of the script, never the pull request's (a changed script in the pull request never runs).
 set -euo pipefail
 SUITE=privacy
 # shellcheck source=tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CHECK="$ROOT/tools/privacy_check.py"
+WF="$ROOT/.github/workflows/privacy.yml"
 # Made-up words: entry 1 a plain word, entry 2 a regular expression, after a blank line that is not counted.
 WORDS=$'zebrafjord\n\nquokka[0-9]+\n'
 
@@ -162,6 +164,56 @@ t_skills_check_reads_the_same_list() {
     "$ROOT/tests/skills-check.py"
 }
 
+# --- The workflow ---------------------------------------------------------------------------------------------
+t_workflow_runs_only_the_default_branch_copy() {
+  local wf
+  wf="$(cat "$WF")"
+  expect_true "privacy.yml runs on pull_request_target, so its own copy is the default branch's" \
+    grep -qx '  pull_request_target:' "$WF"
+  if grep -qE '^  pull_request:' "$WF"; then fail "privacy.yml has a pull_request trigger"; else ok; fi
+  expect_true "the check is checked out from the default branch into base/" \
+    grep -qzE 'ref: \$\{\{ github\.event\.repository\.default_branch \}\}\n +path: base\n' "$WF"
+  expect_true "the pull request is checked out into pr/" \
+    grep -qzE 'ref: \$\{\{ github\.event\.pull_request\.head\.sha \}\}\n +path: pr\n' "$WF"
+  expect_true "no checkout keeps credentials" \
+    [ "$(grep -c 'uses: actions/checkout' "$WF")" = "$(grep -c 'persist-credentials: false' "$WF")" ]
+  expect_true "the check runs in pr/" grep -qzE 'working-directory: pr\n' "$WF"
+  # Every run: line names only base/'s script, run isolated, and never a path in pr/.
+  local runs
+  runs="$(grep -c 'privacy_check.py' <<<"$(grep -E '^ +run: ' "$WF")")"
+  expect_true "one step runs the check" [ "$runs" = 1 ]
+  if grep -vE '^ *#' "$WF" | grep -qE 'set -[a-z]*x|bash -x'; then fail "a step traces commands"; else ok; fi
+  if grep -q MROOM_PRIVATE_WORDS "$ROOT/.github/workflows/ci.yml"; then fail "ci.yml holds the private words"; else ok; fi
+  case "$wf" in *'secrets.MROOM_PRIVATE_WORDS'*) ok ;; *) fail "privacy.yml reads the secret MROOM_PRIVATE_WORDS" ;; esac
+}
+
+# The step's own command, in the layout the workflow makes: base/ the default branch's script, pr/ a pull request
+# that changes tools/privacy_check.py to print the list and pass. The default branch's copy runs, and fails the hit.
+t_a_changed_script_in_the_pull_request_never_runs() {
+  local cmd
+  cmd="$(sed -n 's/^ *run: \(python3 .*privacy_check\.py.*\)$/\1/p' "$WF")"
+  expect_true "the step's command is found" [ -n "$cmd" ]
+  mkdir -p "$T/base/tools" && cp "$CHECK" "$T/base/tools/"
+  mkdir -p "$T/pr" && cd "$T/pr"
+  unset PR_TITLE PR_BODY GITHUB_ACTIONS
+  g init -q -b base
+  printf 'hello\n' >README && g add README && g commit -q -m 'chore: start'
+  g checkout -q -b work
+  mkdir -p tools
+  printf '%s\n' 'import os, sys' 'print("PR COPY RAN", os.environ.get("MROOM_PRIVATE_WORDS"))' 'sys.exit(0)' >tools/privacy_check.py
+  # And a module the default branch's script imports, which python3 -I must not take from here.
+  printf '%s\n' 'print("PR MODULE RAN")' >tools/argparse.py && cp tools/argparse.py argparse.py
+  change notes.txt 'quokka5' 'docs: one'
+  g add -A && g commit -q -m 'docs: tools'
+  export MROOM_PRIVATE_WORDS="$WORDS" BASE_SHA
+  BASE_SHA="$(git rev-parse base)"
+  run bash -c "$cmd"
+  expect_rc 1
+  expect_out_has 'notes.txt:1: matches entry 2 of the private list'
+  case "$out $err" in *"PR COPY RAN"* | *"PR MODULE RAN"*) fail "the pull request's code ran" ;; *) ok ;; esac
+  expect_no_words
+}
+
 test_case hit-in-a-line t_hit_in_a_line
 test_case hit-in-a-commit-message t_hit_in_a_commit_message_and_case_blind
 test_case hit-in-title-and-body t_hit_in_title_and_body
@@ -174,4 +226,6 @@ test_case list-from-a-file t_list_from_a_file
 test_case list-from-gitignored-file t_list_from_the_gitignored_file
 test_case bad-entry t_a_bad_entry_fails_without_naming_it
 test_case skills-check-list t_skills_check_reads_the_same_list
+test_case workflow t_workflow_runs_only_the_default_branch_copy
+test_case pr-script-never-runs t_a_changed_script_in_the_pull_request_never_runs
 finish

@@ -2059,11 +2059,13 @@ commit, title or body line) and the entry's number in the list, never the word, 
 
 The list is one case-insensitive regular expression per line; blank lines are skipped and do not count.
 
-- **CI**: the `privacy` job of `ci.yml` reads the repository secret `MROOM_PRIVATE_WORDS`. Set it under
+- **CI**: the workflow `privacy.yml` reads the repository secret `MROOM_PRIVATE_WORDS`. Set it under
   Settings → Secrets and variables → Actions → New repository secret, or with
-  `gh secret set MROOM_PRIVATE_WORDS < words.txt` from a file kept outside the repository. The job masks each
-  entry before it runs. Without the secret (a fork's pull request, or before the owner sets it) the job passes
-  with a notice. A change to only the title or body runs no check until the next push.
+  `gh secret set MROOM_PRIVATE_WORDS < words.txt` from a file kept outside the repository. The job holds the
+  secret, so it never runs the pull request's code: it runs on `pull_request_target` (the default branch's copy
+  of the workflow), takes the script from the default branch, and checks out the pull request apart, as data
+  only. A change to the script or the workflow takes effect once it is merged. The job masks each entry before
+  it runs, re-runs when the title or body is edited, and without the secret passes with a notice.
 - **Before a push**: `$MROOM_PRIVATE_WORDS` (the path of a file, or the list itself) or else `.private-words` at
   the top of the checkout, which is gitignored. The repository ships no git hook; to run the check before each
   push, write an executable `.git/hooks/pre-push` of `#!/bin/sh` and
