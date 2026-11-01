@@ -27,18 +27,15 @@ on without it.
 - Never add the `qa` label. It is a person's switch.
 - Write every PR body, comment, note and commit message with a body to a fresh file, never a
   fixed name such as `note.md` in a shared folder, where another session's PR picks up your text,
-  or you pick up its. Shell variables do not survive between Bash calls, so either use the path
-  `mktemp` printed (the Write tool fills it), or create, fill and use the file in one Bash call
-  with a quoted heredoc (`<<'EOF'`), so `$` and backticks in outside text are never expanded:
+  or you pick up its. Write it with the Write tool to a new file in a fresh folder that `mktemp -d`
+  makes (it prints the path, and only you can open the folder), such as `<folder>/body.md`, and
+  pass that path to the command. Never put the text through the shell, in a heredoc, `echo` or
+  `printf`: in a heredoc, quoted or not, a line of the text equal to its end word ends it, and the
+  lines after it run as commands, so issue, error, review or log text that holds such a line would
+  run. The Write tool refuses to fill a file it has not read, such as the empty one plain `mktemp`
+  makes, so write a new file in the folder.
 
-  ```
-  f="$(mktemp)" && cat > "$f" <<'EOF'
-  <the text>
-  EOF
-  mroom tracker comment <id> < "$f"
-  ```
-
-  Below, `"$f"`, `"$msg"`, `"$body"` and `"$note"` each stand for such a file.
+  Below, `"$f"`, `"$msg"`, `"$body"` and `"$note"` each stand for such a file's path.
 - Never check out, run or push to a pull request from a fork (`isCrossRepository` true). A fork's
   code never runs on this box, not even in a QA environment.
 - When the project runs its agents from an agreed host, commits for agent PRs go only from that
@@ -190,16 +187,18 @@ End the message with the attribution your harness gives (its co-author and sessi
 this session's instructions spell them). Never copy a fixed co-author line or session link from
 another commit, a brief or this file: they name another model or session. With none given, add none.
 A message with a body goes through a fresh file, as the Rules say: `git commit -F "$msg"`. Only a
-one-line message may use `-m`.
+one-line message may use `-m`, in single quotes, as the PR title below.
 Push with `git push -u origin <branch>`; let the pre-push hook run. Retry network failures only.
 
 **Push after your first commit, and open a draft PR right away**, before the work is done. Sessions
 get stopped, and work that lives only in a worktree is stranded, where nobody can see it.
 
 1. After the first commit: `git push -u origin <branch>`, then
-   `gh pr create --draft --title "<title>" --body-file "$body"`, with the title of step 5 and a
+   `gh pr create --draft --title '<title>' --body-file "$body"`, with the title of step 5 and a
    body in a fresh file (Rules) that links the issue: its id and its link
    (`issues.url`, with the id in place of `{id}`). With no tracker, the body holds the task instead.
+   The title goes in single quotes (a `'` in it written `'\''`): in double quotes, the shell runs
+   what backticks or `$(...)` in it name, and a title often names code in backticks.
 2. Push after every later commit too.
 3. Mark it ready (`gh pr ready <pr>`) only when the work is done and any threat check is clear
    (step 6).

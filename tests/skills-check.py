@@ -428,7 +428,7 @@ say(loose_heredocs("`cat > \"$f\" <<EOF`") == ["<<EOF"] and not loose_heredocs("
 impl_rules = one_line(re.search(r"^## Rules\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M).group(1)) if implement else ""
 say(all(p in impl_rules for p in ("PR body, comment, note and commit message with a body to a fresh file",
                                   "never a fixed name", "a fresh folder that `mktemp -d` makes", "with the Write tool",
-                                  "never through the shell", "a line of the text equal to its end word ends it")),
+                                  "Never put the text through the shell", "a line of the text equal to its end word ends it")),
     "implement's rules write every body, message and note with the Write tool, to a new file in a mktemp -d folder")
 # Why: a heredoc, quoted or not, ends at the first line of its text equal to its end word, and the lines after
 # that run as commands. Issue, error, review and log text can carry such a line, so no skill or command puts a

@@ -22,8 +22,8 @@ installed, go on without it.
 - Never touch production. Never read secrets, tokens or credential files.
 - Never add the `qa` label. It is a person's switch.
 - Write every PR body, comment, note and commit message with a body to a fresh file, never a
-  fixed name in a shared folder: the path `mktemp` printed, or one Bash call with a quoted
-  heredoc (`/mroom:implement`, Rules).
+  fixed name in a shared folder: with the Write tool, to a new file in a fresh folder that
+  `mktemp -d` makes, and never through the shell, such as a heredoc (`/mroom:implement`, Rules).
 - Push early: after the first commit, push and open a draft PR linked to the issue
   (`/mroom:implement` step 4). Mark it ready only when the work is done (`/mroom:implement` step 6).
 - Never check out, run or push to a pull request from a fork (`isCrossRepository` true). A fork's
