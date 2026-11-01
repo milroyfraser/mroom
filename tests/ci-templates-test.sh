@@ -109,6 +109,49 @@ t_changed_areas_outside_a_pull_request_is_everything() {
   expect_out "backend=true frontend=true e2e=true "
 }
 
+# pr_areas <change>: a real repository with a backend file, a frontend file and a note as its base commit, and the
+# function <change>, run there, as a pull request's commit on top of it. Runs the changed-areas script there with
+# real git, leaving out only its fetch (both commits are local), and leaves its outputs in $out as one line.
+pr_areas() {
+  local real repo="$T/repo-$1"
+  real="$(command -v git)"
+  mkdir -p "$T/bin" "$repo/api/app" "$repo/web/src" "$repo/docs"
+  printf '#!/usr/bin/env bash\n[ "$1" = fetch ] && exit 0\nexec %q "$@"\n' "$real" >"$T/bin/git"
+  chmod +x "$T/bin/git"
+  printf '<?php\n' >"$repo/api/app/Order.php"
+  printf 'export {};\n' >"$repo/web/src/main.ts"
+  printf 'notes\n' >"$repo/docs/notes.md"
+  python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["runs"]["steps"][0]["run"])' \
+    "$TPL/actions/changed-areas/action.yml" >"$T/areas.sh"
+  cd "$repo" || return 1
+  { git init -q -b main . && git add -A && commit base && "$1" && git add -A && commit change; } ||
+    fail "could not make the repository for $1"
+  : >"$T/output"
+  run env PATH="$T/bin:$PATH" EVENT=pull_request BACKEND_DIR=api FRONTEND_DIR=web GITHUB_OUTPUT="$T/output" \
+    GITHUB_SHA=0 bash "$T/areas.sh"
+  cd "$T" || return 1
+  out="$(tr '\n' ' ' <"$T/output")"
+}
+commit() { git -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false commit -qm "$1"; }
+# A backend file moved out of the backend: git's rename detection lists it only under its new name, in docs/.
+move_out() { git mv api/app/Order.php docs/Order.php; }
+# Names git quotes unless asked for them as they are: one with a byte above 0x7f, and one with a tab.
+odd_backend_name() { printf '<?php\n' >$'api/app/Caf\xc3\xa9.php'; }
+odd_frontend_name() { printf 'export {};\n' >$'web/src/a\tb.ts'; }
+# A note moved within docs/ is still nothing the jobs test.
+move_note() { mkdir -p docs/old && git mv docs/notes.md docs/old/notes.md; }
+
+t_changed_areas_counts_moved_files_and_names_git_quotes() {
+  pr_areas move_out
+  expect_out "backend=true frontend=false e2e=true "
+  pr_areas odd_backend_name
+  expect_out "backend=true frontend=false e2e=true "
+  pr_areas odd_frontend_name
+  expect_out "backend=false frontend=true e2e=true "
+  pr_areas move_note
+  expect_out "backend=false frontend=false e2e=false "
+}
+
 t_the_measuring_report_suggests_a_split_with_rest_last() {
   local dir="$T/times" i
   python3 -c '
@@ -241,6 +284,7 @@ test_case areas-folder t_changed_areas_by_folder
 test_case areas-ci t_changed_areas_for_ci_files
 test_case areas-one t_changed_areas_for_one_folder_and_none
 test_case areas-push t_changed_areas_outside_a_pull_request_is_everything
+test_case areas-git t_changed_areas_counts_moved_files_and_names_git_quotes
 test_case measure-report t_the_measuring_report_suggests_a_split_with_rest_last
 test_case measure-fail t_a_failing_suite_still_records_its_time
 # Rendering reads mroom.toml through bin/mroom, which needs python3 3.11+.
