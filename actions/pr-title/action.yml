@@ -1,0 +1,26 @@
+name: PR title
+description: >-
+  A squash merge makes a pull request's title the commit on the default branch, so the title must be a
+  Conventional Commit, such as "feat(export): add a CSV export". The type must be one of a list, the scope may be
+  required, and the subject must match a pattern. The type labels (actions/pr-type-label) and the auto-tag
+  (actions/auto-tag) read the same title.
+inputs:
+  types:
+    description: The types a title may have, separated by spaces or new lines
+    default: feat fix chore docs refactor test perf style ci build revert
+  require-scope:
+    description: true when every title needs a scope, as in feat(export)
+    default: "false"
+  subject-pattern:
+    description: An extended regular expression the subject, after the colon and one space, must match
+    default: ^[A-Za-z].+$
+runs:
+  using: composite
+  steps:
+    - name: Check the pull request's title
+      shell: bash
+      env:
+        MROOM_TITLE_TYPES: ${{ inputs.types }}
+        MROOM_TITLE_REQUIRE_SCOPE: ${{ inputs.require-scope }}
+        MROOM_TITLE_SUBJECT_PATTERN: ${{ inputs.subject-pattern }}
+      run: '"$GITHUB_ACTION_PATH/check.sh" "$GITHUB_EVENT_PATH"'

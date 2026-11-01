@@ -1,0 +1,97 @@
+name: PR checks
+
+# A pull request's title must be a Conventional Commit (the check-title job), and the title labels it
+# type:feature, type:bug or type:chore for the release notes (the type-label job). The app calls this workflow
+# on pull_request (README, PR checks); mroom calls it for its own pull requests (pr.yml). Both jobs read the
+# pull request from the event file and run mroom's scripts from mroom at the commit of this file, never the
+# pull request's code, and hold no secret.
+on:
+  workflow_call:
+    inputs:
+      types:
+        description: The types a title may have, separated by spaces or new lines
+        type: string
+        default: feat fix chore docs refactor test perf style ci build revert
+      require-scope:
+        description: true when every title needs a scope, as in feat(export)
+        type: boolean
+        default: false
+      subject-pattern:
+        description: An extended regular expression the subject, after the colon and one space, must match
+        type: string
+        default: ^[A-Za-z].+$
+      labels:
+        description: false to check the title only, with no type labels
+        type: boolean
+        default: true
+      feature-label:
+        description: The label for a feat title
+        type: string
+        default: type:feature
+      bug-label:
+        description: The label for a fix title
+        type: string
+        default: type:bug
+      chore-label:
+        description: The label for any other type
+        type: string
+        default: type:chore
+
+permissions:
+  contents: read
+
+# bash with pipefail, so a script piped into tee fails its step when it fails.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check-title:
+    name: check-title
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
+      - uses: ./mroom/actions/pr-title
+        with:
+          types: ${{ inputs.types }}
+          require-scope: ${{ inputs.require-scope }}
+          subject-pattern: ${{ inputs.subject-pattern }}
+
+  type-label:
+    name: type-label
+    # A fork's and Dependabot's pull requests get a read-only token here; Dependabot can label its own
+    # (dependabot.yml, labels).
+    if: >-
+      inputs.labels && github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    # One label job per pull request at a time, in order, so the newest title is the last one labelled.
+    concurrency:
+      group: mroom-type-label-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: write # to label the pull request
+    steps:
+      - name: Check out mroom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: mroom
+          persist-credentials: false
+      - uses: ./mroom/actions/pr-type-label
+        with:
+          feature-label: ${{ inputs.feature-label }}
+          bug-label: ${{ inputs.bug-label }}
+          chore-label: ${{ inputs.chore-label }}

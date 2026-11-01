@@ -1,0 +1,45 @@
+name: auto-tag
+description: >-
+  Tags the checked-out commit of the default branch with the next version from the titles merged since the last
+  version tag: feat bumps the minor, fix the patch, a ! the major (or the minor), and any other type nothing (or
+  the patch). Needs a full checkout (fetch-depth: 0) whose origin the job may push tags to (contents: write). Off
+  unless an app calls it: .github/workflows/auto-tag.yml runs it on a push to the default branch.
+inputs:
+  path:
+    description: The app's checkout, with every tag and merge (fetch-depth 0)
+    default: .
+  tag-prefix:
+    description: What comes before X.Y.Z in a tag; letters, digits, _ and -, or empty
+    default: v
+  breaking-bump:
+    description: The bump for a breaking change (a ! after the type), major or minor
+    default: major
+  other-bump:
+    description: The bump for any type but feat and fix, none or patch
+    default: none
+  dry-run:
+    description: true to say which tag it would push, and push none
+    default: "false"
+outputs:
+  tag:
+    description: The tag it pushed, or would push; the existing one when the commit has a version tag; empty for none
+    value: ${{ steps.tag.outputs.tag }}
+  previous:
+    description: The version tag it counted from, or empty for none
+    value: ${{ steps.tag.outputs.previous }}
+  bump:
+    description: major, minor, patch, or none
+    value: ${{ steps.tag.outputs.bump }}
+runs:
+  using: composite
+  steps:
+    - id: tag
+      name: Tag the next version
+      shell: bash
+      env:
+        MROOM_TAG_PREFIX: ${{ inputs.tag-prefix }}
+        MROOM_TAG_BREAKING_BUMP: ${{ inputs.breaking-bump }}
+        MROOM_TAG_OTHER_BUMP: ${{ inputs.other-bump }}
+        MROOM_TAG_DRY_RUN: ${{ inputs.dry-run }}
+        TAG_PATH: ${{ inputs.path }}
+      run: '"$GITHUB_ACTION_PATH/tag.sh" "$TAG_PATH"'
