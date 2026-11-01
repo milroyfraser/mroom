@@ -427,9 +427,34 @@ say(loose_heredocs("`cat > \"$f\" <<EOF`") == ["<<EOF"] and not loose_heredocs("
     "the heredoc check finds an unquoted heredoc, and not a template placeholder")
 impl_rules = one_line(re.search(r"^## Rules\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M).group(1)) if implement else ""
 say(all(p in impl_rules for p in ("PR body, comment, note and commit message with a body to a fresh file",
-                                  "never a fixed name", "Shell variables do not survive between Bash calls",
-                                  "the path `mktemp` printed", "in one Bash call with a quoted heredoc (`<<'EOF'`)")),
-    "implement's rules write every body, message and note to a fresh file, made and used within one Bash call")
+                                  "never a fixed name", "a fresh folder that `mktemp -d` makes", "with the Write tool",
+                                  "never through the shell", "a line of the text equal to its end word ends it")),
+    "implement's rules write every body, message and note with the Write tool, to a new file in a mktemp -d folder")
+# Why: a heredoc, quoted or not, ends at the first line of its text equal to its end word, and the lines after
+# that run as commands. Issue, error, review and log text can carry such a line, so no skill or command puts a
+# body, a message or a note through one; the Write tool never hands the text to a shell.
+demo = subprocess.run(["bash", "-c", "cat <<'EOF'\nquoted text\nEOF\necho ran-as-a-command\nEOF\n"],
+                      capture_output=True, text=True)
+say("ran-as-a-command" in demo.stdout.split("\n"),
+    "bash ends a quoted heredoc at a line of its text equal to the end word, and runs what follows")
+HEREDOC = re.compile(r"(?<!<)<<-?\s*(?:'[^'\n]+'|\"[^\"\n]+\"|\\?\w+(?![\w>:.]))")
+def heredocs(text):
+    """Every code span or block of the text that holds a heredoc (not a here-string or a <<placeholder>>)."""
+    return [c for c in code(text) if HEREDOC.search(c)]
+for label, d in sorted(docs.items()):
+    found = heredocs(d[3])
+    say(not found, f"{label} writes no body, message or note through a heredoc ({[f[:40] for f in found[:2]]})")
+say(len(heredocs("`cat > \"$f\" <<'EOF'` `<<EOF` `x <<-\"END\"` `y <<\\EOF`")) == 4
+    and not heredocs("`cat <<<'x'` `<<fill:x>>` `<<app.dir>>`"),
+    "the heredoc check finds every heredoc, and not a here-string or a template placeholder")
+# A title in double quotes runs what backticks or $(...) in it name, and a Conventional Commit title often names
+# code in backticks; in single quotes it stays text.
+def dq_titles(spans):
+    return [c for c in split_commands(spans) if re.match(r"gh\s+pr\s+(?:create|edit)\b", c) and re.search(r"\s--title\s+\"", c)]
+titled = [c for _, d in sorted(docs.items()) for c in dq_titles(code(d[3]))]
+say(not titled, f"no skill passes a PR title in double quotes ({titled[:2]})")
+say(dq_titles(['gh pr create --draft --title "<title>" --body-file "$body"']) and not dq_titles(["gh pr create --title '<title>'"]),
+    "the title check finds a double-quoted PR title, and not a single-quoted one")
 step4 = re.search(r"^## 4\. .*?\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M) if implement else None
 say(bool(step4) and "A message with a body goes through a fresh file" in one_line(step4.group(1)),
     "implement's commit step agrees with its rules: every message with a body goes through a fresh file")
