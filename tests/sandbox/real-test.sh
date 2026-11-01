@@ -56,6 +56,7 @@ EOF
 
   expect_true "no folder on the runner's PATH is left writable by all" \
     [ -z "$(IFS=:; for d in $PATH; do [ -d "$d" ] && find -H "$d" -maxdepth 0 -perm -o+w; done)" ]
+  expect_true "nor a folder above one (GitHub's /opt)" [ -z "$(find /opt /usr/local -maxdepth 0 -perm -o+w)" ]
   expect_true "the secret is the holder's, mode 600" [ "$(sudo stat -c '%U %a' /etc/mroom-sandbox/holder/secret)" = "mroom-holder 600" ]
   run cat /etc/mroom-sandbox/holder/secret
   expect_rc 1

@@ -103,14 +103,25 @@ chmod 0700 "$home"
 # --- No folder the runner runs from left writable by the step ---
 
 IFS=: read -ra runner_path <<<"/usr/local/bin:/usr/local/sbin:${MROOM_SANDBOX_RUNNER_PATH:-}"
+# world_writable <folder>: whether every user may write it.
+world_writable() { [ -n "$(find "$1" -maxdepth 0 -perm -o+w)" ]; }
+sticky() { [ -k "$1" ]; }
 for dir in "${runner_path[@]}"; do
   [[ "$dir" == /* && -d "$dir" ]] || continue
   # A link's own mode is 777; what counts is the folder it leads to.
   dir="$(readlink -f "$dir")"
-  if [ -n "$(find "$dir" -maxdepth 0 -perm -o+w)" ]; then
-    chmod o-w "$dir"
-    echo "runner-sandbox: $dir was writable by every user; closed (o-w)" >&2
-  fi
+  # The folder itself, and each one above it: in an open folder the step could rename the one below away and put
+  # its own in its place (GitHub's images leave /opt, above /opt/pipx_bin, open). A sticky one above (/tmp) keeps
+  # others' entries, so it may stay; the PATH folder itself may not, since a new file there is enough.
+  leaf=1
+  while :; do
+    if world_writable "$dir" && { [ -n "$leaf" ] || ! sticky "$dir"; }; then
+      chmod o-w "$dir"
+      echo "runner-sandbox: $dir was writable by every user; closed (o-w)" >&2
+    fi
+    [ "$dir" = / ] && break
+    dir="$(dirname "$dir")" leaf=""
+  done
 done
 
 # --- What the holder alone reads, and what everyone reads but nobody but root changes ---
@@ -146,6 +157,22 @@ install -d -m 0755 -o root -g root "$SANDBOX_VAR"
 install -d -m 0755 -o "$runner" -g "$runner" "$SANDBOX_VAR/inputs"
 install -d -m 0755 -o "$SANDBOX_STEP_USER" -g "$SANDBOX_STEP_USER" "$SANDBOX_VAR/evidence"
 
+# Every folder the sandbox trusts, and each one above it, must be one only root or the runner can change: else the
+# step could rename it away and put its own in its place.
+runner_uid="$(id -u "$runner")" runner_gid="$(id -g "$runner")"
+for path in "$LIB" "$SANDBOX_ETC" "$SANDBOX_OPT" "$SANDBOX_VAR" "$(dirname "$SANDBOX_STEP_BIN")" "${runner_path[@]}"; do
+  [[ "$path" == /* && -e "$path" ]] || continue
+  path="$(readlink -f "$path")"
+  while :; do
+    read -r owner group mode <<<"$(stat -c '%u %g %a' "$path")"
+    if [ "$owner" != 0 ] && [ "$owner" != "$runner_uid" ]; then die "$path is owned by uid $owner, which the step might be" 1; fi
+    if (((8#$mode & 8#002) != 0)) && ! sticky "$path"; then die "$path is writable by every user" 1; fi
+    if (((8#$mode & 8#020) != 0)) && [ "$group" != 0 ] && [ "$group" != "$runner_gid" ]; then die "$path is writable by group $group" 1; fi
+    [ "$path" = / ] && break
+    path="$(dirname "$path")"
+  done
+done
+
 # --- sudoers: each hop resets the environment (env_reset is sudo's default, and these rules keep it) ---
 
 rules="$runner ALL=($SANDBOX_STEP_USER) NOPASSWD: ALL"$'\n'
@@ -160,20 +187,4 @@ install -m 0440 -o root -g root "$tmp" "$SANDBOX_SUDOERS"
 rm -f "$tmp"
 
 if [ -n "$secret" ]; then held="readable by $SANDBOX_HOLDER_USER only"; else held="not set"; fi
-# Every folder the sandbox trusts, and each one above it, must be one only root or the runner can change: else the
-# step could rename it away and put its own in its place.
-runner_uid="$(id -u "$runner")" runner_gid="$(id -g "$runner")"
-for path in "$LIB" "$SANDBOX_ETC" "$SANDBOX_OPT" "$SANDBOX_VAR" "$(dirname "$SANDBOX_STEP_BIN")" "${runner_path[@]}"; do
-  [[ "$path" == /* && -e "$path" ]] || continue
-  path="$(readlink -f "$path")"
-  while :; do
-    read -r owner group mode <<<"$(stat -c '%u %g %a' "$path")"
-    if [ "$owner" != 0 ] && [ "$owner" != "$runner_uid" ]; then die "$path is owned by uid $owner, which the step might be" 1; fi
-    if (((8#$mode & 8#002) != 0)); then die "$path is writable by every user" 1; fi
-    if (((8#$mode & 8#020) != 0)) && [ "$group" != 0 ] && [ "$group" != "$runner_gid" ]; then die "$path is writable by group $group" 1; fi
-    [ "$path" = / ] && break
-    path="$(dirname "$path")"
-  done
-done
-
 echo "runner-sandbox: ready (steps run as $SANDBOX_STEP_USER through mroom-step; the secret is $held)" >&2
