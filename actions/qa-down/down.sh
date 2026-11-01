@@ -10,8 +10,10 @@
 #      can be given the same UID. When it fails, nothing more is removed, so a run again cleans the user first
 #   4. its sites, right after, so the PHP-FPM pool workers that start again end with them. A site Forge has been
 #      removing for half an hour gets the delete again
-#   5. its database and role, its Redis user and keys, its mail login and mail (qa.parity.mail is catcher) and its
-#      buckets (qa.parity.files is same), through the gate; each is tried even when one before failed
+#   5. its database and role, its Redis user and keys, its mail login and mail (qa.parity.mail is catcher), its
+#      buckets (qa.parity.files is same) and its Reverb app (qa.parity.broadcast is same), through the gate; each is
+#      tried even when one before failed. All of them go by N alone, so an environment brought up under the names
+#      of before mroom 0.5.0 loses them too
 # Then the comment says it was removed, or names the step that failed and says to re-run the failed job. --state is
 # what qa-down's check job read; without it, Forge is read here. The comment's hidden line keeps the state the
 # teardown started from (removing was=present, failed was=present), so a run again finds it when Forge has no site
@@ -75,6 +77,7 @@ trap 'exit 143' TERM
 qa_names "$n"
 mail="$(qa_config qa.parity.mail catcher)" || exit 1
 files="$(qa_config qa.parity.files same)" || exit 1
+broadcast="$(qa_config qa.parity.broadcast same)" || exit 1
 ttl="$(qa_config qa.ttl_days 5)" || exit 1
 # A push brings an environment back only to a pull request that is still open.
 open=""
@@ -138,9 +141,12 @@ fi
 qa_show "$out"
 
 STEP="its sites"
-for domain in "$QA_API" "$QA_WEB"; do
-  echo "==> Site $domain"
+# By the names of now and of before mroom 0.5.0, so an environment brought up then goes too; an old name is said
+# only when Forge has a site by it.
+for domain in "$QA_API" "$QA_WEB" "$QA_OLD_API" "$QA_OLD_WEB"; do
   site="$(forge_site "$domain")"
+  case "$domain" in "$QA_OLD_API" | "$QA_OLD_WEB") [ -n "$site" ] || continue ;; esac
+  echo "==> Site $domain"
   status="$(jq -r '.attributes.status // ""' <<<"${site:-null}")"
   id="$(jq -r '.id // ""' <<<"${site:-null}")"
   if [ -z "$site" ]; then
@@ -180,6 +186,10 @@ if [ "$mail" = catcher ]; then
 fi
 if [ "$files" = same ]; then
   step "buckets" bucket-drop "$n"
+fi
+# Its sockets already open stay until they close; no new one opens.
+if [ "$broadcast" = same ]; then
+  step "Reverb app" reverb-app-remove "$n"
 fi
 if [ "${#failed[@]}" -gt 0 ]; then
   STEP="$(printf '%s, ' "${failed[@]}")"

@@ -12,6 +12,7 @@ set -euo pipefail
 SUITE=mail
 # shellcheck source=tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+read -ra MAILPIT_TREE <<<"$(bash -c '. "$1"; echo "${MAILPIT_TREE[*]}"' _ "$ROOT/lib/root-setup")"
 stop_all() {
   local f
   for f in "$TOP"/*/up; do rm -f "$f"; done
@@ -26,18 +27,18 @@ skip_unless has_box_tools "this host lacks bash 5, flock or GNU date, which box 
 API_PASSWORD=0123456789abcdef0123456789abcdef0123456789abcdef
 
 world() {
-  local secrets="$HOME/.config/mroom/secrets" services="$HOME/.local/share/mroom-services"
-  mkdir -p "$secrets" "$services/mailpit/v1.32.0" "$services/mailpit/run" "$services/mail-relay" "$T/bin" "$T/api"
-  chmod 700 "$services/mailpit/run"
+  local secrets="$HOME/.config/mroom/secrets" services="$T/services"
+  services_tree "${MAILPIT_TREE[@]}"
+  mkdir -p "$secrets" "$services/mailpit/builds/v1.32.0" "$T/bin" "$T/api"
   SMTP_PORT=$((20000 + RANDOM % 30000))
   while (exec 3<>"/dev/tcp/127.0.0.1/$SMTP_PORT") 2>/dev/null; do SMTP_PORT=$((SMTP_PORT + 1)); done
   printf 'MROOM_APP_NAME=shop\nMROOM_QA_SMTP_PORT=%s\n' "$SMTP_PORT" >"$HOME/.config/mroom/box.env"
   printf 'MAILPIT_API_USER=mroom-gate\nMAILPIT_API_PASSWORD=%s\n' "$API_PASSWORD" >"$secrets/mailpit.env"
-  printf 'mroom-none:$6$x$y\n' >"$secrets/mailpit-smtp.passwd"
-  chmod 600 "$secrets/mailpit.env" "$secrets/mailpit-smtp.passwd"
-  cp "$(command -v perl)" "$services/mailpit/v1.32.0/mailpit"
-  ln -sfn v1.32.0 "$services/mailpit/current"
-  install -m 700 "$ROOT/lib/mail-relay" "$services/mail-relay/mail-relay"
+  printf 'mroom-none:$6$x$y\n' >"$services/mailpit/etc/mailpit-smtp.passwd"
+  chmod 600 "$secrets/mailpit.env" "$services/mailpit/etc/mailpit-smtp.passwd"
+  cp "$(command -v perl)" "$services/mailpit/builds/v1.32.0/mailpit"
+  ln -sfn v1.32.0 "$services/mailpit/builds/current"
+  install -m 700 "$ROOT/lib/mail-relay" "$services/mail-relay/bin/mail-relay"
   cat >"$T/bin/curl" <<'FAKE'
 #!/usr/bin/env bash
 # Plays Mailpit's API, which listens only on its Unix socket. Insists on the gate's login on stdin, never on
@@ -55,7 +56,7 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-if [ "$socket" != "$HOME/.local/share/mroom-services/mailpit/run/http.sock" ]; then
+if [ "$socket" != "$T/services/mailpit/run/http.sock" ]; then
   echo "curl: (7) Couldn't connect to server" >&2; exit 7
 fi
 path="${url#http://localhost}"
@@ -87,7 +88,7 @@ FAKE
 # The stand-in Mailpit: listens on the SMTP socket unless $T/no-smtp exists, and sleeps. Like Mailpit, it
 # removes a socket left from before.
 STAND_IN='use IO::Socket::UNIX;
-my $path = "$ENV{HOME}/.local/share/mroom-services/mailpit/run/smtp.sock";
+my $path = "$ENV{T}/services/mailpit/run/smtp.sock";
 unless (-e "$ENV{T}/no-smtp") {
   unlink $path;
   $smtp = IO::Socket::UNIX->new(Local => $path, Listen => 5) or die "listen: $!";
@@ -96,7 +97,7 @@ sleep 600;'
 
 # mailpit_up: a loop that plays Forge's daemon, starting "mailpit" again whenever it stops.
 mailpit_up() {
-  local bin="$HOME/.local/share/mroom-services/mailpit/current/mailpit"
+  local bin="$T/services/mailpit/builds/current/mailpit"
   : >"$T/up"
   # wait fails when the gate stops "mailpit", which set -e would take for the loop's own failure.
   (while [ -e "$T/up" ]; do "$bin" -e "$STAND_IN" & echo $! >"$T/pid"; wait $! || true; sleep 0.05; done) >/dev/null 2>&1 &
@@ -113,8 +114,8 @@ wait_listening() {
 }
 # relay_up [<port>]: mroom's mail relay, run as its systemd unit runs it, but listening itself.
 relay_up() {
-  local services="$HOME/.local/share/mroom-services" port="${1:-$SMTP_PORT}"
-  python3 -I "$services/mail-relay/mail-relay" 127.0.0.1 "$port" "$services/mailpit/run/smtp.sock" >"$T/relay.log" 2>&1 &
+  local services="$T/services" port="${1:-$SMTP_PORT}"
+  python3 -I "$services/mail-relay/bin/mail-relay" 127.0.0.1 "$port" "$services/mailpit/run/smtp.sock" >"$T/relay.log" 2>&1 &
   echo $! >"$T/relay.pid"
   wait_listening 127.0.0.1 "$port" || { cat "$T/relay.log" >&2; return 1; }
 }
@@ -135,7 +136,7 @@ free_port() {
 stop_pid_file() { if [ -s "$1" ]; then kill "$(cat "$1")" 2>/dev/null || true; rm -f "$1"; fi; sleep 0.2; }
 
 gate() { run env SSH_ORIGINAL_COMMAND="$1" "$MROOM" gate provision; }
-logins() { cat "$HOME/.config/mroom/secrets/mailpit-smtp.passwd"; }
+logins() { cat "$T/services/mailpit/etc/mailpit-smtp.passwd"; }
 gate_log_text() { cat "$HOME/.local/state/mroom/gate.log" 2>/dev/null || true; }
 # hash_of <password> <hash>: whether the SHA-512 crypt hash is of the password.
 hash_of() { [ "$(printf '%s' "$1" | openssl passwd -6 -salt "$(cut -d'$' -f3 <<<"$2")" -stdin)" = "$2" ]; }
@@ -172,7 +173,7 @@ t_mail_user_add_gives_the_environment_a_login_and_restarts_mailpit() {
   expect_true "the gate stopped a Mailpit that had just started" at_least $(($(now_ms) - started)) 2500
   password="$(sed -n 's/^MAIL_PASSWORD=//p' <<<"$out")"
   expect_true "the password is not 48 hex characters" hex48 "$password"
-  hash="$(sed -n 's/^shop_qa_12://p' "$HOME/.config/mroom/secrets/mailpit-smtp.passwd")"
+  hash="$(sed -n 's/^shop_qa_12://p' "$T/services/mailpit/etc/mailpit-smtp.passwd")"
   expect_true "the login's hash is not of the password" hash_of "$password" "$hash"
   expect_true "the placeholder login went" has "$(logins)" 'mroom-none:$6$x$y'
   after="$(cat "$T/pid")"
@@ -180,7 +181,7 @@ t_mail_user_add_gives_the_environment_a_login_and_restarts_mailpit() {
   expect_true "the password reached a command line" lacks "$(cat "$T/curl.argv" 2>/dev/null)" "$password"
   expect_true "the API password reached a command line" lacks "$(cat "$T/curl.argv" 2>/dev/null)" "$API_PASSWORD"
   expect_true "the password reached the gate log" lacks "$(gate_log_text)" "$password"
-  run stat -c %a "$HOME/.config/mroom/secrets/mailpit-smtp.passwd"; expect_out 600
+  run stat -c %a "$T/services/mailpit/etc/mailpit-smtp.passwd"; expect_out 600
   # --rotate: a new password, and a restart, which waits for the Mailpit started a moment ago.
   started=$(now_ms)
   gate "mail-user-add 12 --rotate"; expect_rc 0
@@ -189,14 +190,14 @@ t_mail_user_add_gives_the_environment_a_login_and_restarts_mailpit() {
   expect_true "the second restart came within a second of the first" at_least $(($(now_ms) - started)) 2000
   expect_true "a new login did not restart Mailpit" [ "$(cat "$T/pid")" != "$after" ]
   after="$(cat "$T/pid")"
-  hash="$(sed -n 's/^shop_qa_12://p' "$HOME/.config/mroom/secrets/mailpit-smtp.passwd")"
+  hash="$(sed -n 's/^shop_qa_12://p' "$T/services/mailpit/etc/mailpit-smtp.passwd")"
   # The same login again, with the same password: the file is as it was, so Mailpit keeps running.
   gate "mail-user-add 12"; expect_rc 0
   expect_out_has "MAIL_PASSWORD=$password"
   expect_true "an unchanged login restarted Mailpit" [ "$(cat "$T/pid")" = "$after" ]
-  run sed -n 's/^shop_qa_12://p' "$HOME/.config/mroom/secrets/mailpit-smtp.passwd"; expect_out "$hash"
-  run grep -c '^shop_qa_12:' "$HOME/.config/mroom/secrets/mailpit-smtp.passwd"; expect_out 1
-  run bash -c 'compgen -G "$1/.mailpit-smtp.*" || true' _ "$HOME/.config/mroom/secrets"; expect_out ""
+  run sed -n 's/^shop_qa_12://p' "$T/services/mailpit/etc/mailpit-smtp.passwd"; expect_out "$hash"
+  run grep -c '^shop_qa_12:' "$T/services/mailpit/etc/mailpit-smtp.passwd"; expect_out 1
+  run bash -c 'compgen -G "$1/.mailpit-smtp.*" || true' _ "$T/services/mailpit/etc"; expect_out ""
   mailpit_down
 }
 
@@ -266,7 +267,7 @@ t_a_mailpit_that_is_down_or_stays_down_fails_the_request() {
   expect_true "the gate stopped a program it did not install" kill -0 "$impostor"
   kill "$impostor" 2>/dev/null || true
   # Running once, but nothing starts it again.
-  "$HOME/.local/share/mroom-services/mailpit/current/mailpit" -e "$STAND_IN" &
+  "$T/services/mailpit/builds/current/mailpit" -e "$STAND_IN" &
   local lone=$!
   MROOM_GATE_RESTART_WAIT=3 gate "mail-user-add 12"
   expect_rc 1; expect_err_has "Mailpit did not come back within 3 seconds of a restart"
@@ -286,7 +287,7 @@ t_a_mailpit_that_is_down_or_stays_down_fails_the_request() {
 
 t_a_restart_starts_the_current_build() {
   world; relay_up
-  local services="$HOME/.local/share/mroom-services/mailpit"
+  local services="$T/services/mailpit/builds"
   mailpit_up
   mkdir -p "$services/v1.33.0"
   cp "$(command -v perl)" "$services/v1.33.0/mailpit"
@@ -299,13 +300,13 @@ t_a_restart_starts_the_current_build() {
 
 t_a_login_file_that_cannot_be_written_is_left_as_it_was() {
   world; relay_up; mailpit_up
-  local secrets="$HOME/.config/mroom/secrets" before text
+  local secrets="$T/services/mailpit/etc" before text
   before="$(cat "$T/pid")"
   text="$(logins)"
   chmod 500 "$secrets"
   gate "mail-user-add 12"
   chmod 700 "$secrets"
-  expect_rc 1; expect_err_has "could not write ~/.config/mroom/secrets/mailpit-smtp.passwd, which is unchanged"
+  expect_rc 1; expect_err_has "could not write $T/services/mailpit/etc/mailpit-smtp.passwd, which is unchanged"
   expect_true "a password went out" lacks "$out" "MAIL_PASSWORD"
   run logins; expect_out "$text"
   expect_true "Mailpit was restarted for a login it does not have" [ "$before" = "$(cat "$T/pid")" ]
