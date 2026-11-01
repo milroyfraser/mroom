@@ -11,7 +11,8 @@
 # for app "shop" (lib/gate), or from $GATE/<operation>.out and $GATE/<operation>.rc when the test wrote them; its
 # probe-link links $SITE_OP_INSTALLED, the box's root-owned site-op, which the Forge stand-in serves when nginx
 # follows that link. As the gate does, it records the commit a code-put put in ($GATE/commit-<N>), which env-sha
-# reports and user-clean forgets.
+# reports and user-clean forgets, and keeps a Reverb app's secret while the app exists ($GATE/reverb-<N>): a new
+# one, reverb-pw-<N>-<how many apps N had>, only for an app reverb-app-remove took away.
 set -euo pipefail
 printf '%s\n' "$@" >>"$GATE/ssh.argv"
 echo "--" >>"$GATE/ssh.argv"
@@ -87,5 +88,20 @@ case "$op" in
   mail-user-remove) echo "mail user $user: removed" ;;
   mail-clear) echo "mail of $user: 2 deleted" ;;
   bucket-drop) echo "bucket shop-qa-$n-files: dropped, 4 objects deleted" ;;
+  reverb-app-add)
+    if [ ! -f "$GATE/reverb-$n" ]; then
+      made=$(($(cat "$GATE/reverb-made-$n" 2>/dev/null || echo 0) + 1))
+      echo "$made" >"$GATE/reverb-made-$n"
+      echo "reverb-pw-$n-$made" >"$GATE/reverb-$n"
+    fi
+    printf 'REVERB_APP_ID=shop-qa-%s\nREVERB_APP_KEY=shop-qa-%s\nREVERB_APP_SECRET=%s\nREVERB_HOST=ws.qa.example.dev\nREVERB_PORT=443\nREVERB_SCHEME=https\n' \
+      "$n" "$n" "$(cat "$GATE/reverb-$n")" ;;
+  reverb-app-remove)
+    if [ -f "$GATE/reverb-$n" ]; then
+      rm -f "$GATE/reverb-$n"
+      echo "Reverb app shop-qa-$n: removed; its sockets already open stay until they close"
+    else
+      echo "environment $n has no Reverb app, so nothing to remove"
+    fi ;;
   *) echo "mroom gate: refused: provision may not run '$op'" >&2; exit 1 ;;
 esac
