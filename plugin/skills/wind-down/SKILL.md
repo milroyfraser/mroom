@@ -83,5 +83,8 @@ a helper, a settings change for the developer). Items left unticked are not done
 
 ## Restarting
 
+When the developer writes again after more than 5 minutes, write `meta/wave` `{at}` first (the page
+waves hello where the moon sits) and keep `meta/presence.lastUserAt` current.
+
 The next session reads `meta/winddown`, the open cards and `meta/next`, starts the watchers again,
 and sets `meta/winddown.on` to false. That turns the page back to its day mood.
