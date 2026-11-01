@@ -7,6 +7,8 @@
 #     read or a tracker call except through `mroom tracker` and `mroom errors`;
 #   - a skill that calls `mroom tracker` or `mroom errors` says what to do when it exits 3 (no tracker);
 #   - the release skill asks before it drafts, only drafts, and the settings fragments still ask on a release;
+#   - implement publishes its Session Room first, and room/ holds the page and its README, each keeping the
+#     footer copyright and naming no host but github.com and Google Fonts;
 #   - no skill names a host, address, id or person (and none of the words in $MROOM_PRIVATE_WORDS, a file
 #     of one case-insensitive regular expression per line, kept outside the repository).
 #
