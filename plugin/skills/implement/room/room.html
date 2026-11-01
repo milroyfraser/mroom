@@ -485,6 +485,12 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
 .shotview{overflow:auto;display:grid;place-items:start center;min-height:0}
 .shotview img{max-width:100%;height:auto;cursor:zoom-out;border-radius:6px;background:#fff}
 .fshotimg img{cursor:zoom-in}
+/* A card whose checks are running, or whose branch is behind main, pulses its left border. */
+@keyframes cardpulse{0%,100%{border-left-color:var(--accent)}50%{border-left-color:color-mix(in srgb,var(--accent) 25%,transparent)}}
+@keyframes cardbehind{0%,100%{border-left-color:var(--warn)}50%{border-left-color:color-mix(in srgb,var(--warn) 25%,transparent)}}
+.focus[data-checks="running"]{animation:cardpulse 1.6s ease-in-out infinite}
+.focus[data-checks="behind"]{animation:cardbehind 1.6s ease-in-out infinite}
+@media (prefers-reduced-motion:reduce){.focus[data-checks]{animation:none;border-left-style:dashed}}
 </style>
 
 <div class="wrap">
@@ -1320,6 +1326,8 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     const b = it.brief || {};
     const card = el("div", "focus");
     card.dataset.id = it.id;
+    /* While checks run or the branch is behind main, the card's left border pulses. */
+    if (it.checks === "running" || it.checks === "behind") card.dataset.checks = it.checks;
     card.tabIndex = -1;
     const head = el("div", "ftitle");
     const title = titleWithLinks(it.title, it.links);
