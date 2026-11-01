@@ -1701,11 +1701,12 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (s.startedAt) box.append(el("span", "meta", "started " + when(s.startedAt)));
   }
 
-  /* meta/settings.refreshSeconds is the session check period; the waiting colours step once per period. */
-  let refreshSeconds = 0, atMinute = 0;
+  /* meta/settings.waitStepSeconds: how long each waiting colour lasts (600 s by default). It is its own
+     setting, not the session's schedule, so a card turns red after the same wait however often Claude looks. */
+  let waitStep = 0;
   /* Yellow while a card waits less than one check period on the developer, orange for the next, red after. */
   function paintWaiting() {
-    const step = (refreshSeconds || 600) * 1000;
+    const step = (waitStep || 600) * 1000;
     for (const c of document.querySelectorAll("[data-wait-since]")) {
       const age = Date.now() - Date.parse(c.dataset.waitSince);
       const level = age < step ? 1 : age < 2 * step ? 2 : 3;
@@ -1864,9 +1865,8 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     db.doc("meta/next").onSnapshot((snap) => { nextMeta = data(snap); renderWork(); }, onErr);
     db.doc("meta/settings").onSnapshot((snap) => {
       const s = data(snap) || {};
-      const sec = Number(s.refreshSeconds), m = Number(s.atMinute);
-      refreshSeconds = sec >= 60 ? sec : 0;
-      atMinute = m >= 0 ? m : 0;
+      const sec = Number(s.waitStepSeconds);
+      waitStep = sec >= 60 ? sec : 0;
       paintWaiting();
     }, onErr);
     db.doc("boards/session").onSnapshot((snap) => { boards.session = data(snap); renderPlan(); }, onErr);
