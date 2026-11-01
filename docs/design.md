@@ -179,18 +179,22 @@ mroom/
   bin/mroom                     front door (today scripts/dev-box/mroom)
   bin/forge-api                 agent-facing Forge CLI (guards: --write, --secret, path pinning)
   lib/                          box commands: wt, site, site-pull, user, keys, baseline, agent-env, memory-preflight,
-                                job, watchdog, gate (the forced command CI reaches the box through, 8.2),
+                                job, watchdog, guard (the PreToolUse command parser, 8.3),
+                                gate (the forced command CI reaches the box through, 8.2),
                                 site-op (the gate's work inside a QA site, as its user, D17), mail-relay (holds
-                                the SMTP port for Mailpit, D19)
+                                the SMTP port for Mailpit, D19), tracker and errors (the adapters' command lines)
   lib/core/                     config reader, forge client, chat adapter (Slack), tracker/errors adapters, job
-                                records, the watchdog's probes, util, the QA services' pinned builds (pins.txt)
+                                records, the watchdog's probes, the guard's tokeniser, util, the QA services'
+                                pinned builds (pins.txt)
   plugin/                       the Claude Code plugin
     .claude-plugin/plugin.json
     skills/                     refine, deliver, implement, fix-issue, release, forge, blast-radius, correct,
                                 verify-app, principle-*, typescript-best-practices (vendored, with LICENSE)
     agents/qa-engineer.md
     commands/clean-review.md, crap.md
-    hooks/hooks.json            SessionStart banner, PreToolUse guard, WorktreeCreate/Remove
+    hooks/hooks.json            SessionStart banner, PreToolUse guard, WorktreeCreate/Remove; each hook runs the
+                                installed `mroom`, since Claude Code copies only plugin/ into its cache
+  .claude-plugin/marketplace.json   lists plugin/, so the repository is its own marketplace
   actions/                      composite actions: qa-up, qa-down, qa-reap, qa-browser, pr-status, triage,
                                 deploy-verify, regression-label, claude-review, review-findings, ...
   reverb-host/                  a small Laravel app that runs one Reverb for every QA environment, with an app
@@ -257,11 +261,15 @@ suites_glob = "app/*/Tests"                 # for the path-aware pre-push; empty
 tracker = "linear"                 # linear | none
 id_pattern = "SHOP-[0-9]+"         # worktree slugs, PR title scopes, issue links
 url = "https://linear.app/<workspace>/issue/{id}"
+team = "SHOP"                      # where the tracker adapter files new issues (Linear: the team's key)
+token_env = "LINEAR_API_KEY"       # the environment variable with the tracker's token (the default)
 
 [errors]
 provider = "sentry"                # leave the table out for no error tracker
 org = "<org>"
+region = "us"                      # us | de: the API host is <region>.sentry.io, never a URL from config
 id_pattern = "[A-Z]+-[A-Z0-9]+"    # an error issue's id, as APP-1A2; names a worktree with no tracker id
+token_env = "SENTRY_AUTH_TOKEN"    # the environment variable with the error tracker's token (the default)
 
 [pr]
 required_checks = ["test", "lint", "unit-tests", "e2e", "check-title"]
@@ -309,8 +317,8 @@ agrees; `mroom config keys` shows it.
 | `app.version_path` | never: optional | `/version`, mroom's own (phase 2a) |
 | `qa.max_envs`, `qa.env_memory_mb` | never: optional | `5` and `1024`, mroom's own (phase 2a) |
 | other `qa.*` (`qa.db_read_allowlist` has no default, ever; section 8.6) | phase 2 decides | phase 2 decides; `qa.parity.*` defaults to the values above |
-| `issues.*` | phase 3 decides | phase 3 decides |
-| `errors.*` | phase 3 decides | none: without the table there is no error tracker |
+| `issues.*` | none (phase 3) | `issues.tracker`: none; `issues.token_env`: `LINEAR_API_KEY`; `issues.team` has no default, and only `create` needs it |
+| `errors.*` | none (phase 3) | none: without the table there is no error tracker; `errors.region`: us; `errors.token_env`: `SENTRY_AUTH_TOKEN`; `errors.org` has no default, and every call needs it |
 | `pr.required_checks` | phase 4 decides | phase 4 decides |
 | `persona.*`, `github.agent_login` | none (phase 5) | `persona.name`: Agent; `persona.chat_users`: `.github/chat-users.json`; without `persona.channel` no pings go out; without `github.agent_login` an agent's pull request pings that account's developer only |
 
@@ -319,7 +327,7 @@ agrees; `mroom config keys` shows it.
 - A missing required key fails with its name and an example line; a wrong type fails with the key's name. Types:
   string, whole number ≥ 1 (`qa.max_envs`, `qa.env_memory_mb`, `qa.ttl_days`), list of strings, table of strings
   (`app.build.frontend_env`), or one of a fixed set (`app.package_manager`: npm | pnpm; `issues.tracker`:
-  linear | none; `errors.provider`: sentry; each `qa.parity.*` key: the values listed above).
+  linear | none; `errors.provider`: sentry; `errors.region`: us | de; each `qa.parity.*` key: the values listed above).
 - `app.name` matches `[a-z][a-z0-9_]{0,31}`, since it is built into database names and Redis prefixes. A Redis
   prefix puts `:` after each part (`shop:`, `shop:qa12:`), a character no name contains, so no app's or
   environment's ACL pattern matches another's keys.
@@ -327,6 +335,9 @@ agrees; `mroom config keys` shows it.
   no query, since the checks add their own (section 10).
 - `tests.database_pattern` contains `{slug}`, so each worktree gets its own database.
 - `issues.url` contains `{id}`.
+- `issues.team` and `errors.org` are plain words (a team key, an organisation slug). Each `token_env` names a
+  variable ending in `_TOKEN` or `_API_KEY`, never one of mroom's, GitHub's, a cloud's or a host's (`MROOM_*`,
+  `GH_*`, `GITHUB_*`, `AWS_*`, `FORGE_*`, `SSH_*`), and the two differ.
 - `issues.id_pattern` and `errors.id_pattern` compile as **Python** regular expressions (`re`), not POSIX ERE;
   patterns used by shell tools later must stay in the common subset.
 - An unknown key warns (with a close match, if any) and is ignored; it never fails.
@@ -381,13 +392,22 @@ Shell function interfaces in `lib/core/`, chosen by config. v1 implements the fi
 
 | Adapter | Functions | v1 | Later |
 |---|---|---|---|
-| tracker | `issue_get`, `issue_set_state`, `issue_comment_upsert`, `issue_create`, `issue_find_by_marker`, `issue_owned_by_bot`, `attach_image` | Linear; `none` (notes on the PR, images as artifact links) | GitHub Issues (search over hidden markers must be verified first) |
+| tracker | `issue_get`, `issue_comment`, `issue_set_state`, `issue_create` (only with `--allow-create`); with the skills that need them: `issue_comment_upsert`, `issue_find_by_marker`, `issue_owned_by_bot`, `attach_image` | Linear; `none` (notes on the PR, images as artifact links) | GitHub Issues (search over hidden markers must be verified first) |
 | chat | `chat_post`, `chat_update`, `chat_mention <github-login or commit email>` | Slack (bot token, `chat:write`) | Discord or Teams webhooks |
-| errors | `errors_new_since`, `errors_count_for_release`, `errors_crons_failing`, `errors_issue_get` | Sentry (org, region from config), optional | |
+| errors | `errors_issue_get`, `errors_search`, `errors_issue_resolve`; with the persona (phase 5): `errors_new_since`, `errors_count_for_release`, `errors_crons_failing` | Sentry (org, region from config), optional | |
 | host | `host_sites`, `host_site_create`, `host_daemon_*`, `host_jobs_*`, `host_cert_*`, `host_deploy` | Forge v2 (one client: retries, 429, pagination) | |
 
-`errors_issue_get` gives an error issue with its latest event, its counts and its first release. Linking an error
-issue to its fix needs no write key: it goes through the SCM integration's commit reference, the `Fixes <id>` line on
+The tracker and errors adapters are `lib/core/tracker.sh` and `lib/core/errors.sh`, on the command line as
+`mroom tracker` and `mroom errors`, over one HTTP client (`lib/core/api.sh`: the token on stdin, no redirects
+followed; a 429 and a request that never left retried for every call, a 5xx or a timeout only for a read or a
+write that does the same thing twice, never another 4xx). Each token comes from the
+environment variable its `token_env` names, never from a file, and each host is fixed (`api.linear.app`,
+`<region>.sentry.io`). With `issues.tracker = "none"` or no `[errors]` table, every function returns 3, so a
+skill falls back to the pull request.
+
+`errors_issue_get` gives an error issue with its latest event, its counts and its first release.
+`errors_issue_resolve` needs a token with write access, which only the persona's own profile or a person holds
+(D23); a read-only token gets a 403. Linking an error issue to its fix needs no write key: it goes through the SCM integration's commit reference, the `Fixes <id>` line on
 the fixing commit. An explicit link call, if one is ever needed, goes through the gate, never as a key every box
 session can read.
 
@@ -446,9 +466,11 @@ Invariants, each with a test:
      as `forge`.
 3. **Agents never merge, approve, deploy, release, or read secrets.** Settings fragments plus a `PreToolUse`
    `mroom guard` that parses each Bash command and refuses, among others, `gh api` writes to `/merge`, `/reviews`
-   with approve, and `/releases`; `gh pr merge`, `gh pr review --approve`, force-push in any form, reading
-   `.env*`, `~/.ssh`, `~/.config/gh`, `~/.config/mroom/secrets` through any command. Prefix rules stay as a second
-   layer. Release still goes through `gh release create`, which always asks. These are best effort, and GitHub
+   with approve, `/releases` and `/git/refs`; `gh pr merge`, `gh pr review --approve`, force-push in any form,
+   pushing tags or to `main`, `master` or `release`, reading `.env*`, `~/.ssh`, `~/.config/gh`,
+   `~/.config/mroom/secrets` through any command. It checks each command in a chain, inside `bash -c` and inside
+   `$(...)`, but a command built from variables or a script file gets past it: it is a speed bump. Prefix rules
+   stay as a second layer. Release still goes through `gh release create`, which always asks. These are best effort, and GitHub
    is the gate: the box holds one GitHub identity, the agents' own, which may write the app's repository and
    nothing else, never administers it, and cannot approve its own pull requests; review from code owners, who
    are people, makes every approval that counts a person's; and `production` waits for a person to approve each
@@ -846,7 +868,10 @@ What the pilot's scripts learned after this table was drawn, which their ports k
    workflows check out `job.workflow_repository` at `job.workflow_sha` and run their composite actions from that
    checkout, so the caller pins mroom once. Neither property exists on GitHub Enterprise Server.
 2. Plugins cannot set permissions (to verify): if so, `mroom init` merges the settings fragments into
-   `.claude/settings.json`, and `mroom update` re-merges the parts it owns between markers.
+   `.claude/settings.json`, and `mroom update` re-merges the parts it owns between markers. **Answered:** they
+   cannot. Claude Code's plugin reference says a plugin's `settings.json` keeps only `agent` and
+   `subagentStatusLine`, and drops every other key. So `mroom init` merges `settings/*.json`, joining the lists;
+   Claude Code checks deny, then ask, then allow, so no fragment's `allow` can undo another's `ask` or `deny`.
 3. Forge site isolation for QA sites: confirm it works with per-PR sites, the queue worker and the box gate.
    **Partly answered (D17):** a site created with `is_isolated` and `isolated_user` gets its own user and PHP pool,
    its worker, created through the API, runs as that user, and the user cannot enter `forge`'s home. Still to test:

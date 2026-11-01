@@ -22,11 +22,13 @@ The full design, including how each requirement is measured, is in [docs/design.
 
 **Pre-alpha, phase 1 of 6 under way.** What exists today: the skeleton (the `mroom` front door,
 `mroom config`, the one reader of `mroom.toml` and `box.env`, `install.sh`, tests and CI) and the first
-part of phase 1: the [box watchdog](#box-watchdog) with its job records, and the
-[regression label](#regression-label) check with its measures. Ahead of its phase, part of phase 4:
-the [Claude review](#claude-review) and its [review findings](#review-findings) check; and ahead of it, part
-of phase 5: the persona's [PR status](#pr-status) notes and pings. Every other command
-prints `not yet: phase N`. The phases and what each delivers are in
+part of phase 1: the [box watchdog](#box-watchdog) with its job records, the
+[regression label](#regression-label) check with its measures, and the
+[guard, the plugin's skeleton and the settings fragments](#guard-and-settings); from phase 3, the
+[tracker and error-tracker adapters](#tracker-and-error-tracker); ahead of its phase, part of phase 4: the
+[Claude review](#claude-review) and its [review findings](#review-findings) check; and ahead of it, part of
+phase 5: the persona's [PR status](#pr-status) notes and pings. Every other command prints
+`not yet: phase N`. The phases and what each delivers are in
 [section 11 of the design](docs/design.md#11-phases). Expect breaking changes in every `0.x` release.
 
 ## Host requirements
@@ -104,6 +106,7 @@ mroom config get app.build.daemons         # one item per line
 mroom config get app.build.daemons --json  # ["horizon", "reverb"]
 mroom config get app.build --json          # a whole table, as JSON
 mroom config get app.php --default 8.4     # a fallback when the key is not set
+mroom config get errors.org --optional     # nothing when the key is not set
 mroom config get app.version_path          # /version, mroom's default, when the file has none
 mroom config validate                      # check the whole file
 mroom config path                          # which mroom.toml was found
@@ -112,7 +115,8 @@ mroom config keys                          # every key the schema knows
 
 Strings print raw, lists one item per line, tables of strings as `KEY=value` lines, and `--json` prints
 JSON. `--default` takes the key's type: a number for a number, JSON for a list or table
-(`--default '[]'`). A missing required key fails with its name and an example line; a wrong type fails
+(`--default '[]'`). `--optional` prints nothing (`null` with `--json`) and exits 0 for a key that is
+not set. A missing required key fails with its name and an example line; a wrong type fails
 with the key's name (`get` reports only errors that concern the key it reads, `validate` reports all).
 An unknown key is ignored, and `validate` warns about it, with a suggestion when it looks like a typo.
 Exit codes: `0` success, `1` a config error or a key that is not set, `2` a usage error.
@@ -275,6 +279,123 @@ To store the token without it showing on screen or in history:
 
 On a runner, the QA actions use the same client (`lib/core/forge.sh`) with `MROOM_FORGE_ORG`,
 `MROOM_FORGE_SERVER` and `MROOM_FORGE_TOKEN` in the environment.
+
+## Guard and settings
+
+Agents never merge, approve, release, force-push or read secrets; a person does that. Two layers
+keep them to it (design 8.3), and GitHub is the gate behind both.
+
+**`mroom guard`** is a `PreToolUse` hook on Claude Code's Bash tool. It parses the whole command:
+each command in a chain (`;`, `&&`, `||`, `|`, newlines), inside `bash -c`, `eval`, `$(...)`,
+backticks, subshells and heredocs, behind wrappers such as `sudo`, `env`, `xargs` and `npx`. It
+refuses, among others:
+
+- `gh pr merge`, `gh pr review --approve`, and `gh api` writes to `/merge`, `/merges`, `/reviews`
+  with `APPROVE`, `/releases` and `/git/refs`, and GraphQL merges, ref updates and deploy approvals;
+- `git push` with any form of force (`-f`, `--force`, `--force-with-lease`, `--mirror`, a `+`
+  refspec, abbreviations too), with tags, or to `main`, `master` or `release`; git config or aliases
+  that would make a later push do one of those; `gh pr update-branch --rebase`;
+- reading `.env*` (not `*.example`), `~/.ssh` (not `*.pub`), `~/.config/gh*`,
+  `~/.config/mroom/secrets`, any `*.env` under `~/.config`, `~/.forge-token` and Claude's
+  credentials, through the common readers, interpreters, uploads and redirections, or a `cd` into
+  their folder; `gh auth token`.
+
+```bash
+mroom guard check 'true && git push --force origin feat/x'   # exit 2, and why
+mroom guard check 'git push -u origin feat/x'                # allowed
+```
+
+**It is a speed bump, not a boundary.** A command built from variables (`$CMD`) or from another
+command's output (`cat $(echo x)`), a script file (`bash x.sh`), an alias already in a config file,
+`ssh host 'cmd'` or `docker compose exec`, a recursive search of the project (`grep -r KEY .`
+reads its `.env` too) or a secret in the environment gets past it. `lib/guard`'s header lists the rest. Without jq or
+awk it is off and says so; a command it cannot parse is refused. The real gate is GitHub: the
+default branch's ruleset, review by people, and the `production` environment (design D22).
+
+**The plugin** in `plugin/` runs the guard. Claude Code copies a plugin without the rest of this
+repository, so its hook runs the installed `mroom guard hook` (from `PATH` or `~/.local/bin`):
+
+```text
+/plugin install mroom --marketplace milroyfraser/mroom
+```
+
+(On a Claude Code older than 2.1.275: `/plugin marketplace add milroyfraser/mroom`, then
+`/plugin install mroom@mroom`.)
+
+**Settings fragments** in `settings/` are the second layer: prefix rules (`allow`, `ask`, `deny`)
+for `.claude/settings.json`. A plugin cannot set permissions, so `mroom init` (coming in phase 1)
+will merge them into the app's settings:
+
+| Fragment | For |
+|---|---|
+| `base.json` | every app: git and gh reads, pushes and releases ask, merges, approvals, force-pushes and secret reads denied |
+| `laravel-vite.json` | Laravel and Vite: tests, linters and builds allowed; migrations, seeds and tinker ask |
+| `forge.json` | Forge: `forge-api GET` allowed; the Forge CLI and its tokens denied |
+| `tracker-linear.json` | a Linear tracker: GitHub issue writes denied |
+
+The merge joins every list. Claude Code checks deny first, then ask, then allow, so an `allow` rule
+never overrides an `ask` or a `deny`. `tests/settings-test.sh` checks each fragment and what the
+merged set decides for common commands.
+
+## Tracker and error tracker
+
+The workflow skills of phase 3 reach the issue tracker and the error tracker through two adapters
+(design section 7). Each picks its backend from `mroom.toml` and prints JSON.
+
+```bash
+mroom tracker get SHOP-12                    # title, state, labels, description, every comment
+mroom tracker comment SHOP-12 < note.md      # adds a comment; the body comes on stdin
+mroom tracker state SHOP-12 "In Review"      # the team's state of that name, in any case
+mroom tracker create --allow-create --title "Checkout fails" --state Triage --label bug < body.md
+mroom errors get SHOP-1A2                    # the error issue and its latest event
+mroom errors search 'is:unresolved' --environment production --period 24h --limit 50
+mroom errors resolve SHOP-1A2
+```
+
+```toml
+[issues]
+tracker = "linear"                 # linear | none
+id_pattern = "SHOP-[0-9]+"
+team = "SHOP"                      # where `create` files issues (Linear: the team's key)
+token_env = "LINEAR_API_KEY"       # the default
+
+[errors]                           # leave the table out for no error tracker
+provider = "sentry"
+org = "example-org"
+region = "us"                      # us | de: where the organisation's data is
+id_pattern = "SHOP-[A-Z0-9]+"
+token_env = "SENTRY_AUTH_TOKEN"    # the default
+```
+
+- **Tokens** come only from the environment variable `token_env` names, never from a file. Its name ends
+  in `_TOKEN` or `_API_KEY`, is not one of `MROOM_*`, `GH_*`, `GITHUB_*`, `AWS_*`, `FORGE_*` or `SSH_*`,
+  and the two differ, so a changed `mroom.toml` cannot send another secret. A missing or empty token fails
+  with the variable's name, never its value. The token reaches curl on stdin, never a
+  command line, and an answer that echoes it has it cut out of the message.
+- **Hosts are fixed**: `api.linear.app`, and `<region>.sentry.io` for the organisation in `errors.org`.
+  No URL comes from config, so a changed `mroom.toml` cannot send a token elsewhere.
+- **Creating an issue** needs `--allow-create`; without it, nothing is sent. It files in `issues.team`
+  and uses labels that already exist, of that team or the whole workspace (not a parent team's); mroom
+  never creates a label.
+- **Bodies** come on stdin, so the guard sees the file a body is read from, and are sent as they are,
+  up to 64 KiB. A longer one, one with a NUL byte, or one that holds the tracker's token is refused,
+  never cut short. A title that holds the token is refused too.
+- **Retries**: a 429 (or Linear's `RATELIMITED`) waits for `Retry-After`, or the latest rate-limit
+  reset header Linear or Sentry sends, from 1 to 120 seconds (20 when there is none). A request that never
+  left (no host, no connection) is retried too. A read, or a write that does the same thing twice (a
+  state, a resolve), is also retried after a 5xx or no answer. A comment or a create never is, since it
+  may have gone through. No other 4xx is retried, and no redirect is followed (a merged Sentry issue
+  says which one it moved to). At most 4 calls.
+- **Lists are read to the end**: a Linear connection page by page, a Sentry search by its `Link`
+  cursor up to `--limit`. A page that cannot be read fails the call, so a blip never reads as a short
+  list. A search fails, too, when the token sees no project, since Sentry then answers `[]` for anything.
+- **Exit codes**: `0` done, `1` the tracker or the config failed, `2` a usage error, `3` no tracker
+  (`issues.tracker = "none"`) or no `[errors]` table, so a skill can leave its note on the pull request
+  instead.
+
+Sentry needs a user or internal integration token; an organisation auth token cannot read issues. It
+needs Issue & Event: read, and Organization: read for `search`, which first checks that the token sees
+a project. `resolve` also needs Issue & Event: write.
 
 ## QA gate
 

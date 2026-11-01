@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # mroom — the box CLI of mroom (Machine Room). Phase 1 is under way: only the commands below work yet.
 #
-#   mroom config get <dotted.key> [--json] [--default <value>]
+#   mroom config get <dotted.key> [--json] [--default <value> | --optional]
 #                              a value from the app's mroom.toml (found by walking up from here, or
 #                              $MROOM_CONFIG): strings raw, lists one item per line, --json for JSON
 #   mroom config validate      check mroom.toml: missing required keys and wrong types fail, unknown
@@ -24,6 +24,16 @@
 #   mroom baseline reverb      WebSockets for every QA environment: mroom's Reverb host with its pinned
 #                              packages, its apps file, whether its unit is this release's, and its host's
 #                              nginx config
+#   mroom guard hook | check <command>
+#                              the PreToolUse guard for Claude Code's Bash tool (design 8.3): refuses a
+#                              merge, an approval, a release, a force-push or a secret read; a speed bump,
+#                              not a boundary (GitHub is the gate)
+#   mroom tracker get|comment|state|create|backend
+#                              the tracker adapter (issues.tracker: linear or none): read an issue,
+#                              comment, set its state, or file one (only with --allow-create)
+#   mroom errors get|search|resolve|backend
+#                              the error-tracker adapter (errors.provider: sentry): an issue and its
+#                              latest event, a search, or resolving one
 #   mroom memory-preflight <MB> [<what>]
 #                              exit 1, saying why, when the box's RAM available and free swap hold less than
 #                              <MB> more (2 for a usage error): run it before work the kernel would end half
@@ -32,7 +42,7 @@
 #   mroom help
 #
 # Coming in later phases (see docs/design.md, section 11): status, sessions, resume, restart, doctor,
-# site, update, wt, user, keys, env, init, guard, default (phase 1).
+# site, update, wt, user, keys, env, init, default (phase 1).
 set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
@@ -64,13 +74,16 @@ case "$cmd" in
   job) exec "$ROOT/lib/job" "$@" ;;
   gate) exec "$ROOT/lib/gate" "$@" ;;
   baseline) exec "$ROOT/lib/baseline" "$@" ;;
+  guard) exec "$ROOT/lib/guard" "$@" ;;
+  tracker) exec "$ROOT/lib/tracker" "$@" ;;
+  errors) exec "$ROOT/lib/errors" "$@" ;;
   memory-preflight)
     if ! [[ "${1:-}" =~ ^[1-9][0-9]{0,6}$ ]] || [ "$#" -gt 2 ]; then die "usage: mroom memory-preflight <MB> [<what>]" 2; fi
     # shellcheck source=lib/memory-preflight
     . "$ROOT/lib/memory-preflight"
     memory_preflight "$1" "${2:-this}"
     ;;
-  status | sessions | resume | restart | doctor | site | update | wt | user | keys | env | init | guard | default)
+  status | sessions | resume | restart | doctor | site | update | wt | user | keys | env | init | default)
     not_yet "$cmd" 1
     ;;
   *) die "unknown command '$cmd' (mroom help lists the commands)" 2 ;;
