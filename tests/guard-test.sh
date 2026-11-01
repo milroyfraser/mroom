@@ -539,11 +539,14 @@ EOF"
 print(1 + 1)
 EOF"
   allow 'gh pr view 1 --json body | python3 -c "import json,sys; print(json.load(sys.stdin))"'
-  # A command with more inline-code segments than check_code can scan in time is refused, not scanned to the
-  # end: scanning each one forks, and thousands within every other cap (a run of `python -c ...;`) would run
-  # past the hook timeout, so a merge or secret read after them would run. A handful still passes.
+  # A command with more interpreter or inline-code commands than check_code can scan in time is refused, not
+  # scanned to the end: scanning each one forks, and thousands within every other cap (a run of `python -c
+  # ...;`, or even bare `node --version;`) would run past the hook timeout, so a merge or secret read after
+  # them would run. A handful still passes; at the budget (128) it still passes, one over it is refused.
   allow "$(printf "python -c 'print(1)'; %.0s" $(seq 1 20))"
-  refuse_for "inline-code segments" "$(printf "python -c 'print(1)'; %.0s" $(seq 1 2000))"
+  allow "$(printf 'node --version; %.0s' $(seq 1 128))"
+  refuse_for "interpreter or inline-code" "$(printf 'node --version; %.0s' $(seq 1 129))"
+  refuse_for "interpreter or inline-code" "$(printf "python -c 'print(1)'; %.0s" $(seq 1 2000))"
 
   # gh flags that shift the positional slots.
   agree 'gh workflow run --ref main deploy-production.yml'
@@ -882,11 +885,11 @@ timing() {
   uc=""; seg="find .$(printf ' -iname A%.0s' $(seq 1 990))"
   for _ in $(seq 1 10); do uc+="$seg; "; done
   fast 8 0 "$uc"
-  # Inline-code segments, within every other cap (2000 `python -c ...;`, ~36 KB): scanning each forks a few
-  # times, so before the budget this ran for minutes, well past the hook timeout, and a refused command after
-  # it ran. The budget refuses it after a bound, so it is decided far inside the limit.
+  # Inline-code commands, within every other cap (2000 `python -c ...;`, ~36 KB): scanning each forks a few
+  # times, so before the budget this ran tens of seconds here (and over a minute on a slower host), past the
+  # hook timeout, and a refused command after it ran. The budget refuses it after a bound, far inside the limit.
   uc=""; for _ in $(seq 1 2000); do uc+="python -c 'Aa=1'; "; done
-  fast 20 2 "$uc"
+  fast 15 2 "$uc"
 }
 
 awks=()
@@ -923,6 +926,15 @@ expect "check allows" 0 "$mroom" guard check 'git status'
 has "$TOP/out" allowed
 expect "check refuses" 2 "$mroom" guard check 'git push --force origin x'
 has "$err" "Refused by mroom guard: git push --force force-pushes."
+# The wall-clock deadline fails closed: a command too slow to check is refused, not left to run past the hook
+# timeout, whatever path makes it slow. With a one-second deadline, thousands of forking simple commands (a
+# shape the per-command caps alone do not bound in time) are refused after about a second, instead of scanned
+# to the end (far slower) and allowed. A fast command is untouched — the whole suite runs at the default.
+deadline_slow=""
+for _ in $(seq 1 2999); do deadline_slow+="git push origin A; "; done
+expect "deadline fails closed" 2 env MROOM_GUARD_DEADLINE=1 "$mroom" guard check "$deadline_slow"
+has "$err" "taking too long"
+expect "deadline leaves a fast command alone" 0 env MROOM_GUARD_DEADLINE=1 "$mroom" guard check 'git status; ls; echo hi'
 expect "check takes one argument" 64 "$mroom" guard check git status
 expect "no mode" 64 "$mroom" guard
 expect "help" 0 "$mroom" guard help

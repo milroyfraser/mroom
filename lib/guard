@@ -73,13 +73,16 @@
 #
 # A broken guard must not brick every session: without jq or awk it allows and warns. A command it cannot
 # check (over 256 KB, over 3000 simple commands, over 2000 words in a simple command or 20,000 in all, over
-# 200 commands inside other commands, or one the tokeniser fails on) is refused instead.
+# 200 commands inside other commands, more than 128 interpreter or inline-code commands, or one the tokeniser
+# fails on) is refused instead.
 #
 # Time is part of the contract: a hook that runs past its timeout is non-blocking, so the command runs. The
 # plugin's hooks.json sets this hook's timeout to 60 seconds explicitly (Claude Code's default for a command
-# hook, written down so nobody lowers it by accident), and the checks stay linear and far inside it: no fork
-# per word (lower case is one `tr` per simple command at most, see lower_all), and the caps above bound the
-# rest. A fork per argument once let `cat x x x ...` with 100k words, then a merge, run past the timeout.
+# hook, written down so nobody lowers it by accident). The checks avoid a fork per word (lower case is one
+# `tr` per simple command at most, see lower_all) and the caps above bound each kind of work, but several of
+# them at their cap, or a path super-linear in the command's size, can still add up; so analyze also stops at
+# a wall-clock DEADLINE well inside the timeout (see DEADLINE), failing closed, whatever the command's shape.
+# A fork per argument once let `cat x x x ...` with 100k words, then a merge, run past the timeout.
 #
 # Bash 3.2 compatible (macOS). Tests: tests/guard-test.sh. No `set -u`: bash 3.2 treats an empty
 # "${array[@]}" as unbound, and any exit other than 0 or 2 lets the command through.
@@ -128,6 +131,15 @@ WORDS=0
 # forks awk, so a command that hands hundreds of them on is refused rather than checked slowly.
 MAX_PARSES=200
 PARSES=0
+# The wall-clock stop, and the real guarantee that the hook decides before its timeout. Each cap above bounds
+# one kind of work, but several of them at their cap, or a path super-linear in the command's size (for
+# example check_graphql_text, which rescans the whole command for each `gh api graphql`), can still add up
+# past the timeout, after which the hook is non-blocking and the command runs unchecked. So analyze also
+# stops, failing closed, once checking has run this many seconds ($SECONDS is a bash builtin, no fork). Well
+# under hooks.json's 60s, and far above any real command (which decides in under a second). Overridable for
+# tests and for an operator who sets a lower hook timeout; a non-number falls back to the default.
+DEADLINE=${MROOM_GUARD_DEADLINE:-30}
+case $DEADLINE in '' | *[!0-9]*) DEADLINE=30 ;; esac
 
 if [ "$mode" = hook ]; then
   command -v jq >/dev/null 2>&1 || warn_off jq
@@ -150,11 +162,12 @@ COMMANDS=0
 # rest are worst-cased, so total matcher work stays bounded (see glob_stars_over_cap).
 GLOB_SEEN=0
 GLOB_BUDGET=48
-# How many inline-code segments (a `-c`/`-e`/`-r` program, an awk `system()`, a heredoc into an interpreter)
-# this command has had check_code scan. Each scan forks a few times to lower case and match, which is cheap
-# once but a command could carry thousands within every other cap (a run of `python -c ...;` separated by
-# `;`), and the forks then add up past the hook timeout, which is a bypass. Past this budget the rest are
-# refused instead of scanned, so total check_code work stays bounded (see check_code).
+# How many interpreter or inline-code commands (a `-c`/`-e`/`-r` program, a bare `node --version`, an awk
+# `system()`, a heredoc into an interpreter) this command has had check_code scan. Each scan forks a few times
+# to lower case and match, which is cheap once but a command could carry thousands within every other cap (a
+# run of `python -c ...;` separated by `;`), and the forks then add up past the hook timeout, which is a
+# bypass. Past this budget the rest are refused instead of scanned, so total check_code work stays bounded
+# (see check_code). The wall-clock DEADLINE is the catch-all; this is the faster, deterministic cut-off here.
 CODE_SEEN=0
 CODE_BUDGET=128
 RAW=$(printf '%s' "$command" | tr '[:upper:]' '[:lower:]')
@@ -343,13 +356,14 @@ mentions_forbidden() {
 
 check_code() {
   local what=$1 code=$2
-  # Bound the total scanning work: a command with thousands of inline-code segments would otherwise fork its
-  # way past the hook timeout (a bypass), so past the budget each further segment is refused unscanned. A
-  # command with more than CODE_BUDGET of them is pathological; blocking it matches the other "too many to
-  # check in time" caps.
+  # Bound the total scanning work: a command with thousands of interpreter or inline-code commands (a run of
+  # `python -c ...;`, `node --version;`, awk programs, heredocs into an interpreter) would otherwise fork its
+  # way past the hook timeout (a bypass), so past the budget each further one is refused unscanned. A command
+  # with more than CODE_BUDGET of them is pathological; blocking it matches the other "too many to check in
+  # time" caps, and is a faster, deterministic cut-off than the wall-clock DEADLINE for this common path.
   CODE_SEEN=$((CODE_SEEN + 1))
   if [ "$CODE_SEEN" -gt "$CODE_BUDGET" ]; then
-    block "the command has more than $CODE_BUDGET inline-code segments, too many to check in time"
+    block "the command has more than $CODE_BUDGET interpreter or inline-code commands, too many to check in time"
     return
   fi
   if mentions_secret "$code"; then
@@ -1716,6 +1730,13 @@ analyze() {
   local -a f
   while IFS= read -r rec; do
     [ -n "$BLOCKED" ] && return
+    # The wall-clock stop (see DEADLINE): whatever the command's shape, once checking has run this long it is
+    # refused rather than left to run unchecked past the hook timeout. Checked once per simple command, the
+    # grain at which the super-linear and per-command-fork paths accumulate.
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+      block "checking the command is taking too long (over ${DEADLINE}s), so it is refused rather than run unchecked past the hook timeout"
+      return
+    fi
     COMMANDS=$((COMMANDS + 1))
     if [ "$COMMANDS" -gt "$MAX_COMMANDS" ]; then
       block "the command has more than $MAX_COMMANDS simple commands, too many to check in time"
