@@ -359,8 +359,9 @@ t_the_gate_keys_are_restricted_and_forced_to_a_role() {
 gate_line() { printf 'restrict,command="%s gate %s" ssh-ed25519 AAAAC3%s mroom-qa-%s\n' "$MROOM" "$1" "${2:-$1}" "$1"; }
 
 # authorized_keys as sshd reads it (OpenSSH's auth-options.c and auth2-pubkeyfile.c): the options apply in order,
-# so a word after restrict gives back what restrict took; a word in a quoted value is no option; and of the lines
-# that hold a key, the first decides what the key may do.
+# so a word after restrict gives back what restrict took; a word in a quoted value is no option; options after the
+# key are its comment; and of the lines that hold a key, in authorized_keys and then authorized_keys2, the first
+# decides what the key may do.
 t_the_gate_keys_are_read_as_sshd_reads_them() {
   world
   local word
@@ -384,6 +385,14 @@ t_the_gate_keys_are_read_as_sshd_reads_them() {
     expect_rc 1
     expect_out_has "fail  gate-keys: the provision key in ~/.ssh/authorized_keys is not restrict-ed"
   done
+  # Options after the key are its comment to sshd, so that key gets no forced command at all.
+  {
+    gate_line provision
+    printf 'ssh-ed25519 AAAAC3template mroom-qa-template restrict,command="%s gate template"\n' "$MROOM"
+  } >"$HOME/.ssh/authorized_keys"
+  doctor_app
+  expect_rc 1
+  expect_out_has "fail  gate-keys: ~/.ssh/authorized_keys:2 names mroom gate after its key"
   # A copy of the key on a line of its own, as a host's key screen stores it: sshd takes the first line that holds
   # the key, so the copy gives it a shell.
   {
@@ -393,7 +402,19 @@ t_the_gate_keys_are_read_as_sshd_reads_them() {
   } >"$HOME/.ssh/authorized_keys"
   doctor_app
   expect_rc 1
-  expect_out_has "fail  gate-keys: the provision key is on 2 lines of ~/.ssh/authorized_keys"
+  expect_out_has "fail  gate-keys: the provision key is on 2 lines (~/.ssh/authorized_keys:1, ~/.ssh/authorized_keys:2)"
+  # The same with CRs after the key, or under a key type that is a signature's name, which sshd reads as the key's.
+  for word in 'ssh-ed25519 AAAAC3provision\r\r' 'rsa-sha2-256 AAAAC3provision c' 'rsa-sha2-512 AAAAC3provision c' \
+    'webauthn-sk-ecdsa-sha2-nistp256@openssh.com AAAAC3provision c'; do
+    {
+      printf '%b\n' "$word"
+      gate_line provision
+      gate_line template
+    } >"$HOME/.ssh/authorized_keys"
+    doctor_app
+    expect_rc 1
+    expect_out_has "fail  gate-keys: the provision key is on 2 lines (~/.ssh/authorized_keys:1, ~/.ssh/authorized_keys:2)"
+  done
   # A copy on the last line counts too, with no newline after it, since an edit can move it up.
   {
     gate_line provision
@@ -402,7 +423,7 @@ t_the_gate_keys_are_read_as_sshd_reads_them() {
   } >"$HOME/.ssh/authorized_keys"
   doctor_app
   expect_rc 1
-  expect_out_has "fail  gate-keys: the provision key is on 2 lines of ~/.ssh/authorized_keys"
+  expect_out_has "fail  gate-keys: the provision key is on 2 lines (~/.ssh/authorized_keys:1, ~/.ssh/authorized_keys:3)"
   # One key for two roles: the first line decides, so the browser job's key would provision.
   {
     gate_line provision
@@ -411,16 +432,24 @@ t_the_gate_keys_are_read_as_sshd_reads_them() {
   } >"$HOME/.ssh/authorized_keys"
   doctor_app
   expect_rc 1
-  expect_out_has "fail  gate-keys: the provision key is on 2 lines of ~/.ssh/authorized_keys"
+  expect_out_has "fail  gate-keys: the provision key is on 2 lines (~/.ssh/authorized_keys:1, ~/.ssh/authorized_keys:2)"
   expect_out_lacks "AAAAC3"
+  # sshd reads authorized_keys2 after authorized_keys, so a copy there counts as well.
+  { gate_line provision; gate_line template; } >"$HOME/.ssh/authorized_keys"
+  printf 'ssh-ed25519 AAAAC3provision a-copy\n' >"$HOME/.ssh/authorized_keys2"
+  doctor_app
+  expect_rc 1
+  expect_out_has "fail  gate-keys: the provision key is on 2 lines (~/.ssh/authorized_keys:1, ~/.ssh/authorized_keys2:1)"
+  rm "$HOME/.ssh/authorized_keys2"
   # What sshd reads as restricted passes: blanks before the options, a quoted option before command=, restrict in
-  # capitals, a word before restrict, restrict again, and a word turned off again. A comment after blanks is no
-  # line, so its key is no copy.
+  # capitals, a word before restrict, restrict again, and a word turned off again, once or twice. A comment, after
+  # blanks or holding a gate key, is no line, so its key is no copy.
   {
-    printf '  restrict,from="10.0.0.0/8,192.168.0.0/16",command="%s gate provision" ssh-ed25519 AAAAC3provision mroom-qa-up\n' "$MROOM"
+    printf '  restrict,pty,pty,no-pty,from="10.0.0.0/8,192.168.0.0/16",command="%s gate provision" ssh-ed25519 AAAAC3provision mroom-qa-up\n' "$MROOM"
     printf 'port-forwarding,RESTRICT,command="%s gate template" ssh-ed25519 AAAAC3template mroom-qa-template\n' "$MROOM"
     printf 'restrict,pty,restrict,port-forwarding,no-port-forwarding,command="%s gate browser" ssh-ed25519 AAAAC3browser b\n' "$MROOM"
     printf '\t# command="%s gate browser" ssh-ed25519 AAAAC3provision an old line\n' "$MROOM"
+    printf '# ssh-ed25519 AAAAC3provision an old copy\n'
     printf 'ssh-ed25519 AAAAC3person a-person\n'
   } >"$HOME/.ssh/authorized_keys"
   doctor_app

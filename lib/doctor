@@ -417,22 +417,24 @@ box_db_read() {
     "set MROOM_QA_DB_READ=\"$DB_READ_LIST\" in box.env (the gate never reads the app's repository)"
 }
 
-# key_line <line>: one line of authorized_keys as sshd reads it (OpenSSH's auth2-pubkeyfile.c, authfile.c and
-# auth-options.c): KEY_WORDS, the options in order, each its name in lower case, since sshd compares names without
-# case and a word in a quoted value is no option; KEY_COMMAND, command="..."'s value; KEY_BLOB, the key. Returns 1
-# for a line sshd skips: blank, a comment, a quote left open, or no key.
+# key_line <line>: one line of authorized_keys as sshd reads it (OpenSSH 10.2p1's auth2-pubkeyfile.c, authfile.c,
+# auth-options.c and sshkey.c): KEY_WORDS, the options in order, each its name in lower case, since sshd compares
+# names without case and a word in a quoted value is no option; KEY_COMMAND, command="..."'s value; KEY_BLOB, the
+# key. Returns 1 for a line sshd skips: blank, a comment, a quote left open, or no key.
 key_line() {
   local line="${1//\\\"/$'\001'}" opts="" word re # \" is a quote inside a value, never its end
   line="${line#"${line%%[!$' \t']*}"}"
   [ -n "$line" ] && [[ "$line" != \#* ]] || return 1
   KEY_WORDS=() KEY_COMMAND=""
-  # A line that starts with a key type has no options; otherwise they run to the first blank outside quotes.
-  if ! [[ "$line" =~ ^(ssh-|ecdsa-|sk-) ]]; then
+  # A line that starts with a key type has no options (every type sshd reads starts so); otherwise they run to the
+  # first blank outside quotes.
+  if ! [[ "$line" =~ ^(ssh-|ecdsa-|sk-|rsa-sha2-|webauthn-sk-) ]]; then
     re=$'^(([^ \t"]|"[^"]*")+)[ \t]+(.*)$'
     [[ "$line" =~ $re ]] || return 1
     opts="${BASH_REMATCH[1]}," line="${BASH_REMATCH[3]}"
   fi
-  re=$'^[^ \t]+[ \t]+([A-Za-z0-9+/]+=*)([ \t]|$)'
+  # The key runs to the next blank; sshd's base64 reader passes over a CR after it.
+  re=$'^[^ \t]+[ \t]+([A-Za-z0-9+/]+=*)([[:space:]]|$)'
   [[ "$line" =~ $re ]] || return 1
   KEY_BLOB="${BASH_REMATCH[1]}"
   re='^(([^,"]|"[^"]*")*),(.*)$'
@@ -447,20 +449,32 @@ key_line() {
   done
 }
 
-# box_keys: the gate's forced-command keys in authorized_keys, read as sshd reads them: each restricted with
-# nothing turned back on after restrict, forced to an mroom that runs, and on no other line, since sshd lets a key
-# do what the first line that holds it allows.
+# box_keys: the gate's forced-command keys in the files sshd reads keys from by default, ~/.ssh/authorized_keys and
+# then authorized_keys2, read as sshd reads them: each restricted with nothing turned back on after restrict, forced
+# to an mroom that runs, and on no other line, since sshd lets a key do what the first line that holds it allows.
 box_keys() {
-  local line cmd role path word back blob roles=" " gate_blobs=()
-  local -A key_lines=() key_role=()
-  if [ -f "$AUTHORIZED_KEYS" ]; then
+  local file shown n where line cmd role path word back blob roles=" " gate_blobs=()
+  local -A key_lines=() key_at=() key_role=()
+  for file in "$AUTHORIZED_KEYS" "${AUTHORIZED_KEYS}2"; do
+    [ -f "$file" ] || continue
+    shown="$(home_short "$file")" n=0
     while IFS= read -r line || [ -n "$line" ]; do
-      key_line "${line%$'\r'}" || continue
+      n=$((n + 1))
+      key_line "$line" || continue
+      where="$shown:$n"
       key_lines[$KEY_BLOB]=$((${key_lines[$KEY_BLOB]:-0} + 1))
+      key_at[$KEY_BLOB]+="${key_at[$KEY_BLOB]:+, }$where"
       cmd="$KEY_COMMAND"
-      [[ "$cmd" =~ (^|[[:space:]/])mroom[[:space:]]+gate([[:space:]]|$) ]] || continue
+      if ! [[ "$cmd" =~ (^|[[:space:]/])mroom[[:space:]]+gate([[:space:]]|$) ]]; then
+        # After the key, sshd reads options as the key's comment, so that key has no forced command.
+        if [ -z "$cmd" ] && [[ "$line" =~ (^|[[:space:]/])mroom[[:space:]]+gate([[:space:]]|$) ]]; then
+          report fail gate-keys "$where names mroom gate after its key, where sshd reads it as the key's comment, so sshd forces no command on that key" \
+            "put restrict,command=\"...\" before the key type (README, QA gate, step 1)"
+        fi
+        continue
+      fi
       if ! [[ "$cmd" =~ ^([^[:space:]]+)[[:space:]]+gate[[:space:]]+(provision|browser|template)$ ]]; then
-        report fail gate-keys "a key in ~/.ssh/authorized_keys is forced to \"$cmd\", which is not mroom gate provision, browser or template" \
+        report fail gate-keys "a key in $shown is forced to \"$cmd\", which is not mroom gate provision, browser or template" \
           "force each key to <path to mroom> gate <role> alone (README, QA gate, step 1)"
         continue
       fi
@@ -477,10 +491,10 @@ box_keys() {
         esac
       done
       if [ -z "$back" ]; then
-        report fail gate-keys "the $role key in ~/.ssh/authorized_keys is not restrict-ed, so it may forward ports or get a terminal" \
+        report fail gate-keys "the $role key in $shown is not restrict-ed, so it may forward ports or get a terminal" \
           "start its line with restrict,command=\"...\" (README, QA gate, step 1)"
       elif back="${back# }" && back="${back% }" && [ -n "$back" ]; then
-        report fail gate-keys "the $role key in ~/.ssh/authorized_keys turns ${back// /, } back on after restrict, so it may do more than run the gate" \
+        report fail gate-keys "the $role key in $shown turns ${back// /, } back on after restrict, so it may do more than run the gate" \
           "take ${back// /, } off its line, so it reads restrict,command=\"...\" (README, QA gate, step 1)"
       fi
       if [ ! -x "$path" ]; then
@@ -489,12 +503,12 @@ box_keys() {
       fi
       if [ -z "${key_role[$KEY_BLOB]:-}" ]; then key_role[$KEY_BLOB]="$role" gate_blobs+=("$KEY_BLOB"); fi
       roles+="$role "
-    done <"$AUTHORIZED_KEYS"
-    for blob in "${gate_blobs[@]}"; do
-      [ "${key_lines[$blob]}" = 1 ] || report fail gate-keys "the ${key_role[$blob]} key is on ${key_lines[$blob]} lines of ~/.ssh/authorized_keys, and sshd lets it do what the first of them allows" \
-        "keep each gate key on one line of its own, and give each role a key of its own (README, QA gate, step 1)"
-    done
-  fi
+    done <"$file"
+  done
+  for blob in "${gate_blobs[@]}"; do
+    [ "${key_lines[$blob]}" = 1 ] || report fail gate-keys "the ${key_role[$blob]} key is on ${key_lines[$blob]} lines (${key_at[$blob]}), and sshd lets it do what the first of them allows" \
+      "keep each gate key on one line of its own, and give each role a key of its own (README, QA gate, step 1)"
+  done
   if [[ "$roles" == *" provision "* ]]; then
     report ok gate-keys "a key is forced to mroom gate provision"
   else
