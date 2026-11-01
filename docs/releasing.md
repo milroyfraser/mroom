@@ -4,8 +4,9 @@ A release is a git tag `vX.Y.Z` on `main` plus a GitHub release for it. `install
 installs from that release's source tarball, and refuses it if the tarball's `VERSION` is not `X.Y.Z`.
 The developer cuts releases by hand; no workflow and no agent creates tags or releases.
 
-1. **Bump `VERSION`** in a pull request (for example `0.1.0` to `0.2.0`), with a Conventional Commit
-   title such as `chore: release 0.2.0`. Merge it once CI is green.
+1. **Bump `VERSION`** in a pull request (for example `0.1.0` to `0.2.0`), and the plugin's
+   `version` in `plugin/.claude-plugin/plugin.json` to match (`tests/guard-test.sh` checks), with a
+   Conventional Commit title such as `chore: release 0.2.0`. Merge it once CI is green.
 2. **Tag the merge commit on `main`** and push the tag:
 
    ```bash

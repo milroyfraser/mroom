@@ -1,0 +1,11 @@
+{
+  "name": "mroom",
+  "owner": { "name": "mroom contributors" },
+  "plugins": [
+    {
+      "name": "mroom",
+      "source": "./plugin",
+      "description": "The workflow skills and commands, and the PreToolUse guard on Bash (mroom guard); more in later phases"
+    }
+  ]
+}

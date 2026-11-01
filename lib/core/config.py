@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """mroom config: the one reader of an app's mroom.toml and a box's box.env.
 
-    mroom config get <dotted.key> [--json] [--default <value>]
+    mroom config get <dotted.key> [--json] [--default <value> | --optional]
     mroom config validate
     mroom config path [--box]
     mroom config keys
@@ -76,6 +76,25 @@ SCHEMA = {
     "issues.id_pattern": ("str", False, 'id_pattern = "SHOP-[0-9]+"', "issue ids, as a regular expression"),
     "issues.url": ("str", False, 'url = "https://tracker.example.dev/issue/{id}"',
                    "issue link; must contain {id}"),
+    "issues.team": ("str", False, 'team = "SHOP"', "the team new issues are filed in (Linear: the team's key)"),
+    "issues.token_env": ("str", False, 'token_env = "LINEAR_API_KEY"',
+                         "the environment variable that holds the tracker's token (default LINEAR_API_KEY)"),
+    "issues.state_started": ("str", False, 'state_started = "In Progress"',
+                             "the state an issue moves to when work starts (default In Progress)"),
+    "issues.state_review": ("str", False, 'state_review = "In Review"',
+                            "the state an issue moves to when its pull request is ready (default In Review)"),
+    "errors.provider": (("sentry",), False, 'provider = "sentry"',
+                        "sentry; leave the [errors] table out for no error tracker"),
+    "errors.org": ("str", False, 'org = "example-org"', "the error tracker's organisation (Sentry: its slug)"),
+    "errors.region": (("us", "de"), False, 'region = "us"', "the Sentry region the organisation's data is in: us | de"),
+    "errors.id_pattern": ("str", False, 'id_pattern = "[A-Z]+-[A-Z0-9]+"',
+                          "an error issue's short id, as a regular expression"),
+    "errors.token_env": ("str", False, 'token_env = "SENTRY_AUTH_TOKEN"',
+                         "the environment variable that holds the error tracker's token (default SENTRY_AUTH_TOKEN)"),
+    "release.production_url": ("str", False, 'production_url = "https://app.example.dev"',
+                               "the production app's https origin, read after a release to check its version"),
+    "release.tag_prefix": ("str", False, 'tag_prefix = "release-"',
+                           "put before the version in a release's tag (default none: v1.2.3)"),
     "pr.required_checks": ("list", False, 'required_checks = ["test"]', "check names the ruleset requires"),
     "qa.zone": ("str", False, 'zone = "qa.example.dev"', "QA hosts are api.<PR>.<zone> and <PR>.<zone>"),
     "qa.max_envs": ("int", False, "max_envs = 5",
@@ -104,6 +123,13 @@ SCHEMA = {
     "qa.parity.files": (("same", "local"), False, 'files = "same"',
                         "same (a bucket per environment) | local"),
     "persona.name": ("str", False, 'name = "Agent"', "the bot persona's name"),
+    "persona.label": ("str", False, 'label = "found-by-agent"',
+                      "the label on every issue alert triage files; it must exist (mroom never creates labels)"),
+    "persona.state": ("str", False, 'state = "Triage"', "the state alert triage files issues in (default: the team's)"),
+    "persona.environment": ("str", False, 'environment = "production"',
+                            "the error tracker's environment alert triage reads (default production)"),
+    "persona.channel": ("str", False, 'channel = "C0123456789"',
+                        "the chat channel the persona pings when triage cannot run (a Slack channel id)"),
 }
 
 # What get gives for a single key the file leaves out, before any --default: only keys mroom has decided. A whole
@@ -197,7 +223,31 @@ def rule_error(key: str, value) -> str | None:
                 f"none of them . or .., with no query (got {json.dumps(value)[:80]})")
     if key == "issues.url" and "{id}" not in value:
         return f"{key} must contain {{id}}"
-    if key == "issues.id_pattern":
+    # The adapters send these to a fixed host (lib/core/tracker.sh, errors.sh): keep them plain words.
+    if key == "issues.team" and not TEAM_KEY.fullmatch(value):
+        return f"{key} must be a team key of capitals, digits and _ (got {json.dumps(value)})"
+    if key == "errors.org" and not ORG_SLUG.fullmatch(value):
+        return f"{key} must be an organisation slug: lowercase letters, digits, _ and - (got {json.dumps(value)})"
+    if key == "persona.name" and not PERSONA_NAME.fullmatch(value):
+        return f"{key} must be a name of letters, digits, spaces, - and _, at most 40 (got {json.dumps(value)})"
+    if key == "persona.label" and not LABEL_NAME.fullmatch(value):
+        return f"{key} must be a label's name: at most 80 characters, none of them a control character (got {json.dumps(value)})"
+    if key == "persona.environment" and not ENV_NAME.fullmatch(value):
+        return f"{key} must be an environment's name: letters, digits, ., _ and -, at most 64 (got {json.dumps(value)})"
+    if key == "persona.channel" and not CHANNEL_ID.fullmatch(value):
+        return f"{key} must be a Slack channel id, such as C0123456789 (got {json.dumps(value)})"
+    if key in ("issues.state_started", "issues.state_review", "persona.state") and not STATE_NAME.fullmatch(value):
+        return f"{key} must be a state's name: words of letters, digits, - and _, one space apart, at most 40 (got {json.dumps(value)})"
+    # The release skill reads this origin's version path, so it is an https origin and nothing more.
+    if key == "release.production_url" and not HTTPS_ORIGIN.fullmatch(value):
+        return f"{key} must be an https origin such as https://app.example.dev, with no path (got {json.dumps(value)})"
+    if key == "release.tag_prefix" and not TAG_PREFIX.fullmatch(value):
+        return f"{key} must be empty or lowercase letters, digits and -, such as release- (got {json.dumps(value)})"
+    if key in TOKEN_ENV_DEFAULTS and (not TOKEN_ENV.fullmatch(value) or value.startswith(TOKEN_ENV_DENIED)
+                                      or "SECRET" in value or "PASSWORD" in value):
+        return (f"{key} must be an environment variable's name in capitals ending in _TOKEN or _API_KEY, and not "
+                f"one of {', '.join(p + '*' for p in TOKEN_ENV_DENIED)} (got {json.dumps(value)})")
+    if key in ("issues.id_pattern", "errors.id_pattern"):
         try:
             re.compile(value)
         except re.error as exc:
@@ -256,6 +306,12 @@ def check(path: str, data: dict) -> tuple[list[tuple[str, str]], list[str]]:
         problem = type_error(key, kind, value) or rule_error(key, value)
         if problem:
             errors.append((key, problem))
+    # One token for each service: the tracker's must never go to the error tracker, or the other way round.
+    names = {k: flat.get(k, default) for k, default in TOKEN_ENV_DEFAULTS.items()}
+    first, second = names.values()
+    if isinstance(first, str) and isinstance(second, str) and first == second:
+        for k in names:
+            errors.append((k, "issues.token_env and errors.token_env must name different variables"))
     for key, (_, required, _, _) in SCHEMA.items():
         if required and key not in flat:
             errors.append(("", f"{key} is required, for example:\n{example(key)}"))
@@ -347,6 +403,22 @@ DNS_ZONE = re.compile(r"(?=.{1,200}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a
 REPO_DIR = re.compile(r"\.|(?=.{1,200}$)[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*")
 PHP_BINARY = re.compile(r"php(?:[0-9]+(?:\.[0-9]+)?)?")
 DISK = re.compile(r"[a-z][a-z0-9]{0,15}")
+TEAM_KEY = re.compile(r"[A-Z0-9][A-Z0-9_]{0,31}")
+ORG_SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,49}")
+STATE_NAME = re.compile(r"(?=.{1,40}$)[A-Za-z0-9_-]+(?: [A-Za-z0-9_-]+)*")
+# The persona's name goes into every note it writes, its label and state to the tracker, its environment to
+# the error tracker's search and its channel to chat (actions/triage): each a plain value.
+PERSONA_NAME = re.compile(r"(?=.{1,40}$)[A-Za-z0-9_-]+(?: [A-Za-z0-9_-]+)*")
+LABEL_NAME = re.compile(r"[^\x00-\x1f\x7f]{1,80}")
+ENV_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
+CHANNEL_ID = re.compile(r"[CG][A-Z0-9]{8,12}")
+HTTPS_ORIGIN = re.compile(r"https://(?=[^/]{1,200}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?")
+TAG_PREFIX = re.compile(r"(?:[a-z][a-z0-9-]{0,15})?")
+# A token's variable ends in _TOKEN or _API_KEY, and is none of the box's, GitHub's, a cloud's or a host's,
+# so a changed mroom.toml cannot send another secret (APP_KEY, AWS_SECRET_ACCESS_KEY) to the tracker.
+TOKEN_ENV = re.compile(r"[A-Z][A-Z0-9_]{0,63}(?:_TOKEN|_API_KEY)")
+TOKEN_ENV_DENIED = ("MROOM_", "GH_", "GITHUB_", "AWS_", "FORGE_", "SSH_")
+TOKEN_ENV_DEFAULTS = {"issues.token_env": "LINEAR_API_KEY", "errors.token_env": "SENTRY_AUTH_TOKEN"}
 VERSION_PART = re.compile(r"[A-Za-z0-9._~-]+")
 ENV_PREFIX = re.compile(r"[A-Z][A-Z0-9_]{0,40}")
 PERSONA_DOMAIN = re.compile(r"(?=.{2,200}$)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
@@ -523,7 +595,7 @@ def coerce_default(key: str, raw: str):
 
 
 def cmd_get(args: list[str]) -> int:
-    as_json, default, key = False, None, None
+    as_json, default, key, optional = False, None, None, False
     i = 0
     while i < len(args):
         arg = args[i]
@@ -534,6 +606,8 @@ def cmd_get(args: list[str]) -> int:
                 raise UsageError("--default needs a value")
             default = args[i + 1]
             i += 1
+        elif arg == "--optional":
+            optional = True
         elif arg.startswith("-"):
             raise UsageError(f"unknown option {arg}")
         elif key is None:
@@ -543,6 +617,8 @@ def cmd_get(args: list[str]) -> int:
         i += 1
     if key is None:
         raise UsageError("get needs a key, for example: mroom config get app.name")
+    if optional and default is not None:
+        raise UsageError("--optional and --default do not go together")
     if key not in SCHEMA and key not in SECTIONS:
         hint = difflib.get_close_matches(key, list(SCHEMA) + sorted(SECTIONS), n=1)
         tip = f"; did you mean {hint[0]}?" if hint else " (mroom config keys lists them)"
@@ -555,6 +631,11 @@ def cmd_get(args: list[str]) -> int:
         # mroom's own default comes first, so every reader agrees on it; --default is for the other keys.
         if key in DEFAULTS:
             value = DEFAULTS[key]
+        elif optional:
+            # Unset is an answer here, not an error: nothing (null with --json), for a key with no default.
+            if as_json:
+                sys.stdout.write("null\n")
+            return 0
         elif default is None:
             print(f"{PROG}: {key} is not set in {path}", file=sys.stderr)
             return 1

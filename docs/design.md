@@ -65,9 +65,10 @@ Commits do not show a person's work, because agents make almost all of them.
   against the description), works in a worktree whose branch names both ids, and reproduces the error with a failing
   test before it fixes it. It links the error issue to the fix through the repository's SCM integration: a
   `Fixes <id>` line on the fixing commit, which reaches the default branch in a merge commit, or in a squash merge
-  that keeps the commits' messages. The error tracker links the commit as soon as it is pushed, but resolves the
-  issue only when a release that contains the commit has its commits attached, which is why the deploy template
-  attaches them (phase 4). Principle skills named at the step that needs them.
+  that keeps the commits' messages, and the same line in the PR body, for a squash merge that uses it. The error
+  tracker links the commit as soon as it is pushed, but resolves the issue only when a release that contains the
+  commit has its commits attached, which is why the deploy template attaches them (phase 4). Principle skills named at
+  the step that needs them.
 - **Guardrails**: agents never merge, approve, deploy, release or read secrets; enforced by a command parser,
   not only prefix rules, and gated by GitHub, where only people's approvals count and a person approves each
   deploy (D22).
@@ -180,18 +181,23 @@ mroom/
   bin/mroom                     front door (today scripts/dev-box/mroom)
   bin/forge-api                 agent-facing Forge CLI (guards: --write, --secret, path pinning)
   lib/                          box commands: wt, site, site-pull, user, keys, baseline, agent-env, memory-preflight,
-                                job, watchdog, gate (the forced command CI reaches the box through, 8.2),
+                                job, watchdog, guard (the PreToolUse command parser, 8.3),
+                                gate (the forced command CI reaches the box through, 8.2),
                                 site-op (the gate's work inside a QA site, as its user, D17), mail-relay (holds
-                                the SMTP port for Mailpit, D19)
+                                the SMTP port for Mailpit, D19), tracker and errors (the adapters' command lines),
+                                persona (the guard: the persona's only way to write to the tracker, D23)
   lib/core/                     config reader, forge client, chat adapter (Slack), tracker/errors adapters, job
-                                records, the watchdog's probes, util, the QA services' pinned builds (pins.txt)
+                                records, the watchdog's probes, the guard's tokeniser, util, the QA services'
+                                pinned builds (pins.txt)
   plugin/                       the Claude Code plugin
     .claude-plugin/plugin.json
     skills/                     refine, deliver, implement, fix-issue, release, forge, blast-radius, correct,
                                 verify-app, principle-*, typescript-best-practices (vendored, with LICENSE)
     agents/qa-engineer.md
     commands/clean-review.md, crap.md
-    hooks/hooks.json            SessionStart banner, PreToolUse guard, WorktreeCreate/Remove
+    hooks/hooks.json            SessionStart banner, PreToolUse guard, WorktreeCreate/Remove; each hook runs the
+                                installed `mroom`, since Claude Code copies only plugin/ into its cache
+  .claude-plugin/marketplace.json   lists plugin/, so the repository is its own marketplace
   actions/                      composite actions: qa-up, qa-down, qa-reap, qa-browser, pr-status, triage,
                                 deploy-verify, regression-label, ...
   reverb-host/                  a small Laravel app that runs one Reverb for every QA environment, with an app
@@ -258,14 +264,24 @@ suites_glob = "app/*/Tests"                 # for the path-aware pre-push; empty
 tracker = "linear"                 # linear | none
 id_pattern = "SHOP-[0-9]+"         # worktree slugs, PR title scopes, issue links
 url = "https://linear.app/<workspace>/issue/{id}"
+team = "SHOP"                      # where the tracker adapter files new issues (Linear: the team's key)
+token_env = "LINEAR_API_KEY"       # the environment variable with the tracker's token (the default)
+state_started = "In Progress"      # the state /implement moves an issue to when work starts (the default)
+state_review = "In Review"         # the state it moves the issue to when the PR is ready (the default)
 
 [errors]
 provider = "sentry"                # leave the table out for no error tracker
 org = "<org>"
+region = "us"                      # us | de: the API host is <region>.sentry.io, never a URL from config
 id_pattern = "[A-Z]+-[A-Z0-9]+"    # an error issue's id, as APP-1A2; names a worktree with no tracker id
+token_env = "SENTRY_AUTH_TOKEN"    # the environment variable with the error tracker's token (the default)
 
 [pr]
 required_checks = ["test", "lint", "unit-tests", "e2e", "check-title"]
+
+[release]
+production_url = "https://app.example.dev"   # /release reads app.version_path here after a deploy, read-only
+tag_prefix = ""                    # before the version in a release's tag ("release-" gives release-v1.2.3)
 
 [qa]
 zone = "<qa-zone>"                 # api.<PR>.<zone> (the Laravel app), <PR>.<zone> (a frontend of its own)
@@ -288,6 +304,10 @@ files = "same"                     # same (a bucket per environment and file dis
 
 [persona]
 name = "Agent"                     # the name people see on notes and pings
+label = "found-by-agent"           # on every issue alert triage files (it must exist)
+state = "Triage"                   # the state alert triage files issues in (default: the team's)
+environment = "production"         # the error tracker's environment alert triage reads
+channel = "C0123456789"            # where the persona pings when triage cannot run (a Slack channel id)
 
 [github]
 agent_login = "<agents-account>"   # the box's one GitHub account (D22); `mroom user setup` refuses any other
@@ -308,17 +328,18 @@ agrees; `mroom config keys` shows it.
 | `app.version_path` | never: optional | `/version`, mroom's own (phase 2a) |
 | `qa.max_envs`, `qa.env_memory_mb` | never: optional | `5` and `1024`, mroom's own (phase 2a) |
 | other `qa.*` (`qa.db_read_allowlist` has no default, ever; section 8.6) | phase 2 decides | phase 2 decides; `qa.parity.*` defaults to the values above |
-| `issues.*` | phase 3 decides | phase 3 decides |
-| `errors.*` | phase 3 decides | none: without the table there is no error tracker |
+| `issues.*` | none (phase 3) | `issues.tracker`: none; `issues.token_env`: `LINEAR_API_KEY`; `issues.state_started`: In Progress; `issues.state_review`: In Review; `issues.team` has no default, and only `create` needs it |
+| `errors.*` | none (phase 3) | none: without the table there is no error tracker; `errors.region`: us; `errors.token_env`: `SENTRY_AUTH_TOKEN`; `errors.org` has no default, and every call needs it |
+| `release.*` | none (phase 3) | `release.tag_prefix`: none; without `release.production_url`, `/release` skips its version check |
 | `pr.required_checks` | phase 4 decides | phase 4 decides |
-| `persona.name` | phase 5 decides | phase 5 decides |
+| `persona.*` | none (phase 5) | `persona.name`: Agent; `persona.environment`: production; `persona.label`, `persona.state` and `persona.channel`: none (no label, the team's default state, no ping) |
 
 **Validation** (`mroom config validate`, and before every `get`):
 
 - A missing required key fails with its name and an example line; a wrong type fails with the key's name. Types:
   string, whole number ≥ 1 (`qa.max_envs`, `qa.env_memory_mb`, `qa.ttl_days`), list of strings, table of strings
   (`app.build.frontend_env`), or one of a fixed set (`app.package_manager`: npm | pnpm; `issues.tracker`:
-  linear | none; `errors.provider`: sentry; each `qa.parity.*` key: the values listed above).
+  linear | none; `errors.provider`: sentry; `errors.region`: us | de; each `qa.parity.*` key: the values listed above).
 - `app.name` matches `[a-z][a-z0-9_]{0,31}`, since it is built into database names and Redis prefixes. A Redis
   prefix puts `:` after each part (`shop:`, `shop:qa12:`), a character no name contains, so no app's or
   environment's ACL pattern matches another's keys.
@@ -326,6 +347,12 @@ agrees; `mroom config keys` shows it.
   no query, since the checks add their own (section 10).
 - `tests.database_pattern` contains `{slug}`, so each worktree gets its own database.
 - `issues.url` contains `{id}`.
+- `issues.state_started` and `issues.state_review` are a state's name (letters, digits, spaces, `-` and `_`).
+  `release.production_url` is an `https://` origin with no path, `release.tag_prefix` empty or lowercase
+  letters, digits and `-`.
+- `issues.team` and `errors.org` are plain words (a team key, an organisation slug). Each `token_env` names a
+  variable ending in `_TOKEN` or `_API_KEY`, never one of mroom's, GitHub's, a cloud's or a host's (`MROOM_*`,
+  `GH_*`, `GITHUB_*`, `AWS_*`, `FORGE_*`, `SSH_*`), and the two differ.
 - `issues.id_pattern` and `errors.id_pattern` compile as **Python** regular expressions (`re`), not POSIX ERE;
   patterns used by shell tools later must stay in the common subset.
 - An unknown key warns (with a close match, if any) and is ignored; it never fails.
@@ -380,13 +407,53 @@ Shell function interfaces in `lib/core/`, chosen by config. v1 implements the fi
 
 | Adapter | Functions | v1 | Later |
 |---|---|---|---|
-| tracker | `issue_get`, `issue_set_state`, `issue_comment_upsert`, `issue_create`, `issue_find_by_marker`, `issue_owned_by_bot`, `attach_image` | Linear; `none` (notes on the PR, images as artifact links) | GitHub Issues (search over hidden markers must be verified first) |
+| tracker | `issue_get`, `issue_list` (`--mine` or `--label`), `issue_comment`, `issue_set_state`, `issue_create` (only with `--allow-create`), `issue_find_by_marker`, `issue_owned_by_bot`; with the skills that need them: `issue_comment_upsert`, `attach_image` | Linear; `none` (notes on the PR, images as artifact links) | GitHub Issues (search over hidden markers must be verified first) |
 | chat | `chat_post`, `chat_update`, `chat_mention <github-login or commit email>` | Slack (bot token, `chat:write`) | Discord or Teams webhooks |
-| errors | `errors_new_since`, `errors_count_for_release`, `errors_crons_failing`, `errors_issue_get` | Sentry (org, region from config), optional | |
+| errors | `errors_issue_get`, `errors_search`, `errors_issue_resolve`, `errors_new_since` (alert triage); with the persona's later work (phase 5): `errors_count_for_release`, `errors_crons_failing` | Sentry (org, region from config), optional | |
 | host | `host_sites`, `host_site_create`, `host_daemon_*`, `host_jobs_*`, `host_cert_*`, `host_deploy` | Forge v2 (one client: retries, 429, pagination) | |
 
-`errors_issue_get` gives an error issue with its latest event, its counts and its first release. Linking an error
-issue to its fix needs no write key: it goes through the SCM integration's commit reference, the `Fixes <id>` line on
+The tracker and errors adapters are `lib/core/tracker.sh` and `lib/core/errors.sh`, on the command line as
+`mroom tracker` and `mroom errors`, over one HTTP client (`lib/core/api.sh`: the token on stdin, no redirects
+followed; a 429 and a request that never left retried for every call, a 5xx or a timeout only for a read or a
+write that does the same thing twice, never another 4xx). Each token comes from the
+environment variable its `token_env` names, never from a file, and each host is fixed (`api.linear.app`,
+`<region>.sentry.io`). With `issues.tracker = "none"` or no `[errors]` table, every function returns 3, so a
+skill falls back to the pull request.
+
+The workflow skills (`plugin/skills/`: refine, deliver, implement, fix-issue, release, correct, forge)
+reach the trackers only through these two commands, never an API or an MCP server of their own. Each
+writes to the tracker only the state of the issue it works and comments on it, and asks a person before
+it files an issue. A design waiting for approval is a comment (`Design for review: <link>`, then
+`Design approved by <name>: <link>`), not a label. `tests/skills-test.sh` checks each skill against this
+contract.
+
+`issue_find_by_marker` (`mroom tracker find <key>`) lists the issues whose description holds the
+persona's hidden marker for an alert, `<!-- mroom-alert key=<provider>:<numeric id> -->`, with
+`:<kind>:...` after the id for a later alert (alert triage writes `:regressed:<day>` and
+`:escalating:<day>`). The tracker's search is a substring match, so the adapter checks each description
+again and keeps an issue only when the marker ends there or goes on with `:`, and lists each issue's
+keys of that error. It reads archived issues too. `/fix-issue` reads it, and makes no tracker write
+beyond the state and comments of that issue. `issue_owned_by_bot` (`mroom tracker owned`) says
+whether the token's user filed an issue: with the persona's token, which issues are its own (D23).
+`issue_comment_upsert` and `attach_image` wait for the PR notes (phase 5) and browser QA (phase 2b).
+
+Whether the tracker keeps an HTML-comment marker in a description it stores is not taken on trust:
+the persona's guard (`mroom persona`, the only way alert triage writes) reads every issue it files
+back, and when a marker is missing it writes nothing more in that run, and the triage workflow's
+switch-off job turns the workflow off and asks a person once. Without that stop, every run would file
+the same alerts again. The guard also writes only what D23 allows: it files an issue only for an
+alert key of the run, assigns no one, comments only on issues the persona filed, and has no command
+to edit, close, label or delete; it escapes every HTML comment's opening in the text it is given, so
+no alert text can forge a marker, refuses text shaped like a token and defangs links to other hosts. Triage redacts the error's data before it reaches an
+issue (tokens, email addresses, phone numbers, IBANs). Its alarm pings at most once a UTC day when a
+live run fails, keyed `triage:<yyyymmdd>` on an issue it files before the ping, so a ping it could not
+record is never sent.
+The tracker's own SCM integration may read a `Fixes` line too, so an error tracker's project prefix
+should not be a tracker team's key.
+
+`errors_issue_get` gives an error issue with its latest event, its counts and its first release.
+`errors_issue_resolve` needs a token with write access, which only the persona's own profile or a person holds
+(D23); a read-only token gets a 403. Linking an error issue to its fix needs no write key: it goes through the SCM integration's commit reference, the `Fixes <id>` line on
 the fixing commit. An explicit link call, if one is ever needed, goes through the gate, never as a key every box
 session can read.
 
@@ -457,9 +524,11 @@ Invariants, each with a test:
      as `forge`.
 3. **Agents never merge, approve, deploy, release, or read secrets.** Settings fragments plus a `PreToolUse`
    `mroom guard` that parses each Bash command and refuses, among others, `gh api` writes to `/merge`, `/reviews`
-   with approve, and `/releases`; `gh pr merge`, `gh pr review --approve`, force-push in any form, reading
-   `.env*`, `~/.ssh`, `~/.config/gh`, `~/.config/mroom/secrets` through any command. Prefix rules stay as a second
-   layer. Release still goes through `gh release create`, which always asks. These are best effort, and GitHub
+   with approve, `/releases` and `/git/refs`; `gh pr merge`, `gh pr review --approve`, force-push in any form,
+   pushing tags or to `main`, `master` or `release`, reading `.env*`, `~/.ssh`, `~/.config/gh`,
+   `~/.config/mroom/secrets` through any command. It checks each command in a chain, inside `bash -c` and inside
+   `$(...)`, but a command built from variables or a script file gets past it: it is a speed bump. Prefix rules
+   stay as a second layer. Release still goes through `gh release create`, which always asks. These are best effort, and GitHub
    is the gate: the box holds one GitHub identity, the agents' own, which may write the app's repository and
    nothing else, never administers it, and cannot approve its own pull requests; review from code owners, who
    are people, makes every approval that counts a person's; and `production` waits for a person to approve each
@@ -478,7 +547,7 @@ Invariants, each with a test:
    XSRF cookie name, since environments share one box. `HORIZON_PREFIX` must start with the environment's Redis
    prefix, because Horizon replaces the connection's prefix with its own.
 8. **Secrets per GitHub environment.** `qa` (default branch only) holds the box and Forge credentials, which reach root (D20); `persona` (default branch only)
-   holds the tracker and chat tokens; `production` (release tags only, each deploy approved by a person other
+   holds the tracker and chat tokens, and alert triage's read-only error-tracker token; `production` (release tags only, each deploy approved by a person other
    than the one who started it) holds the deploy credential, since Write can tag any commit (D22). None is
    readable from a `pull_request` job.
 9. **Each QA environment's services are its own.** Its database and the role that owns it (D18), its app key, its
@@ -700,6 +769,14 @@ the tag. The deploy template adds three patterns instead:
     safe because migrations are expand/contract (section 9); the old code must also run jobs that the new code
     queued, and the deploy restarts workers and clears caches.
 
+The deploy template (`templates/github/workflows/deploy-production.yml`) runs these as two jobs under one
+concurrency group that never cancels a deploy. `release`, in `production`, checks out the run's own tag with the
+deploy key and runs `release-branch.sh`, which also stops when the branch is at a commit off the default branch or
+neither before nor after the tag, since then someone else moved it; that job runs no action but `actions/checkout`
+beside the key. `verify` holds no secret and runs `deploy-verify` on the commit `release` pushed; a poll counts only
+when the app's `/up` answers 200 too, and a release name other than the tag, for the right commit, is a warning. The
+run takes no input: a rollback is a dispatch from the older tag.
+
 **Sharded jobs.** The frontend unit tests came next: four vitest shards, the slowest shard's job 254 s, and a
 count the ruleset held in place, because it required each shard by name. With six shards the slowest shard's job
 took 152 to 181 s over four runs, and its `Test` step 105 to 135 s, from 201 s. The CI templates add two patterns
@@ -854,7 +931,10 @@ What the pilot's scripts learned after this table was drawn, which their ports k
    workflows check out `job.workflow_repository` at `job.workflow_sha` and run their composite actions from that
    checkout, so the caller pins mroom once. Neither property exists on GitHub Enterprise Server.
 2. Plugins cannot set permissions (to verify): if so, `mroom init` merges the settings fragments into
-   `.claude/settings.json`, and `mroom update` re-merges the parts it owns between markers.
+   `.claude/settings.json`, and `mroom update` re-merges the parts it owns between markers. **Answered:** they
+   cannot. Claude Code's plugin reference says a plugin's `settings.json` keeps only `agent` and
+   `subagentStatusLine`, and drops every other key. So `mroom init` merges `settings/*.json`, joining the lists;
+   Claude Code checks deny, then ask, then allow, so no fragment's `allow` can undo another's `ask` or `deny`.
 3. Forge site isolation for QA sites: confirm it works with per-PR sites, the queue worker and the box gate.
    **Partly answered (D17):** a site created with `is_isolated` and `isolated_user` gets its own user and PHP pool,
    its worker, created through the API, runs as that user, and the user cannot enter `forge`'s home. Still to test:

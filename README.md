@@ -22,8 +22,11 @@ The full design, including how each requirement is measured, is in [docs/design.
 
 **Pre-alpha, phase 1 of 6 under way.** What exists today: the skeleton (the `mroom` front door,
 `mroom config`, the one reader of `mroom.toml` and `box.env`, `install.sh`, tests and CI) and the first
-part of phase 1: the [box watchdog](#box-watchdog) with its job records, and the
-[regression label](#regression-label) check with its measures. Every other command prints
+part of phase 1: the [box watchdog](#box-watchdog) with its job records, the
+[regression label](#regression-label) check with its measures, and the
+[guard, the plugin's skeleton and the settings fragments](#guard-and-settings), and, from phase 3, the
+[tracker and error-tracker adapters](#tracker-and-error-tracker) and the [workflow skills](#workflow-skills),
+and, from phase 5, [alert triage](#alert-triage) with its alarm and its guard. Every other command prints
 `not yet: phase N`. The phases and what each delivers are in
 [section 11 of the design](docs/design.md#11-phases). Expect breaking changes in every `0.x` release.
 
@@ -102,6 +105,7 @@ mroom config get app.build.daemons         # one item per line
 mroom config get app.build.daemons --json  # ["horizon", "reverb"]
 mroom config get app.build --json          # a whole table, as JSON
 mroom config get app.php --default 8.4     # a fallback when the key is not set
+mroom config get errors.org --optional     # nothing when the key is not set
 mroom config get app.version_path          # /version, mroom's default, when the file has none
 mroom config validate                      # check the whole file
 mroom config path                          # which mroom.toml was found
@@ -110,7 +114,8 @@ mroom config keys                          # every key the schema knows
 
 Strings print raw, lists one item per line, tables of strings as `KEY=value` lines, and `--json` prints
 JSON. `--default` takes the key's type: a number for a number, JSON for a list or table
-(`--default '[]'`). A missing required key fails with its name and an example line; a wrong type fails
+(`--default '[]'`). `--optional` prints nothing (`null` with `--json`) and exits 0 for a key that is
+not set. A missing required key fails with its name and an example line; a wrong type fails
 with the key's name (`get` reports only errors that concern the key it reads, `validate` reports all).
 An unknown key is ignored, and `validate` warns about it, with a suggestion when it looks like a typo.
 Exit codes: `0` success, `1` a config error or a key that is not set, `2` a usage error.
@@ -337,6 +342,299 @@ To store the token without it showing on screen or in history:
 
 On a runner, the QA actions use the same client (`lib/core/forge.sh`) with `MROOM_FORGE_ORG`,
 `MROOM_FORGE_SERVER` and `MROOM_FORGE_TOKEN` in the environment.
+
+## Guard and settings
+
+Agents never merge, approve, release, force-push or read secrets; a person does that. Two layers
+keep them to it (design 8.3), and GitHub is the gate behind both.
+
+**`mroom guard`** is a `PreToolUse` hook on Claude Code's Bash tool. It parses the whole command:
+each command in a chain (`;`, `&&`, `||`, `|`, newlines), inside `bash -c`, `eval`, `$(...)`,
+backticks, subshells and heredocs, behind wrappers such as `sudo`, `env`, `xargs` and `npx`. It
+refuses, among others:
+
+- `gh pr merge`, `gh pr review --approve`, and `gh api` writes to `/merge`, `/merges`, `/reviews`
+  with `APPROVE`, `/releases` and `/git/refs`, and GraphQL merges, ref updates and deploy approvals;
+- `git push` with any form of force (`-f`, `--force`, `--force-with-lease`, `--mirror`, a `+`
+  refspec, abbreviations too), with tags, or to `main`, `master` or `release`; git config or aliases
+  that would make a later push do one of those; `gh pr update-branch --rebase`;
+- reading `.env*` (not `*.example`), `~/.ssh` (not `*.pub`), `~/.config/gh*`,
+  `~/.config/mroom/secrets`, any `*.env` under `~/.config`, `~/.forge-token` and Claude's
+  credentials, through the common readers, interpreters, uploads and redirections, or a `cd` into
+  their folder; `gh auth token`.
+
+```bash
+mroom guard check 'true && git push --force origin feat/x'   # exit 2, and why
+mroom guard check 'git push -u origin feat/x'                # allowed
+```
+
+**It is a speed bump, not a boundary.** A command built from variables (`$CMD`) or from another
+command's output (`cat $(echo x)`), a script file (`bash x.sh`), an alias already in a config file,
+`ssh host 'cmd'` or `docker compose exec`, a recursive search of the project (`grep -r KEY .`
+reads its `.env` too) or a secret in the environment gets past it. `lib/guard`'s header lists the rest. Without jq or
+awk it is off and says so; a command it cannot parse is refused. The real gate is GitHub: the
+default branch's ruleset, review by people, and the `production` environment (design D22).
+
+**The plugin** in `plugin/` runs the guard. Claude Code copies a plugin without the rest of this
+repository, so its hook runs the installed `mroom guard hook` (from `PATH` or `~/.local/bin`):
+
+```text
+/plugin install mroom --marketplace milroyfraser/mroom
+```
+
+(On a Claude Code older than 2.1.275: `/plugin marketplace add milroyfraser/mroom`, then
+`/plugin install mroom@mroom`.)
+
+**Settings fragments** in `settings/` are the second layer: prefix rules (`allow`, `ask`, `deny`)
+for `.claude/settings.json`. A plugin cannot set permissions, so `mroom init` (coming in phase 1)
+will merge them into the app's settings:
+
+| Fragment | For |
+|---|---|
+| `base.json` | every app: git, gh and tracker reads allowed; pushes, releases, filing an issue and resolving an error ask; merges, approvals, force-pushes and secret reads denied |
+| `laravel-vite.json` | Laravel and Vite: tests, linters and builds allowed; migrations, seeds and tinker ask |
+| `forge.json` | Forge: `forge-api GET` allowed, `forge-api --secret` asks; the Forge CLI and its tokens denied |
+| `tracker-linear.json` | a Linear tracker: GitHub issue writes denied |
+
+The merge joins every list. Claude Code checks deny first, then ask, then allow, so an `allow` rule
+never overrides an `ask` or a `deny`. `tests/settings-test.sh` checks each fragment and what the
+merged set decides for common commands.
+
+## Tracker and error tracker
+
+The workflow skills of phase 3 reach the issue tracker and the error tracker through two adapters
+(design section 7). Each picks its backend from `mroom.toml` and prints JSON.
+
+```bash
+mroom tracker get SHOP-12                    # title, state, labels, branch, description, every comment
+mroom tracker list --mine --open             # my 50 latest open issues, by priority; or --label lesson
+mroom tracker find sentry:1001               # the issues whose description holds the marker for an alert
+mroom tracker owned SHOP-12                  # whether the token's user filed the issue
+mroom tracker comment SHOP-12 < note.md      # adds a comment; the body comes on stdin
+mroom tracker state SHOP-12 "In Review"      # the team's state of that name, in any case
+mroom tracker create --allow-create --title "Checkout fails" --state Triage --label bug < body.md
+mroom errors get SHOP-1A2                    # the error issue and its latest event
+mroom errors search 'is:unresolved' --environment production --period 24h --limit 50
+mroom errors new 40 --environment production # new, regressed and escalating issues of the last 40 minutes
+mroom errors resolve SHOP-1A2
+```
+
+```toml
+[issues]
+tracker = "linear"                 # linear | none
+id_pattern = "SHOP-[0-9]+"
+team = "SHOP"                      # where `create` files issues (Linear: the team's key)
+token_env = "LINEAR_API_KEY"       # the default
+
+[errors]                           # leave the table out for no error tracker
+provider = "sentry"
+org = "example-org"
+region = "us"                      # us | de: where the organisation's data is
+id_pattern = "SHOP-[A-Z0-9]+"
+token_env = "SENTRY_AUTH_TOKEN"    # the default
+```
+
+- **Tokens** come only from the environment variable `token_env` names, never from a file. Its name ends
+  in `_TOKEN` or `_API_KEY`, is not one of `MROOM_*`, `GH_*`, `GITHUB_*`, `AWS_*`, `FORGE_*` or `SSH_*`,
+  and the two differ, so a changed `mroom.toml` cannot send another secret. A missing or empty token fails
+  with the variable's name, never its value. The token reaches curl on stdin, never a
+  command line, and an answer that echoes it has it cut out of the message.
+- **Hosts are fixed**: `api.linear.app`, and `<region>.sentry.io` for the organisation in `errors.org`.
+  No URL comes from config, so a changed `mroom.toml` cannot send a token elsewhere.
+- **Listing** needs `--mine` or `--label`, so it never reads a whole backlog. It takes the `--limit`
+  (50, at most 250) most recently updated issues, in `issues.team` when that is set, then sorts
+  them by priority. `get` says whether the issue is assigned to the token's user (`assigned_to_me`).
+- **Finding** an error's issue reads the hidden marker the persona puts in each issue it files,
+  one per alert: `<!-- mroom-alert key=sentry:1001 -->`, where the key is the error tracker and the
+  error issue's numeric id, and a later alert adds `:<kind>:...` after the id. Linear's search is a
+  substring match, so `find` checks each description again and keeps an issue only when the marker
+  ends there or goes on with `:`; the marker for `sentry:100` never finds `sentry:1001`'s issue. It
+  reads every page, in `issues.team` when that is set, and lists the issues in every state,
+  archived ones too, the first filed at the top, each with its `keys`: the keys of its markers that
+  are this error's.
+- **Creating an issue** needs `--allow-create`; without it, nothing is sent. It files in `issues.team`
+  and uses labels that already exist, of that team or the whole workspace (not a parent team's); mroom
+  never creates a label.
+- **Bodies** come on stdin, so the guard sees the file a body is read from, and are sent as they are,
+  up to 64 KiB. A longer one, one with a NUL byte, or one that holds the tracker's token is refused,
+  never cut short. A title that holds the token is refused too.
+- **Retries**: a 429 (or Linear's `RATELIMITED`) waits for `Retry-After`, or the latest rate-limit
+  reset header Linear or Sentry sends, from 1 to 120 seconds (20 when there is none). A request that never
+  left (no host, no connection) is retried too. A read, or a write that does the same thing twice (a
+  state, a resolve), is also retried after a 5xx or no answer. A comment or a create never is, since it
+  may have gone through. No other 4xx is retried, and no redirect is followed (a merged Sentry issue
+  says which one it moved to). At most 4 calls.
+- **Lists are read to the end**: a Linear connection page by page, a Sentry search by its `Link`
+  cursor up to `--limit`. A page that cannot be read fails the call, so a blip never reads as a short
+  list. A search fails, too, when the token sees no project, since Sentry then answers `[]` for anything.
+- **Exit codes**: `0` done, `1` the tracker or the config failed, `2` a usage error, `3` no tracker
+  (`issues.tracker = "none"`) or no `[errors]` table, so a skill can leave its note on the pull request
+  instead.
+
+Sentry needs a user or internal integration token; an organisation auth token cannot read issues. It
+needs Issue & Event: read, and Organization: read for `search`, which first checks that the token sees
+a project. `resolve` also needs Issue & Event: write.
+
+## Alert triage
+
+The persona (design D23) files the error tracker's alerts into the tracker, one issue per alert key,
+and pings a person only when triage itself cannot run. It is a reusable workflow,
+`.github/workflows/triage.yml`, with the composite action `actions/triage`, which the app calls from a
+workflow of its own:
+
+```yaml
+# .github/workflows/alerts.yml
+name: Alert triage
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      live:
+        description: Write to the tracker (unticked, a dry run prints what it would file)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  triage:
+    permissions:
+      actions: write # the switch-off job turns this workflow off when the tracker drops the markers
+      contents: read
+    uses: milroyfraser/mroom/.github/workflows/triage.yml@v0.5.0 # the first release with alert triage
+    with:
+      live: ${{ github.event_name == 'schedule' || inputs.live }}
+    secrets:
+      MROOM_TRACKER_TOKEN: ${{ secrets.MROOM_TRACKER_TOKEN }}
+      MROOM_ERRORS_TOKEN: ${{ secrets.MROOM_ERRORS_TOKEN }}
+      MROOM_CHAT_TOKEN: ${{ secrets.MROOM_CHAT_TOKEN }}
+```
+
+```toml
+[persona]
+name = "Agent"                     # the name on every issue, comment and ping it writes
+label = "found-by-agent"           # on every issue it files; it must exist, mroom never creates labels
+state = "Triage"                   # the state it files issues in (default: the team's)
+environment = "production"         # the error tracker's environment it reads (the default)
+channel = "C0123456789"            # the chat channel it pings when triage cannot run (a Slack channel id)
+```
+
+- **Alerts.** Every 15 minutes it reads the error issues that are new, regressed or escalating in the
+  last 40 minutes (`mroom errors new`), since GitHub often starts a scheduled run late. An alert's key is
+  `sentry:<id>` for a new issue, and `sentry:<id>:regressed:<day>` or `sentry:<id>:escalating:<day>`
+  for a later alert of it. Every alert of the window is looked up, the most urgent first, but at most 10
+  issues are filed a run; the rest wait for the next run, which files them while they are still in its
+  window. Each of the three searches takes at most 100 issues, and the summary says when one was full:
+  alerts past that, or past a longer gap, are missed, so look at the error tracker then.
+- **One issue per alert key.** The issue holding an alert carries its hidden marker, `<!-- mroom-alert
+  key=sentry:1001 -->`. Triage looks for the key with `mroom tracker find` and files an issue only when
+  no issue in any state holds it, archived ones too, so a second run files nothing new, and a cancelled
+  issue is not filed again. A later alert of an error is a new issue that links the 20 newest of the
+  earlier ones, and a comment on the newest earlier one when the persona filed it. The alerts of one
+  error in one run go on one issue. Until an issue of the same kind for that error is done, a later
+  alert counts as filed, so a regression that goes on for days, or one a person cancelled, is one issue;
+  once that issue is done, the next regression is filed.
+- **What an issue holds.** The error, its counts, releases and culprit, and the latest event's exception
+  and in-app frames, all redacted first (`lib/core/text.py`): known token and key shapes, bearer tokens,
+  `password=`, `secret=`, `token=` and `api_key=` values, a URL's password, email addresses, phone
+  numbers and IBANs. It knows shapes, so a secret of no known shape can still pass. The run's summary is
+  redacted the same way. An issue shows the last 3 chained exceptions with 8 in-app frames each, takes
+  out control and text-direction characters, and is cut at 28000 bytes.
+- **The guard** (`mroom persona`) is the persona's only way to write. It files issues only for an alert
+  key of this run, in `issues.team`, `persona.state` and with `persona.label`, and assigns no one. It
+  comments only on an issue the tracker says the persona's token filed (`mroom tracker owned`), and has
+  no command to edit, close, assign, label or delete. An issue filed by an app rather than a user has no
+  creator, so it never counts as the persona's. The markers are its own: it escapes every `<!--` in a
+  body, so no text, however it nests one, can hold a marker, and it writes one per key; reading an issue
+  back, it stops as for a lost marker when it finds one it did not write. It refuses text holding a
+  token, defangs links to hosts other than GitHub's, the trackers' and the app's, and caps a run at 10
+  issues and 30 comments. A dispatch is a dry run unless `live` is ticked: it prints what it would file,
+  and writes nothing.
+- **When the tracker drops the markers.** After each issue it files, the guard reads the issue back.
+  When a marker is missing, the next run could not find the issue and would file it again, every 15
+  minutes. It also searches for each issue as the next run will, three times, since a tracker's search
+  may read another form of the description than the one it stores; an issue the search cannot find
+  counts as lost too. So nothing more is written in that run, and the workflow's switch-off job turns
+  the app's workflow off (`gh workflow disable`) and pings `persona.channel` once. To recover, read the
+  issue's description through the tracker's API and check the `<!-- mroom-alert ... -->` lines; if the
+  tracker strips HTML comments, or stores them but leaves them out of its search (check how its
+  description filter reads the text), the marker's format must change before triage runs again. Merge
+  any duplicates, then turn the workflow on again (`gh workflow enable alerts.yml`). If the workflow
+  cannot be turned off, the ping asks a person to do it by hand, and repeats every run until someone
+  does. A failed read of the issue is not a lost marker: the run fails, and the alarm says so.
+- **The alarm.** When a live run's triage job fails (the error tracker or the tracker could not be read
+  or written, the guard refused an alert, or a step failed or ran past its 11-minute limit), the alarm
+  job pings `persona.channel` with the failed step and the run, at most once a UTC day. Its dedupe is
+  the tracker's: before the ping it files the day's issue, keyed `triage:<yyyymmdd>`, and a day whose
+  issue exists sends nothing. When that issue cannot be filed, nothing is sent: a missed ping, never one
+  every 15 minutes.
+- **Without a tracker** (`issues.tracker = "none"`), nothing is filed: the run's summary lists the
+  window's alerts. The alarm then has nowhere to record its ping, and sends none; nor does it without a
+  chat token or `persona.channel`. A run GitHub cancelled, such as a waiting one a newer run replaced,
+  raises no alarm. Without an `[errors]`
+  table there is nothing to triage.
+- **Secrets** are the `persona` environment's (design 8.8; default branch only): the persona's own
+  tracker token (D23, never a developer's), a read-only error-tracker token, and the chat bot's token
+  (`chat:write`, invited to the channel). Keep them in the `persona` environment only, never as
+  repository or organisation secrets: the called jobs read the environment's own, but where the
+  environment has none, the caller's would be used, and a repository secret is readable from any
+  branch. Each job checks out only the default branch's `mroom.toml`
+  and mroom at the commit of the workflow; the triage job's token reads nothing but the repository,
+  and only the switch-off job may turn workflows off.
+
+## Workflow skills
+
+The plugin carries the agent workflow as skills and commands. Each is a Markdown file in `plugin/`
+that Claude Code reads; in a session they are `/mroom:<name>`.
+
+| Skill or command | What it does |
+|---|---|
+| `/mroom:refine` | lists my open issues, tags each with a Design value, and runs `/mroom:implement` on the ones I confirm |
+| `/mroom:deliver <id>` | a design gate when the issue needs one (a canvas, approved in a comment), then `/mroom:implement`; resumes stopped work |
+| `/mroom:implement <id>` | one issue to a PR in review: a worktree, the change, the affected tests, a draft PR, CI and QA on the PR's environment, then stop |
+| `/mroom:fix-issue <error id>` | one error issue to a fix in review: reads the error and its latest event, finds the issue the persona filed (`mroom tracker find`), works on a branch that names both ids, reproduces the error with a failing test before it fixes it, and links the error issue only through `Fixes <error id>` lines, on the fixing commit and in the PR body; never resolves it |
+| `/mroom:release` | only when a person asks: what ships, what to watch, the notes, one question, then a **draft** release that the person publishes; then a read-only watch of the deploy |
+| `/mroom:correct` | finds a mistake agents repeat, and adds the highest check that stops it (adapted from pstack, MIT) |
+| `/mroom:forge` | Forge through `forge-api` only: reads free, writes asked first, secrets never printed |
+| `/mroom:clean-review` | a clean-code review by a fresh sub-agent, with a verdict; never commits |
+| `/mroom:crap` | CRAP triage of the backend methods you changed, with the app's `bin/crap` |
+
+- **The tracker** is reached only through `mroom tracker` and `mroom errors`. When either exits 3
+  (no tracker), the skill puts its note on the pull request instead.
+- **Rules in every skill:** an agent never merges, approves, deploys or releases; a person does.
+  Tracker writes are only the state of the issue being worked and comments on it. A skill asks
+  before it files an issue or a label, never touches production, and never reads a secret.
+- **Release asks twice:** once in the session, and again through the `ask` rule on
+  `gh release create` in `settings/base.json`. It only ever drafts; publishing is a person's click.
+- **From `mroom.toml`:** the issue id and link (`issues.id_pattern`, `issues.url`), the started and
+  review states (`issues.state_started`, `issues.state_review`; `In Progress` and `In Review` by
+  default), the test command and database (`tests.*`), the required checks (`pr.required_checks`),
+  the QA zone (`qa.zone`), and, for a release, the tag's prefix and the production origin whose
+  `app.version_path` it reads (`release.tag_prefix`, `release.production_url`).
+
+```toml
+[issues]
+state_started = "In Progress"
+state_review = "In Review"
+
+[release]
+production_url = "https://app.example.dev"   # an https origin, no path
+tag_prefix = ""                              # "release-" gives release-v1.2.3
+```
+
+The settings fragment `base.json` allows the adapters' reads (`mroom tracker get`, `list`,
+`find`, `owned`, `backend`; `mroom errors get`, `search`, `new`, `backend`; `mroom persona find`,
+`owned`) and asks before `mroom tracker create`, `mroom errors resolve` and the guard's writes
+(`mroom persona create`, `comment`). `tests/skills-test.sh` checks the skills as a contract: their frontmatter,
+that every `mroom` command, skill and key they name exists, the rules above, the release's draft and
+question, that no skill resolves an error issue, and that none names a host, an IP address, an id or
+an email address. For `fix-issue` it also checks that the branch names both ids, that a failing test
+comes before the fix, that the only links are the `Fixes` lines, and that it stops at a PR in review.
+Names of people and projects come from `$MROOM_PRIVATE_WORDS`, a file of patterns kept outside the
+repository.
+
+Not here yet: `blast-radius` (later in phase 3), the principle skills (named in the
+skills, read when installed), and `verify-app` with `qa-engineer` (phase 2b).
 
 ## QA gate
 
@@ -1166,6 +1464,8 @@ and fill the placeholders below.
 | `actions/setup-frontend/` | Node, pnpm (for pnpm), the package store (restore only) and the frontend's install |
 | `actions/e2e-frontend-build/` | the e2e build: restored when its inputs are unchanged, built otherwise |
 | `scripts/vitest-file-times.mjs` | a vitest reporter that records each test file's time |
+| `workflows/deploy-production.yml` | the production deploy: the `release` branch at the tag, then `deploy-verify` ([below](#the-production-deploy)) |
+| `scripts/release-branch.sh` | points the `release` branch at a release tag's commit, for the deploy |
 
 What they do, in short:
 
@@ -1228,6 +1528,62 @@ supported yet: the Node steps would build their paths from the repository's root
 | `<<fill:frontend_src>>` | the frontend's source folder inside its own: `src` for a separate SPA, `resources` for Vite inside Laravel (then add the other folders Tailwind scans to the build's key) |
 | `<<fill:e2e_build>>` | the build without source maps but minified, with the env it needs, such as `VITE_API_URL=http://127.0.0.1:8000 pnpm exec vite build --sourcemap false` |
 | `<<fill:e2e_command>>` | the browser tests, failing when none are found, such as `php artisan test --testsuite=Browser --fail-on-empty-test-suite` |
+| `<<mroom_version>>` | the mroom release whose actions the deploy uses, such as `v0.6.0` (the one `mroom init` runs as) |
+| `<<fill:backend_origin>>` | the Laravel app's production origin, such as `https://api.shop.example.dev` |
+| `<<fill:frontend_origin>>` | a separate SPA's production origin, whose `/version.json` the deploy also waits on; empty for none |
+| `<<fill:tag_pattern>>` | the release tags, as a bash regular expression, such as `^v[0-9]+\.[0-9]+\.[0-9]+$` |
+
+### The production deploy
+
+`workflows/deploy-production.yml` ships a release tag, never a branch tip, and waits until production runs it
+([design section 10](docs/design.md#10-cicd-defaults-measured), patterns 8 to 10). Publishing a GitHub release
+starts it; a person deploys another tag, a rollback included, with
+`gh workflow run deploy-production.yml --ref <tag>`. The run takes no input: the tag is the ref it runs for.
+
+- **`release`**, in the GitHub environment `production`: checks out the tag with the deploy key, and
+  `scripts/release-branch.sh` points the `release` branch at the tag's commit. It refuses a run that is not from a
+  tag matching `<<fill:tag_pattern>>`, a release whose tag is not the run's, and a tag whose commit is not on the
+  default branch. The branch moves forward for a release, back for a rollback (with a warning), or stays for a
+  re-run; when someone else moved it (to a commit off the default branch, or neither before nor after the tag),
+  the job stops for a person. Then, when `MROOM_DEPLOY_HOOK` is set, it calls the host's deploy hook. This job
+  builds and installs nothing, and runs no action but `actions/checkout`, since it holds the key.
+- **`verify`**, with no environment and no secret: `deploy-verify` asks `app.version_path` (and a separate
+  SPA's `/version.json`) with a query no cache has seen, every 10 seconds, until each reports the tag's commit
+  three times in a row with `/up` answering 200, and fails after 10 minutes. A fixed sleep and a health ping
+  pass when the host's deploy failed, since the old release answers too; the commit cannot. When the app names
+  another release for the right commit (two tags on one commit, or no tag found), it warns and still passes.
+- **One deploy at a time:** the whole run takes the group `deploy-production` and never cancels one in
+  progress, so a second deploy waits until the first is verified.
+
+What the app sets up once:
+
+1. **The version endpoint** (design section 9): `app.version_path` answers `{"release": "<tag>", "commit":
+   "<sha>"}` with `Cache-Control: no-store`, from a file the host's deploy script writes from the code it
+   checked out (`git describe --tags --exact-match`, `git rev-parse HEAD`), never from config set separately.
+   A separate SPA's build writes the same to `version.json`.
+2. **The host deploys `release`:** the Forge site's branch is `release`, with Quick Deploy on, or Quick Deploy off
+   and the site's deploy hook URL in the `production` secret `MROOM_DEPLOY_HOOK` (one or the other: with both, it
+   deploys twice). A separate SPA's host deploys the same branch, or the app adds a job of its own between
+   `release` and `verify` that builds the tag. The deploy script restarts the workers and clears caches, so a
+   rollback runs the old code.
+3. **A deploy key** with write access (`ssh-keygen -t ed25519 -N '' -f release-key`; Settings, Deploy keys, Allow
+   write access), its private half in the `production` secret `MROOM_RELEASE_KEY`, and no other deploy key with
+   write access.
+4. **The GitHub environment `production`:** deployment branches and tags limited to tags matching the release
+   tags (such as `v*`), required reviewers who are people, and "Prevent self-review", so each deploy is approved
+   by a person other than the one who started it (design 8.8, D22).
+5. **A ruleset on `release`** (target `refs/heads/release`): restrict creations, updates and deletions, and block
+   force pushes, with deploy keys as the only bypass. Without it, any account with Write, the agents' included,
+   could push the branch production deploys.
+6. **Who may create release tags:** a tag ruleset, so that only people can make one. The environment admits any
+   tag that matches, and the workflow file at that tag is the one that runs with the deploy key.
+
+A re-run of the same tag leaves the branch where it is: Quick Deploy then deploys nothing and `verify` passes at
+once, while a deploy hook deploys again.
+
+`actions/deploy-verify` can also be used on its own, from any job after a deploy: its inputs are `origin`,
+`frontend-origin`, `commit` (the full SHA), `tag`, `health-path` (`/up`; empty for none), `timeout` (`10m`),
+`interval` (`10s`) and `config` (the app's `mroom.toml`, for `app.version_path`).
 
 ## Regression label
 
