@@ -1555,6 +1555,12 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     box.style.borderLeftColor = "";
     box.removeAttribute("title");
     let n = nextMeta && nextMeta.title ? nextMeta : null;
+    /* A next step that names a card which is done or gone is stale (the step it named has happened):
+       ignore it and fall back to the first ready card, so the box never freezes on finished work. */
+    if (n) {
+      const named = [].concat(n.cardId ? n.cardId : [], Array.isArray(n.cardIds) ? n.cardIds : []).map(String);
+      if (named.length && !named.some((id) => todos.some((t) => String(t.id) === id && t.status !== "done"))) n = null;
+    }
     if (!n) {
       /* Anything waiting on the developer counts: the first open to-do by rank that is a decision or a "now",
          unless a PR card whose current step is theirs comes first. */
