@@ -8,7 +8,8 @@
 #
 # The dedupe is the tracker's, as triage's is: the day's alarm is an issue the persona files through its
 # guard, keyed triage:<yyyymmdd>, and it is filed before the message goes out. A day whose issue the
-# persona filed sends nothing (an issue someone else wrote the key into does not count); a failure to file it sends nothing either, so a failure costs a missed ping, never one
+# persona filed sends nothing (an issue someone else wrote the key into does not count); a failure to
+# file it, or to tell who filed one, sends nothing either, so a failure costs a missed ping, never one
 # every 15 minutes. Without a tracker (mroom tracker exits 3) there is nowhere to record the ping, and
 # without persona.channel nowhere to send it: the alarm says so in the job's log and sends nothing.
 #
