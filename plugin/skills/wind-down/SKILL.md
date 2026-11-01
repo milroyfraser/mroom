@@ -68,7 +68,8 @@ the Room's `learnings` collection:
 
 The page shows one learning at a time on top of "Your next step", with "Learning n of N". Each
 action item has a check box: the developer ticks the ones they confirm and presses the button twice
-(the first click arms it, the second saves). The page writes `status: "done"` and `confirmed` (the
+(the first click arms it, the second saves; the next card shows at once while the save finishes in
+the background). The page writes `status: "done"` and `confirmed` (the
 indexes of the ticked items in `actions`) and shows the next card. "Back" opens the previous card
 with its saved ticks so the developer can change them; saving there steps forward through the
 cards already read. Keep the learning generic when it

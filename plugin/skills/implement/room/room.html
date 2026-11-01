@@ -727,7 +727,7 @@ html[data-winddown] body::before{background:
      and pressing the button twice saves them as `confirmed` (indexes into actions) and moves to the next card.
      "Back" opens the previous card with its saved ticks, to change them. The first one not "done" (by order) shows above the next step; "Next learning"
      marks it done. Rows are data: every field lands as text. */
-  let learnings = [], windDown = null, learnPick = { id: null, picked: new Set(), armed: false }, learnView = null;
+  let learnings = [], windDown = null, learnPick = { id: null, picked: new Set(), armed: false }, learnView = null, learnLocal = {}, learnErr = null;
 
   /* The wind-down sky, built once and shown while the mood is on. Fixed star spots, staggered twinkles. */
   function windSky(on) {
@@ -762,7 +762,7 @@ html[data-winddown] body::before{background:
     if (on) document.documentElement.dataset.winddown = "1"; else delete document.documentElement.dataset.winddown;
     windSky(on);
     box.replaceChildren();
-    const list = learnings.slice().sort((x, y) => (Number(x.order) || 0) - (Number(y.order) || 0));
+    const list = learnings.map((l) => (learnLocal[l.id] ? Object.assign({}, l, learnLocal[l.id]) : l)).sort((x, y) => (Number(x.order) || 0) - (Number(y.order) || 0));
     const open = list.filter((l) => l.status !== "done");
     /* learnView is the card the developer stepped back to (Back); otherwise the first card not done. */
     const viewed = learnView ? list.find((l) => l.id === learnView) : null;
@@ -807,6 +807,7 @@ html[data-winddown] body::before{background:
     const head = el("div", "lchead");
     head.append(el("span", null, "Retrospective" + (cur.status === "done" ? " · editing" : "")), el("span", null, "Learning " + (idx + 1) + " of " + list.length));
     box.append(head, el("h3", null, String(cur.title || "")));
+    if (learnErr) box.append(el("p", "wdnote", learnErr));
     const obs = cur.observation || cur.happened;
     if (obs) { const p = el("div", "lcpart"); p.append(el("b", null, "Observation"), el("p", null, String(obs))); box.append(p); }
     const acts = Array.isArray(cur.actions) ? cur.actions.filter((a) => a && a.text) : [];
@@ -845,15 +846,20 @@ html[data-winddown] body::before{background:
       /* Two clicks: the first arms the button, the second saves the ticked actions and moves on. */
       btn.addEventListener("click", async () => {
         if (!learnPick.armed) { learnPick.armed = true; label(); setTimeout(() => { if (learnPick.id === cur.id && learnPick.armed) { learnPick.armed = false; label(); } }, 5000); return; }
-        btn.disabled = true;
+        /* Move on at once: the save is shown as done locally (learnLocal) and written in the background,
+           so the button never waits on the network. A failed save puts the card back with a note. */
         const confirmed = Array.from(learnPick.picked).sort((x, y) => x - y);
-        try {
-          await db.doc("learnings/" + cur.id).update({ status: "done", doneAt: new Date().toISOString(), confirmed });
-          learnPick = { id: null, picked: new Set(), armed: false };
-          /* After editing an earlier card, step forward through the cards already read; else back to the first unread. */
-          learnView = nextCard && nextCard.status === "done" && cur.status === "done" ? nextCard.id : null;
-        }
-        catch (e) { btn.disabled = false; learnPick.armed = false; label(); }
+        const patch = { status: "done", doneAt: new Date().toISOString(), confirmed };
+        const wasDone = cur.status === "done";
+        learnLocal[cur.id] = patch;
+        learnPick = { id: null, picked: new Set(), armed: false };
+        /* After editing an earlier card, step forward through the cards already read; else back to the first unread. */
+        learnView = nextCard && nextCard.status === "done" && wasDone ? nextCard.id : null;
+        learnErr = null;
+        renderLearning();
+        db.doc("learnings/" + cur.id).update(patch)
+          .catch(() => { learnErr = "Couldn't save that card. Please try again."; learnView = cur.id; })
+          .finally(() => { delete learnLocal[cur.id]; renderLearning(); });
       });
       row.append(btn);
     }
