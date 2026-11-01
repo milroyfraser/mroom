@@ -512,6 +512,8 @@ body[data-winddown]{--bg:var(--wd-bg);--surface:var(--wd-surface);background:var
 .learncard .lcacts{list-style:none;padding-left:0}
 .learncard .lcact{display:flex;gap:10px;align-items:flex-start;cursor:pointer}
 .learncard .lcact input{margin-top:3px;accent-color:var(--wd-accent);flex:none;width:16px;height:16px}
+.learncard .lcnav{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.learncard .lcback{border-color:var(--line);color:var(--muted)}
 .learncard .wdnote{font-size:13px;color:var(--muted);margin:0}
 </style>
 
@@ -682,9 +684,10 @@ body[data-winddown]{--bg:var(--wd-bg);--surface:var(--wd-surface);background:var
   /* Wind-down and the retrospective. meta/winddown {on, note, paused:[...]} puts the page in its dusk mood;
      each learnings doc {order, title, observation, actions:[{text,rec}], status} is one card: what was seen,
      then the recommended action items, each with Claude's recommendation and a check box. Ticking items
-     and pressing the button twice saves them as `confirmed` (indexes into actions) and moves to the next card. The first one not "done" (by order) shows above the next step; "Next learning"
+     and pressing the button twice saves them as `confirmed` (indexes into actions) and moves to the next card.
+     "Back" opens the previous card with its saved ticks, to change them. The first one not "done" (by order) shows above the next step; "Next learning"
      marks it done. Rows are data: every field lands as text. */
-  let learnings = [], windDown = null, learnPick = { id: null, picked: new Set(), armed: false };
+  let learnings = [], windDown = null, learnPick = { id: null, picked: new Set(), armed: false }, learnView = null;
   function renderLearning() {
     const box = document.getElementById("learnCard");
     if (!box) return;
@@ -693,27 +696,38 @@ body[data-winddown]{--bg:var(--wd-bg);--surface:var(--wd-surface);background:var
     box.replaceChildren();
     const list = learnings.slice().sort((x, y) => (Number(x.order) || 0) - (Number(y.order) || 0));
     const open = list.filter((l) => l.status !== "done");
-    const cur = open[0];
-    if (!cur && !on) { box.hidden = true; return; }
+    /* learnView is the card the developer stepped back to (Back); otherwise the first card not done. */
+    const viewed = learnView ? list.find((l) => l.id === learnView) : null;
+    if (learnView && !viewed) learnView = null;
+    const cur = viewed || open[0];
+    const idx = cur ? list.indexOf(cur) : list.length;
+    const back = (to) => { const b = el("button", "lcback", "← Back"); b.type = "button"; b.addEventListener("click", () => { learnView = to.id; learnPick = { id: null, picked: new Set(), armed: false }; renderLearning(); }); return b; };
+    if (!cur && !on && !list.length) { box.hidden = true; return; }
     box.hidden = false;
     if (on) {
       const n = el("p", "wdnote", "Winding down" + (windDown.note ? " · " + String(windDown.note) : "") + (Array.isArray(windDown.paused) && windDown.paused.length ? " · Paused: " + windDown.paused.map(String).join("; ") : ""));
       box.append(n);
     }
-    if (!cur) { if (list.length) box.append(el("p", "wdnote", "Retrospective done: " + list.length + " learnings read.")); return; }
+    if (!cur) {
+      if (list.length) { const r = el("div", "lcrow"); r.append(el("span", "wdnote", "Retrospective done: " + list.length + " learnings read.")); if (!readOnly && db) r.append(back(list[list.length - 1])); box.append(r); }
+      return;
+    }
     const head = el("div", "lchead");
-    head.append(el("span", null, "Retrospective"), el("span", null, "Learning " + (list.indexOf(cur) + 1) + " of " + list.length));
+    head.append(el("span", null, "Retrospective" + (cur.status === "done" ? " · editing" : "")), el("span", null, "Learning " + (idx + 1) + " of " + list.length));
     box.append(head, el("h3", null, String(cur.title || "")));
     const obs = cur.observation || cur.happened;
     if (obs) { const p = el("div", "lcpart"); p.append(el("b", null, "Observation"), el("p", null, String(obs))); box.append(p); }
     const acts = Array.isArray(cur.actions) ? cur.actions.filter((a) => a && a.text) : [];
-    if (learnPick.id !== cur.id) learnPick = { id: cur.id, picked: new Set(), armed: false };
+    if (learnPick.id !== cur.id) learnPick = { id: cur.id, picked: new Set(cur.status === "done" && Array.isArray(cur.confirmed) ? cur.confirmed.map(Number).filter((i) => i >= 0 && i < acts.length) : []), armed: false };
+    const nextCard = list[idx + 1];
+    const goesTo = nextCard && nextCard.status === "done" ? "next" : open.filter((l) => l !== cur).length ? "next" : "finish";
     const canWrite = !readOnly && !!db;
     const btn = el("button");
     btn.type = "button";
     const label = () => {
       const n = learnPick.picked.size;
-      btn.textContent = learnPick.armed ? "Click again to confirm" : n ? "Confirm " + n + (n === 1 ? " action" : " actions") + (open.length > 1 ? " and go to next" : " and finish") : open.length > 1 ? "None confirmed, go to next" : "None confirmed, finish";
+      const tail = goesTo === "next" ? " and go to next" : " and finish";
+      btn.textContent = learnPick.armed ? "Click again to confirm" : n ? (cur.status === "done" ? "Save " : "Confirm ") + n + (n === 1 ? " action" : " actions") + tail : "None confirmed" + (goesTo === "next" ? ", go to next" : ", finish");
     };
     if (acts.length) {
       const p = el("div", "lcpart"); const ul = el("ul", "lcacts");
@@ -727,7 +741,11 @@ body[data-winddown]{--bg:var(--wd-bg);--surface:var(--wd-surface);background:var
       p.append(el("b", null, "Recommended action items · tick the ones you confirm"), ul); box.append(p);
     }
     const row = el("div", "lcrow");
-    row.append(el("span", "wdnote", open.length - 1 ? (open.length - 1) + " more after this" : "Last one"));
+    const left = el("span", "lcnav");
+    if (idx > 0 && !readOnly && db) left.append(back(list[idx - 1]));
+    const rest = open.filter((l) => l !== cur).length;
+    left.append(el("span", "wdnote", rest ? rest + " not read yet" : "All read after this"));
+    row.append(left);
     if (canWrite) {
       label();
       /* Two clicks: the first arms the button, the second saves the ticked actions and moves on. */
@@ -735,7 +753,12 @@ body[data-winddown]{--bg:var(--wd-bg);--surface:var(--wd-surface);background:var
         if (!learnPick.armed) { learnPick.armed = true; label(); setTimeout(() => { if (learnPick.id === cur.id && learnPick.armed) { learnPick.armed = false; label(); } }, 5000); return; }
         btn.disabled = true;
         const confirmed = Array.from(learnPick.picked).sort((x, y) => x - y);
-        try { await db.doc("learnings/" + cur.id).update({ status: "done", doneAt: new Date().toISOString(), confirmed }); learnPick = { id: null, picked: new Set(), armed: false }; }
+        try {
+          await db.doc("learnings/" + cur.id).update({ status: "done", doneAt: new Date().toISOString(), confirmed });
+          learnPick = { id: null, picked: new Set(), armed: false };
+          /* After editing an earlier card, step forward through the cards already read; else back to the first unread. */
+          learnView = nextCard && nextCard.status === "done" && cur.status === "done" ? nextCard.id : null;
+        }
         catch (e) { btn.disabled = false; learnPick.armed = false; label(); }
       });
       row.append(btn);
