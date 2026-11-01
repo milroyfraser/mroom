@@ -61,12 +61,17 @@ areas() {
 case "\$1" in fetch) exit 0 ;; diff) cat "$T/files" ;; *) exit 1 ;; esac
 EOF
   chmod +x "$T/bin/git"
-  python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["runs"]["steps"][0]["run"])' \
-    "$TPL/actions/changed-areas/action.yml" >"$T/areas.sh"
+  areas_script
   : >"$T/output"
   run env PATH="$T/bin:$PATH" EVENT="$event" BACKEND_DIR="$back" FRONTEND_DIR="$front" GITHUB_OUTPUT="$T/output" \
     GITHUB_SHA=0 bash "$T/areas.sh"
   out="$(tr '\n' ' ' <"$T/output")"
+}
+
+# areas_script: the changed-areas step's script, in $T/areas.sh.
+areas_script() {
+  python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["runs"]["steps"][0]["run"])' \
+    "$TPL/actions/changed-areas/action.yml" >"$T/areas.sh"
 }
 
 t_changed_areas_by_folder() {
@@ -107,6 +112,71 @@ t_changed_areas_for_one_folder_and_none() {
 t_changed_areas_outside_a_pull_request_is_everything() {
   areas push api web README.md
   expect_out "backend=true frontend=true e2e=true "
+}
+
+# pr_areas <change> [<backend dir> <frontend dir>]: a real repository with a backend file, a frontend file and a
+# note as its base commit, and what the function <change> stages there as a pull request's commit on top of it.
+# Runs the changed-areas script on it with real git, in a UTF-8 locale as on a runner, leaving out only its fetch
+# (both commits are local), and leaves its outputs in $out as one line. The folders are api and web by default.
+pr_areas() {
+  local real repo="$T/repo-$1" back="${2:-api}" front="${3:-web}"
+  real="$(command -v git)"
+  mkdir -p "$T/bin" "$repo/api/app" "$repo/web/src" "$repo/docs"
+  printf '#!/usr/bin/env bash\n[ "$1" = fetch ] && exit 0\nexec %q -C %q "$@"\n' "$real" "$repo" >"$T/bin/git"
+  chmod +x "$T/bin/git"
+  printf '<?php\n' >"$repo/api/app/Order.php"
+  printf 'export {};\n' >"$repo/web/src/main.ts"
+  printf 'notes\n' >"$repo/docs/notes.md"
+  (cd "$repo" && git init -q -b main . && git add -A && commit base && "$1" && commit change) ||
+    fail "could not make the repository for $1"
+  areas_script
+  : >"$T/output"
+  run env PATH="$T/bin:$PATH" LC_ALL=C.UTF-8 EVENT=pull_request BACKEND_DIR="$back" FRONTEND_DIR="$front" \
+    GITHUB_OUTPUT="$T/output" GITHUB_SHA=0 bash "$T/areas.sh"
+  out="$(tr '\n' ' ' <"$T/output")"
+}
+commit() {
+  git -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false -c core.hooksPath=/dev/null \
+    commit -qm "$1"
+}
+# A backend file moved out of the backend: git's rename detection lists it only under its new name, in docs/.
+move_out() { git mv api/app/Order.php docs/Order.php; }
+# A frontend file moved into the backend: both folders change, so both names must come through, one per line.
+move_across() { git mv web/src/main.ts api/main.ts; }
+# Names git quotes unless asked for them as they are: one with a byte above 0x7f, and one with a tab.
+odd_backend_name() { printf '<?php\n' >$'api/app/Caf\xc3\xa9.php' && git add -A; }
+odd_frontend_name() { printf 'export {};\n' >$'web/src/a\tb.ts' && git add -A; }
+# A newline splits a name in two, and its folder still counts.
+newline_name() { printf '<?php\n' >$'api/app/a\nb.php' && git add -A; }
+# A name that is not UTF-8, in the index only (some file systems refuse it), for an app in one folder: in a UTF-8
+# locale grep's "." matches no such byte.
+not_utf8_name() { git update-index --add --cacheinfo "100644,$(git hash-object -w --stdin </dev/null),"$'\xff'; }
+# A submodule in the backend that the pull request's .gitmodules marks `ignore = all`, beside a change to a note.
+ignored_submodule() {
+  printf '[submodule "lib"]\n\tpath = api/lib\n\turl = ./lib\n\tignore = all\n' >.gitmodules &&
+    printf 'more\n' >>docs/notes.md && git add .gitmodules docs/notes.md &&
+    git update-index --add --cacheinfo 160000,1111111111111111111111111111111111111111,api/lib
+}
+# A note moved within docs/ is still nothing the jobs test.
+move_note() { mkdir -p docs/old && git mv docs/notes.md docs/old/notes.md; }
+
+t_changed_areas_on_real_git_misses_no_path() {
+  pr_areas move_out
+  expect_out "backend=true frontend=false e2e=true "
+  pr_areas move_across
+  expect_out "backend=true frontend=true e2e=true "
+  pr_areas odd_backend_name
+  expect_out "backend=true frontend=false e2e=true "
+  pr_areas odd_frontend_name
+  expect_out "backend=false frontend=true e2e=true "
+  pr_areas newline_name
+  expect_out "backend=true frontend=false e2e=true "
+  pr_areas not_utf8_name . .
+  expect_out "backend=true frontend=true e2e=true "
+  pr_areas ignored_submodule
+  expect_out "backend=true frontend=false e2e=true "
+  pr_areas move_note
+  expect_out "backend=false frontend=false e2e=false "
 }
 
 t_the_measuring_report_suggests_a_split_with_rest_last() {
@@ -242,6 +312,7 @@ test_case areas-folder t_changed_areas_by_folder
 test_case areas-ci t_changed_areas_for_ci_files
 test_case areas-one t_changed_areas_for_one_folder_and_none
 test_case areas-push t_changed_areas_outside_a_pull_request_is_everything
+test_case areas-git t_changed_areas_on_real_git_misses_no_path
 test_case measure-report t_the_measuring_report_suggests_a_split_with_rest_last
 test_case measure-fail t_a_failing_suite_still_records_its_time
 # Rendering reads mroom.toml through bin/mroom, which needs python3 3.11+.

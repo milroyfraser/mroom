@@ -12,12 +12,14 @@ ORIG_PATH="$PATH"
 failures=0
 passes=0
 
-# setup <name>: a fresh world in $T with HOME at $T/home; clears every MROOM_* override.
+# setup <name>: a fresh world in $T with HOME at $T/home; clears every MROOM_* override, and every GIT_* variable:
+# git exports GIT_DIR, GIT_INDEX_FILE and others to hooks and to `rebase -x`, and with them a test's own repository
+# would be the one the tests run from.
 setup() {
   T="$TOP/$1"
   mkdir -p "$T/home"
   local var
-  for var in $(compgen -e | grep '^MROOM_' || true); do unset "$var"; done
+  for var in $(compgen -e | grep -E '^(MROOM|GIT)_' || true); do unset "$var"; done
   export HOME="$T/home" PATH="$ORIG_PATH"
   cd "$T" || exit 1
 }
