@@ -57,7 +57,8 @@ With no tracker, use `<type>/<short-slug>`, such as `fix/empty-seat-override`.
 2. `git fetch origin <default>`, then
    `git worktree add ../<repo>-<slug> -b <branch> origin/<default>` (or `git worktree add <path> <branch>`
    when the branch exists and is this repository's own, as `/mroom:deliver`, "Resume", step 2
-   checks). Work only in that folder.
+   checks). If the branch exists but is not known to be this repository's own, leave it, name it in
+   the report and stop: a person decides. Work only in that folder.
 3. Set it up the way the app's `CLAUDE.md` says: dependencies, `.env` from the app's example file,
    and its own test database (`tests.database_pattern`).
 4. Move the issue to the started state:
