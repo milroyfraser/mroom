@@ -14,8 +14,8 @@ trap 'chmod -R u+w "$TOP" 2>/dev/null; rm -rf "$TOP"' EXIT
 skip_unless has_box_tools "this host lacks bash 5, flock or GNU date, which box commands need"
 
 COMMIT=abc1234def5678abc1234def5678abc1234def56
-SITE="api-12.qa.example.test"
-WEB="go-12.qa.example.test"
+SITE="api.12.qa.example.test"
+WEB="12.qa.example.test"
 
 # world: box.env, a root-like copy of site-op in a folder the box user cannot change, the site user's home
 # with a live tree, and fakes for sudo, id and logger.
@@ -147,6 +147,27 @@ t_code_put_replaces_the_tree_and_keeps_env_and_storage() {
   run tail -n 1 "$T/sudo.log"; expect_out "-n -u shop_qa_12 -- $T/libexec/site-op unpack code $SITE backend $COMMIT"
   expect_true "a scratch folder stayed" no_leftovers
   expect_true "the put is not logged" has "$(gate_log_text)" "code-put 12: $COMMIT into $SITE"
+}
+
+# The version file is the gate's, never the tree's: a PR's own version.json, naming another commit or a link to a
+# file it should not read, is replaced, and env-sha reports what the gate recorded, whatever the site writes later.
+t_the_version_file_is_the_gates() {
+  world; repo_tarball
+  local top="$T/src/example-shop-${COMMIT:0:7}" other=ffffffffffffffffffffffffffffffffffffffff
+  printf '{"release": "v9.9.9", "commit": "%s"}\n' "$other" >"$top/backend/version.json"
+  tar -czf "$T/code.tgz" -C "$T/src" "example-shop-${COMMIT:0:7}"
+  put; expect_rc 0
+  run cat "$(site)/backend/version.json"; expect_out "{\"release\": null, \"commit\": \"$COMMIT\"}"
+  # A link inside the tree, which the data filter lets through (one to an absolute path refuses the tarball).
+  rm "$top/backend/version.json"; ln -s ../README.md "$top/backend/version.json"
+  tar -czf "$T/code.tgz" -C "$T/src" "example-shop-${COMMIT:0:7}"
+  put; expect_rc 0
+  expect_true "the version file is a link" eval '[ ! -L "$(site)/backend/version.json" ]'
+  run cat "$(site)/README.md"; expect_out readme
+  run cat "$(site)/backend/version.json"; expect_out "{\"release\": null, \"commit\": \"$COMMIT\"}"
+  # The site's code may write the file later: env-sha does not read it.
+  printf '{"release": null, "commit": "%s"}\n' "$other" >"$(site)/backend/version.json"
+  gate provision "env-sha 12"; expect_rc 0; expect_out_has "commit=$COMMIT"
 }
 
 t_a_second_put_replaces_the_first() {
@@ -343,10 +364,14 @@ t_unpacked_files_lose_setuid_and_dirs_stay_removable() {
 
 t_site_op_works_only_on_its_own_environments_sites() {
   world; repo_tarball
-  site_op shop_qa_12 unpack dist "$SITE" <"$T/code.tgz"; expect_rc 1; expect_err_has "is not this environment's go-12 site"
-  site_op shop_qa_12 unpack code "$WEB" backend "$COMMIT" <"$T/code.tgz"; expect_rc 1; expect_err_has "is not this environment's api-12 site"
-  site_op shop_qa_12 env-sha api-13.qa.example.test backend; expect_rc 1; expect_err_has "is not this environment's api-12 site"
-  site_op shop_qa_12 env-sha api-123.qa.example.test backend; expect_rc 1
+  site_op shop_qa_12 unpack dist "$SITE" <"$T/code.tgz"; expect_rc 1; expect_err_has "is not this environment's 12.<zone> site"
+  site_op shop_qa_12 unpack code "$WEB" backend "$COMMIT" <"$T/code.tgz"; expect_rc 1; expect_err_has "is not this environment's api.12.<zone> site"
+  site_op shop_qa_12 env-sha api.13.qa.example.test backend; expect_rc 1; expect_err_has "is not this environment's api.12.<zone> site"
+  site_op shop_qa_12 env-sha api.123.qa.example.test backend; expect_rc 1; expect_err_has "is not this environment's api.12.<zone> site"
+  site_op shop_qa_12 unpack dist 123.qa.example.test <"$T/code.tgz"; expect_rc 1; expect_err_has "is not this environment's 12.<zone> site"
+  # The names of before mroom 0.5.0 are no environment's sites now.
+  site_op shop_qa_12 env-sha api-12.qa.example.test backend; expect_rc 1; expect_err_has "is not this environment's api.12.<zone> site"
+  site_op shop_qa_12 unpack dist go-12.qa.example.test <"$T/code.tgz"; expect_rc 1; expect_err_has "is not this environment's 12.<zone> site"
   site_op forge env-sha "$SITE" backend; expect_rc 1; expect_err_has "forge is not a QA site's isolated user"
   expect_true "a refused call changed the site" unchanged
 }
@@ -421,7 +446,7 @@ t_probe_link_puts_a_link_to_site_op_at_each_web_root() {
   gate provision "probe-link 12 both"; expect_rc 1; expect_err_has "its second argument is api or web"
   gate provision "probe-link 12"; expect_rc 1
   # Only a QA site's own user puts it, in its own site.
-  site_op shop_qa_12 probe-link api-13.qa.example.test backend; expect_rc 1; expect_err_has "is not this environment's api-12 site"
+  site_op shop_qa_12 probe-link api.13.qa.example.test backend; expect_rc 1; expect_err_has "is not this environment's api.12.<zone> site"
   site_op forge probe-link "$WEB"; expect_rc 1; expect_err_has "forge is not a QA site's isolated user"
   # What site-op says is passed on only as a file's SHA-256 and path: a release whose site-op says anything else.
   mkdir -p "$T/release"
@@ -487,6 +512,7 @@ t_one_site_request_at_a_time_per_environment() {
 }
 
 test_case code-put t_code_put_replaces_the_tree_and_keeps_env_and_storage
+test_case version-file t_the_version_file_is_the_gates
 test_case second-put t_a_second_put_replaces_the_first
 test_case failed-step t_a_failed_step_puts_everything_back
 test_case concurrent-writes t_a_put_survives_the_sites_own_writes

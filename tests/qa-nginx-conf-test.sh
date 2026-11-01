@@ -14,7 +14,7 @@ CONF="$ROOT/actions/qa-up/nginx-conf"
 conf() { run bash -c 'printf "%s" "$2" | python3 -I "$1" "${@:3}"' _ "$CONF" "$2" "$1" "${@:3}"; }
 # domain <inside the server block> [<outside it>]: a domain's server block as Forge writes one.
 domain() {
-  printf '# FORGE CONFIG (DO NOT REMOVE!)\ninclude forge-conf/101/before/*;\n%s\nserver {\n    listen 443 ssl;\n    server_name api-7.qa.example.dev;\n    root /home/shop_qa_7/api-7.qa.example.dev/public;\n%s\n}\n' "${2:-}" "$1"
+  printf '# FORGE CONFIG (DO NOT REMOVE!)\ninclude forge-conf/101/before/*;\n%s\nserver {\n    listen 443 ssl;\n    server_name api.7.qa.example.dev;\n    root /home/shop_qa_7/api.7.qa.example.dev/public;\n%s\n}\n' "${2:-}" "$1"
 }
 SITE_CONF='    include forge-conf/101/site.conf;'
 
@@ -31,7 +31,7 @@ t_the_server_block_must_include_the_site_config_itself() {
   # In a server block inside another block, which is not the domain's own.
   conf includes $'http {\n    server {\n        include forge-conf/101/site.conf;\n    }\n}'; expect_rc 1
   # Every server block at the top includes it: one that does not would serve the site without the guard.
-  conf includes "$(domain "$SITE_CONF")"$'\nserver {\n    listen 8080;\n    root /home/shop_qa_7/api-7.qa.example.dev/public;\n}'
+  conf includes "$(domain "$SITE_CONF")"$'\nserver {\n    listen 8080;\n    root /home/shop_qa_7/api.7.qa.example.dev/public;\n}'
   expect_rc 1; expect_err_has "does not include the site's site.conf"
   conf includes "$(domain "$SITE_CONF")"$'\nserver {\n    listen 8080;\n'"$SITE_CONF"$'\n}'; expect_rc 0
   # Another file, a comment, or a file that only ends like it.

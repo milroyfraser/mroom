@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317,SC2016  # t_* run through test_case; a $ in single quotes is for eval, later
 # The gate's Reverb operations against mroom's real Reverb host, run the way a box runs it: what a fake cannot
-# show. mroom baseline reverb installs this release's reverb-host with the packages its composer.lock pins, its
-# unit is installed by this release's lib/root-setup, run as root, from a home under /home as on a box, and
+# show. This release's lib/root-setup, run as root as the root recipe runs it, makes the services' folders and
+# installs the unit, mroom baseline reverb installs this release's reverb-host with the packages its
+# composer.lock pins, from a home under /home as on a box, moving the apps of a host that lived there, and
 # systemd runs it confined. The test then checks:
 # - an app reverb-app-add gives connects from its environment's two sites and stays open; from any other site
 #   it is refused and closed, and an app no one added does not exist;
@@ -39,6 +40,7 @@ cleanup() {
   sudo rm -f /etc/systemd/system/mroom-reverb.service
   sudo systemctl daemon-reload || true
   rm -f "$ROOT/reverb-host/.ci-build"
+  sudo rm -r /var/lib/mroom/services 2>/dev/null || true
   [ -z "$CI_HOME" ] || rm -rf "$CI_HOME"
   rm -rf "$TOP"
 }
@@ -46,7 +48,7 @@ trap cleanup EXIT
 
 gate() { run env SSH_ORIGINAL_COMMAND="$1" "$MROOM" gate provision; }
 field() { sed -n "s/^$1=//p" <<<"$2"; }
-reverb_dir() { echo "$HOME/.local/share/mroom-services/reverb"; }
+reverb_dir() { echo /var/lib/mroom/services/reverb; }
 sock() { echo "unix:$(reverb_dir)/run/reverb.sock"; }
 client() { python3 -I "$ROOT/tests/reverb/client.py" "$@"; }
 main_pid() { systemctl show -p MainPID --value mroom-reverb.service; }
@@ -90,14 +92,26 @@ t_the_reverb_operations_against_the_real_host() {
   export HOME="$CI_HOME"
   mkdir -p "$HOME/.config/mroom"
   printf 'MROOM_APP_NAME=shop\nMROOM_QA_ZONE=qa.example.test\n' >"$HOME/.config/mroom/box.env"
+  # A host that lived in the home, as before: its apps file, which moves once the new unit is in.
+  mkdir -p "$HOME/.local/share/mroom-services/reverb/apps"
+  printf '{"apps": []}\n' >"$HOME/.local/share/mroom-services/reverb/apps/apps.json"
+  chmod 600 "$HOME/.local/share/mroom-services/reverb/apps/apps.json"
+  run "$MROOM" baseline reverb
+  expect_rc 1; expect_out_has "The folders of reverb are not in place yet"
+  # The root recipe: this release's lib/root-setup, run as root, makes the folders and installs the unit.
+  run sudo bash "$ROOT/lib/root-setup" --user "$(id -un)" reverb
+  expect_rc 0
+  expect_out_has "service folders made in /var/lib/mroom/services, for $(id -un): reverb/apps reverb/builds reverb/run"
+  expect_out_has "systemd units written: mroom-reverb.service"
   run "$MROOM" baseline reverb
   expect_rc 0; expect_out_has "installed (Reverb v1.12.0)"
-  expect_out_has "To be installed or updated: mroom-reverb.service."
-  expect_out_has "Reverb host does not answer yet"
-  # Install the unit as the root recipe does: this release's lib/root-setup, run as root.
-  run sudo bash "$ROOT/lib/root-setup" --user "$(id -un)" --home "$HOME" reverb
-  expect_rc 0; expect_out_has "systemd units written: mroom-reverb.service"
+  expect_out_has "Reverb host: its data moved from ~/.local/share/mroom-services/reverb to /var/lib/mroom/services"
+  expect_no_file "$HOME/.local/share/mroom-services/reverb/apps/apps.json"
   wait_ready
+  # In its own mount namespace, the host sees only its own folders, and no home.
+  run sudo nsenter -t "$(main_pid)" -m ls -A /var/lib/mroom/services; expect_out reverb
+  run sudo nsenter -t "$(main_pid)" -m ls -A /var/lib/mroom/services/reverb; expect_out $'apps\nbuilds\nrun'
+  run sudo nsenter -t "$(main_pid)" -m ls -A "$HOME"; expect_rc 2
   run "$MROOM" baseline reverb
   expect_rc 0; expect_out_has "matches this mroom"; expect_out_has "Reverb host answers; its apps file holds 0."
   expect_out_has "systemd units: installed as this mroom writes them (mroom-reverb.service active)."
@@ -116,24 +130,24 @@ t_the_reverb_operations_against_the_real_host() {
 
   # From its two sites only, where its sockets stay open; from another site the host refuses and closes one, and
   # an app no one added does not exist.
-  run client open "$(sock)" "$key12" https://go-12.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
+  run client open "$(sock)" "$key12" https://12.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
   expect_true "its own site's socket was closed: $out" eval '[ "$(tail -n1 <<<"$out")" = open ]'
-  run client open "$(sock)" "$key12" https://api-12.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
-  run client open "$(sock)" "$key12" https://go-13.qa.example.test; expect_out_has 'Origin not allowed'
+  run client open "$(sock)" "$key12" https://api.12.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
+  run client open "$(sock)" "$key12" https://13.qa.example.test; expect_out_has 'Origin not allowed'
   expect_true "a refused socket stayed open: $out" eval '[ "$(tail -n1 <<<"$out")" = closed ]'
-  run client open "$(sock)" shop-qa-14 https://go-14.qa.example.test; expect_out_has 'Application does not exist'
+  run client open "$(sock)" shop-qa-14 https://14.qa.example.test; expect_out_has 'Application does not exist'
   expect_true "an unknown app's socket stayed open: $out" eval '[ "$(tail -n1 <<<"$out")" = closed ]'
 
   # An event its backend sends, signed with its secret, reaches its sockets; another's secret is refused.
-  listen_for "$(sock)" "$key12" https://go-12.qa.example.test orders
+  listen_for "$(sock)" "$key12" https://12.qa.example.test orders
   run client send "$(sock)" shop-qa-12 "$key12" "$secret12" orders shipped '{"id":7}'; expect_out 200
   run heard; expect_out_has 'event shipped {"id":7}'
   run client send "$(sock)" shop-qa-12 "$key12" "$secret13" orders shipped '{}'; expect_out 401
 
   # A client event between two of app 12's sockets arrives, though app 13 was served between the sender's
   # subscribe and its event: Reverb 1.12.0 alone would look the channel up in app 13's.
-  listen_for "$(sock)" "$key12" https://go-12.qa.example.test chat
-  client whisper "$(sock)" "$key12" https://go-12.qa.example.test chat client-typing '{"x":1}' "$T/whisper.go" \
+  listen_for "$(sock)" "$key12" https://12.qa.example.test chat
+  client whisper "$(sock)" "$key12" https://12.qa.example.test chat client-typing '{"x":1}' "$T/whisper.go" \
     >"$T/whisper.out" 2>&1 &
   WHISPER_PID=$!
   for _ in $(seq 1 100); do if grep -qx ready "$T/whisper.out"; then break; fi; sleep 0.1; done
@@ -170,15 +184,15 @@ t_the_reverb_operations_against_the_real_host() {
   } >"$T/nginx/nginx.conf"
   nginx -p "$T/nginx" -c "$T/nginx/nginx.conf" 2>"$T/nginx/start.err" || { cat "$T/nginx/nginx.conf" "$T/nginx/start.err" >&2; exit 1; }
   sleep 0.5
-  run client open 127.0.0.1:8082 "$key12" https://go-12.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
-  listen_for 127.0.0.1:8082 "$key12" https://go-12.qa.example.test orders
+  run client open 127.0.0.1:8082 "$key12" https://12.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
+  listen_for 127.0.0.1:8082 "$key12" https://12.qa.example.test orders
   run client send 127.0.0.1:8082 shop-qa-12 "$key12" "$secret12" orders packed '"box 3"'; expect_out 200
   run heard; expect_out_has 'event packed "box 3"'
 
   # A removed app opens no socket; the other environment's keeps working, and nothing restarted.
   gate "reverb-app-remove 12"; expect_rc 0
-  run client open "$(sock)" "$key12" https://go-12.qa.example.test; expect_out_has 'Application does not exist'
-  run client open "$(sock)" "$key13" https://go-13.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
+  run client open "$(sock)" "$key12" https://12.qa.example.test; expect_out_has 'Application does not exist'
+  run client open "$(sock)" "$key13" https://13.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
   expect_out_has open
   expect_true "the host restarted" [ "$(main_pid)" = "$pid" ]
 
@@ -187,8 +201,8 @@ t_the_reverb_operations_against_the_real_host() {
   sleep 1.5
   wait_ready
   expect_true "systemd did not start it again" [ "$(main_pid)" != "$pid" ]
-  run client open "$(sock)" "$key13" https://go-13.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
-  listen_for "$(sock)" "$key13" https://go-13.qa.example.test orders
+  run client open "$(sock)" "$key13" https://13.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
+  listen_for "$(sock)" "$key13" https://13.qa.example.test orders
   run client send "$(sock)" shop-qa-13 "$key13" "$secret13" orders shipped '{"id":8}'; expect_out 200
   run heard; expect_out_has 'event shipped {"id":8}'
   # Reverb's errors reach the journal: the refused origin above is one. Nothing else went wrong.
@@ -204,11 +218,12 @@ t_the_reverb_operations_against_the_real_host() {
   expect_rc 0; expect_out_has "installed (Reverb v1.12.0)"; expect_out_has "Reverb host: restarted to run its build"
   expect_out_has "Reverb host answers; its apps file holds 1."
   expect_true "the host did not restart" [ "$(main_pid)" != "$pid" ]
-  run bash -c 'ls "$1" | wc -l' _ "$(reverb_dir)/builds"; expect_out 2
-  run client open "$(sock)" "$key13" https://go-13.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
+  # Two builds, and the link to the current one.
+  run bash -c 'ls "$1" | wc -l' _ "$(reverb_dir)/builds"; expect_out 3
+  run client open "$(sock)" "$key13" https://13.qa.example.test; expect_out_has '"event":"pusher:connection_established"'
   run "$MROOM" baseline reverb
   expect_rc 0; expect_out_has "matches this mroom"
-  run bash -c 'ls "$1" | wc -l' _ "$(reverb_dir)/builds"; expect_out 1
+  run bash -c 'ls "$1" | wc -l' _ "$(reverb_dir)/builds"; expect_out 2
 }
 
 test_case real-reverb t_the_reverb_operations_against_the_real_host

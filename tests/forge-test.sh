@@ -102,7 +102,7 @@ t_a_read_prints_the_body_and_keeps_the_token_off_every_command_line() {
 
 t_curl_ignores_curlrc_and_keeps_its_safety_options() {
   fake_tools; box; answer 200 '{}'
-  run "$FORGE_API" GET 'sites?filter[name]=api-1.qa.example.dev'; expect_rc 0
+  run "$FORGE_API" GET 'sites?filter[name]=api.1.qa.example.dev'; expect_rc 0
   expect_true "curl's first argument is not -q" every_call_starts_with_q
   run grep -c -x -e --globoff -e --max-time "$T/curl.argv"; expect_out 2
 }
@@ -203,9 +203,9 @@ t_a_path_cannot_leave_the_server_or_reach_it() {
 
 t_a_query_with_brackets_is_a_plain_path() {
   fake_tools; box; answer 200 '{}'
-  run "$FORGE_API" GET 'sites?filter[name]=api-1.qa.example.dev'
+  run "$FORGE_API" GET 'sites?filter[name]=api.1.qa.example.dev'
   expect_rc 0
-  run cat "$T/curl.log"; expect_out "GET $BASE/sites?filter[name]=api-1.qa.example.dev auth=yes"
+  run cat "$T/curl.log"; expect_out "GET $BASE/sites?filter[name]=api.1.qa.example.dev auth=yes"
 }
 
 t_paths_that_return_secrets_need_secret_however_they_are_spelled() {
@@ -321,10 +321,10 @@ t_a_list_stops_after_too_many_pages() {
 
 t_a_site_is_found_by_a_plain_name() {
   fake_tools; box
-  answer 200 '{"data":[{"id":"5","attributes":{"name":"api-1.qa.example.dev"}},{"id":"6","attributes":{"name":"api-12.qa.example.dev"}}],"meta":{}}'
-  lib_run 'forge_site api-1.qa.example.dev'
-  expect_rc 0; expect_out '{"id":"5","attributes":{"name":"api-1.qa.example.dev"}}'
-  run cat "$T/curl.log"; expect_out "GET $BASE/sites?filter[name]=api-1.qa.example.dev&page[size]=100 auth=yes"
+  answer 200 '{"data":[{"id":"5","attributes":{"name":"api.1.qa.example.dev"}},{"id":"6","attributes":{"name":"api.12.qa.example.dev"}}],"meta":{}}'
+  lib_run 'forge_site api.1.qa.example.dev'
+  expect_rc 0; expect_out '{"id":"5","attributes":{"name":"api.1.qa.example.dev"}}'
+  run cat "$T/curl.log"; expect_out "GET $BASE/sites?filter[name]=api.1.qa.example.dev&page[size]=100 auth=yes"
   lib_run "forge_site 'api-#1'"; expect_rc 1; expect_err_has "not a domain"
 }
 
