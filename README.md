@@ -421,10 +421,11 @@ mroom tracker get SHOP-12                    # title, state, labels, branch, des
 mroom tracker list --mine --open             # my 50 latest open issues, by priority; or --label lesson
 mroom tracker find sentry:1001               # the issues whose description holds the marker for an alert
 mroom tracker owned SHOP-12                  # whether the token's user filed the issue
-note="$(mktemp)"                             # a fresh file per comment, never a fixed name
-mroom tracker comment SHOP-12 < "$note"      # adds a comment; the body comes on stdin
+note="$(mktemp)"                             # a fresh file per comment, never a fixed name; fill it in the
+mroom tracker comment SHOP-12 < "$note"      # same shell. Adds a comment; the body comes on stdin
 mroom tracker state SHOP-12 "In Review"      # the team's state of that name, in any case
-mroom tracker create --allow-create --title "Checkout fails" --state Triage --label bug < "$note"
+body="$(mktemp)"                             # and another fresh file for the new issue's body
+mroom tracker create --allow-create --title "Checkout fails" --state Triage --label bug < "$body"
 mroom errors get SHOP-1A2                    # the error issue and its latest event
 mroom errors search 'is:unresolved' --environment production --period 24h --limit 50
 mroom errors new 40 --environment production # new, regressed and escalating issues of the last 40 minutes
@@ -629,7 +630,11 @@ that Claude Code reads; in a session they are `/mroom:<name>`.
   `install.sh`, `lib/root-setup`, `lib/runner-sandbox`, `lib/job`, `bin/forge-api`, `bin/mroom`),
   `implement` (and `fix-issue`, which follows its step 6) has a fresh max-effort sub-agent check the
   PR head against the security model (section 8 of `docs/design.md`) before marking it ready. The
-  session writes the findings under `## Threat check` in the PR body; a high or critical one
+  session writes the findings under `## Threat check` in the PR body, through a fresh file: each
+  with its severity, its class, the file and line, and its fix, never quoting the secret, host,
+  address, id, name or personal data it found, nor a step-by-step exploit (a PR body may be public,
+  and its edit history keeps what a later edit removes). A finding in code the PR does not change
+  goes to the person, not into the PR body. A high or critical one
   blocks ready, or sends a ready PR back to draft, until it is fixed. The post-merge security check
   stays the backstop.
 - **Release asks twice:** once in the session, and again through the `ask` rule on

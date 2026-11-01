@@ -91,8 +91,8 @@ then a worktree of its own, and work only there. The tracker still links the bra
 issue id in its name.
 
 Its step 1.4 moves the issue to the started state. Then also comment the error issue's link, the
-cause in two sentences, and the branch: write them to a fresh file (`f="$(mktemp)"`), then
-`mroom tracker comment <id> < "$f"`.
+cause in two sentences, and the branch: `mroom tracker comment <id> < "$f"`, a fresh file as
+`/mroom:implement`'s Rules say.
 
 ## 4. Reproduce, then fix
 
@@ -106,8 +106,8 @@ cause in two sentences, and the branch: write them to a fresh file (`f="$(mktemp
    ask above all whether it reaches a shell, SQL, a path or a log. Run the test again and see it
    pass.
 3. **Commit.** End the message of the commit that fixes it with `Fixes <error id>` on a line of its
-   own, before any trailers. Write the message to a fresh file (`msg="$(mktemp)"`) and commit with
-   `git commit -F "$msg"`. These lines are the only link to the error issue.
+   own, before any trailers. Commit with `git commit -F "$msg"`, a fresh file as
+   `/mroom:implement`'s Rules say. These lines are the only link to the error issue.
    - The error tracker's SCM integration links the commit to the issue as soon as the branch is
      pushed, and may assign the issue to the commit's author. So never put the line on a commit
      that does not fix the issue.
@@ -140,8 +140,8 @@ Follow `/mroom:implement` steps 6 and 7: mark the PR ready, wait for its checks 
 commit, then move the issue to the review state
 (`mroom tracker state <id> "$(mroom config get issues.state_review --default 'In Review')"`).
 
-The hand-off note (in a fresh file, `note="$(mktemp)"`, then `mroom tracker comment <id> < "$note"`,
-or the PR when `mroom tracker` exits 3)
+The hand-off note (`mroom tracker comment <id> < "$note"`, a fresh file, or the PR when
+`mroom tracker` exits 3)
 also carries the error issue's link. It says the fix is proven only when the release that ships it
 has no new events for the issue, and that a person resolves the issue then, if the release did not
 resolve it.

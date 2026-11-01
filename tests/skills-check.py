@@ -304,7 +304,7 @@ THREAT_TRIGGERS = [
     "5. the session Room page: `plugin/skills/implement/room/`;",
     "6. what installs, runs as root, boxes untrusted code or decides review: `.github/scripts/`, `.github/CODEOWNERS`, `install.sh`, `lib/root-setup`, `lib/runner-sandbox`, `lib/job`, `bin/forge-api`, `bin/mroom`.",
 ]
-THREAT_CLASSES = ["Secret reach", "QA isolation", "Input reaching commands", "Guard bypasses", "Pins", "Privacy"]
+THREAT_CLASSES = ["Secret reach", "QA isolation", "Input reaching commands", "Guard bypasses", "Pins", "Privacy", "Privilege"]
 qa = re.search(r"^## 6\. QA\b.*?\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M) if implement else None
 qa = qa.group(1) if qa else ""
 # The threat check: from its bold lead to the paragraph that marks the PR ready.
@@ -331,11 +331,29 @@ say("`docs/design.md`, section 8" in check and all(f"**{c}:**" in check for c in
 design = read(os.path.join(root, "docs/design.md"))
 cited = re.search(r"decisions it names \(D(\d+), D(\d+) to D(\d+)\)", check)
 nums = [int(cited.group(1))] + list(range(int(cited.group(2)), int(cited.group(3)) + 1)) if cited else []
+say(14 in nums, f"implement's threat check cites D14, the QA file store's isolation ({nums})")
 say(bool(nums) and all(re.search(rf"^\| D{n} \|", design, flags=re.M) for n in nums),
     f"the decisions implement's threat check cites exist in docs/design.md ({nums})")
 say("never edits the PR" in check and "You write them into the PR body under `## Threat check`" in check
     and "A high or critical finding blocks `gh pr ready` until it is fixed" in check,
     "implement writes the sub-agent's findings under ## Threat check, and a high or critical one blocks ready")
+# A PR body may be public and keeps its edit history, so the write-up never carries what it found or an exploit.
+WRITE_UP = ["You write them into the PR body under `## Threat check`, through a fresh file (`--body-file`)",
+            "each finding with its severity, its class, the file and line, and its fix",
+            "A finding never quotes the secret, host, address, id, name or personal data it found, and never gives a step-by-step exploit",
+            "its edit history keeps what a later edit removes",
+            "A finding in code this PR does not change goes to the person, not into the PR body."]
+say(all(w in check for w in WRITE_UP), "implement's threat write-up goes through a fresh file, names no secret or person and gives no exploit")
+privilege = "**Privilege:** a way for PR code, a QA site's user or the box user to act as the deploy user or root"
+say(privilege in check and "a sudo rule, a systemd unit line, a link that root or nginx follows" in check,
+    "implement's threat check asks for privilege: acting as the deploy user or root, or writing outside its area")
+readme_flat = one_line(read(os.path.join(root, "README.md")))
+design_flat = one_line(design)
+for doc_label, flat_text in (("README.md", readme_flat), ("docs/design.md", design_flat)):
+    say("through a fresh file" in flat_text and "the secret, host, address, id, name or personal data it found" in flat_text
+        and "step-by-step exploit" in flat_text and "goes to the person, not into the PR body" in flat_text,
+        f"{doc_label} mirrors implement's threat write-up rules")
+say("pins, privacy and privilege" in design_flat, "docs/design.md lists privilege among the threat check's classes")
 say("`gh pr ready <pr> --undo`" in check, "implement moves a ready PR back to draft when a re-check finds a high or critical")
 say("the post-merge security check" in check and "stays the backstop" in check,
     "implement keeps the post-merge security check as the backstop")
@@ -362,26 +380,79 @@ say(bool(fix) and "**Build to the threat model**" in fix[3] and bool(deliver_doc
     "fix-issue and deliver build from implement's threat-model questions, and deliver's re-review looks at what is new")
 
 # A PR body, commit message, comment or note goes in a fresh mktemp file, never a fixed name in a shared folder,
-# where one session's PR picks up another's text. Every file a gh, git or mroom command reads its text from is a
-# "$variable" (set from mktemp), in every skill, command and the README.
-FILE_ARG = re.compile(r"(?:\s<|\s--body-file|\s--notes-file|\s-F|\s--file)(?:=|\s+)(\S+)")
+# where one session's PR picks up another's text. Every file a gh, git or mroom command reads its text from, by a
+# flag, a redirect or a pipe from cat, is a bare "$variable" (set from mktemp), in every skill, command and the README.
+FILE_VAR = re.compile(r'"\$[A-Za-z_][A-Za-z0-9_]*"')
+# The flags that name a text file, for the commands that take them. -F is a field for gh api and a fixed string for
+# git grep, so it counts only where it means a file.
+FILE_FLAGS = [
+    (r"gh\s+\S+\s+\S+", r"--body-file|--notes-file"),
+    (r"gh\s+api\b", r"--input"),
+    (r"gh\s+(?:pr|issue|release)\s+(?:create|edit|comment)\b|git\s+(?:commit|tag)\b", r"-F|--file"),
+]
 def fixed_files(spans):
+    """Every file name a gh, git or mroom command reads text from that is not a bare "$variable"."""
     bad = []
-    for c in split_commands(spans):
-        if re.match(r"(?:gh|git|mroom)\s", c):
-            bad += [m.group(1) for m in FILE_ARG.finditer(" " + c) if not m.group(1).startswith('"$')]
+    for span in spans:
+        joined = re.sub(r"\\\n\s*", " ", span)
+        for pipeline in re.split(r"\n|;|&&|\|\|", joined):
+            stages = [re.sub(r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*", "", s).strip() for s in pipeline.split("|")]
+            if not any(re.match(r"(?:gh|git|mroom)\s", s) for s in stages):
+                continue
+            args = []
+            for s in stages:
+                for cmd, flags in FILE_FLAGS:
+                    if re.match(cmd, s):
+                        args += [m.group(1) for m in re.finditer(rf"\s(?:{flags})(?:=|\s+)(\S+)", " " + s)]
+                # A redirect from a file, with or without a space; a <placeholder> and <<'EOF' are not one.
+                for m in re.finditer(r"(?<![<\w])<(?!<)(\s*)(\S+)", s):
+                    if not m.group(1) and re.match(r"<[^<>\n]*>", s[m.start():]):
+                        continue
+                    args.append(m.group(2))
+                m = re.match(r"cat\s+(\S+)", s)
+                if m:
+                    args.append(m.group(1))
+            bad += [a for a in args if not FILE_VAR.fullmatch(a)]
     return bad
+def loose_heredocs(text):
+    """Every unquoted heredoc in the text's code; <<key>> and <<fill:name>> template placeholders are not one."""
+    return re.findall(r"<<-?\s*(?![\s'\"])\w+(?![\w>:.])", "\n".join(code(text)))
 texts = [(label, d[3]) for label, d in sorted(docs.items())] + [("README.md", read(os.path.join(root, "README.md")))]
 for label, body in texts:
     bad = fixed_files(code(body))
     say(not bad, f"{label} reads PR bodies, commit messages and comments only from a mktemp file ({bad[:3]})")
-say(bool(implement) and 'f="$(mktemp)"' in implement[3] and "Never a fixed name" in implement[3],
-    "implement's rules write every body, message and note to a fresh mktemp file")
-# The check sees a fixed name when there is one.
-say(fixed_files(["mroom tracker comment <id> < note.md", "gh pr comment 1 --body-file /tmp/body.md",
-                 'git commit -F msg.txt', 'gh release edit v1 --notes-file <file>']) ==
-    ["note.md", "/tmp/body.md", "msg.txt", "<file>"] and not fixed_files(['gh pr create --body-file "$body"']),
-    "the mktemp check finds a fixed-name body file")
+    # A heredoc of outside text is quoted, so its $ and backticks are never expanded.
+    say(not loose_heredocs(body), f"{label} quotes every heredoc ({loose_heredocs(body)[:2]})")
+say(loose_heredocs("`cat > \"$f\" <<EOF`") == ["<<EOF"] and not loose_heredocs("`cat <<'EOF'` `<<fill:x>>` `<<app.dir>>`"),
+    "the heredoc check finds an unquoted heredoc, and not a template placeholder")
+impl_rules = one_line(re.search(r"^## Rules\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M).group(1)) if implement else ""
+say(all(p in impl_rules for p in ("PR body, comment, note and commit message with a body to a fresh file",
+                                  "never a fixed name", "Shell variables do not survive between Bash calls",
+                                  "the path `mktemp` printed", "in one Bash call with a quoted heredoc (`<<'EOF'`)")),
+    "implement's rules write every body, message and note to a fresh file, made and used within one Bash call")
+step4 = re.search(r"^## 4\. .*?\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M) if implement else None
+say(bool(step4) and "A message with a body goes through a fresh file" in one_line(step4.group(1)),
+    "implement's commit step agrees with its rules: every message with a body goes through a fresh file")
+# The check sees a fixed name however it is written, and leaves alone what is not a file.
+FIXED = {
+    "mroom tracker comment <id> < note.md": ["note.md"],
+    "mroom tracker comment <id> <note.md": ["note.md"],
+    "mroom tracker comment <error id> < note.md": ["note.md"],
+    'mroom tracker comment <id> < "$HOME/note.md"': ['"$HOME/note.md"'],
+    "mroom tracker comment <id> < <file>": ["<file>"],
+    "cat note.md | mroom tracker comment <id>": ["note.md"],
+    "GH_REPO=o/r gh pr comment 1 --body-file /tmp/body.md": ["/tmp/body.md"],
+    "gh pr create --draft --body-file=body.md": ["body.md"],
+    "gh pr create -F body.md": ["body.md"],
+    "gh api repos/o/r/issues/1/comments --input body.json": ["body.json"],
+    "git commit -F msg.txt": ["msg.txt"],
+    "gh release edit v1 --notes-file <file>": ["<file>"],
+}
+CLEAN = ['gh pr create --body-file "$body"', 'mroom tracker comment <id> < "$f"', 'cat "$f" | mroom tracker comment <id>',
+         "gh api -F state=open repos/o/r/issues", "git grep -F needle", "mroom tracker get <id>",
+         'f="$(mktemp)" && cat > "$f" <<\'EOF\'', 'git diff <last reviewed head>..HEAD']
+say(all(fixed_files([c]) == want for c, want in FIXED.items()) and not any(fixed_files([c]) for c in CLEAN),
+    f"the mktemp check finds a fixed-name body file, and nothing else ({[(c, fixed_files([c])) for c in list(FIXED) + CLEAN if fixed_files([c]) != FIXED.get(c, [])][:2]})")
 
 # --- The release skill ------------------------------------------------------------------------------------
 release = docs.get("skill release")
