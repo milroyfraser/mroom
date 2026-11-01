@@ -39,9 +39,20 @@ job in Forge, since a token that can do it reaches root: tell them exactly what 
 - Paths that return secrets (a site's env, a deploy hook or webhook URL, a command's output) need
   `forge-api --secret GET …`, which always asks. Use it only when the task needs one value, and
   never print the answer: sum it up instead.
-- A body for such a path goes on stdin, never inline: `jq -n '{...}' | forge-api --secret PUT
-  sites/<site id>/environment --write --data -`. An inline `--data` is refused there, since it
-  shows in the process list.
+- Never put a secret on a command line. Every user on this box, a QA site's too, can read every
+  running program's arguments, and the text of each command you run is passed to its shell as an
+  argument.
+  So a body for such a path reaches `--data -` through a pipe: change what you read, and take a
+  secret you add from a file you wrote with the Write tool, in a folder `mktemp -d` made (remove
+  the folder after):
+
+  ```
+  forge-api --secret GET sites/<site id>/environment | jq '<the change>' | forge-api --secret PUT sites/<site id>/environment --write --data -
+  forge-api --secret GET sites/<site id>/environment | jq --rawfile v <file> '<the change, with $v>' | forge-api --secret PUT sites/<site id>/environment --write --data -
+  ```
+
+  Never `jq -n` or `--arg` holding the value, a here-document, `echo` or an inline `--data`, which
+  is refused there.
 
 ## Finding things
 

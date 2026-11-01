@@ -15,7 +15,8 @@
 # --secret. The two flags mark a call so that a permission rule allowing plain reads never matches it and
 # the call asks first. The token comes from ~/.config/mroom/secrets/forge-token (mode 600) and is never
 # printed. --data - reads the body from stdin: use it for a body with secrets in it, since an inline --data
-# shows in the process list. A path that needs --secret takes its body only that way: an inline --data is
+# shows in the process list, which every user on the box can read; so would a jq --arg, or the text of a
+# command an agent runs. A path that needs --secret takes its body only that way: an inline --data is
 # refused there.
 #
 # Exit codes: 0 done, 1 Forge or the client failed, 2 refused before calling Forge.
