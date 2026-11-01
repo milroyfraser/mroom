@@ -229,7 +229,7 @@ def type_error(key: str, kind, value) -> str | None:
 
 def rule_error(key: str, value) -> str | None:
     """Checks beyond the type, for keys that other names are built from."""
-    if key == "app.name" and not APP_NAME_RE.match(value):
+    if key == "app.name" and not APP_NAME_RE.fullmatch(value):
         return f"{key} must match [a-z][a-z0-9_]* and be at most 32 characters (got {json.dumps(value)})"
     if key == "tests.database_pattern" and "{slug}" not in value:
         return f"{key} must contain {{slug}}, so each worktree gets its own database"
@@ -309,8 +309,10 @@ def check(path: str, data: dict) -> tuple[list[tuple[str, str]], list[str]]:
     errors, warnings = [], []
     # Each key is written once, as tables and keys: never one quoted key with a dot, which could give it two values.
     for key, name in dotted_names(data):
-        errors.append((key, f"{key} must not be one quoted key with a dot ({json.dumps(name)}): write it as a table "
-                            f"and a key, such as [{key.rsplit('.', 1)[0]}] and {key.rsplit('.', 1)[1]} = ..."))
+        parent, leaf = key.rsplit(".", 1)
+        hint = f"[{key}]" if key in SECTIONS else f"[{parent}] and {leaf} = ..."
+        errors.append((key, f"{key} must not be one quoted key with a dot ({json.dumps(name)}): write it as tables "
+                            f"and keys, such as {hint}"))
     flat = flatten(data)
     for key, value in flat.items():
         if key not in SCHEMA:

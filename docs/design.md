@@ -355,9 +355,10 @@ agrees; `mroom config keys` shows it.
   `GH_*`, `GITHUB_*`, `AWS_*`, `FORGE_*`, `SSH_*`), and the two differ.
 - `issues.id_pattern` and `errors.id_pattern` compile as **Python** regular expressions (`re`), not POSIX ERE;
   patterns used by shell tools later must stay in the common subset.
-- A key mroom reads is written as tables and keys, never as one quoted key with a dot (`"issues.token_env" = ...`),
-  which fails: TOML keeps it apart from `[issues]` and `token_env = ...`, so the file could hold two values for one
-  key, and the checks pass one while `get` returns the other.
+- A key or table mroom reads is written as tables and keys, never as one quoted name with a dot
+  (`"issues.token_env" = ...`, `"qa.parity" = { ... }`), which fails: TOML keeps it apart from `[issues]` and
+  `token_env = ...`, so the file could hold two values for one key, and the checks pass one while `get` returns
+  the other.
 - An unknown key warns (with a close match, if any) and is ignored; it never fails.
 
 ### 5.2 Box config (`~/.config/mroom/`)
