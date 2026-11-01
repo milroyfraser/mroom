@@ -60,6 +60,13 @@ deploy() {
 
 live() { g -C "$T/origin.git" rev-parse --verify --quiet refs/heads/release || echo none; }
 
+# host_fetch: what the host's deploy script runs in its clone, $T/site, as the README gives it (production deploy,
+# step 2): the branch by its full name into a ref of its own, then a reset to it.
+host_fetch() {
+  g -C "$T/site" fetch -q origin +refs/heads/release:refs/remotes/origin/release &&
+    g -C "$T/site" reset -q --hard refs/remotes/origin/release
+}
+
 t_a_first_release_creates_the_branch_at_the_tag() {
   repo
   deploy v1.0.0 EVENT=release RELEASE_TAG=v1.0.0
@@ -142,12 +149,88 @@ t_a_branch_someone_else_moved_is_left_for_a_person() {
   expect_true "the deploy moved a branch someone else moved" [ "$(live)" = "$stray" ]
 }
 
+# A tag named like the branch: git ranks refs/tags/<name> above refs/heads/<name>, so a host whose deploy script
+# fetches the branch by its short name (git pull origin release) takes the tag instead. Anyone with Write can push a
+# tag, so one at a commit no one released would go live with the next deploy.
+t_a_tag_named_like_the_branch_is_left_for_a_person() {
+  repo
+  deploy v1.0.0
+  g -C "$T/dev" switch -q --detach v1.0.0 && g -C "$T/dev" commit -q --allow-empty -m unreleased
+  local unreleased
+  unreleased="$(g -C "$T/dev" rev-parse HEAD)"
+  # A tag whose name only ends in the branch's is no shadow.
+  g -C "$T/dev" push -q origin HEAD:refs/tags/hotfix/release
+  deploy v1.0.0
+  expect_rc 0
+  # An annotated tag release: what such a deploy script gets is the unreleased commit, not the branch at v1.0.0.
+  g -C "$T/dev" tag -a -m unreleased release
+  g -C "$T/dev" push -q origin refs/tags/release
+  g -C "$T/dev" fetch -q origin release
+  expect_true "a fetch of release by its short name took the branch over the tag" \
+    [ "$(g -C "$T/dev" rev-parse 'FETCH_HEAD^{commit}')" = "$unreleased" ]
+  deploy v1.1.0
+  expect_rc 1
+  expect_err_has "origin has the tag release, which a fetch of release by its short name takes over the branch"
+  expect_out ""
+  expect_true "the deploy moved release while a tag of its name was there" [ "$(live)" = "$C1" ]
+  # A re-run of the deployed tag stops too: with a deploy hook, the host would deploy again.
+  deploy v1.0.0
+  expect_rc 1
+  expect_err_has "origin has the tag release"
+  # Once a person has removed it, the deploy goes on.
+  g -C "$T/dev" push -q origin :refs/tags/release
+  deploy v1.1.0
+  expect_rc 0
+  expect_true "release did not move to v1.1.0 once the tag was gone" [ "$(live)" = "$C2" ]
+}
+
+# The host's fetch as the README gives it takes the branch over a tag named release that came after the deploy's
+# check, brings the release's tag for the version file's git describe, and moves the site back for a rollback.
+t_the_hosts_fetch_takes_the_branch_and_its_tag() {
+  # host_fetch runs the README's own commands.
+  expect_true "the README's host fetch is not the one host_fetch runs" \
+    grep -qxF '   git fetch origin +refs/heads/release:refs/remotes/origin/release &&' "$ROOT/README.md"
+  expect_true "the README's host reset is not the one host_fetch runs" \
+    grep -qxF '     git reset --hard refs/remotes/origin/release' "$ROOT/README.md"
+  repo
+  deploy v1.0.0
+  g clone -q -b release "$T/origin.git" "$T/site"
+  # A release tagged after the host's clone.
+  g -C "$T/dev" switch -q main && g -C "$T/dev" commit -q --allow-empty -m three && g -C "$T/dev" tag v1.2.0
+  g -C "$T/dev" push -q origin main refs/tags/v1.2.0
+  local c4 unreleased
+  c4="$(g -C "$T/dev" rev-parse HEAD)"
+  deploy v1.2.0
+  expect_rc 0
+  g -C "$T/dev" switch -q --detach v1.0.0 && g -C "$T/dev" commit -q --allow-empty -m unreleased
+  unreleased="$(g -C "$T/dev" rev-parse HEAD)"
+  g -C "$T/dev" push -q origin HEAD:refs/tags/release
+  host_fetch
+  expect_true "the host's fetch did not take the branch" [ "$(g -C "$T/site" rev-parse HEAD)" = "$c4" ]
+  expect_true "git describe does not name v1.2.0 after the host's fetch" \
+    [ "$(g -C "$T/site" describe --tags --exact-match)" = v1.2.0 ]
+  expect_true "the host's fetch brought the unreleased commit" \
+    bash -c '! git -C "$1" cat-file -e "$2^{commit}" 2>/dev/null' _ "$T/site" "$unreleased"
+  # A rollback, once a person has removed that tag.
+  g -C "$T/dev" push -q origin :refs/tags/release
+  deploy v1.1.0
+  expect_rc 0
+  host_fetch
+  expect_true "the host's fetch did not move the site back" [ "$(g -C "$T/site" rev-parse HEAD)" = "$C2" ]
+}
+
 t_another_branch_name_can_be_used() {
   repo
   deploy v1.1.0 RELEASE_BRANCH=production
   expect_rc 0
   expect_true "the named branch was not created" [ "$(g -C "$T/origin.git" rev-parse production)" = "$C2" ]
   expect_true "release was created as well" [ "$(live)" = none ]
+  # A name with a slash is refused: refs/<name>, outside heads and tags, would shadow it.
+  deploy v1.1.0 RELEASE_BRANCH=deploy/live
+  expect_rc 1
+  expect_err_has "RELEASE_BRANCH is not one plain name"
+  expect_true "a refused name was created" \
+    bash -c '! git -C "$1" rev-parse --verify -q refs/heads/deploy/live' _ "$T/origin.git"
 }
 
 # --- deploy-verify, against a fake host ---
@@ -412,6 +495,20 @@ t_the_shape_checks_catch_planted_bugs() {
   planted placeholders 't = t.replace("<<fill:tag_pattern>>", "<<fill:tag_regex>>")' "<<fill:tag_regex>> is used"
 }
 
+# Only the production deploy is left out of the CI checks: another deploy-* workflow holding a secret is caught.
+t_another_deploy_workflow_meets_the_ci_checks() {
+  rm -rf "$T/root"
+  mkdir -p "$T/root/templates"
+  cp -R "$TPL" "$T/root/templates/github"
+  cp "$TPL/workflows/deploy-production.yml" "$T/root/templates/github/workflows/deploy-staging.yml"
+  shape no-secrets "$T/root"
+  expect_rc 1
+  expect_out_has "workflows/deploy-staging.yml contains 'secrets.'"
+  rm "$T/root/templates/github/workflows/deploy-staging.yml"
+  shape no-secrets "$T/root"
+  expect_rc 0
+}
+
 t_the_template_renders_from_both_examples() {
   local example version
   version="v$(tr -d '[:space:]' <"$ROOT/VERSION")"
@@ -443,6 +540,8 @@ test_case rollback t_an_older_tag_rolls_it_back
 test_case off-main t_a_tag_off_the_default_branch_is_refused
 test_case refused t_only_a_release_tag_of_the_run_deploys
 test_case moved t_a_branch_someone_else_moved_is_left_for_a_person
+test_case shadow t_a_tag_named_like_the_branch_is_left_for_a_person
+test_case host-fetch t_the_hosts_fetch_takes_the_branch_and_its_tag
 test_case branch t_another_branch_name_can_be_used
 skip_unless has_yaml "python3 has no yaml module (PyYAML)"
 test_case triggers t_only_a_published_release_or_a_person_starts_it
@@ -451,6 +550,7 @@ test_case release-step t_one_deploy_at_a_time_moves_the_branch_then_the_hook
 test_case verify-job t_verify_waits_for_the_pushed_commit_without_a_secret
 test_case placeholders t_placeholders_are_documented
 test_case planted t_the_shape_checks_catch_planted_bugs
+test_case other-deploy t_another_deploy_workflow_meets_the_ci_checks
 # deploy-verify reads app.version_path through the one reader, which needs python3 3.11+, and uses bash 4's arrays.
 skip_unless has_bash4 "this host lacks bash 4 or python3 3.11 (tomllib), which deploy-verify needs"
 test_case render t_the_template_renders_from_both_examples

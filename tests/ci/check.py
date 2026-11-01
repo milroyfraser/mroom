@@ -3,9 +3,9 @@
 
 Used by tests/ci-templates-test.sh and tests/deploy-test.sh, one check per test case. Reads the templates
 as YAML (PyYAML), with their placeholders unfilled: every placeholder sits inside a scalar, so the raw
-files parse. The CI checks leave out the production deploy (workflows/deploy-*.yml), which runs on a tag
-and holds a secret by design; the deploy-* checks read it alone. Prints what is wrong and exits 1, or
-exits 0.
+files parse. The CI checks leave out the production deploy (workflows/deploy-production.yml), which runs
+on a tag and holds a secret by design; the deploy-* checks read it alone. Prints what is wrong and exits
+1, or exits 0.
 """
 
 import os
@@ -43,7 +43,8 @@ def load(root, deploy=False):
     for sub in ("workflows", "actions"):
         for dirpath, _, names in os.walk(os.path.join(base, sub)):
             for name in names:
-                if sub == "workflows" and name.startswith("deploy-") and not deploy:
+                # By its exact path: any other workflow, one named deploy-* included, meets every CI check.
+                if os.path.relpath(os.path.join(dirpath, name), base) == DEPLOY and not deploy:
                     continue
                 if name.endswith((".yml", ".yaml")):
                     path = os.path.join(dirpath, name)
