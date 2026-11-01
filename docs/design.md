@@ -431,11 +431,13 @@ writes to the tracker only the state of the issue it works and comments on it, a
 it files an issue. A design waiting for approval is a comment (`Design for review: <link>`, then
 `Design approved by <name>: <link>`), not a label. A skill that resumes earlier work, or stacks a branch on
 another pull request, takes only a pull request whose branch is in the app's repository, never a fork's (8.1).
-Before `implement` marks a PR ready (step 6, which `fix-issue` follows), a change that touches the guard or a
-hook, the gate or `site-op`, workflows or actions, code that handles a secret or token, or the session Room page
-gets a threat check: a max-effort sub-agent reads the head's diff against section 8 and its decisions, for
-secret reach, QA isolation, input reaching commands, guard bypasses, pins and privacy, and writes its findings
-under `## Threat check` in the PR body. A high or critical finding blocks ready until it is fixed. It comes before
+Before `implement` marks a PR ready (step 6, which `fix-issue` follows), a change that touches at least one of
+the guard, a hook or the permission rules, the gate or `site-op`, workflows or actions, code that handles a secret
+or token, the session Room page, or what installs, runs as root or decides review gets a threat check: a fresh
+max-effort sub-agent (never a fork) fetches the head's diff itself and reads it as data against section 8 and its
+decisions, for secret reach, QA isolation, input reaching commands, guard bypasses, pins and privacy. It returns
+its findings, and the session writes them under `## Threat check` in the PR body. A high or critical finding
+blocks ready, or sends a ready PR back to draft, until it is fixed. It comes before
 review; the post-merge security check stays the backstop.
 `tests/skills-test.sh` checks each skill against this contract.
 
