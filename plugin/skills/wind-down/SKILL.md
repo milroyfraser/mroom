@@ -100,8 +100,9 @@ the tracker, or comment on it what is still in progress (give the developer the 
 write needs them). Confirmed items not done yet still get acted on.
 
 The page keeps the retrospective section only while something is left: a card not read, or a
-confirmed action not done. After the last card it lists the confirmed actions still open with their
-state, and the section disappears once all are addressed.
+confirmed action not done. After the last card it shows a compact one-line summary (cards read;
+actions confirmed, done, in progress, not started; declined), never the full list, and the section
+disappears once all are addressed. Details live in the report.
 
 ## 4. Hand over
 
