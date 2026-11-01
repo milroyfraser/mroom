@@ -676,7 +676,13 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
   function firstSentence(s) { const t = String(s || ""); const m = t.match(/^.*?[.!?](\s|$)/); return (m ? m[0] : t).trim(); }
 
   /* Asking Claude: the page saves what was clicked on the card, then sends it to the watching session as a
-     comment so it acts now. Without a watching session the saved field waits for Claude's next check. */
+     comment so it acts now. Without a watching session the saved field waits for Claude's next check. The
+     comment goes out as the viewer's own words, so it names the card and never quotes one: a card's text is
+     data that whoever wrote the row chose. Claude reads the pick from the card. */
+  function cardRef(it) {
+    const id = String((it && it.id) || "");
+    return /^[A-Za-z0-9._-]{1,64}$/.test(id) ? "todos/" + id : "a card";
+  }
   async function tellClaude(btn, text) {
     try {
       const c = window.claude ? await window.claude.use("comments") : null;
@@ -729,7 +735,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
       setStatus("That choice didn't save. Try again in a moment.", true);
       return;
     }
-    const sent = await tellClaude(btn, "Decision on “" + (it.title || it.id) + "”: " + label + ".");
+    const sent = await tellClaude(btn, "Room: a decision is saved on " + cardRef(it) + ". Read its choice there.");
     setStatus(sent ? "Sent to Claude: " + label + "." : "Saved: " + label + ". Claude picks it up at its next check.");
   }
   function commandRow(text) {
@@ -1047,7 +1053,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
       const sum = el("summary", "qasum");
       sum.append(el("b", "qacase", String(c.title)), stale ? el("span", "qapill recalc", "Recalculating…") : verdict ? el("span", "qapill " + k, PROOF[k]) : el("span", "qapill none", "Not judged"));
       const body = el("div", "qabody");
-      /* c.tests: every test that proves the case, of any kind: [{type, name, result?}], e.g. {type: "unit", name: "BandLabelTest", result: "pass"}. */
+      /* c.tests: every test that proves the case, of any kind: [{type, name, result?}], e.g. {type: "unit", name: "PriceFormatTest", result: "pass"}. */
       const testsLine = Array.isArray(c.tests) && c.tests.length ? c.tests.map((t) => t && typeof t === "object" ? [t.type, t.name].filter(Boolean).join(": ") + (t.result ? " (" + t.result + ")" : "") : String(t)).join(" · ") : "";
       for (const [label, text] of [["Expected", c.expected], ["Seen", c.seen], ["Tests", testsLine], ["Claude", stale ? "" : verdict && verdict.text]]) {
         if (!text) continue;
@@ -1280,7 +1286,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (all) Object.assign(patch, { status: "done", doneAt: now, doneBy: "you" });
     try { await db.doc("todos/" + it.id).update(patch); }
     catch { btn.disabled = false; setStatus("That choice didn't save. Try again in a moment.", true); return; }
-    const sent = await tellClaude(btn, "Investigation “" + (it.title || it.id) + "”, " + (d.title || d.key) + ": " + label + ".");
+    const sent = await tellClaude(btn, "Room: an investigation pick is saved on " + cardRef(it) + ". Read its choices there.");
     setStatus(sent ? "Sent to Claude: " + label + "." : "Saved: " + label + ". Claude picks it up at its next check.");
   }
   function stepEvidence(list, note, full) {
@@ -1517,7 +1523,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
       setStatus("That didn't save. Try again in a moment.", true);
       return;
     }
-    const sent = await tellClaude(btn, "Action on “" + (it.title || it.id) + "”: " + label + ".");
+    const sent = await tellClaude(btn, "Room: an action is asked on " + cardRef(it) + ". Read its asked field there.");
     setStatus(sent ? "Sent to Claude: " + label + "." : "Saved: " + label + ". Claude picks it up at its next check.");
   }
   /* Dependencies: a card with `blocks` (a todo id, or a list of them) sits right above the card it unblocks,
@@ -1812,7 +1818,8 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
       try { if ((await user.can("data.write")) === false) readOnly = true; } catch {}
     }
     const onErr = (e) => setStatus(e && e.code === "revoked" ? "This session room is no longer available here." : "The page stopped updating. Reload it to reconnect.", true);
-    const rows = (snap) => snap.docs.map((d) => Object.assign({ id: d.id }, d.data()));
+    /* A row's id is its document's: an `id` field in the data never replaces it, so a click saves to that card. */
+    const rows = (snap) => snap.docs.map((d) => Object.assign({}, d.data(), { id: d.id }));
     const data = (snap) => (snap.exists ? snap.data() : null);
     db.collection("todos").onSnapshot((snap) => { todos = rows(snap); loaded.todos = true; setStatus(""); renderWork(); renderPlan(); renderMood(); }, onErr);
     db.collection("work").onSnapshot((snap) => { work = rows(snap); loaded.work = true; renderWork(); renderMood(); }, onErr);
