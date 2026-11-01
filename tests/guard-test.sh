@@ -218,6 +218,10 @@ EOF"
   refuse 'git push origin v1.2.3'
   refuse 'git push origin refs/tags/v1.2.3'
   refuse 'git push origin release-v1.2.3'
+  # A lone dash is an argument to git: a remote named `-`, not an option.
+  refuse 'git push - v1.2.3'
+  refuse 'git push - HEAD:main'
+  refuse 'git push - refs/tags/v1.2.3'
   refuse 'git push origin "$BRANCH"'
   refuse 'git -C /tmp/w push -f origin x'
   refuse 'git -c alias.p="push --force" p origin x'
@@ -1076,6 +1080,9 @@ sc_twin=$(sc "$mroom" scratch new --bare)
 sc_alt=$(sc "$mroom" scratch new --bare)
 sc_common=$(sc "$mroom" scratch new --bare)
 sc_linkhead=$(sc "$mroom" scratch new --bare)
+sc_nested=$(sc "$mroom" scratch new --bare)
+sc_badhead=$(sc "$mroom" scratch new --bare)
+sc_front=$(sc "$mroom" scratch new)
 sc_root=${sc_bare%/*}
 git init -q --bare "$TOP/sc-outside.git"
 ln -s "$TOP/sc-outside.git" "$sc_root/evil"
@@ -1085,6 +1092,14 @@ echo "$TOP/sc-outside.git/objects" >"$sc_alt/objects/info/alternates"
 echo "$TOP/sc-outside.git" >"$sc_common/commondir"
 mv "$sc_linkhead/HEAD" "$TOP/sc-head"
 ln -s "$TOP/sc-head" "$sc_linkhead/HEAD"
+# A link deeper inside (refs/tags), a HEAD git would not take, and an unusable .git in front of a
+# repository that reaches another one (git would skip the .git and take PATH itself).
+ln -s "$TOP/sc-outside.git/refs/tags" "$sc_nested/refs/tags/out"
+echo 'not a ref' >"$sc_badhead/HEAD"
+git init -q --bare "$sc_front"
+echo "$TOP/sc-outside.git" >"$sc_front/commondir"
+mkdir -p "$sc_front/.git/objects" "$sc_front/.git/refs"
+echo 'junk' >"$sc_front/.git/HEAD"
 # sc_hook COMMAND: the guard's exit status in hook mode, as Claude Code runs it.
 sc_hook() {
   printf '%s' "$1" | jq -cRs --arg cwd "$sc_session" '{tool_name: "Bash", cwd: $cwd, tool_input: {command: .}}' \
@@ -1116,6 +1131,10 @@ sc_cases() {
   sc_refuse "git push $sc_alt v1.2.3"
   sc_refuse "git push $sc_common v1.2.3"
   sc_refuse "git push $sc_linkhead v1.2.3"
+  sc_refuse "git push $sc_nested v1.2.3"
+  sc_refuse "git push $sc_badhead v1.2.3"
+  sc_refuse "git push $sc_front v1.2.3"
+  sc_refuse "git push $sc_front HEAD:main"
   # Any word that changes how git picks the remote rules the exception out, whatever the spelling.
   sc_refuse "git push --repo=$sc_bare --tags"
   sc_refuse "git push --repo $sc_bare --tags"
@@ -1151,6 +1170,14 @@ sc_cases() {
 }
 for AWK_UNDER_TEST in "${awks[@]}"; do sc_cases; done
 AWK_UNDER_TEST=$(command -v awk)
+# Without a working folder from the hook (or one that cannot be entered), the remote is not scratch.
+sc_hook_cwd() {
+  printf '%s' "$2" | jq -cRs --arg cwd "$1" 'if $cwd == "" then {tool_name: "Bash", tool_input: {command: .}} else {tool_name: "Bash", cwd: $cwd, tool_input: {command: .}} end' \
+    | sc env MROOM_GUARD_AWK="$AWK_UNDER_TEST" bash "$guard" hook >"$TOP/out" 2>"$err"
+}
+expect "scratch push without a cwd" 2 sc_hook_cwd "" "git push $sc_bare v1.2.3"
+expect "scratch push with a missing cwd" 2 sc_hook_cwd "$TOP/no-such-folder" "git push $sc_bare v1.2.3"
+expect "scratch push with the session cwd" 0 sc_hook_cwd "$sc_session" "git push $sc_bare v1.2.3"
 # `--` and --end-of-options make every later word an argument: a refspec that starts with a dash is still one.
 expect "refspec after --" 2 "$mroom" guard check 'git push origin -- --x:main'
 expect "refspec after --end-of-options" 2 "$mroom" guard check 'git push origin --end-of-options --x:main'

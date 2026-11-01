@@ -90,7 +90,8 @@
 # `tr` per simple command at most, see lower_all) and the caps above bound each kind of work, but several of
 # them at their cap, or a path super-linear in the command's size, can still add up; so check_segment also
 # stops at a wall-clock DEADLINE (see DEADLINE), failing closed, so checking lasts at most DEADLINE plus one
-# simple command. A fork per argument once let `cat x x x ...` with 100k words, then a merge, run past it.
+# simple command; that one command may add up to SCRATCH_PROBE_LIMIT (5s) for the scratch probe, so 45 + 5
+# stays under the 60s timeout. A fork per argument once let `cat x x x ...` with 100k words, then a merge, run past it.
 #
 # Bash 3.2 compatible (macOS). Tests: tests/guard-test.sh. No `set -u`: bash 3.2 treats an empty
 # "${array[@]}" as unbound, and any exit other than 0 or 2 lets the command through.
@@ -161,7 +162,8 @@ PARSES=0
 # entry every simple command (and every find -exec group) goes through, stops and fails closed once checking
 # has run this many seconds ($SECONDS is a bash builtin, no fork). The guarantee is then DEADLINE plus the
 # work of one more simple command (a single scan: well under a second on a fast host, a few seconds on a much
-# slower one), kept under hooks.json's 60s and far above any real command (which decides in under a second).
+# slower one, plus up to SCRATCH_PROBE_LIMIT, 5s, when it is a push to a scratch path), kept under
+# hooks.json's 60s and far above any real command (which decides in under a second).
 # Overridable for tests and for an operator who sets a lower hook timeout; see the sanitiser below.
 DEADLINE=${MROOM_GUARD_DEADLINE:-30}
 # A plain one- or two-digit count of seconds, no leading zero (so never 0), and at most 45, which leaves room
@@ -1124,34 +1126,46 @@ is_scratch_remote() {
 # the push must be the only command on its line (see the end of this script).
 #   - PATH, as written, starts with the root (as configured or resolved) before anything at PATH is read;
 #   - it resolves, physically, strictly inside the root, and the root is a real folder (not a link);
+#   - no link anywhere under PATH (git would follow one out of the root);
 #   - git tries PATH/.git, PATH, PATH.git/.git and PATH.git: nothing named PATH.git may exist, a .git that is
-#     a link or a gitfile (which can point anywhere) is refused, and the repository git takes must look like
-#     one (HEAD, objects, refs), with no commondir or objects/info/alternates (which reach other
-#     repositories) and none of HEAD, refs, objects or packed-refs a link;
-#   - the session folder's git configuration (with the global and system ones) holds no url.*.insteadOf or
+#     a link or a gitfile (which can point anywhere) is refused, PATH itself may not hold HEAD, objects, refs
+#     or commondir when PATH/.git exists, and the repository git takes must look like one (objects, refs,
+#     and a HEAD that is a ref under refs/ or an object id), with no commondir or objects/info/alternates
+#     (which reach other repositories);
+#   - the hook gave a working folder that can be entered (otherwise: not scratch), and its git configuration (with the global and system ones) holds no url.*.insteadOf or
 #     pushInsteadOf and no remote named as the word itself (git looks a configured remote up by name before
 #     it takes the word as a path), since either could send the push to a network remote. Only `git config`
 #     exiting 1 means none; any other failure is not scratch.
 # shellcheck disable=SC2317,SC2329 # run through run_limited
 scratch_probe() {
-  local r=$1 p=$2 root logical repo f names key st=0
-  logical=$(scratch_root)
+  local r=$1 p=$2 root logical repo f names key head st=0
+  logical=$(scratch_root) || return 1
   root=$(scratch_real_root) || return 1
   case $p in "$root"/?* | "$logical"/?*) ;; *) return 1 ;; esac
   scratch_inside "$root" "$p" >/dev/null || return 1
   if [ -e "$p.git" ] || [ -L "$p.git" ]; then return 1; fi
   if [ -L "$p/.git" ] || [ -f "$p/.git" ]; then return 1; fi
+  # No link anywhere in it (refs/tags, objects/pack, hooks, ...): git would follow one out of the root.
+  [ -z "$(find -P "$p" -type l -print -quit 2>/dev/null)" ] || return 1
   repo=$p
   if [ -e "$p/.git" ]; then
     repo=$p/.git
     scratch_inside "$root" "$repo" >/dev/null || return 1
+    # If git found PATH/.git unusable it would take PATH itself: PATH must not look like a repository too.
+    for f in HEAD objects refs commondir; do
+      if [ -e "$p/$f" ] || [ -L "$p/$f" ]; then return 1; fi
+    done
   fi
   for f in HEAD refs objects packed-refs commondir objects/info/alternates; do
     [ -L "$repo/$f" ] && return 1
   done
   if [ -e "$repo/commondir" ] || [ -e "$repo/objects/info/alternates" ]; then return 1; fi
   [ -f "$repo/HEAD" ] && [ -d "$repo/objects" ] && [ -d "$repo/refs" ] || return 1
-  if [ -z "${CWD:-}" ] || ! cd "$CWD" 2>/dev/null; then cd / || return 1; fi
+  # HEAD must be what git accepts: a symbolic ref under refs/, or an object id.
+  IFS= read -r head <"$repo/HEAD" || [ -n "$head" ] || return 1
+  [[ $head =~ ^ref:\ refs/[A-Za-z0-9._/-]+$ || $head =~ ^[0-9a-f]{40}$ || $head =~ ^[0-9a-f]{64}$ ]] || return 1
+  # The session folder's configuration, or none: without a folder to read it from, the remote is not scratch.
+  if [ -z "${CWD:-}" ] || ! cd "$CWD" 2>/dev/null; then return 1; fi
   names=$(git config --name-only --get-regexp '^(url|remote)\.' 2>/dev/null) || st=$?
   case $st in
     0) ;;
@@ -1215,6 +1229,8 @@ check_git_push() {
       --pu*=*) ;;
       --pu*) i=$((i + 1)) ;;
       --*) ;;
+      # A lone dash is an argument to git, here a remote named `-`.
+      -) [ -n "$remote" ] || remote=$a ;;
       -*)
         g=${a#-}
         while [ -n "$g" ]; do
@@ -1261,6 +1277,7 @@ check_git_push() {
       --pu*=*) continue ;;
       --pu*) i=$((i + 1)); continue ;;
       --*) continue ;;
+      -) ;; # a lone dash is an argument (a remote or refspec named `-`), checked below
       -*)
         g=${a#-}
         [ "${#g}" -le 64 ] || { block "a git push option too long to check"; return; }

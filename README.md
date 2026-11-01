@@ -258,10 +258,10 @@ mroom scratch prune --older-than 24
 ```
 
 `rm` and `prune` remove only whole folders directly inside the root. They resolve the real path and
-refuse an entry that is a link, a path that reaches the root through a link, `..`, and anything beside
-or above the root. They delete with `find -P`, which never follows a link: a link inside a folder is
+refuse an entry that is a link, a path that reaches the root through a link, `..`, and anything that
+resolves outside the root. They delete with `find -P`, which never follows a link: a link inside a folder is
 removed as a link, and what it points at stays. The root itself must be a folder you own, and neither
-it nor its `mroom` folder may be a link. `base.json` allows every `mroom scratch` command, while
+it nor its `mroom` folder may be a link; the `mroom` folder must be yours and not writable by others. `base.json` allows every `mroom scratch` command, while
 `rm -rf` stays denied.
 
 **Offline tag and release tests.** `mroom guard` lets a `git push` of tags, or of any branch, through
@@ -276,12 +276,16 @@ git push origin v1.2.3             # still refused, as is a file:// push outside
 Name the tag: `base.json` still denies `--tags` by prefix. The push must be the line's only command,
 written as `git push <path> ...`: no `-C`, `--git-dir`, `-c`, `env` or `GIT_DIR` before it, and no
 `--repo`, `--no-repo`, `--` or `--end-of-options`. The guard's check is a snapshot of the files when the
-hook runs, so a command on the same line that changes them (a clone or init that writes config, a link
-swapped in) would not be seen. Force, mirror, `--all`, `--prune` and `+` refspecs stay refused there
-too. A remote that resolves out of the root through a link or `..`, that is not a repository itself,
-that reaches another repository (`commondir`, alternates, a `PATH.git` beside it), or that the git
-configuration could rewrite (`url.*.insteadOf`, or a remote configured under that name) is treated like
-any other remote. The check runs under a five-second limit; past it, the remote is not scratch.
+hook runs, so what changes them afterwards is not seen: a command on the same line (a clone or init that
+writes config, a link swapped in), or a process an earlier command left running. Nor does the guard see
+any difference between its own environment or git and the Bash tool's (another `HOME`, `PATH` or git
+version). Force, mirror, `--all`, `--prune` and `+` refspecs stay refused there too. A remote that
+resolves out of the root through a link or `..`, that holds a link anywhere inside it, that is not a
+repository itself (with a valid HEAD), that reaches another repository (`commondir`, alternates, a
+`PATH.git` beside it, a repository-looking `PATH` behind its `.git`), or that the git configuration could
+rewrite (`url.*.insteadOf`, or a remote configured under that name) is treated like any other remote, as
+it is when the hook gives no working folder. The check runs under a five-second limit; past it, the
+remote is not scratch.
 
 ## Doctor
 

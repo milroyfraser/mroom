@@ -28,14 +28,18 @@ scratch_physical() {
 }
 
 # scratch_real_root: the root's physical path, when the root is safe to use: a folder this user owns that is
-# not a link, under an `mroom` folder that is not a link either. A folder above those may be a link (a cache
-# on another disk), so containment is always checked against this physical path. Fails otherwise, also when
-# the root does not exist yet.
+# not a link, under an `mroom` folder that is not a link either, that this user owns and others cannot write
+# to (so no one else can swap the root). A folder above those may be a link (a cache on another disk), so
+# containment is always checked against this physical path. Fails otherwise, also when the root does not
+# exist yet.
 scratch_real_root() {
-  local root real
+  local root real mroom
   root=$(scratch_root) || return 1
   [ -n "${root%/mroom/scratch}" ] || return 1
-  [ ! -L "$root" ] && [ ! -L "${root%/scratch}" ] && [ -d "$root" ] && [ -O "$root" ] || return 1
+  mroom=${root%/scratch}
+  [ ! -L "$root" ] && [ ! -L "$mroom" ] && [ -d "$root" ] && [ -O "$root" ] || return 1
+  [ -d "$mroom" ] && [ -O "$mroom" ] || return 1
+  [ -z "$(find -P "$mroom" -maxdepth 0 -perm -002 -print 2>/dev/null)" ] || return 1
   real=$(scratch_physical "$root") || return 1
   [ "$real" != / ] || return 1
   printf '%s' "$real"
