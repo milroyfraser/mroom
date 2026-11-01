@@ -785,7 +785,7 @@ html[data-winddown] body::before{background:
   }
   /* Production check: a read-only command Claude asks the developer to run. One card on top of the
      stack while any check waits; it leaves when Claude records the answer (status "answered"). */
-  let prodChecks = [];
+  let prodChecks = [], pcLoaded = false;
   const PC_KEYWORDS = /^(select|from|where|and|or|not|in|is|null|as|on|join|left|right|inner|group|by|order|limit|count|distinct|begin|rollback|commit|set|transaction|read|only|local|true|false|function|fn|use|return|echo|new|foreach|if|else|ilike|like|desc|asc)$/i;
   function pcHighlight(code) {
     const out = document.createElement("code");
@@ -1892,6 +1892,16 @@ html[data-winddown] body::before{background:
       const named = [].concat(n.cardId ? n.cardId : [], Array.isArray(n.cardIds) ? n.cardIds : []).map(String);
       if (named.length && !named.some((id) => todos.some((t) => String(t.id) === id && t.status !== "done"))) n = null;
     }
+    /* A production check waiting for its output is what the session is waiting on: it is the next step,
+       whatever meta/next says, until Claude records the answer. A meta/next that names an answered or
+       dropped check is stale. */
+    const pcOpen = (typeof prodChecks !== "undefined" ? prodChecks : []).filter((c) => c && c.status !== "answered" && c.status !== "dropped" && typeof c.query === "string" && c.query.trim())
+      .sort((x, y) => String(x.askedAt || "").localeCompare(String(y.askedAt || "")));
+    if (n && n.prodCheckId && pcLoaded && !pcOpen.some((c) => String(c.id) === String(n.prodCheckId))) n = null;
+    if (pcOpen.length && !(n && n.prodCheckId && String(n.prodCheckId) === String(pcOpen[0].id))) {
+      const c = pcOpen[0];
+      n = { title: "Run the production check: " + String(c.title || "a read-only check"), text: String(c.why || ""), how: "Copy the command on the card above, run it" + (c.where ? " (" + String(c.where) + ")" : "") + ", and paste the output in the Claude Code chat.", prodCheckId: c.id, at: c.askedAt };
+    }
     if (!n) {
       /* Anything waiting on the developer counts: the first open to-do by rank that is a decision or a "now",
          unless a PR card whose current step is theirs comes first. */
@@ -1919,7 +1929,7 @@ html[data-winddown] body::before{background:
     /* The title scrolls to the card, which flashes an accent outline when reached. */
     const goCard = (e) => {
       if (e) e.preventDefault();
-      const c = n.cardId && document.querySelector('.focus[data-id="' + CSS.escape(String(n.cardId)) + '"]');
+      const c = n.prodCheckId ? $("prodCheck") : n.cardId && document.querySelector('.focus[data-id="' + CSS.escape(String(n.cardId)) + '"]');
       if (!c) return;
       c.scrollIntoView({ behavior: "smooth", block: "start" });
       c.classList.remove("flash"); void c.offsetWidth; c.classList.add("flash");
@@ -2164,7 +2174,7 @@ html[data-winddown] body::before{background:
     db.collection("work").onSnapshot((snap) => { work = rows(snap); loaded.work = true; renderWork(); renderMood(); }, onErr);
     db.doc("meta/session").onSnapshot((snap) => { session = data(snap); renderSession(); }, onErr);
     db.doc("meta/next").onSnapshot((snap) => { nextMeta = data(snap); renderWork(); }, onErr);
-    db.collection("prodChecks").onSnapshot((snap) => { prodChecks = snap.docs.map((d) => Object.assign({}, d.data(), { id: d.id })); renderProdCheck(); }, onErr);
+    db.collection("prodChecks").onSnapshot((snap) => { prodChecks = snap.docs.map((d) => Object.assign({}, d.data(), { id: d.id })); pcLoaded = true; renderProdCheck(); renderWork(); }, onErr);
     db.collection("learnings").onSnapshot((snap) => { learnings = snap.docs.map((d) => Object.assign({}, d.data(), { id: d.id })); renderLearning(); }, onErr);
     db.doc("meta/winddown").onSnapshot((snap) => { windDown = snap.exists ? snap.data() : null; renderLearning(); }, onErr);
     db.doc("meta/wave").onSnapshot((snap) => { showWave(snap.exists ? snap.data() : null); }, onErr);
