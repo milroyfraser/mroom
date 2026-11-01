@@ -425,6 +425,45 @@ x = 1'
   run "$MROOM" config validate; expect_rc 1; expect_err_has "app.name must be a string"
 }
 
+# A quoted key with a dot ("issues.token_env" = ...) spells the same key as a table and its key. The checks must
+# never pass one of the two values while get returns the other.
+t_dotted_key_names() {
+  toml 'issues.tracker = "linear"
+issues.token_env = "GH_TOKEN"
+"issues.token_env" = "LINEAR_API_KEY"
+
+[app]
+name = "shop"'
+  run "$MROOM" config validate; expect_rc 1
+  expect_err_has 'issues.token_env must not be one quoted key with a dot ("issues.token_env")'
+  run "$MROOM" config get issues.token_env; expect_rc 1; expect_out ""
+  run "$MROOM" config get issues --json; expect_rc 1; expect_out ""
+  run "$MROOM" config get issues.tracker; expect_rc 0; expect_out "linear"
+  run "$MROOM" config get app.name; expect_rc 0; expect_out "shop"
+  # Inside a table: a folder QA builds paths from.
+  toml '[app]
+name = "shop"
+build.frontend_dist = "../.."
+"build.frontend_dist" = "dist"'
+  run "$MROOM" config validate; expect_rc 1
+  expect_err_has 'app.build.frontend_dist must not be one quoted key with a dot ("build.frontend_dist")'
+  run "$MROOM" config get app.build.frontend_dist; expect_rc 1; expect_out ""
+  # A whole table in one quoted key.
+  toml 'app.name = "shop"
+qa.parity.mail = "smtp"
+"qa.parity" = { mail = "catcher" }'
+  run "$MROOM" config validate; expect_rc 1; expect_err_has 'qa.parity must not be one quoted key with a dot'
+  run "$MROOM" config get qa.parity.mail; expect_rc 1; expect_out ""
+  # One that spells no key mroom reads is an unknown key, as ever: a warning.
+  toml '"extra.thing" = 1
+
+[app]
+name = "shop"
+"x.y" = 2'
+  run "$MROOM" config validate; expect_rc 0
+  expect_err_has "unknown key extra.thing (ignored)"; expect_err_has "unknown key app.x.y (ignored)"
+}
+
 t_bad_toml() {
   toml '[app
 name = "shop"'
@@ -461,6 +500,7 @@ test_case workflow-keys t_workflow_keys
 test_case adapter-rules t_adapter_rules
 test_case qa-rules t_qa_rules
 test_case shape-errors t_shape_errors
+test_case dotted-key-names t_dotted_key_names
 test_case bad-toml t_bad_toml
 test_case keys-and-help t_keys_and_help
 finish
