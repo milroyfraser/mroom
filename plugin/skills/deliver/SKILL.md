@@ -21,6 +21,9 @@ installed, go on without it.
 - Ask the person before you create an issue or a label.
 - Never touch production. Never read secrets, tokens or credential files.
 - Never add the `qa` label. It is a person's switch.
+- Write every PR body, comment, note and commit message with a body to a fresh file, never a
+  fixed name in a shared folder: the path `mktemp` printed, or one Bash call with a quoted
+  heredoc (`/mroom:implement`, Rules).
 - Push early: after the first commit, push and open a draft PR linked to the issue
   (`/mroom:implement` step 4). Mark it ready only when the work is done (`/mroom:implement` step 6).
 - Never check out, run or push to a pull request from a fork (`isCrossRepository` true). A fork's
@@ -56,11 +59,13 @@ repository's own; a PR from a fork does not count (step 1).
    branch of that name, in a worktree or not, is worked on only when step 2 says it is this
    repository's own; otherwise stop as step 2 says.
    - A draft PR is unfinished work. Check out its branch in a worktree (`git worktree list` may
-     already have one) and continue `/mroom:implement` from step 2. Read the PR body, its commits
-     and the issue's comments for what was done.
-   - A ready PR: read `gh pr checks <pr>`, fix failures, answer review comments, and read the QA
-     result for the head commit (`/mroom:implement` step 6). Push the fixes. If the PR is behind
-     the default branch, `gh pr update-branch <pr>`.
+     already have one) and continue `/mroom:implement` from step 2, starting from its **Build to the
+     threat model** questions. Read the PR body, its commits and the issue's comments for what was
+     done.
+   - A ready PR: read `gh pr checks <pr>`, fix failures, answer review comments (looking hardest at
+     the code added since the last review round, as `/mroom:implement` step 2 says), and read the QA
+     result for the head commit (`/mroom:implement` step 6). Push the fixes. If the PR is behind the
+     default branch, `gh pr update-branch <pr>`.
 2. **A worktree with unpushed work.** `git worktree list`, then `git -C <path> log @{u}..` (or
    `git -C <path> log origin/<default>..` for a branch never pushed). A branch is this repository's
    own when `git -C <path> config branch.<branch>.remote` prints nothing or `origin`, and
@@ -104,9 +109,9 @@ The design source is Claude Design canvases (the Artifact tool, intent `design`)
    - When scope and polish pull apart, choose fewer, finished features over more rough ones
      (`principle-experience-first`).
    - Never publish a stand-in mockup.
-3. **Post it for approval.** `mroom tracker comment <id> < design.md`, a comment whose first line
-   is `Design for review: <canvas link>`, then the decisions worth the person's eye and the
-   assumptions made. When `mroom tracker` exits 3, put it in the PR body instead.
+3. **Post it for approval.** `mroom tracker comment <id> < "$f"`, a fresh file (Rules): a comment
+   whose first line is `Design for review: <canvas link>`, then the decisions worth the person's eye
+   and the assumptions made. When `mroom tracker` exits 3, put it in the PR body instead.
 4. **Ask once** with `AskUserQuestion`: approve / approve with changes / later.
    - **approve:** comment `Design approved by <the person's name, or "the person">: <canvas link>`. It records
      their answer to this question; never write it without one.

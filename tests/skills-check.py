@@ -304,7 +304,7 @@ THREAT_TRIGGERS = [
     "5. the session Room page: `plugin/skills/implement/room/`;",
     "6. what installs, runs as root, boxes untrusted code or decides review: `.github/scripts/`, `.github/CODEOWNERS`, `install.sh`, `lib/root-setup`, `lib/runner-sandbox`, `lib/job`, `bin/forge-api`, `bin/mroom`.",
 ]
-THREAT_CLASSES = ["Secret reach", "QA isolation", "Input reaching commands", "Guard bypasses", "Pins", "Privacy"]
+THREAT_CLASSES = ["Secret reach", "QA isolation", "Input reaching commands", "Guard bypasses", "Pins", "Privacy", "Privilege"]
 qa = re.search(r"^## 6\. QA\b.*?\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M) if implement else None
 qa = qa.group(1) if qa else ""
 # The threat check: from its bold lead to the paragraph that marks the PR ready.
@@ -331,17 +331,128 @@ say("`docs/design.md`, section 8" in check and all(f"**{c}:**" in check for c in
 design = read(os.path.join(root, "docs/design.md"))
 cited = re.search(r"decisions it names \(D(\d+), D(\d+) to D(\d+)\)", check)
 nums = [int(cited.group(1))] + list(range(int(cited.group(2)), int(cited.group(3)) + 1)) if cited else []
+say(14 in nums, f"implement's threat check cites D14, the QA file store's isolation ({nums})")
 say(bool(nums) and all(re.search(rf"^\| D{n} \|", design, flags=re.M) for n in nums),
     f"the decisions implement's threat check cites exist in docs/design.md ({nums})")
 say("never edits the PR" in check and "You write them into the PR body under `## Threat check`" in check
     and "A high or critical finding blocks `gh pr ready` until it is fixed" in check,
     "implement writes the sub-agent's findings under ## Threat check, and a high or critical one blocks ready")
+# A PR body may be public and keeps its edit history, so the write-up never carries what it found or an exploit.
+WRITE_UP = ["You write them into the PR body under `## Threat check`, through a fresh file (`--body-file`)",
+            "each finding with its severity, its class, the file and line, and its fix",
+            "A finding never quotes the secret, host, address, id, name or personal data it found, and never gives a step-by-step exploit",
+            "its edit history keeps what a later edit removes",
+            "A finding in code this PR does not change goes to the person, not into the PR body."]
+say(all(w in check for w in WRITE_UP), "implement's threat write-up goes through a fresh file, names no secret or person and gives no exploit")
+privilege = "**Privilege:** a way for PR code, a QA site's user or the box user to act as the deploy user or root"
+say(privilege in check and "a sudo rule, a systemd unit line, a link that root or nginx follows" in check,
+    "implement's threat check asks for privilege: acting as the deploy user or root, or writing outside its area")
+readme_flat = one_line(read(os.path.join(root, "README.md")))
+design_flat = one_line(design)
+for doc_label, flat_text in (("README.md", readme_flat), ("docs/design.md", design_flat)):
+    say("through a fresh file" in flat_text and "the secret, host, address, id, name or personal data it found" in flat_text
+        and "step-by-step exploit" in flat_text and "goes to the person, not into the PR body" in flat_text,
+        f"{doc_label} mirrors implement's threat write-up rules")
+say("pins, privacy and privilege" in design_flat, "docs/design.md lists privilege among the threat check's classes")
 say("`gh pr ready <pr> --undo`" in check, "implement moves a ready PR back to draft when a re-check finds a high or critical")
 say("the post-merge security check" in check and "stays the backstop" in check,
     "implement keeps the post-merge security check as the backstop")
 fix = docs.get("skill fix-issue")
 say(bool(fix) and "Follow `/mroom:implement` steps 6 and 7" in fix[3],
     "fix-issue follows implement's steps 6 and 7, so it runs the threat check too")
+
+# The builder starts from the threat check's own questions, so the author answers them while writing, before any
+# reviewer asks. Step 2 opens with them, one bullet per class the threat check reads for, ahead of the principles.
+build = re.search(r"^## 2\. Implement\n\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M) if implement else None
+build = build.group(1) if build else ""
+asked = re.findall(r"^- \*\*([^*]+):\*\*", build.split("\n\n- Before adding anything")[0], flags=re.M)
+say(build.startswith("**Build to the threat model.**") and asked == THREAT_CLASSES,
+    f"implement step 2 opens with the threat check's questions, one per class ({asked})")
+say("before adding anything" not in one_line(build.split("**Build to the threat model.**")[0]).lower()
+    and build.find("**Build to the threat model.**") < build.find("- Before adding anything"),
+    "implement asks the threat-model questions before the principles")
+ROUND = "the code added since the last review round"
+say(ROUND in one_line(build) and ROUND in check,
+    "implement's later rounds and threat re-checks look hardest at the code added since the last review round")
+deliver_doc = docs.get("skill deliver")
+say(bool(fix) and "**Build to the threat model**" in fix[3] and bool(deliver_doc)
+    and "**Build to the threat model**" in one_line(deliver_doc[3]) and ROUND in one_line(deliver_doc[3]),
+    "fix-issue and deliver build from implement's threat-model questions, and deliver's re-review looks at what is new")
+
+# A PR body, commit message, comment or note goes in a fresh mktemp file, never a fixed name in a shared folder,
+# where one session's PR picks up another's text. Every file a gh, git or mroom command reads its text from, by a
+# flag, a redirect or a pipe from cat, is a bare "$variable" (set from mktemp), in every skill, command and the README.
+FILE_VAR = re.compile(r'"\$[A-Za-z_][A-Za-z0-9_]*"')
+# The flags that name a text file, for the commands that take them. -F is a field for gh api and a fixed string for
+# git grep, so it counts only where it means a file.
+FILE_FLAGS = [
+    (r"gh\s+\S+\s+\S+", r"--body-file|--notes-file"),
+    (r"gh\s+api\b", r"--input"),
+    (r"gh\s+(?:pr|issue|release)\s+(?:create|edit|comment)\b|git\s+(?:commit|tag)\b", r"-F|--file"),
+]
+def fixed_files(spans):
+    """Every file name a gh, git or mroom command reads text from that is not a bare "$variable"."""
+    bad = []
+    for span in spans:
+        joined = re.sub(r"\\\n\s*", " ", span)
+        for pipeline in re.split(r"\n|;|&&|\|\|", joined):
+            stages = [re.sub(r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*", "", s).strip() for s in pipeline.split("|")]
+            if not any(re.match(r"(?:gh|git|mroom)\s", s) for s in stages):
+                continue
+            args = []
+            for s in stages:
+                for cmd, flags in FILE_FLAGS:
+                    if re.match(cmd, s):
+                        args += [m.group(1) for m in re.finditer(rf"\s(?:{flags})(?:=|\s+)(\S+)", " " + s)]
+                # A redirect from a file, with or without a space; a <placeholder> and <<'EOF' are not one.
+                for m in re.finditer(r"(?<![<\w])<(?!<)(\s*)(\S+)", s):
+                    if not m.group(1) and re.match(r"<[^<>\n]*>", s[m.start():]):
+                        continue
+                    args.append(m.group(2))
+                m = re.match(r"cat\s+(\S+)", s)
+                if m:
+                    args.append(m.group(1))
+            bad += [a for a in args if not FILE_VAR.fullmatch(a)]
+    return bad
+def loose_heredocs(text):
+    """Every unquoted heredoc in the text's code; <<key>> and <<fill:name>> template placeholders are not one."""
+    return re.findall(r"<<-?\s*(?![\s'\"])\w+(?![\w>:.])", "\n".join(code(text)))
+texts = [(label, d[3]) for label, d in sorted(docs.items())] + [("README.md", read(os.path.join(root, "README.md")))]
+for label, body in texts:
+    bad = fixed_files(code(body))
+    say(not bad, f"{label} reads PR bodies, commit messages and comments only from a mktemp file ({bad[:3]})")
+    # A heredoc of outside text is quoted, so its $ and backticks are never expanded.
+    say(not loose_heredocs(body), f"{label} quotes every heredoc ({loose_heredocs(body)[:2]})")
+say(loose_heredocs("`cat > \"$f\" <<EOF`") == ["<<EOF"] and not loose_heredocs("`cat <<'EOF'` `<<fill:x>>` `<<app.dir>>`"),
+    "the heredoc check finds an unquoted heredoc, and not a template placeholder")
+impl_rules = one_line(re.search(r"^## Rules\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M).group(1)) if implement else ""
+say(all(p in impl_rules for p in ("PR body, comment, note and commit message with a body to a fresh file",
+                                  "never a fixed name", "Shell variables do not survive between Bash calls",
+                                  "the path `mktemp` printed", "in one Bash call with a quoted heredoc (`<<'EOF'`)")),
+    "implement's rules write every body, message and note to a fresh file, made and used within one Bash call")
+step4 = re.search(r"^## 4\. .*?\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M) if implement else None
+say(bool(step4) and "A message with a body goes through a fresh file" in one_line(step4.group(1)),
+    "implement's commit step agrees with its rules: every message with a body goes through a fresh file")
+# The check sees a fixed name however it is written, and leaves alone what is not a file.
+FIXED = {
+    "mroom tracker comment <id> < note.md": ["note.md"],
+    "mroom tracker comment <id> <note.md": ["note.md"],
+    "mroom tracker comment <error id> < note.md": ["note.md"],
+    'mroom tracker comment <id> < "$HOME/note.md"': ['"$HOME/note.md"'],
+    "mroom tracker comment <id> < <file>": ["<file>"],
+    "cat note.md | mroom tracker comment <id>": ["note.md"],
+    "GH_REPO=o/r gh pr comment 1 --body-file /tmp/body.md": ["/tmp/body.md"],
+    "gh pr create --draft --body-file=body.md": ["body.md"],
+    "gh pr create -F body.md": ["body.md"],
+    "gh api repos/o/r/issues/1/comments --input body.json": ["body.json"],
+    "git commit -F msg.txt": ["msg.txt"],
+    "gh release edit v1 --notes-file <file>": ["<file>"],
+}
+CLEAN = ['gh pr create --body-file "$body"', 'mroom tracker comment <id> < "$f"', 'cat "$f" | mroom tracker comment <id>',
+         "gh api -F state=open repos/o/r/issues", "git grep -F needle", "mroom tracker get <id>",
+         'f="$(mktemp)" && cat > "$f" <<\'EOF\'', 'git diff <last reviewed head>..HEAD']
+say(all(fixed_files([c]) == want for c, want in FIXED.items()) and not any(fixed_files([c]) for c in CLEAN),
+    f"the mktemp check finds a fixed-name body file, and nothing else ({[(c, fixed_files([c])) for c in list(FIXED) + CLEAN if fixed_files([c]) != FIXED.get(c, [])][:2]})")
 
 # --- The release skill ------------------------------------------------------------------------------------
 release = docs.get("skill release")
@@ -559,3 +670,31 @@ say(not any(r.startswith("Bash(gh release") and r != "Bash(gh release list:*)" a
             for r in frag["allow"]), "no settings fragment allows a release write")
 say("Bash(gh release delete:*)" in frag["deny"] and "Bash(gh pr merge:*)" in frag["deny"],
     "the settings deny a release delete and a merge")
+
+# --- Attribution comes from the harness ------------------------------------------------------------------
+# A co-author line or a session link written into any file mroom ships (a skill, a command, a doc, a template,
+# a workflow, a script) would put one model's or one session's name on every commit and PR made from it. The
+# skills say to use the attribution the harness gives instead (implement step 4). The whole repository is
+# scanned, but tests/, whose fixtures may spell one out. A placeholder that explains the trailer, such as
+# `Co-authored-by: <name>`, is allowed.
+fixed_attribution = re.compile(
+    r"(?:co-authored-by|claude-session):[ \t]*(?!<)\S|claude\.ai/code/session|generated with \[claude code\]", re.I)
+listed = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True, text=True, check=True).stdout
+paths = [f for f in listed.split("\0") if f and not f.startswith("tests/")]
+# SKILLS_DIR and COMMANDS_DIR can point at a copy (mutation checks): scan those in place of the tracked ones.
+for override, tracked in ((skills_dir, "plugin/skills/"), (commands_dir, "plugin/commands/")):
+    if os.path.realpath(override) != os.path.realpath(os.path.join(root, tracked)):
+        paths = [f for f in paths if not f.startswith(tracked)]
+        paths += [os.path.join(d, f) for d, _, fs in os.walk(override) for f in fs]
+hits = []
+for path in sorted(paths):
+    full = path if os.path.isabs(path) else os.path.join(root, path)
+    try:
+        text = read(full)
+    except (UnicodeDecodeError, OSError):
+        continue
+    if fixed_attribution.search(text):
+        hits.append(os.path.relpath(full, root))
+say(not hits, f"no file outside tests/ hard-codes a co-author line or session link {hits[:3]}")
+implement = read(os.path.join(skills_dir, "implement", "SKILL.md"))
+say("the attribution your harness gives" in implement, "implement takes commit and PR attribution from the harness")
