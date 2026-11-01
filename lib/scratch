@@ -33,8 +33,8 @@ HERE="$(cd "$(dirname "$SELF")" && pwd)"
 die() { echo "mroom scratch: $1" >&2; exit "${2:-1}"; }
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF" | sed -n '/^  *mroom scratch new/,/^$/p'; }
 
-ROOT_DIR=$(scratch_root)
-[ -n "${ROOT_DIR%/mroom/scratch}" ] || die "neither XDG_CACHE_HOME nor HOME is set, so there is no scratch root"
+ROOT_DIR=$(scratch_root) || die "neither XDG_CACHE_HOME nor HOME is an absolute path, so there is no scratch root"
+[ -n "${ROOT_DIR%/mroom/scratch}" ] || die "the scratch root would be /mroom/scratch; set HOME or XDG_CACHE_HOME"
 
 # real_root [create]: the root's physical path in REAL_ROOT; with create, makes the root first (mode 700).
 real_root() {
@@ -97,7 +97,7 @@ remove() {
   fi
   # git makes its objects read-only, and a test may lock a folder: make every folder writable first. find -P
   # never follows a link, and -type d never matches one, so nothing outside the folder changes mode.
-  find -P "$path" -xdev -type d ! -perm -300 -exec chmod u+wx {} + 2>/dev/null || true
+  find -P "$path" -xdev -type d ! -perm -700 -exec chmod u+rwx {} + 2>/dev/null || true
   if ! find -P "$path" -xdev -depth -delete; then
     echo "mroom scratch: could not remove all of $id (what is left is still in $path)" >&2
     return 1
@@ -136,7 +136,7 @@ case "$cmd" in
     real_root || { echo "no scratch folders (no root yet at $ROOT_DIR)"; exit 0; }
     now=$(date +%s)
     found=0
-    for entry in "$REAL_ROOT"/* "$REAL_ROOT"/.[!.]*; do
+    for entry in "$REAL_ROOT"/* "$REAL_ROOT"/.[!.]* "$REAL_ROOT"/..?*; do
       [ -e "$entry" ] || [ -L "$entry" ] || continue
       found=1
       id=${entry##*/}

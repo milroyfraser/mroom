@@ -251,30 +251,37 @@ mroom memory-preflight 4096 "the frontend build" && pnpm build
 choosing.
 
 ```bash
-d="$(mroom scratch new)"           # an empty folder; --git for a repository, --bare for a remote
+mroom scratch new                  # prints a fresh empty folder; --git for a repository, --bare for a remote
 mroom scratch ls                   # id, kind (plain, git, bare or link), age in hours, path
-mroom scratch rm <id>...           # remove folders made by new (an id, or the path new printed)
+mroom scratch rm <id-or-path>...   # remove folders made by new
 mroom scratch prune --older-than 24
 ```
 
 `rm` and `prune` remove only whole folders directly inside the root. They resolve the real path and
-refuse a link (in the root or on the way to it), `..`, and anything beside or above the root; they
-delete with `find -P`, so a link inside a folder goes as a link and what it points at stays. The root
-itself must be a folder you own, not reached through a link. `base.json` allows every `mroom scratch`
-command, while `rm -rf` stays denied.
+refuse an entry that is a link, a path that reaches the root through a link, `..`, and anything beside
+or above the root. They delete with `find -P`, which never follows a link: a link inside a folder is
+removed as a link, and what it points at stays. The root itself must be a folder you own, and neither
+it nor its `mroom` folder may be a link. `base.json` allows every `mroom scratch` command, while
+`rm -rf` stays denied.
 
 **Offline tag and release tests.** `mroom guard` lets a `git push` of tags, or of any branch, through
-when its remote is a repository inside the root, named by its absolute path or `file:///` URL:
+when its remote is a repository inside the root, named by the literal absolute path (or `file:///` URL)
+that `mroom scratch new --bare` printed:
 
 ```bash
-remote="$(mroom scratch new --bare)"
-git push "$remote" v1.2.3          # allowed: name the tag (base.json still denies --tags by prefix)
+git push /home/me/.cache/mroom/scratch/20260101-120000-AbC123 v1.2.3   # allowed: name the tag
 git push origin v1.2.3             # still refused, as is a file:// push outside the root
 ```
 
-Force, mirror, `--all`, `--prune` and `+` refspecs stay refused there too. A remote that resolves out of
-the root through a link or `..`, that is not a repository itself, or that the git configuration could
-rewrite (`url.*.insteadOf`, or a remote configured under that name) is treated like any other remote.
+Name the tag: `base.json` still denies `--tags` by prefix. The push must be the line's only command,
+written as `git push <path> ...`: no `-C`, `--git-dir`, `-c`, `env` or `GIT_DIR` before it, and no
+`--repo`, `--no-repo`, `--` or `--end-of-options`. The guard's check is a snapshot of the files when the
+hook runs, so a command on the same line that changes them (a clone or init that writes config, a link
+swapped in) would not be seen. Force, mirror, `--all`, `--prune` and `+` refspecs stay refused there
+too. A remote that resolves out of the root through a link or `..`, that is not a repository itself,
+that reaches another repository (`commondir`, alternates, a `PATH.git` beside it), or that the git
+configuration could rewrite (`url.*.insteadOf`, or a remote configured under that name) is treated like
+any other remote. The check runs under a five-second limit; past it, the remote is not scratch.
 
 ## Doctor
 

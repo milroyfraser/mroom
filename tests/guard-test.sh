@@ -1063,58 +1063,129 @@ has "$err" "the Bash guard is off"
 
 # --- Pushes to a `mroom scratch` repository ------------------------------------------------------
 # Real folders this time: the guard resolves the remote. HOME and the cache are the test's own, so no
-# developer's git configuration counts.
+# developer's git configuration counts. Every case goes through hook mode, with the session folder as the
+# hook's cwd, under each awk.
 sc_home="$TOP/sc-home"
-mkdir -p "$sc_home" "$TOP/sc-session"
+sc_session="$TOP/sc-session"
+mkdir -p "$sc_home" "$sc_session"
 sc() { env HOME="$sc_home" XDG_CACHE_HOME="$TOP/sc-cache" GIT_CONFIG_NOSYSTEM=1 "$@"; }
 sc_bare=$(sc "$mroom" scratch new --bare)
 sc_git=$(sc "$mroom" scratch new --git)
 sc_plain=$(sc "$mroom" scratch new)
+sc_twin=$(sc "$mroom" scratch new --bare)
+sc_alt=$(sc "$mroom" scratch new --bare)
+sc_common=$(sc "$mroom" scratch new --bare)
+sc_linkhead=$(sc "$mroom" scratch new --bare)
 sc_root=${sc_bare%/*}
 git init -q --bare "$TOP/sc-outside.git"
 ln -s "$TOP/sc-outside.git" "$sc_root/evil"
-sc_check() { (cd "$TOP/sc-session" && sc "$mroom" guard check "$1"); }
-sc_allow() { expect "scratch push allowed: $1" 0 sc_check "$1"; }
-sc_refuse() { expect "scratch push refused: $1" 2 sc_check "$1"; }
-sc_allow "git push file://$sc_bare v1.2.3"
-sc_allow "git push $sc_bare refs/tags/release-v1.2.3"
-sc_allow "git push $sc_bare --tags"
-sc_allow "git push --follow-tags file://$sc_git HEAD:main"
-sc_allow "git push -u $sc_bare main"
-# git takes the argument over --repo, so here the remote is the scratch repository.
-sc_allow "git push --repo=origin $sc_bare v1.2.3"
-# A tag push to a network remote, or to a path outside the root, is still refused.
-sc_refuse "git push origin v1.2.3"
-sc_refuse "git push --tags origin"
-sc_refuse "git push https://github.com/acme/shop.git v1.2.3"
-sc_refuse "git push git@github.com:acme/shop.git refs/tags/v1.2.3"
-sc_refuse "git push file://$TOP/sc-outside.git v1.2.3"
-sc_refuse "git push $TOP/sc-outside.git --tags"
-# Out of the root through a link or `..`, a plain folder (git would try PATH.git next), a relative path.
-sc_refuse "git push file://$sc_root/evil v1.2.3"
-sc_refuse "git push $sc_bare/../../../../sc-outside.git v1.2.3"
-sc_refuse "git push file://$sc_plain v1.2.3"
-sc_refuse "git push ./x v1.2.3"
-sc_refuse "git push \"\$R\" v1.2.3"
-# Where git's own option parsing makes the scratch path something other than the remote.
-sc_refuse "git push --rep=$sc_bare origin v1.2.3"
-sc_refuse "git push --pus $sc_bare origin v1.2.3"
-sc_refuse "git push -o $sc_bare origin v1.2.3"
-sc_refuse "git push --repo=$sc_bare --repo=origin v1.2.3"
-# Force and its kin stay refused, scratch or not.
-sc_refuse "git push -f $sc_bare main"
-sc_refuse "git push --mirror $sc_bare"
-sc_refuse "git push $sc_bare +main"
-sc_refuse "git push --receive-pack=x $sc_bare v1"
-# A rewrite or a remote of that name in the git configuration could send the push to the network.
-sc_refuse "git -c url.https://github.com/acme/shop.pushInsteadOf=$sc_bare push $sc_bare v1.2.3"
-sc_refuse "git config --global url.https://github.com/acme/shop.insteadOf $sc_root"
+# Ways a repository in the root reaches another one: PATH.git beside it, alternates, commondir, a linked HEAD.
+git init -q --bare "$sc_twin.git"
+echo "$TOP/sc-outside.git/objects" >"$sc_alt/objects/info/alternates"
+echo "$TOP/sc-outside.git" >"$sc_common/commondir"
+mv "$sc_linkhead/HEAD" "$TOP/sc-head"
+ln -s "$TOP/sc-head" "$sc_linkhead/HEAD"
+# sc_hook COMMAND: the guard's exit status in hook mode, as Claude Code runs it.
+sc_hook() {
+  printf '%s' "$1" | jq -cRs --arg cwd "$sc_session" '{tool_name: "Bash", cwd: $cwd, tool_input: {command: .}}' \
+    | sc env MROOM_GUARD_AWK="$AWK_UNDER_TEST" bash "$guard" hook >"$TOP/out" 2>"$err"
+}
+sc_allow() { expect "[$AWK_UNDER_TEST] scratch push allowed: $1" 0 sc_hook "$1"; }
+sc_refuse() { expect "[$AWK_UNDER_TEST] scratch push refused: $1" 2 sc_hook "$1"; }
+sc_cases() {
+  sc_allow "git push file://$sc_bare v1.2.3"
+  sc_allow "git push $sc_bare refs/tags/release-v1.2.3"
+  sc_allow "git push $sc_bare --tags"
+  sc_allow "git push --follow-tags file://$sc_git HEAD:main"
+  sc_allow "git push -u $sc_bare main"
+  # A tag push to a network remote, or to a path outside the root, is still refused.
+  sc_refuse "git push origin v1.2.3"
+  sc_refuse "git push --tags origin"
+  sc_refuse "git push https://github.com/acme/shop.git v1.2.3"
+  sc_refuse "git push git@github.com:acme/shop.git refs/tags/v1.2.3"
+  sc_refuse "git push file://$TOP/sc-outside.git v1.2.3"
+  sc_refuse "git push $TOP/sc-outside.git --tags"
+  # Out of the root through a link or `..`, a plain folder, a relative path, a variable.
+  sc_refuse "git push file://$sc_root/evil v1.2.3"
+  sc_refuse "git push $sc_bare/../../../../sc-outside.git v1.2.3"
+  sc_refuse "git push file://$sc_plain v1.2.3"
+  sc_refuse "git push ./x v1.2.3"
+  sc_refuse "git push \"\$R\" v1.2.3"
+  # A repository that reaches another one.
+  sc_refuse "git push $sc_twin v1.2.3"
+  sc_refuse "git push $sc_alt v1.2.3"
+  sc_refuse "git push $sc_common v1.2.3"
+  sc_refuse "git push $sc_linkhead v1.2.3"
+  # Any word that changes how git picks the remote rules the exception out, whatever the spelling.
+  sc_refuse "git push --repo=$sc_bare --tags"
+  sc_refuse "git push --repo $sc_bare --tags"
+  sc_refuse "git push --rep=$sc_bare --ta"
+  sc_refuse "git push --rep $sc_bare --fol"
+  sc_refuse "git push --repo=origin $sc_bare v1.2.3"
+  sc_refuse "git push $sc_bare --no-repo --tags"
+  sc_refuse "git push $sc_bare --no-rep --follow-tags"
+  sc_refuse "git push --tags -- $sc_bare"
+  sc_refuse "git push $sc_bare -- v1.2.3"
+  sc_refuse "git push --end-of-options $sc_bare --tags"
+  sc_refuse "git push $sc_bare --end-of-options v1.2.3"
+  sc_refuse "git push --pus $sc_bare origin v1.2.3"
+  sc_refuse "git push -o $sc_bare origin v1.2.3"
+  # Only a lone, literal `git push` at the top level.
+  sc_refuse "git push $sc_bare v1.2.3 && git push origin v1.2.3"
+  sc_refuse "true; git push $sc_bare v1.2.3"
+  sc_refuse "git push $sc_bare v1.2.3 | cat"
+  sc_refuse "env GIT_DIR=x git push $sc_bare v1.2.3"
+  sc_refuse "GIT_DIR=x git push $sc_bare v1.2.3"
+  sc_refuse "git -C $sc_session push $sc_bare v1.2.3"
+  sc_refuse "git --git-dir=x push $sc_bare v1.2.3"
+  sc_refuse "git -c core.x=1 push $sc_bare v1.2.3"
+  sc_refuse "bash -c 'git push $sc_bare v1.2.3'"
+  sc_refuse "find . -exec git push $sc_bare v1.2.3 ';'"
+  # Force and its kin stay refused, scratch or not.
+  sc_refuse "git push -f $sc_bare main"
+  sc_refuse "git push --mirror $sc_bare"
+  sc_refuse "git push $sc_bare +main"
+  sc_refuse "git push --receive-pack=x $sc_bare v1"
+  sc_refuse "git -c url.https://github.com/acme/shop.pushInsteadOf=$sc_bare push $sc_bare v1.2.3"
+  sc_refuse "git config --global url.https://github.com/acme/shop.insteadOf $sc_root"
+}
+for AWK_UNDER_TEST in "${awks[@]}"; do sc_cases; done
+AWK_UNDER_TEST=$(command -v awk)
+# `--` and --end-of-options make every later word an argument: a refspec that starts with a dash is still one.
+expect "refspec after --" 2 "$mroom" guard check 'git push origin -- --x:main'
+expect "refspec after --end-of-options" 2 "$mroom" guard check 'git push origin --end-of-options --x:main'
+expect "dash refspec after --" 2 "$mroom" guard check 'git push origin -- --tags'
+expect "plain refspec after --" 0 "$mroom" guard check 'git push origin -- feat/x'
+# A rewrite, or a remote of that name (as a path or a file:/// URL), in the git configuration could send the
+# push to the network.
 sc git config --global "url.https://github.com/acme/shop.pushInsteadOf" "$sc_bare"
 sc_refuse "git push $sc_bare v1.2.3"
 sc git config --global --unset "url.https://github.com/acme/shop.pushInsteadOf"
 sc git config --global "remote.$sc_bare.url" https://github.com/acme/shop.git
 sc_refuse "git push $sc_bare v1.2.3"
 sc git config --global --unset "remote.$sc_bare.url"
+sc git config --global "remote.file://$sc_bare.url" https://github.com/acme/shop.git
+sc_refuse "git push file://$sc_bare v1.2.3"
+sc git config --global --unset "remote.file://$sc_bare.url"
+# The session folder's own repository counts too.
+git init -q "$sc_session"
+git -C "$sc_session" config "url.https://github.com/acme/shop.insteadOf" "$sc_root"
+sc_refuse "git push $sc_bare v1.2.3"
+git -C "$sc_session" config --unset "url.https://github.com/acme/shop.insteadOf"
+sc_allow "git push $sc_bare v1.2.3"
+# A git config the probe cannot read (any error but "no match") is no scratch.
+[ ! -e "$sc_home/.gitconfig" ] || unlink "$sc_home/.gitconfig"
+printf '[broken\n' >"$sc_home/.gitconfig"
+sc_refuse "git push $sc_bare v1.2.3"
+unlink "$sc_home/.gitconfig"
+# A FIFO as the git configuration would block git config: the probe is killed after its limit and the push
+# is refused, well inside the hook's timeout, rather than stalling it (a timed-out hook lets the line run).
+mkfifo "$sc_home/.gitconfig"
+sc_t0=$SECONDS
+sc_refuse "git push $sc_bare v1.2.3"
+count=$((count + 1))
+[ $((SECONDS - sc_t0)) -le 15 ] || { echo "FAIL (a FIFO git config held the hook $((SECONDS - sc_t0))s)" >&2; failures=$((failures + 1)); }
+unlink "$sc_home/.gitconfig"
 sc_allow "git push $sc_bare v1.2.3"
 # A root reached through a link is no root.
 mv "$TOP/sc-cache/mroom/scratch" "$TOP/sc-real"

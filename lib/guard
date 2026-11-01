@@ -67,9 +67,12 @@
 # (.env is the destination), writes such as `echo X=y >> .env`, `git show HEAD:path` (committed content only),
 # `bash script.sh` (a script file is not read here), and a `git push` of tags or of any branch (main too) to a
 # repository that `mroom scratch new --git|--bare` made, named by its literal absolute path or file:/// URL,
-# so tag and release flows can be tested offline (is_scratch_remote says what counts; force, mirror, --all,
-# --prune and + or pattern refspecs stay refused there too). Name the tag (`git push <path> v1.2.3`): the
-# settings fragment's deny rule on `git push*--tags*` matches by prefix and cannot tell a scratch remote
+# so tag and release flows can be tested offline. The push must be the line's only command, written as
+# `git push <path> ...` (no -C, --git-dir, -c, env or GIT_DIR before it, no --repo, `--` or --end-of-options),
+# since the check is a snapshot of the files when the hook runs: a command that changes them (a clone or init
+# that writes config, a link swapped in) is not seen. is_scratch_remote says what counts; force, mirror,
+# --all, --prune and + or pattern refspecs stay refused there too. Name the tag (`git push <path> v1.2.3`):
+# the settings fragment's deny rule on `git push*--tags*` matches by prefix and cannot tell a scratch remote
 # apart. That repository's own hooks run on the push, as a script file would.
 #
 # Contract (https://code.claude.com/docs/en/hooks): exit 2 blocks and its stderr is shown to the model, and
@@ -129,6 +132,16 @@ HERE=$(cd "$(dirname "$(readlink -f "$SELF" 2>/dev/null || echo "$SELF")")" && p
 TOKENIZER="$HERE/core/guard-tokenize.awk"
 # Where `mroom scratch` keeps throwaway folders: a push to one may carry tags (see is_scratch_remote).
 SCRATCH_LIB="$HERE/core/scratch.sh"
+# shellcheck source=lib/core/scratch.sh
+[ -f "$SCRATCH_LIB" ] && . "$SCRATCH_LIB"
+# How long the scratch probe (is_scratch_remote) may take, in seconds, before it is killed and the remote
+# counts as not scratch. It reads files and git configuration an agent can write (a FIFO would block).
+SCRATCH_PROBE_LIMIT=5
+# Set when a push used the scratch exception: then it must be the line's only simple command (see the end).
+SCRATCH_USED=""
+# Whether the simple command being checked is literally `git push ...` at the top level (check_segment).
+SEG_PLAIN_GIT_PUSH=""
+SEGMENTS=0
 MAX_BYTES=262144
 MAX_COMMANDS=3000
 # Words in one simple command (its name and arguments), and in the whole command. Far above an everyday
@@ -1085,18 +1098,13 @@ is_protected_ref() {
   return 1
 }
 
-# is_scratch_remote WORD: is this push's remote a folder inside `mroom scratch`'s root (lib/core/scratch.sh)?
-# Only a literal absolute path or file:/// URL counts: a word from a variable, a glob, a brace list, a `~`, a
-# percent escape (git decodes some), a relative path (the command may `cd` first) or a named remote does not.
-# The path must resolve, physically, strictly inside the root, and the root must be a real folder (not a
-# link), so a link or `..` out of it is not scratch. git tries PATH/.git before PATH: a .git there that is a
-# link or a gitfile (which can point anywhere) is not scratch either. Last, the session folder's git
-# configuration (with the global and system ones) may hold no url.*.insteadOf or pushInsteadOf, and no
-# remote named as the word itself (git looks a configured remote up by name before it takes the word as a
-# path), since either could send the push to a network remote. Configuration in another repository (after a
-# `cd`, or `git -C`) is not read here: like an alias already in a config file, it gets past the guard.
+# is_scratch_remote WORD: is this push's remote a repository inside `mroom scratch`'s root
+# (lib/core/scratch.sh)? Only a literal absolute path or file:/// URL counts: a word from a variable, a glob,
+# a brace list, a `~`, a percent escape (git decodes some), a relative path or a named remote does not, nor a
+# path with `.` or `..` parts or `//`. The guard's own environment must not set GIT_DIR, GIT_WORK_TREE,
+# GIT_COMMON_DIR or GIT_EXEC_PATH. The rest, which reads files, runs in scratch_probe under a hard time limit.
 is_scratch_remote() {
-  local r=$1 p root
+  local r=$1 p
   case $r in
     *[!A-Za-z0-9._/+@=,:-]*) return 1 ;;
     file:///*) p=${r#file://} ;;
@@ -1104,24 +1112,52 @@ is_scratch_remote() {
     *) return 1 ;;
   esac
   case $p in *:*) return 1 ;; esac
-  [ -f "$SCRATCH_LIB" ] || return 1
-  # shellcheck source=lib/core/scratch.sh
-  . "$SCRATCH_LIB"
+  while [ "${p%/}" != "$p" ] && [ "$p" != / ]; do p=${p%/}; done
+  case "$p/" in */./* | */../* | *//*) return 1 ;; esac
+  [ -z "${GIT_DIR:-}${GIT_WORK_TREE:-}${GIT_COMMON_DIR:-}${GIT_EXEC_PATH:-}" ] || return 1
+  command -v scratch_root >/dev/null 2>&1 && command -v git >/dev/null 2>&1 || return 1
+  run_limited "$SCRATCH_PROBE_LIMIT" scratch_probe "$r" "$p"
+}
+
+# scratch_probe WORD PATH: the file checks of is_scratch_remote, run in a child (run_limited). It is a
+# snapshot of the files when the hook runs: what the command itself changes later is not seen, which is why
+# the push must be the only command on its line (see the end of this script).
+#   - PATH, as written, starts with the root (as configured or resolved) before anything at PATH is read;
+#   - it resolves, physically, strictly inside the root, and the root is a real folder (not a link);
+#   - git tries PATH/.git, PATH, PATH.git/.git and PATH.git: nothing named PATH.git may exist, a .git that is
+#     a link or a gitfile (which can point anywhere) is refused, and the repository git takes must look like
+#     one (HEAD, objects, refs), with no commondir or objects/info/alternates (which reach other
+#     repositories) and none of HEAD, refs, objects or packed-refs a link;
+#   - the session folder's git configuration (with the global and system ones) holds no url.*.insteadOf or
+#     pushInsteadOf and no remote named as the word itself (git looks a configured remote up by name before
+#     it takes the word as a path), since either could send the push to a network remote. Only `git config`
+#     exiting 1 means none; any other failure is not scratch.
+# shellcheck disable=SC2317,SC2329 # run through run_limited
+scratch_probe() {
+  local r=$1 p=$2 root logical repo f names key st=0
+  logical=$(scratch_root)
   root=$(scratch_real_root) || return 1
+  case $p in "$root"/?* | "$logical"/?*) ;; *) return 1 ;; esac
   scratch_inside "$root" "$p" >/dev/null || return 1
+  if [ -e "$p.git" ] || [ -L "$p.git" ]; then return 1; fi
   if [ -L "$p/.git" ] || [ -f "$p/.git" ]; then return 1; fi
-  # The repository git will take: PATH/.git, else PATH. It must look like one (HEAD, objects, refs), or git
-  # would go on to PATH.git, which may be anything.
-  local repo=$p
+  repo=$p
   if [ -e "$p/.git" ]; then
     repo=$p/.git
     scratch_inside "$root" "$repo" >/dev/null || return 1
   fi
+  for f in HEAD refs objects packed-refs commondir objects/info/alternates; do
+    [ -L "$repo/$f" ] && return 1
+  done
+  if [ -e "$repo/commondir" ] || [ -e "$repo/objects/info/alternates" ]; then return 1; fi
   [ -f "$repo/HEAD" ] && [ -d "$repo/objects" ] && [ -d "$repo/refs" ] || return 1
-  command -v git >/dev/null 2>&1 || return 1
-  local dir=${CWD:-.} names key
-  [ -d "$dir" ] || dir=/
-  names=$(cd "$dir" 2>/dev/null && git config --name-only --get-regexp '^(url|remote)\.' 2>/dev/null) || true
+  if [ -z "${CWD:-}" ] || ! cd "$CWD" 2>/dev/null; then cd / || return 1; fi
+  names=$(git config --name-only --get-regexp '^(url|remote)\.' 2>/dev/null) || st=$?
+  case $st in
+    0) ;;
+    1) return 0 ;;
+    *) return 1 ;;
+  esac
   while IFS= read -r key; do
     case $key in
       url.*.insteadof | url.*.pushinsteadof | "remote.$r".*) return 1 ;;
@@ -1130,10 +1166,31 @@ is_scratch_remote() {
   return 0
 }
 
+# run_limited SECONDS FUNCTION ARG...: runs FUNCTION in a child with its own process group, with no stdin or
+# output, and kills that whole group (so a blocked grandchild too) after SECONDS. Its status, or non-zero
+# when it was killed.
+run_limited() {
+  local secs=$1 pid wpid st=0
+  shift
+  set -m
+  ("$@") </dev/null >/dev/null 2>&1 &
+  pid=$!
+  (sleep "$secs"; kill -KILL -- "-$pid") </dev/null >/dev/null 2>&1 &
+  wpid=$!
+  set +m
+  wait "$pid" 2>/dev/null || st=$?
+  kill -KILL -- "-$wpid" 2>/dev/null
+  wait "$wpid" 2>/dev/null
+  return "$st"
+}
+
 # git push [options] [remote [refspec...]]: any form of force (git takes a long option's unambiguous
 # abbreviation, so `--forc` is `--force`), a mirror, tags, or a push to a protected branch. A push to a
-# `mroom scratch` folder (is_scratch_remote) may carry tags and update any branch; force, mirror, --all,
-# --prune, a command to receive it, a + refspec or a pattern stay refused there too.
+# `mroom scratch` repository (is_scratch_remote) may carry tags and update any branch, but only a push that is
+# literally `git push` at the top level (no -C, --git-dir, -c, env or wrapper before it), whose remote is its
+# first positional word, with no --repo (or abbreviation), --no-repo, `--` or --end-of-options anywhere;
+# force, mirror, --all, --prune, a command to receive it, a + refspec or a pattern stay refused there too.
+# After `--` or --end-of-options, git takes every word as an argument, even one that starts with a dash.
 check_git_push() {
   local a g c npos=0 src la i=0 n=$# remote="" scratch=""
   local -a w=("$@") lw
@@ -1145,15 +1202,16 @@ check_git_push() {
   lw=("${LOWERED[@]}")
   set --
   # The remote, found first, since a tag option may come before it: the first word that is neither an option
-  # nor an option's value, or else the last --repo (git's own order: the argument beats --repo).
-  local repo=""
+  # nor an option's value. Any word that changes how git picks the remote (--repo, --rep, --no-repo, `--`,
+  # --end-of-options) rules the scratch exception out.
+  local odd=""
   while [ "$i" -lt "$n" ]; do
     a=${w[$i]}
     i=$((i + 1))
     case "$a" in
+      -- | --end*) odd=1; break ;;
+      --no-rep* | --rep=* | --repo=* | --rep | --repo) odd=1; break ;;
       --no-*) ;;
-      --rep=* | --repo=*) repo=${a#*=} ;;
-      --rep | --repo) repo=${w[$i]:-}; i=$((i + 1)) ;;
       --pu*=*) ;;
       --pu*) i=$((i + 1)) ;;
       --*) ;;
@@ -1167,17 +1225,25 @@ check_git_push() {
           break
         done
         ;;
-      *) remote=$a; break ;;
+      *) [ -n "$remote" ] || remote=$a ;;
     esac
   done
-  [ -n "$remote" ] || remote=$repo
   i=0
-  if [ -n "$remote" ] && is_scratch_remote "$remote"; then scratch=1; fi
+  if [ -z "$odd" ] && [ -n "$remote" ] && [ "$SEG_PLAIN_GIT_PUSH" = 1 ] && is_scratch_remote "$remote"; then
+    scratch=1
+    SCRATCH_USED=1
+  fi
+  local args_only=""
   while [ "$i" -lt "$n" ]; do
     a=${w[$i]}
     la=${lw[$i]}
     i=$((i + 1))
-    case "$a" in
+    if [ -z "$args_only" ]; then
+      case "$a" in
+        -- | --end-of-options) args_only=1; continue ;;
+      esac
+    fi
+    [ -n "$args_only" ] || case "$a" in
       --no-*) continue ;;
       --for* | --m*) block "git push $a force-pushes"; return ;;
       --ta* | --fol*)
@@ -1211,6 +1277,9 @@ check_git_push() {
     esac
     npos=$((npos + 1))
     [ "$npos" = 1 ] && continue # the remote
+    if [ -n "$args_only" ]; then
+      case "$a" in -*) block "git push $a: a refspec that starts with a dash, after -- or --end-of-options, is not checked"; return ;; esac
+    fi
     case "$a" in
       +*) block "git push $a force-pushes (a + refspec)"; return ;;
       *[\*\?\[]*) block "git push $a pushes by a pattern, which can reach a protected branch"; return ;;
@@ -1299,6 +1368,10 @@ check_segment() {
   # For the checks below that read stdin (gh api --input -).
   SEG_STDIN_KIND=$stdin_kind
   SEG_STDIN=$stdin
+  # The scratch exception holds only for a push written as `git push ...` at the top level (check_git_push).
+  SEGMENTS=$((SEGMENTS + 1))
+  SEG_PLAIN_GIT_PUSH=""
+  if [ "$depth" = 0 ] && [ "${words[0]:-}" = git ] && [ "${words[1]:-}" = push ]; then SEG_PLAIN_GIT_PUSH=1; fi
 
   set -- ${words[@]+"${words[@]}"}
   # Peel leading NAME=value assignments and check them with the positional parameters cleared, so
@@ -1871,6 +1944,12 @@ elif [ "${#command}" -gt "$MAX_BYTES" ]; then
   block "the command is over $MAX_BYTES bytes, too long to check in time"
 else
   analyze "$command" 0
+fi
+
+# A push that used the scratch exception was checked against the files as they were when the hook ran; any
+# other command on the line (before or after it) could change them, so it must be the only one.
+if [ -z "$BLOCKED" ] && [ -n "$SCRATCH_USED" ] && { [ "$COMMANDS" != 1 ] || [ "$SEGMENTS" != 1 ]; }; then
+  block "a push that carries tags or updates a protected branch in a scratch repository must be the only command on its line"
 fi
 
 if [ -n "$BLOCKED" ]; then

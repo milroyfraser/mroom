@@ -3,14 +3,20 @@
 # throwaway folders live. Sourced, never run. Bash 3.2 compatible (the guard runs on macOS too).
 #
 # The root is ${XDG_CACHE_HOME:-~/.cache}/mroom/scratch. An XDG_CACHE_HOME that is not an absolute path is
-# ignored, as the XDG spec says.
+# ignored, as the XDG spec says; HOME must then be set and absolute.
 
-# scratch_root: the root as configured (not resolved, and not checked).
+# scratch_root: the root as configured (not resolved, and not checked); fails, printing nothing, without an
+# absolute XDG_CACHE_HOME or HOME.
 scratch_root() {
   local base=${XDG_CACHE_HOME:-}
   case $base in
     /*) ;;
-    *) base=${HOME:-}/.cache ;;
+    *)
+      case ${HOME:-} in
+        /*) base=$HOME/.cache ;;
+        *) return 1 ;;
+      esac
+      ;;
   esac
   printf '%s/mroom/scratch' "${base%/}"
 }
@@ -27,7 +33,7 @@ scratch_physical() {
 # the root does not exist yet.
 scratch_real_root() {
   local root real
-  root=$(scratch_root)
+  root=$(scratch_root) || return 1
   [ -n "${root%/mroom/scratch}" ] || return 1
   [ ! -L "$root" ] && [ ! -L "${root%/scratch}" ] && [ -d "$root" ] && [ -O "$root" ] || return 1
   real=$(scratch_physical "$root") || return 1

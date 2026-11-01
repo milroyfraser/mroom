@@ -20,6 +20,9 @@ t_root() {
   run "$MROOM" scratch root; expect_out "$HOME/.cache/mroom/scratch"
   # A relative XDG_CACHE_HOME is ignored, as the XDG spec says.
   XDG_CACHE_HOME=rel run "$MROOM" scratch root; expect_out "$HOME/.cache/mroom/scratch"
+  # Without an absolute XDG_CACHE_HOME or HOME there is no root, rather than one relative to here.
+  HOME=rel run "$MROOM" scratch new; expect_rc 1; expect_err_has "no scratch root"
+  HOME="" run "$MROOM" scratch ls; expect_rc 1
 }
 
 t_new_kinds() {
