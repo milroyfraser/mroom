@@ -87,22 +87,68 @@ agree() {
   fi
 }
 
-# fast LIMIT_SECONDS WANT_STATUS COMMAND: the guard decides within the limit.
+# Load scaling. The timing limits below are for an idle machine; on a loaded one (a busy CI runner, a box
+# running other suites) everything runs slower, the guard included, and fixed limits fail for no fault of
+# the guard. So timing() first times a fixed workload (bash arithmetic and awk forks, the guard's own mix)
+# and stretches each limit by how much slower than IDLE_BASELINE it ran: never shrinking a limit, never past
+# twice its base, and never past TIMING_CEILING, well under the 60-second hook timeout and the guard's own
+# 30-second deadline. A real slowdown (a quadratic path takes minutes) still fails however loaded the machine.
+IDLE_BASELINE=0.5
+TIMING_CEILING=25
+load_factor=1
+remeasure=1
+
+baseline_work() {
+  local i n=0
+  for ((i = 0; i < 200000; i++)); do n=$((n + i % 7)); done
+  for i in $(seq 1 30); do awk 'BEGIN { exit }'; done
+}
+
+# measure_load: sets load_factor from the median of three runs of the workload (at least 1), so one noisy
+# run does not stretch every limit.
+measure_load() {
+  local runs=() median factor
+  TIMEFORMAT=%R
+  for _ in 1 2 3; do runs+=("$({ time baseline_work; } 2>&1)"); done
+  median=$(printf '%s\n' "${runs[@]}" | sort -n | sed -n 2p)
+  factor=$(awk -v w="$median" -v i="$IDLE_BASELINE" 'BEGIN { f = w / i; printf "%.2f", (f < 1) ? 1 : f }')
+  # Load only ever raises the limits during a run: a quieter moment does not undo an earlier stretch.
+  load_factor=$(awk -v a="$load_factor" -v b="$factor" 'BEGIN { print (b > a) ? b : a }')
+  echo "  load: the baseline workload took ${median}s, the median of ${runs[*]} (${IDLE_BASELINE}s idle): limits x${load_factor}, at most twice each and ${TIMING_CEILING}s"
+}
+
+# scaled LIMIT: the limit for this machine's load, capped at min(TIMING_CEILING, 2 x LIMIT).
+scaled() {
+  awk -v l="$1" -v f="$load_factor" -v c="$TIMING_CEILING" \
+    'BEGIN { s = l * f; if (s > 2 * l) s = 2 * l; if (s > c) s = c; printf "%.2f", s }'
+}
+
+within() { awk -v e="$1" -v l="$2" 'BEGIN { exit !(e < l) }'; }
+
+# fast LIMIT_SECONDS WANT_STATUS COMMAND: the guard decides within the limit, scaled for load. A miss times
+# the workload again first, in case the load rose since, and fails only past the limit that gives.
 fast() {
-  local limit=$1 want=$2 status elapsed
+  local limit want=$2 status elapsed
+  limit=$(scaled "$1")
   count=$((count + 1))
   TIMEFORMAT=%R
   elapsed=$({ time run "$3" >"$err.status"; } 2>&1)
   status=$(cat "$err.status")
   rm -f "$err.status"
-  echo "  [$AWK_UNDER_TEST] ${#3} bytes: exit $status in ${elapsed}s"
+  echo "  [$AWK_UNDER_TEST] ${#3} bytes: exit $status in ${elapsed}s (limit ${limit}s)"
   if [ "$status" != "$want" ]; then
     echo "FAIL [$AWK_UNDER_TEST] (want exit $want, got $status) on a ${#3}-byte command" >&2
     failures=$((failures + 1))
-  elif ! awk -v e="$elapsed" -v l="$limit" 'BEGIN { exit !(e < l) }'; then
-    echo "FAIL [$AWK_UNDER_TEST] (took ${elapsed}s, limit ${limit}s) on a ${#3}-byte command" >&2
-    failures=$((failures + 1))
+    return
   fi
+  within "$elapsed" "$limit" && return
+  if [ "$remeasure" = 1 ]; then
+    measure_load
+    limit=$(scaled "$1")
+    within "$elapsed" "$limit" && return
+  fi
+  echo "FAIL [$AWK_UNDER_TEST] (took ${elapsed}s, limit ${limit}s) on a ${#3}-byte command" >&2
+  failures=$((failures + 1))
 }
 
 cases() {
@@ -818,13 +864,15 @@ EOF
 }
 
 # Time: a 64 KB command, allowed or refused, and the most simple commands it checks, are checked in a
-# few seconds even on a busy box (a second on an idle one); past 256 KB, 3000 commands, 2000 words in one
-# command, 20,000 words in all or 200 commands inside others, refused. The limits catch a quadratic
-# slowdown, which takes minutes: Claude Code lets a command run when its hook times out (60 seconds).
+# few seconds (a second on an idle machine; each limit is scaled for load, see measure_load); past 256 KB,
+# 3000 commands, 2000 words in one command, 20,000 words in all or 200 commands inside others, refused. The
+# limits catch a quadratic slowdown, which takes minutes: Claude Code lets a command run when its hook times
+# out (60 seconds), and no scaled limit passes TIMING_CEILING.
 timing() {
   local line plain body="" flat="" many="" words wide=""
   line="a long PR body line with words, (parens), 'quotes', \$(subst), \`ticks\`, {braces} and env vars in it"
   plain="a long PR body line with words, (parens), {braces}, \"quotes\", \$HOME and no single quotes in it"
+  measure_load
   while [ "${#flat}" -lt 65536 ]; do body+="$line"$'\n'; flat+="$plain"$'\n'; done
   fast 4 0 "gh pr create --draft --title x --body \"$body\""
   fast 4 0 "gh pr create --draft --title x --body '$flat'"
@@ -908,6 +956,47 @@ for AWK_UNDER_TEST in "${awks[@]}"; do
 done
 AWK_UNDER_TEST=$(command -v awk)
 timing
+
+# --- The load scaling cannot hide a real slowdown ------------------------------------------------
+# A guard slower than its scaled limit still fails: a stand-in that answers correctly but sleeps a second
+# past the limit, with no second timing of the workload so the limit stays put.
+slow_guard() {
+  local saved_guard=$guard before=$failures limit
+  limit=$(scaled 1)
+  printf '#!/usr/bin/env bash\ncat >/dev/null\nsleep %s\n' "$(awk -v l="$limit" 'BEGIN { print l + 1 }')" >"$TOP/slow-guard"
+  guard="$TOP/slow-guard" remeasure=0
+  fast 1 0 'git status' 2>"$TOP/slow.err"
+  guard=$saved_guard remeasure=1
+  count=$((count + 1))
+  if [ "$failures" = "$((before + 1))" ] && grep -q "limit ${limit}s" "$TOP/slow.err"; then
+    failures=$before
+  else
+    failures=$((before + 1))
+    echo "FAIL (a guard ${limit}s+1s slow passed a ${limit}s limit): $(cat "$TOP/slow.err")" >&2
+  fi
+}
+slow_guard
+# However loaded the machine, no limit passes twice its base or the ceiling, well under the 60-second hook
+# timeout; an idle machine keeps the base limits.
+scale_case() { # scale_case FACTOR BASE WANT
+  count=$((count + 1))
+  local saved=$load_factor got
+  load_factor=$1 got=$(scaled "$2") load_factor=$saved
+  if [ "$got" != "$3" ]; then
+    echo "FAIL (at load x$1 a ${2}s limit scaled to ${got}s, want ${3}s)" >&2
+    failures=$((failures + 1))
+  fi
+}
+scale_case 1 4 4.00
+scale_case 1.5 4 6.00
+scale_case 1000 4 8.00
+scale_case 1000 8 16.00
+scale_case 1000 15 "$TIMING_CEILING.00"
+count=$((count + 1))
+if [ "$TIMING_CEILING" -ge 30 ]; then
+  echo "FAIL (TIMING_CEILING ${TIMING_CEILING}s reaches the guard's 30-second deadline)" >&2
+  failures=$((failures + 1))
+fi
 
 # --- The subcommand, through bin/mroom -----------------------------------------------------------
 expect() { # expect <what> <want exit> <command...>

@@ -986,6 +986,30 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (t === "review" && it && it.draft === true) return "Open verdict";
     return ({ review: "Merge verdict", qa: "QA verdict", release: "Release verdict", rollout: "Rollout verdict", dod: "Definition of done" })[t] || "Claude's verdict";
   }
+  /* What blocks a card, or null when nothing does: the branch is behind main or conflicts (checks "behind"),
+     it is commits behind main (it.pr.behindBy), a check is red or still running, or the card names a blocker
+     (it.blockers). Being behind main by commits blocks every step's Go, since no check ran on today's main;
+     the rest block the Review verdict (the merge verdict, or the Open verdict of a draft). The card's tabs
+     and the "Your next step" box both read it, so they never disagree. */
+  function cardBlock(it) {
+    if (!it) return null;
+    const pr = it.pr && typeof it.pr === "object" ? it.pr : {};
+    const n = typeof pr.behindBy === "number" && pr.behindBy > 0 ? pr.behindBy : 0;
+    if (it.checks === "behind") return { why: "behind main or conflicting; update the branch first", every: n > 0 };
+    if (n) return { why: "behind main", detail: "The branch is " + n + (n === 1 ? " commit" : " commits") + " behind main, so its checks did not run on today's main. Update the branch and let CI pass first.", every: true };
+    if (it.checks === "red") return { why: "a check failed" };
+    if (it.checks === "running") return { why: "checks still running" };
+    if (Array.isArray(it.blockers) && it.blockers.length) return { why: String(it.blockers[0]) };
+    return null;
+  }
+  /* A Go verdict (v) of the step titled `title` on card `it`, turned No-go with the reason when the card is
+     blocked for that step; any other verdict comes back as it was. */
+  function blockVerdict(v, title, it) {
+    const b = cardBlock(it);
+    if (!b || !v || v.go !== true || !(b.every || String(title || "").toLowerCase() === "review")) return v;
+    return Object.assign({}, v, { go: false, call: "No-go: " + b.why + ".",
+      why: b.detail ? b.detail + " Otherwise: " + String(v.why || v.call || "") : "Was: " + (v.call || "Go") + " " + (v.why || "") });
+  }
   function stepVerdict(v, pr, it) {
     if (!v || !v.call) return null;
     if (isStale(v, it)) {
@@ -995,9 +1019,8 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
       box0.append(head0, el("p", "fevnote", "Checks are running on the latest push. Claude rewrites this when they finish."));
       return box0;
     }
-    /* A PR behind main is never a Go: its checks did not run against today's main. */
-    const behind = pr && typeof pr.behindBy === "number" && pr.behindBy > 0;
-    if (behind && v.go === true) v = { go: false, step: v.step, call: "No-go: behind main.", why: "The branch is " + pr.behindBy + (pr.behindBy === 1 ? " commit" : " commits") + " behind main, so its checks did not run on today's main. Update the branch and let CI pass first. Otherwise: " + String(v.why || v.call) };
+    /* A blocked card is never a Go (cardBlock): a PR behind main on any step, the rest on its Review step. */
+    v = blockVerdict(v, v.step, it || { pr: pr });
     const box = el("div", "fverdict");
     const head = el("div", "fvhead");
     head.append(el("span", "flabel", verdictLabel(v, it)));
@@ -1331,6 +1354,12 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     }
     return box;
   }
+  /* An Issue card whose PR has not opened yet: kind "issue", no link to a pull request, no Review verdict. */
+  function isIssueBeforePr(it, steps) {
+    if (it.kind !== "issue") return false;
+    if (goodLinks(it.links).some((l) => /\/pull\/\d+/.test(l.url))) return false;
+    return !steps.some((s) => s && s.title === "Review" && s.verdict && s.verdict.call);
+  }
   function focusCard(it) {
     const b = it.brief || {};
     const card = el("div", "focus");
@@ -1367,25 +1396,19 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (sol.length) { const ol = el("ol"); for (const s of sol) ol.append(el("li", null, String(s))); part(isIssue ? "Proposed solution (draft, for your review)" : "Solution", ol); }
     const steps = Array.isArray(b.steps) ? b.steps.filter((s) => s && s.text) : [];
     let cur = Number(b.current) || 0;
-    /* A merge can't be Go while something blocks it: the branch is behind main or conflicts (checks
-       "behind"), a check is red or still running, or the card names a blocker (it.blockers). The page shows
-       the Review verdict as No-go with the reason, whatever was written. */
+    /* A merge can't be Go while something blocks it (cardBlock): the page shows the Review verdict as No-go
+       with the reason, whatever was written. */
     /* The same blocks hold for the Open verdict of a draft (it.draft): being a draft is not itself a blocker,
        it's what that verdict decides, so don't list it in it.blockers. */
-    {
-      const why = it.checks === "behind" ? "behind main or conflicting; update the branch first"
-        : it.checks === "red" ? "a check failed"
-        : it.checks === "running" ? "checks still running"
-        : Array.isArray(it.blockers) && it.blockers.length ? String(it.blockers[0]) : "";
-      const rv = why && steps.find((s) => s.title === "Review" && s.verdict && s.verdict.go);
-      if (rv) {
-        const i = steps.indexOf(rv);
-        steps[i] = Object.assign({}, rv, { verdict: Object.assign({}, rv.verdict, { go: false, call: "No-go: " + why + ".", why: "Was: " + (rv.verdict.call || "Go") + " " + (rv.verdict.why || "") }) });
-      }
+    for (let i = 0; i < steps.length; i++) {
+      const v = blockVerdict(steps[i].verdict, steps[i].title, it);
+      if (v !== steps[i].verdict) steps[i] = Object.assign({}, steps[i], { verdict: v });
     }
     /* Every PR card shows a QA tab. When a card has none yet, a placeholder sits after Review (or first),
-       saying QA is missing, so a card can't look finished without it. */
-    if (it.kind !== "issue" && steps.length && !steps.some((s) => s.title === "QA")) {
+       saying QA is missing, so a card can't look finished without it. Only an Issue card before its PR
+       (no PR link, no Review verdict) goes without: a card left as kind "issue" once its PR opens still
+       gets the placeholder. */
+    if (!isIssueBeforePr(it, steps) && steps.length && !steps.some((s) => s.title === "QA")) {
       const at = Math.max(0, steps.findIndex((s) => s.title === "Review") + 1);
       steps.splice(at, 0, { title: "QA", who: "Claude", text: "No QA recorded for this PR yet.", evidenceNote: "Claude adds the test cases, the tests that prove each one, and browser screenshots when the change has a screen.", verdict: { go: false, call: "No QA yet", why: "QA cases and their tests are missing." } });
       if (cur >= at) cur += 1;
@@ -1468,11 +1491,10 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
           panel.append(box);
         }
         const cmds = Array.isArray(s.cmd) ? s.cmd : s.cmd ? [s.cmd] : [];
-        /* Copy commands show only when the step may go: its own verdict is a fresh Go (not behind main, not
-           recalculating); a step with no verdict of its own shows them once it is the current step. */
-        const pr = it.pr || {};
-        const behind = typeof pr.behindBy === "number" && pr.behindBy > 0;
-        const mayGo = s.verdict ? s.verdict.go === true && !behind && !isStale(s.verdict, it) : k <= cur;
+        /* Copy commands show only when the step may go: its own verdict is a fresh Go (not blocked, which the
+           steps above already apply, and not recalculating); a step with no verdict of its own shows them once
+           it is the current step. */
+        const mayGo = s.verdict ? s.verdict.go === true && !isStale(s.verdict, it) : k <= cur;
         if (mayGo) for (const c of cmds) panel.append(commandRow(c));
         else if (cmds.length) panel.append(el("p", "fevnote", "Commands show here once Claude's verdict is Go."));
         /* A QA step with cases shows them instead of the review table and the evidence block. */
@@ -1584,7 +1606,8 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
         const st = steps[cur - 1];
         if (st.who !== "you") continue;
         const link = goodLinks(it.links)[0];
-        const v = st.verdict && st.verdict.call ? st.verdict : null;
+        /* The verdict as the card shows it: a blocked card's Go reads No-go here too (cardBlock). */
+        const v = st.verdict && st.verdict.call ? blockVerdict(st.verdict, st.title, it) : null;
         n = { title: String(st.title || "Step " + cur) + " · " + String(it.title || "Untitled"), text: v ? v.call + (v.why ? " " + v.why : "") : st.text, cardId: it.id, url: link && link.url, at: st.verdict && st.verdict.at };
         break;
       }

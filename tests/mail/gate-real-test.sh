@@ -102,17 +102,41 @@ PY
 }
 squat_result() { wait "$(cat "$T/squatter.pid")" || true; rm -f "$T/squatter.pid"; cat "$T/squatter.log"; }
 
+# ready: Mailpit is active and answers on its socket, and systemd (root) holds the SMTP port for the relay.
+ready() {
+  active mroom-mailpit.service && [ "$(port_owner)" = 0 ] \
+    && curl -q --silent --fail --max-time 2 --output /dev/null \
+      --unix-socket "/var/lib/mroom/services/mailpit/run/http.sock" http://localhost/livez
+}
+
+# wait_ready: waits up to 20 seconds for the units. A slow runner can leave one still starting or failed
+# (start-limit hit) at the first try, so it tries up to three times: after a miss it waits a short backoff
+# (2 s, then 4 s), clears any failed state and starts the units again, saying so in the log, since a retry
+# that was needed is worth seeing. After the last miss it prints the units' status and journal, and fails.
 wait_ready() {
-  for _ in $(seq 1 80); do
-    if active mroom-mailpit.service && [ "$(port_owner)" = 0 ] \
-      && curl -q --silent --fail --max-time 2 --output /dev/null \
-        --unix-socket "/var/lib/mroom/services/mailpit/run/http.sock" http://localhost/livez; then
-      return 0
-    fi
-    sleep 0.25
+  local try backoff=2
+  for try in 1 2 3; do
+    for _ in $(seq 1 80); do
+      if ready; then
+        case $try in
+          1) ;;
+          2) echo "::warning::the mail units came up only on try 2 of 3, after one restart" >&2 ;;
+          *) echo "::warning::the mail units came up only on the LAST try ($try of 3), after two restarts: one more slow start would fail this job; check the units' start-up" >&2 ;;
+        esac
+        return 0
+      fi
+      sleep 0.25
+    done
+    [ "$try" -lt 3 ] || break
+    echo "the mail units are not up after try $try; starting them again in ${backoff}s" >&2
+    sleep "$backoff"
+    backoff=$((backoff * 2))
+    sudo systemctl reset-failed "${UNITS[@]}" 2>/dev/null || true
+    sudo systemctl start mroom-mail-relay.socket mroom-mailpit.service || true
   done
-  systemctl status --no-pager "${UNITS[@]}" >&2 || true
-  echo "the units did not start" >&2
+  systemctl status --no-pager --full "${UNITS[@]}" >&2 || true
+  sudo journalctl --no-pager --lines=60 "${UNITS[@]/#/--unit=}" >&2 || true
+  echo "the units did not start (3 tries)" >&2
   exit 1
 }
 
