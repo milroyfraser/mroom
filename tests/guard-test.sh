@@ -15,6 +15,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 guard="$ROOT/lib/guard"
 failures=0
 count=0
+TAB=$(printf '\t')
 TOP=$(mktemp -d)
 trap 'rm -rf "$TOP"' EXIT
 err="$TOP/err"
@@ -596,6 +597,117 @@ EOF"
   allow "$(printf 'node --version; %.0s' $(seq 1 128))"
   refuse_for "interpreter or inline-code" "$(printf 'node --version; %.0s' $(seq 1 129))"
   refuse_for "interpreter or inline-code" "$(printf "python -c 'print(1)'; %.0s" $(seq 1 2000))"
+
+  # --- Heredocs, ended where bash ends them ----------------------------------------------------
+  # The skills write PR bodies and notes through a heredoc, then run a command after it in the same call. A
+  # line after a heredoc must be checked whenever bash runs it: the guard may not end a heredoc later than bash
+  # does, take a line bash runs for a heredoc's text, or start a heredoc where bash has none. Each command below
+  # holds a refused one on a line bash runs.
+  refuse "f=\"\$(mktemp)\" && cat > \"\$f\" <<'EOF'
+some text
+EOF
+gh pr merge 1"
+  # Only <<- strips the tabs before the end word: after a plain <<, a tab-indented end word is text.
+  refuse "cat <<'EOF'
+${TAB}EOF
+'
+EOF
+gh pr merge 1
+#'"
+  # An end word with a quoted or escaped blank, a quoted ; or a kept backslash, or continued on the next line.
+  refuse "cat <<'E O F'
+E O F
+gh pr merge 1
+E"
+  refuse "cat <<E\\ OF
+E OF
+cat ~/.forge-token
+E"
+  refuse "cat <<'E;F'
+E;F
+gh pr merge 1
+E"
+  refuse "cat <<\"E\\OF\"
+EOF
+'
+E\\OF
+gh pr merge 1
+#'"
+  refuse "cat <<EOF\\
+X
+EOF
+'
+EOFX
+gh pr merge 1
+#'"
+  # An unquoted heredoc joins a line that ends in a backslash to the next, so this text ends it.
+  refuse "cat <<EOF
+EO\\
+F
+gh pr merge 1
+EOF"
+  # A << that bash reads as a shift or a pattern starts no heredoc, and a # inside \${...} starts no comment.
+  refuse 'echo $((1<<2))
+gh pr merge 1'
+  refuse '((x=1<<2))
+gh pr merge 1'
+  refuse 'echo $[1<<2]
+cat .env'
+  refuse 'v=a; echo ${v//<</x}
+gh pr merge 1'
+  refuse 'echo ${v//<<x y}
+gh pr merge 1'
+  refuse 'x=; echo ${x:-a #}; gh pr merge 1'
+  refuse 'x=; echo "$(echo ${x:-)}; gh pr merge 1)"'
+  # A newline inside $(...), `...` or <(...) does not start the text of a heredoc waiting outside it, and a
+  # heredoc left open inside one is read differently by bash 3.2 and 5.
+  refuse 'cat <<X $(true
+gh pr merge 1
+X
+)'
+  refuse 'cat <<X `true
+gh pr merge 1
+X
+`'
+  refuse 'cat <<X <(true
+cat .env
+X
+)'
+  refuse 'echo $(cat <<EOF)
+gh pr merge 1
+EOF'
+  # Everyday heredocs still pass, and so does their text.
+  allow "f=\"\$(mktemp)\" && cat > \"\$f\" <<'EOF'
+Do not gh pr merge this; a person does that.
+EOF
+mroom tracker comment SHOP-1 < \"\$f\""
+  allow "cat <<'EOF'
+${TAB}EOF
+gh pr merge 1 is text here, not a command
+EOF
+echo done"
+  allow "cat <<-EOF
+${TAB}indented text
+${TAB}EOF
+echo done"
+  allow "cat <<\"EOF\"
+x
+EOF"
+  allow "cat <<\\EOF
+x
+EOF"
+  allow "cat <<E'O'F
+x
+EOF"
+  allow "cat <<END_OF-TEXT.1
+x
+END_OF-TEXT.1"
+  allow "cat <<EOF
+a\\\\
+EOF
+echo done"
+  allow 'echo $((1+2)) $(( 16#ff )); (( i++ )); echo $[1+2]'
+  allow 'echo ${x:-a} ${#x} ${x#y} ${x%%.*} ${x:-$(pwd)} ${x//a/b}'
 
   # gh flags that shift the positional slots.
   agree 'gh workflow run --ref main deploy-production.yml'
