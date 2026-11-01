@@ -8,6 +8,9 @@
 #   tests/guard-test.sh
 set -euo pipefail
 
+# The default-deadline cases below assume the guard's own default; an inherited override would skew them.
+unset MROOM_GUARD_DEADLINE
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 guard="$ROOT/lib/guard"
 failures=0
@@ -930,12 +933,22 @@ has "$err" "Refused by mroom guard: git push --force force-pushes."
 # timeout, whatever path makes it slow. `gh api graphql` rescans the whole command each time, so thousands of
 # them (within every count cap) take far longer than a second to check — a shape the counts alone do not bound
 # in time. With a one-second deadline it is refused after about a second instead of scanned to the end and
-# allowed. A fast command is untouched, so the whole suite runs at the default deadline.
+# allowed; that case needs ~27s of work, so the one-second deadline is reliably reached.
 deadline_slow=""
 for _ in $(seq 1 2999); do deadline_slow+="gh api graphql; "; done
 expect "deadline fails closed" 2 env MROOM_GUARD_DEADLINE=1 "$mroom" guard check "$deadline_slow"
 has "$err" "taking too long"
-expect "deadline leaves a fast command alone" 0 env MROOM_GUARD_DEADLINE=1 "$mroom" guard check 'git status; ls; echo hi'
+# A fast command is untouched. $SECONDS counts whole seconds, so a one-second deadline can fire a few ms after
+# start; use five seconds here so a quick command is reliably well inside it (the default is 30).
+expect "deadline leaves a fast command alone" 0 env MROOM_GUARD_DEADLINE=5 "$mroom" guard check 'git status; ls; echo hi'
+# One find with many -exec groups is a single analyze record but many check_segment calls, so the deadline has
+# to live in check_segment to interrupt it. Made costly by a large filler word that each `gh api graphql`
+# rescans, this must be refused, not run to the end and (as the last record) allowed.
+dl_filler=$(head -c 200000 /dev/zero | tr '\0' a)
+dl_find="find ."
+for _ in $(seq 1 390); do dl_find+=" -exec gh api graphql ';'"; done
+expect "deadline interrupts a heavy find" 2 env MROOM_GUARD_DEADLINE=1 "$mroom" guard check "echo $dl_filler; $dl_find"
+has "$err" "taking too long"
 expect "check takes one argument" 64 "$mroom" guard check git status
 expect "no mode" 64 "$mroom" guard
 expect "help" 0 "$mroom" guard help
