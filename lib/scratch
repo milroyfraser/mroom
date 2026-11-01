@@ -158,8 +158,9 @@ case "$cmd" in
     exit "$status"
     ;;
   prune)
-    [ "${1:-}" = --older-than ] && [ "$#" = 2 ] && [[ ${2:-} =~ ^[0-9]{1,6}$ ]] \
-      || die "usage: mroom scratch prune --older-than <hours>" 2
+    if [ "${1:-}" != --older-than ] || [ "$#" != 2 ] || ! [[ ${2:-} =~ ^[0-9]{1,6}$ ]]; then
+      die "usage: mroom scratch prune --older-than <hours>" 2
+    fi
     hours=$((10#$2))
     real_root || exit 0
     status=0
