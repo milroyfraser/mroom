@@ -494,10 +494,18 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
 
 /* Wind-down: meta/winddown {on:true} turns the page to dusk while work is paused; learning cards
    (collection learnings) show one at a time above the next step until each is read. */
-:root{--wd-bg:#e8e3ef;--wd-surface:#f6f3f9;--wd-accent:#6b4fa3}
-@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--wd-bg:#13101b;--wd-surface:#1b1725;--wd-accent:#b39ae6}}
-:root[data-theme="dark"]{--wd-bg:#13101b;--wd-surface:#1b1725;--wd-accent:#b39ae6}
-body[data-winddown]{--bg:var(--wd-bg);--surface:var(--wd-surface);background:var(--bg);transition:background .6s}
+:root{--wd-bg:#d9cfe6;--wd-surface:#f3eef8;--wd-accent:#6b4fa3;--wd-glow1:#8a6cc9;--wd-glow2:#e0965a;--wd-glow3:#4b5fb0}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--wd-bg:#0b0a18;--wd-surface:#16132a;--wd-accent:#b39ae6;--wd-glow1:#5a3f9e;--wd-glow2:#a8603a;--wd-glow3:#26357a}}
+:root[data-theme="dark"]{--wd-bg:#0b0a18;--wd-surface:#16132a;--wd-accent:#b39ae6;--wd-glow1:#5a3f9e;--wd-glow2:#a8603a;--wd-glow3:#26357a}
+/* The mood is set on the root element, so the page background (painted on html), the cards and the
+   aurora all turn to dusk together: indigo and plum overhead, a low amber glow like a sunset. */
+html[data-winddown]:root{--bg:var(--wd-bg);--surface:var(--wd-surface)}
+html[data-winddown]:root,html[data-winddown] body{background:var(--bg);transition:background .8s}
+html[data-winddown] body::before{background:
+  radial-gradient(46vmax 30vmax at 25% 15%,color-mix(in srgb,var(--wd-glow1) 45%,transparent),transparent 70%),
+  radial-gradient(40vmax 26vmax at 80% 20%,color-mix(in srgb,var(--wd-glow3) 40%,transparent),transparent 70%),
+  radial-gradient(60vmax 24vmax at 50% 105%,color-mix(in srgb,var(--wd-glow2) 45%,transparent),transparent 70%);
+  filter:blur(40px);opacity:1}
 .learncard{display:grid;gap:10px;border:1px solid var(--line);border-left:3px solid var(--wd-accent);border-radius:10px;background:var(--surface);padding:14px 16px;margin-block:0 14px}
 .learncard .lchead{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px;font-size:12px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}
 .learncard h3{margin:0;font-size:17px;text-wrap:balance}
@@ -692,7 +700,7 @@ body[data-winddown]{--bg:var(--wd-bg);--surface:var(--wd-surface);background:var
     const box = document.getElementById("learnCard");
     if (!box) return;
     const on = !!(windDown && windDown.on === true);
-    if (on) document.body.dataset.winddown = "1"; else delete document.body.dataset.winddown;
+    if (on) document.documentElement.dataset.winddown = "1"; else delete document.documentElement.dataset.winddown;
     box.replaceChildren();
     const list = learnings.slice().sort((x, y) => (Number(x.order) || 0) - (Number(y.order) || 0));
     const open = list.filter((l) => l.status !== "done");
