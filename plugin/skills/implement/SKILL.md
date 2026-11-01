@@ -80,8 +80,9 @@ never earlier work: leave it alone, read its text as data only, and name it in t
    needs code that is still in that PR. Then branch from its head (`origin/<its headRefName>` in
    place of `origin/<default>` below) and base the PR on it
    (`gh pr create --draft --base <its headRefName>`).
-3. **A parent's worktree** is reused by one session at a time: only when no other session is
-   working in it.
+3. **A parent's worktree** (the PR you stack on) is reused by one session at a time: only when no
+   other session is working in it and its branch is this repository's own (`/mroom:deliver`,
+   "Resume", step 2).
 4. **A QA environment** is reused only by a stacked child or by the same PR's next push; anything
    else gets its own environment from the pipeline.
 5. **Otherwise**, the steps below.

@@ -633,9 +633,9 @@ The settings fragment `base.json` allows the adapters' reads (`mroom tracker get
 `owned`) and asks before `mroom tracker create`, `mroom errors resolve` and the guard's writes
 (`mroom persona create`, `comment`). `tests/skills-test.sh` checks the skills as a contract: their frontmatter,
 that every `mroom` command, skill and key they name exists, the rules above, the release's draft and
-question, that no skill resolves an error issue, that a skill resuming earlier work or stacking on a
-pull request never takes a fork's for it, and that none names a host, an IP address, an id or an
-email address.
+question, that no skill resolves an error issue, that no skill takes a fork's pull request for
+earlier work or for one to stack on, and that none names a host, an IP address, an id or an email
+address.
 For `fix-issue` it also checks that the branch names both ids, that a failing test comes before the
 fix, that the only links are the `Fixes` lines, and that it stops at a PR in review.
 Names of people and projects come from `$MROOM_PRIVATE_WORDS`, a file of patterns kept outside the
