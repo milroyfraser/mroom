@@ -288,9 +288,14 @@ The box's checks, for what the app's `mroom.toml` needs with `--app`, or for the
   `app.php`. A box with no `MROOM_APP_NAME` has no QA gate, and its checks are skipped.
 - **db-read**: `MROOM_QA_DB_READ` holds the same entries as `qa.db_read_allowlist`, in any order; it names those
   only in one or the other. With no `qa.db_read_allowlist`, an `MROOM_QA_DB_READ` warns.
-- **gate-keys**: a key in `~/.ssh/authorized_keys` is forced to `mroom gate provision`, each gate key is
-  `restrict`-ed and forced to an mroom that runs, with one role alone; a missing `template` key warns, and a missing
-  `browser` key warns once the app or the box has an allowlist.
+- **gate-keys**: a key is forced to `mroom gate provision`, and each gate key is `restrict`-ed with nothing after
+  it that turns a restriction back on (`port-forwarding`, `agent-forwarding`, `x11-forwarding`, `pty`, `user-rc`),
+  forced to an mroom that runs, with one role alone, and on no other line. It reads `~/.ssh/authorized_keys` and
+  then `authorized_keys2`, the files sshd reads by default, each line as sshd does: options before the key, in order
+  and in any case, a quoted value never an option, and the first line holding the key that sshd accepts the one that
+  counts, since it passes over a line it refuses (an `AuthorizedKeysFile` or `AuthorizedKeysCommand` of sshd's own
+  is left to `sshd -T`). A missing `template` key warns, and a missing `browser` key warns once the app or the box
+  has an allowlist.
 - **secrets**: `pg_service.conf` (with its `[mroom-gate]` service) and `redis-gate.env` are there, mode 600, and
   set their login.
 - **postgres**: 16 or later, reached as the gate's role; the gate holds `<app>_qa_objects`, `<app>_qa_envs` and
@@ -939,7 +944,13 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
    ```
 
    The `template` key belongs to the job that builds the template (step 3), and the `browser` key to browser
-   QA (phase 2b); add each when its job exists.
+   QA (phase 2b); add each when its job exists. sshd lets a key do what the first line holding the key that sshd
+   accepts allows, and passes over a line it refuses (an unknown option, a `from=` that does not match, a lapsed
+   `expiry-time`). So no other line, here or in `authorized_keys2`, may hold one of these keys: a bare copy, such as
+   one Forge's key screen added, gives the key a shell, and one key on two roles' lines has the first role alone.
+   Keep the options before the key type, since sshd reads anything after the key as its comment, and put nothing
+   after `restrict` that turns a restriction back on (`port-forwarding`, `agent-forwarding`, `x11-forwarding`,
+   `pty`, `user-rc`). `mroom doctor` checks each of these.
 
 2. As a Postgres superuser (`sudo -u postgres psql`). `\password` asks for each password, so none ends up
    in a history file or the server's log:
