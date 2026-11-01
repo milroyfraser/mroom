@@ -329,7 +329,7 @@ t_a_release_named_otherwise_is_a_warning() {
 t_bad_inputs_fail_before_any_poll() {
   host
   local bad
-  for bad in DEPLOY_COMMIT=abc123 DEPLOY_COMMIT="${NEW^^}" DEPLOY_ORIGIN="$APP/" DEPLOY_ORIGIN=api.shop.example.dev \
+  for bad in DEPLOY_COMMIT=abc123 DEPLOY_COMMIT="${NEW:0:39}A" DEPLOY_ORIGIN="$APP/" DEPLOY_ORIGIN=api.shop.example.dev \
     DEPLOY_FRONTEND_ORIGIN="$WEB/app" DEPLOY_TIMEOUT=soon DEPLOY_INTERVAL=0 DEPLOY_HEALTH_PATH=up \
     DEPLOY_HEALTH_PATH=/../up "DEPLOY_TAG=v1 2"; do
     verify "$bad"
