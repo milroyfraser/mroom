@@ -762,9 +762,10 @@ concurrency group that never cancels a deploy. `release`, in `production`, check
 deploy key and runs `release-branch.sh`, which also stops when the branch is at a commit off the default branch or
 neither before nor after the tag, since then someone else moved it; that job runs no action but `actions/checkout`
 beside the key. It stops too while a tag named `release` exists: git takes a tag over a branch of the same short
-name, anyone with Write can push one, and the branch's ruleset does not cover it, so the host fetches
-`refs/heads/release` by its full name and the tag ruleset covers the name `release` as well. That script's check
-that the tag is on the default branch runs from the tag, so it holds only for a tag a person made; a draft release's
+name, anyone with Write can push one, and the branch's ruleset does not cover it. That stop is a backstop, since a
+tag can come after it; the host fetches `refs/heads/release` by its full name, and the tag ruleset covers the name
+`release` as well. That script's check that the tag is on the default branch runs from the tag, so it holds only for
+a tag a person made and no one can move: the tag ruleset restricts updates and deletions too, and a draft release's
 target, which Write can change, is where publishing makes the tag. `verify` holds no secret and runs `deploy-verify`
 on the commit `release` pushed; a poll counts only when the app's `/up` answers 200 too, and a release name other
 than the tag, for the right commit, is a warning. The run takes no input: a rollback is a dispatch from the older

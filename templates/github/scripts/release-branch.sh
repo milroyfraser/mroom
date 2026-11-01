@@ -12,14 +12,16 @@
 #
 # Environment: EVENT (github.event_name), REF_TYPE and REF_NAME (github.ref_type, github.ref_name), RELEASE_TAG
 # (github.event.release.tag_name, for a release), DEFAULT_BRANCH, TAG_PATTERN (a bash regular expression) and,
-# optionally, RELEASE_BRANCH (release). Prints tag=, commit=, previous= (the branch's commit before, or none) and
-# direction= (new, forward, rollback or same) for GITHUB_OUTPUT; messages go to stderr. It prints no credential:
-# the push uses the key the checkout set up.
+# optionally, RELEASE_BRANCH (release; one name, no slash). Prints tag=, commit=, previous= (the branch's commit
+# before, or none) and direction= (new, forward, rollback or same) for GITHUB_OUTPUT; messages go to stderr. It
+# prints no credential: the push uses the key the checkout set up.
 set -euo pipefail
 
 fail() { echo "::error::$*" >&2; exit 1; }
 
 branch="${RELEASE_BRANCH:-release}"
+# One plain name: for a name with a slash, refs/<name>, which no ruleset covers, would take the branch's place too.
+[[ "$branch" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "RELEASE_BRANCH is not one plain name such as release"
 [ "${REF_TYPE:-}" = tag ] || fail "a production deploy runs from a release tag, not the ${REF_TYPE:-unknown} ${REF_NAME:-}: gh workflow run <this workflow> --ref <tag>"
 tag="${REF_NAME:-}"
 [[ "$tag" =~ ${TAG_PATTERN:?TAG_PATTERN is not set} ]] || fail "$tag is not a release tag (it does not match $TAG_PATTERN)"

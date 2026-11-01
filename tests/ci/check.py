@@ -43,8 +43,8 @@ def load(root, deploy=False):
     for sub in ("workflows", "actions"):
         for dirpath, _, names in os.walk(os.path.join(base, sub)):
             for name in names:
-                # By its exact name: any other workflow, one named deploy-* included, meets every CI check.
-                if os.path.join(sub, name) == DEPLOY and not deploy:
+                # By its exact path: any other workflow, one named deploy-* included, meets every CI check.
+                if os.path.relpath(os.path.join(dirpath, name), base) == DEPLOY and not deploy:
                     continue
                 if name.endswith((".yml", ".yaml")):
                     path = os.path.join(dirpath, name)
