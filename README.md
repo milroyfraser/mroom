@@ -1453,9 +1453,12 @@ either. Name it in qa-up's `next-workflows`, and give it `workflow_dispatch` wit
 `up_run_id`: qa-up starts it once its deploy ran, whether the environment came up or not, as the
 `workflow_run` would have. It takes the rest from GitHub, how the deploy went included, from the run
 `up_run_id` names, as qa-up does from its plan's run, and finds the runs it looks for by workflow and name,
-never by event, since a dispatched run is as much a run of its workflow as one `workflow_run` started. qa-up
-goes by the run's first starter here too, so a person's re-run of a dispatched qa-up starts it again; should
-that re-run also end with a `workflow_run`, it runs twice for one commit.
+never by the usual event alone, since a dispatched run is as much a run of its workflow as one `workflow_run`
+started. It trusts only a run of the default branch's copy of the workflow, on `workflow_run` or dispatched on
+the default branch, the one that started it included: a pull request's own copy of the workflow's file, or a
+branch's, runs on events of its own and names its runs and jobs as it likes, and its runs start a
+`workflow_run` too. qa-up goes by the run's first starter here too, so a person's re-run of a dispatched qa-up
+starts it again; should that re-run also end with a `workflow_run`, it runs twice for one commit.
 
 ## CI templates
 
@@ -1917,7 +1920,9 @@ url = "https://tracker.example.dev/issue/{id}"
   not matter which event woke it. A qa-up run links no pull request, so the called workflow's `relay` job
   starts the app's workflow by dispatch for the number its run-name ends in. That name can come from a
   fork's own QA plan, so a run counts only when its deploy job, which qa-up names after the pull request
-  it resolved itself (`QA deploy · PR #42`), names this one. One update per pull request runs at a time.
+  it resolved itself (`QA deploy · PR #42`), names this one, and only a run of the default branch's copy
+  of the workflow (on `workflow_run`, or dispatched on the default branch): a pull request's own copy of
+  its file, or a branch's, names its runs and jobs as it likes. One update per pull request runs at a time.
   A pull request based on another branch than the default gets no note.
 - **Secrets.** Only the chat bot's token (`chat:write`, invited to the channel), in the `persona`
   environment (design 8.8; default branch only), never a repository or organisation secret. Without it

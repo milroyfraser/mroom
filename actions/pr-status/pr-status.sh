@@ -40,7 +40,8 @@
 #   GH_TOKEN, GITHUB_REPOSITORY           the job token, and owner/name
 #   MROOM_CONFIG                          the default branch's mroom.toml
 #   SLACK_BOT_TOKEN                       the chat bot's token; without it no pings go out (a notice says so)
-#   MROOM_DEFAULT_BRANCH                  where the chat user map is read (the repository's default if unset)
+#   MROOM_DEFAULT_BRANCH                  where the chat user map is read, and the one branch a dispatched qa-up
+#                                         run counts on (the repository's default if unset)
 #   MROOM_PR_STATUS_LIVE=1                act: write the note and send pings. Only the action sets it.
 #   MROOM_PR_STATUS_DRY_RUN=1             a dry run even with MROOM_PR_STATUS_LIVE=1
 #   MROOM_PR_STATUS_REVIEWER              the login that posts the Claude review (claude[bot])
@@ -173,26 +174,34 @@ ping_login() {
   echo "$2"
 }
 
-# qa_run <pr> — the app's latest qa-up run for the PR, with its deploy job, or null. qa-up runs on workflow_run,
-# or on a dispatch, so GitHub links its run to no PR: its run-name ends in "PR #<n>" (README, QA environments).
-# A run-name can come from a fork's own QA plan, though, so a run counts only when its deploy job, which qa-up
-# names after the PR it resolved itself ("QA deploy · PR #<n>"), names this PR. A run whose deploy job names
-# another PR is passed over. A run whose deploy job names none (qa-up resolved no PR to deploy, and skipped it),
-# or that has none yet, counts as one that deploys nothing: while it runs it can only say "planning", and once
-# done, the QA environment comment speaks. A fork's own QA plan can make such a run, which can say no more than
-# that. An app without that workflow has no runs. Fails when GitHub did not answer, a run's jobs included: an
-# older run's result must not stand in for a newer one's.
+# qa_run <pr> <default branch> — the app's latest qa-up run for the PR, with its deploy job, or null. qa-up runs
+# on workflow_run, or on a dispatch, so GitHub links its run to no PR: its run-name ends in "PR #<n>" (README, QA
+# environments). Only a run of the default branch's copy of the workflow counts, as qa-up's own runs are: on
+# workflow_run, which always runs that copy, or dispatched on the default branch (the plan's hand-over). A pull
+# request's own copy of the workflow's file, or a branch's, runs on events of its own and names its run and its
+# jobs as it likes, so its runs say nothing about any PR. A run-name can come from a fork's own QA plan, though,
+# so a run counts only when its deploy job, which qa-up names after the PR it resolved itself ("QA deploy · PR
+# #<n>"), names this PR. A run whose deploy job names another PR is passed over. A run whose deploy job names
+# none (qa-up resolved no PR to deploy, and skipped it), or that has none yet, counts as one that deploys
+# nothing: while it runs it can only say "planning", and once done, the QA environment comment speaks. A fork's
+# own QA plan can make such a run, which can say no more than that. An app without that workflow has no runs.
+# Fails when GitHub did not answer, a run's jobs included: an older run's result must not stand in for a newer
+# one's.
 qa_run() {
   local runs err id run jobs deploy
   err="$(mktemp)"
   if ! runs="$(gh api -X GET "repos/$REPO/actions/workflows/$QA_WORKFLOW/runs" -F per_page=100 --jq "
       [.workflow_runs[] | select(.conclusion != \"skipped\")
        | select(([.pull_requests[]?.number] | index($1)) or ((.display_title // \"\") | endswith(\"PR #$1\")))]
-      | sort_by(.created_at) | reverse | .[0:5][] | {id, status, conclusion, html_url} | tojson" 2>"$err")"; then
+      | sort_by(.created_at) | reverse | .[] | {id, event, head_branch, status, conclusion, html_url} | tojson" 2>"$err")"; then
     if grep -q 'HTTP 404' "$err"; then rm -f "$err"; echo null; return 0; fi
     cat "$err" >&2; rm -f "$err"; return 1
   fi
   rm -f "$err"
+  # The default branch's copy alone, then its newest five runs.
+  runs="$(jq -cn --arg branch "$2" '[inputs
+      | select(.event == "workflow_run" or (.event == "workflow_dispatch" and .head_branch == $branch))]
+    | .[0:5][] | del(.event, .head_branch)' <<<"$runs")" || { warn "could not read the qa-up runs"; return 1; }
   while IFS= read -r run; do
     id="$(jq -r '.id' <<<"$run")"
     [[ "$id" =~ ^[0-9]{1,20}$ ]] || continue
@@ -235,7 +244,7 @@ collect() {
         --jq '.check_runs[] | {id, name, status, conclusion, html_url, title: .output.title, external_id}' >"$tmp/checks" \
       && gh api --paginate "repos/$REPO/issues/$pr/comments?per_page=100" \
         --jq '.[] | {id, login: .user.login, body: (.body // ""), html_url}' >"$tmp/comments" \
-      && qa_run "$pr" >"$tmp/qa" \
+      && qa_run "$pr" "$branch" >"$tmp/qa" \
       && jq -n --slurpfile pr "$tmp/pr" --slurpfile user "$tmp/user" --slurpfile required "$tmp/required" \
         --slurpfile checks "$tmp/checks" --slurpfile comments "$tmp/comments" --slurpfile qa "$tmp/qa" \
         --slurpfile users "$tmp/users" --argjson s "$s" --arg login "$login" --arg branch "$branch" '

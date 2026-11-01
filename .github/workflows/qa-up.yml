@@ -143,7 +143,8 @@ jobs:
 
   deploy:
     # The pull request it resolved (resolve.sh), in the name: PR status (actions/pr-status) trusts a run as this pull
-    # request's only by it, since a run-name can come from a fork's own QA plan.
+    # request's only by it, since a run-name can come from a fork's own QA plan, and only in a run of the default
+    # branch's copy of the app's workflow, since any other copy names its jobs as it likes.
     name: "QA deploy · PR #${{ needs.pr.outputs.number }}"
     needs: [pr, plan]
     if: needs.pr.outputs.go == 'true' && needs.plan.result == 'success'
