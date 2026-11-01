@@ -1481,8 +1481,9 @@ starts it; a person deploys another tag, a rollback included, with
   tag matching `<<fill:tag_pattern>>`, a release whose tag is not the run's, and a tag whose commit is not on the
   default branch. The branch moves forward for a release, back for a rollback (with a warning), or stays for a
   re-run; when someone else moved it (to a commit off the default branch, or neither before nor after the tag),
-  the job stops for a person. Then, when `MROOM_DEPLOY_HOOK` is set, it calls the host's deploy hook. This job
-  builds and installs nothing, and runs no action but `actions/checkout`, since it holds the key.
+  or while a tag named `release` exists (step 6), the job stops for a person. Then, when `MROOM_DEPLOY_HOOK` is
+  set, it calls the host's deploy hook. This job builds and installs nothing, and runs no action but
+  `actions/checkout`, since it holds the key.
 - **`verify`**, with no environment and no secret: `deploy-verify` asks `app.version_path` (and a separate
   SPA's `/version.json`) with a query no cache has seen, every 10 seconds, until each reports the tag's commit
   three times in a row with `/up` answering 200, and fails after 10 minutes. A fixed sleep and a health ping
@@ -1491,7 +1492,8 @@ starts it; a person deploys another tag, a rollback included, with
 - **One deploy at a time:** the whole run takes the group `deploy-production` and never cancels one in
   progress, so a second deploy waits until the first is verified.
 
-What the app sets up once:
+What the app sets up once, the GitHub rules (4 to 6) before the host deploys `release` (2), since until then any
+account with Write can create the branch:
 
 1. **The version endpoint** (design section 9): `app.version_path` answers `{"release": "<tag>", "commit":
    "<sha>"}` with `Cache-Control: no-store`, from a file the host's deploy script writes from the code it
@@ -1501,18 +1503,25 @@ What the app sets up once:
    and the site's deploy hook URL in the `production` secret `MROOM_DEPLOY_HOOK` (one or the other: with both, it
    deploys twice). A separate SPA's host deploys the same branch, or the app adds a job of its own between
    `release` and `verify` that builds the tag. The deploy script restarts the workers and clears caches, so a
-   rollback runs the old code.
+   rollback runs the old code. It takes the branch by its full name, `git fetch origin refs/heads/release` and
+   then `git reset --hard FETCH_HEAD`, never by its short name, as `git pull origin $FORGE_SITE_BRANCH` does: git
+   takes a tag named `release` over the branch, and a pull never moves the site back for a rollback.
 3. **A deploy key** with write access (`ssh-keygen -t ed25519 -N '' -f release-key`; Settings, Deploy keys, Allow
    write access), its private half in the `production` secret `MROOM_RELEASE_KEY`, and no other deploy key with
-   write access.
+   write access. Make it where no agent runs, never on the box, and delete the private half once it is in the
+   secret: whoever can read a copy can push `release` without any reviewer.
 4. **The GitHub environment `production`:** deployment branches and tags limited to tags matching the release
    tags (such as `v*`), required reviewers who are people, and "Prevent self-review", so each deploy is approved
    by a person other than the one who started it (design 8.8, D22).
 5. **A ruleset on `release`** (target `refs/heads/release`): restrict creations, updates and deletions, and block
    force pushes, with deploy keys as the only bypass. Without it, any account with Write, the agents' included,
    could push the branch production deploys.
-6. **Who may create release tags:** a tag ruleset, so that only people can make one. The environment admits any
-   tag that matches, and the workflow file at that tag is the one that runs with the deploy key.
+6. **Who may create release tags:** a tag ruleset on the release tags and on the tag `release`, so that only
+   people can make one. The environment admits any tag that matches, and the workflow file and script at that tag
+   are what run with the deploy key, so their check that the tag is on the default branch is only as good as the
+   tag. Publishing a draft release makes its tag at the draft's target, which anyone with Write can change, so the
+   person who publishes checks the target first. A tag named `release` would shadow the branch for a host that
+   fetches it by its short name (step 2).
 
 A re-run of the same tag leaves the branch where it is: Quick Deploy then deploys nothing and `verify` passes at
 once, while a deploy hook deploys again.

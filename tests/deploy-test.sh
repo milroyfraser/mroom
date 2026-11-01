@@ -142,6 +142,32 @@ t_a_branch_someone_else_moved_is_left_for_a_person() {
   expect_true "the deploy moved a branch someone else moved" [ "$(live)" = "$stray" ]
 }
 
+# A tag named like the branch: git ranks refs/tags/<name> above refs/heads/<name>, so a host whose deploy script
+# fetches the branch by its short name (git pull origin release) takes the tag instead. Anyone with Write can push a
+# tag, so one at a commit no one released would go live with the next deploy.
+t_a_tag_named_like_the_branch_is_left_for_a_person() {
+  repo
+  deploy v1.0.0
+  g -C "$T/dev" switch -q --detach v1.0.0 && g -C "$T/dev" commit -q --allow-empty -m unreleased
+  local unreleased
+  unreleased="$(g -C "$T/dev" rev-parse HEAD)"
+  g -C "$T/dev" push -q origin HEAD:refs/tags/release
+  # What such a deploy script gets: the unreleased commit, not the branch at v1.0.0.
+  g -C "$T/dev" fetch -q origin release
+  expect_true "a fetch of release by its short name took the branch over the tag" \
+    [ "$(g -C "$T/dev" rev-parse FETCH_HEAD)" = "$unreleased" ]
+  deploy v1.1.0
+  expect_rc 1
+  expect_err_has "origin has the tag release, which a fetch of release by its short name takes over the branch"
+  expect_out ""
+  expect_true "the deploy moved release while a tag of its name was there" [ "$(live)" = "$C1" ]
+  # Once a person has removed it, the deploy goes on.
+  g -C "$T/dev" push -q origin :refs/tags/release
+  deploy v1.1.0
+  expect_rc 0
+  expect_true "release did not move to v1.1.0 once the tag was gone" [ "$(live)" = "$C2" ]
+}
+
 t_another_branch_name_can_be_used() {
   repo
   deploy v1.1.0 RELEASE_BRANCH=production
@@ -412,6 +438,20 @@ t_the_shape_checks_catch_planted_bugs() {
   planted placeholders 't = t.replace("<<fill:tag_pattern>>", "<<fill:tag_regex>>")' "<<fill:tag_regex>> is used"
 }
 
+# Only the production deploy is left out of the CI checks: another deploy-* workflow holding a secret is caught.
+t_another_deploy_workflow_meets_the_ci_checks() {
+  rm -rf "$T/root"
+  mkdir -p "$T/root/templates"
+  cp -R "$TPL" "$T/root/templates/github"
+  cp "$TPL/workflows/deploy-production.yml" "$T/root/templates/github/workflows/deploy-staging.yml"
+  shape no-secrets "$T/root"
+  expect_rc 1
+  expect_out_has "workflows/deploy-staging.yml contains 'secrets.'"
+  rm "$T/root/templates/github/workflows/deploy-staging.yml"
+  shape no-secrets "$T/root"
+  expect_rc 0
+}
+
 t_the_template_renders_from_both_examples() {
   local example version
   version="v$(tr -d '[:space:]' <"$ROOT/VERSION")"
@@ -443,6 +483,7 @@ test_case rollback t_an_older_tag_rolls_it_back
 test_case off-main t_a_tag_off_the_default_branch_is_refused
 test_case refused t_only_a_release_tag_of_the_run_deploys
 test_case moved t_a_branch_someone_else_moved_is_left_for_a_person
+test_case shadow t_a_tag_named_like_the_branch_is_left_for_a_person
 test_case branch t_another_branch_name_can_be_used
 skip_unless has_yaml "python3 has no yaml module (PyYAML)"
 test_case triggers t_only_a_published_release_or_a_person_starts_it
@@ -451,6 +492,7 @@ test_case release-step t_one_deploy_at_a_time_moves_the_branch_then_the_hook
 test_case verify-job t_verify_waits_for_the_pushed_commit_without_a_secret
 test_case placeholders t_placeholders_are_documented
 test_case planted t_the_shape_checks_catch_planted_bugs
+test_case other-deploy t_another_deploy_workflow_meets_the_ci_checks
 # deploy-verify reads app.version_path through the one reader, which needs python3 3.11+, and uses bash 4's arrays.
 skip_unless has_bash4 "this host lacks bash 4 or python3 3.11 (tomllib), which deploy-verify needs"
 test_case render t_the_template_renders_from_both_examples
