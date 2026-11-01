@@ -4,7 +4,19 @@ MROOM_ROOT_DIR set. Prints one line per check, "ok <what>" or "FAIL <what>". Pyt
 library only."""
 import json, os, re, shutil, subprocess, sys
 
+import importlib.util
+
 root = os.environ["MROOM_ROOT_DIR"]
+# The private list, read by tools/privacy_check.py's private_words(), loaded by its path: $MROOM_PRIVATE_WORDS
+# (the list), $MROOM_PRIVATE_WORDS_FILE (its file) or, outside GitHub Actions, the gitignored .private-words.
+_spec = importlib.util.spec_from_file_location("privacy_check", os.path.join(root, "tools", "privacy_check.py"))
+privacy_check = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(privacy_check)
+try:
+    PRIVATE_WORDS = privacy_check.private_words(root) or []
+    PRIVATE_LIST_ERROR = None
+except privacy_check.ListError as e:
+    PRIVATE_WORDS, PRIVATE_LIST_ERROR = [], str(e)
 skills_dir = os.environ["SKILLS_DIR"]
 commands_dir = os.environ["COMMANDS_DIR"]
 
@@ -89,6 +101,7 @@ subs = {}
 for m in re.finditer(r"mroom ([a-z]+) ([a-z][a-z|-]*)", usage_text):
     subs.setdefault(m.group(1), set()).update(m.group(2).split("|"))
 keys = set(re.findall(r"^\s*\"([a-z_]+(?:\.[a-z_]+)+)\":", read(os.path.join(root, "lib/core/config.py")), flags=re.M))
+say(PRIVATE_LIST_ERROR is None, f"the private list reads ({PRIVATE_LIST_ERROR})")
 say("tracker" in commands and {"get", "list", "comment", "state"} <= subs.get("tracker", set()),
     "the checks find mroom's commands and subcommands")
 say("issues.state_review" in keys and "release.production_url" in keys, "the checks find mroom.toml's keys")
@@ -216,10 +229,8 @@ for label, (name, kind, meta, body, text) in sorted(docs.items()):
     say(all(h.rstrip(".") == "github.com" or h.rstrip(".").endswith("example.dev") or h == "<production_url>"
             for h in hosts),
         f"{label} links only github.com or an example host ({hosts})")
-    words = os.environ.get("MROOM_PRIVATE_WORDS")
-    if words:
-        for word in [w.strip() for w in read(words).split("\n") if w.strip()]:
-            say(re.search(word, text, flags=re.I) is None, f"{label} names none of the private words (one of them)")
+    for word in PRIVATE_WORDS:
+        say(re.search(word, text, flags=re.I) is None, f"{label} names none of the private words (one of them)")
 
 # --- Earlier work is this repository's own ----------------------------------------------------------------
 # A search for an issue's id, or a list by its branch's name, finds pull requests from forks too, and anyone
@@ -541,11 +552,9 @@ for f in room_files:
     hosts = re.findall(r"https?://([^/\s)`\"'>]+)", text)
     say(all(h in ("github.com", "fonts.googleapis.com", "fonts.gstatic.com") for h in hosts),
         f"{label} links only github.com or Google Fonts ({hosts})")
-    words = os.environ.get("MROOM_PRIVATE_WORDS")
-    if words:
-        rest = plain.replace(COPYRIGHT, "")
-        for word in [w.strip() for w in read(words).split("\n") if w.strip()]:
-            say(re.search(word, rest, flags=re.I) is None, f"{label} names none of the private words (one of them)")
+    rest = plain.replace(COPYRIGHT, "")
+    for word in PRIVATE_WORDS:
+        say(re.search(word, rest, flags=re.I) is None, f"{label} names none of the private words (one of them)")
 # The Room's rows are data. Only the owner and Editors write them: by default anyone the page is shared with as a
 # Contributor could, and the page shows every card, copy command and next step as Claude's. And the page's
 # comments to Claude, which go out as the viewer's own words, name the card that changed and never quote a row.

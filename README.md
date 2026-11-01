@@ -665,8 +665,7 @@ earlier work or for one to stack on, and that none names a host, an IP address, 
 address.
 For `fix-issue` it also checks that the branch names both ids, that a failing test comes before the
 fix, that the only links are the `Fixes` lines, and that it stops at a PR in review.
-Names of people and projects come from `$MROOM_PRIVATE_WORDS`, a file of patterns kept outside the
-repository.
+Names of people and projects come from the private list (see [Privacy check](#privacy-check)).
 
 Not here yet: `blast-radius` (later in phase 3), the principle skills (named in the
 skills, read when installed), and `verify-app` with `qa-engineer` (phase 2b).
@@ -2056,6 +2055,72 @@ tests/run.sh --skip qa-up  # all but tests/qa-up-test.sh, which CI runs in a job
 The tests need what the box needs (bash 5, python3 3.11+); on a host without them the TOML and install
 tests skip locally, and CI on `ubuntu-latest` runs them all, plus shellcheck on every shell script and an
 install on a bare `ubuntu:24.04` container. Releases are cut by hand: [docs/releasing.md](docs/releasing.md).
+
+### Privacy check
+
+This repository is public, and the box it came from is not. `tools/privacy_check.py` checks a change for the
+owner's private words, such as names of people, projects, hosts and ids. It reads:
+
+- every path the change adds or changes, empty files included;
+- every line the change adds, read as text whatever the repository's attributes say;
+- each commit's author, committer and message;
+- the pull request's title, body and branch name.
+
+A hit names the place (a file and line, a commit's author, committer or message line, the title, a body line or
+the branch name) and the entry's number in the list. It never names the word, and the check fails.
+
+The list is one case-insensitive regular expression per line. Blank lines are skipped and do not count. It is
+read from, in order:
+
+1. `$MROOM_PRIVATE_WORDS`, which holds the list itself. A one-line value with a `/` is refused, because it reads
+   like a path.
+2. `$MROOM_PRIVATE_WORDS_FILE`, the path of a file that holds the list.
+3. Outside GitHub Actions only, `.private-words` at the top of the checkout. It is gitignored and must be a plain
+   file, not a link.
+
+With no list, the check passes with a notice.
+
+The check is a backstop, not a gate. CI runs once a pull request is open, and by then its text is already public.
+
+- **CI** (`.github/workflows/privacy.yml`): the owner sets it up in two steps.
+  1. Create a GitHub environment named `privacy` (Settings → Environments) **before the workflow first runs**.
+     Under "Deployment branches and tags", choose "Selected branches and tags" and add only the default branch.
+     If the workflow runs first, GitHub creates the environment itself, with no branch rule.
+  2. Add the environment secret `MROOM_PRIVATE_WORDS`, with one entry per line. Paste it in the environment's
+     page, or pipe the list into `gh secret set MROOM_PRIVATE_WORDS --env privacy` from a file kept outside the
+     repository.
+
+  Until the secret is set, the job passes with a notice. The job holds the secret, so it never runs the pull
+  request's code:
+  - it runs on `pull_request_target`, which uses the default branch's copy of the workflow whatever the pull
+    request's base;
+  - it runs only for a pull request based on the default branch;
+  - it takes the script from that workflow's own commit;
+  - it fetches the pull request's two commits into a bare repository, which it reads as data;
+  - it masks each entry before it prints anything.
+
+  A change to the script or the workflow takes effect once it is merged. Editing the title or body runs the job
+  again.
+
+  The job checks a pull request only when it comes from this repository, its author is the repository's owner, a member
+  or a collaborator (`OWNER`, `MEMBER` or `COLLABORATOR`), and it is not Dependabot's. A fork's annotations are public, so anyone could test
+  guesses against the list. For any other pull request, run the check yourself before you merge it, with its
+  title, body and branch name:
+
+  ```bash
+  n=<number>
+  git fetch origin "pull/$n/head"
+  PR_TITLE="$(gh pr view "$n" --json title --jq .title)" \
+  PR_BODY="$(gh pr view "$n" --json body --jq .body)" \
+  PR_HEAD_REF="$(gh pr view "$n" --json headRefName --jq .headRefName)" \
+  MROOM_PRIVATE_WORDS_FILE=~/words.txt tools/privacy_check.py --base origin/main --head FETCH_HEAD
+  ```
+
+- **Before a push**: the repository ships no git hook. To run the check before each push, write an executable
+  `.git/hooks/pre-push` that holds `#!/bin/sh` and `exec python3 tools/privacy_check.py`. It checks the checked-out
+  branch against `origin/main`, not each ref the push names, so push from the branch you checked.
+
+`tests/skills-test.sh` uses the same code to read the same list, and checks the skills and the Room against it.
 
 ## Licence
 
