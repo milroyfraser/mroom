@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2317,SC2329  # the t_* functions run indirectly, through test_case
+# shellcheck disable=SC2317,SC2329,SC2016  # t_* run through test_case; a ${{ }} in single quotes is the workflow's own
 # Tests for the privacy check (tools/privacy_check.py): a hit in an added line, a path, a commit message and the
 # pull request's title and body, each named by its place and the entry's number; no hit; no list (no secret);
 # the list from a file, from the variable itself and from the gitignored .private-words; an entry that is not a
@@ -171,13 +171,14 @@ t_workflow_runs_only_the_default_branch_copy() {
   expect_true "privacy.yml runs on pull_request_target, so its own copy is the default branch's" \
     grep -qx '  pull_request_target:' "$WF"
   if grep -qE '^  pull_request:' "$WF"; then fail "privacy.yml has a pull_request trigger"; else ok; fi
+  # The line after each ref (grep -A1, which GNU and BSD grep read alike).
   expect_true "the check is checked out from the default branch into base/" \
-    grep -qzE 'ref: \$\{\{ github\.event\.repository\.default_branch \}\}\n +path: base\n' "$WF"
+    grep -qE '^ +path: base$' <<<"$(grep -A1 -F 'ref: ${{ github.event.repository.default_branch }}' "$WF")"
   expect_true "the pull request is checked out into pr/" \
-    grep -qzE 'ref: \$\{\{ github\.event\.pull_request\.head\.sha \}\}\n +path: pr\n' "$WF"
+    grep -qE '^ +path: pr$' <<<"$(grep -A1 -F 'ref: ${{ github.event.pull_request.head.sha }}' "$WF")"
   expect_true "no checkout keeps credentials" \
     [ "$(grep -c 'uses: actions/checkout' "$WF")" = "$(grep -c 'persist-credentials: false' "$WF")" ]
-  expect_true "the check runs in pr/" grep -qzE 'working-directory: pr\n' "$WF"
+  expect_true "the check runs in pr/" grep -qE '^ +working-directory: pr$' "$WF"
   # Every run: line names only base/'s script, run isolated, and never a path in pr/.
   local runs
   runs="$(grep -c 'privacy_check.py' <<<"$(grep -E '^ +run: ' "$WF")")"
