@@ -26,7 +26,8 @@ part of phase 1: the [box watchdog](#box-watchdog) with its job records, the
 [regression label](#regression-label) check with its measures, and the
 [guard, the plugin's skeleton and the settings fragments](#guard-and-settings), and, from phase 3, the
 [tracker and error-tracker adapters](#tracker-and-error-tracker) and the [workflow skills](#workflow-skills),
-and, from phase 5, [alert triage](#alert-triage) with its alarm and its guard. Every other command prints
+and, from phase 5, [alert triage](#alert-triage) with its alarm and its guard, and, from phase 2b, the
+[runner sandbox](#runner-sandbox) with its probe. Every other command prints
 `not yet: phase N`. The phases and what each delivers are in
 [section 11 of the design](docs/design.md#11-phases). Expect breaking changes in every `0.x` release.
 
@@ -1381,6 +1382,52 @@ either. Name it in qa-up's `next-workflows`, and give it `workflow_dispatch` wit
 never by event, since a dispatched run is as much a run of its workflow as one `workflow_run` started. qa-up
 goes by the run's first starter here too, so a person's re-run of a dispatched qa-up starts it again; should
 that re-run also end with a `workflow_run`, it runs twice for one commit.
+
+## Runner sandbox
+
+`actions/runner-sandbox` boxes untrusted code on a throwaway GitHub runner (design 8.5): a PR's harness, a
+browser recipe an agent wrote, or the commands Claude runs on a runner. Run it from the default branch's
+checkout, before any untrusted code runs; it changes the runner for good (users, sudoers, `/etc`), so it refuses
+a self-hosted runner unless `MROOM_SANDBOX_EPHEMERAL=1` says the runner is thrown away after the job.
+
+```yaml
+- uses: actions/checkout@v4            # the default branch's
+  with: { persist-credentials: false }
+- uses: milroyfraser/mroom/actions/runner-sandbox@vX.Y.Z   # the first release with it
+  env:
+    MROOM_SANDBOX_SECRET: ${{ secrets.QA_GATE_KEY }}   # an env, never an input
+  with:
+    holder: .mroom/qa-box.sh           # the trusted wrapper that uses the secret
+    known-hosts: ${{ vars.QA_SSH_KNOWN_HOSTS }}
+    copy: harness                      # root-owned, read-only in /opt/mroom-sandbox/harness
+    path: /opt/node/bin                # node's folder, outside the runner's home
+    step-env: |
+      QA_SITE=https://12.qa.example.dev
+- run: mroom-step --input recipe.mjs -- node /opt/mroom-sandbox/harness/drive.mjs inputs/recipe.mjs
+```
+
+What the step (user `mroom-step`, run through `mroom-step`) gets and does not:
+
+| | |
+|---|---|
+| **Gets** | `env -i` with only `PATH` (`path`, then `/usr/local/bin:/usr/bin:/bin`), `HOME`, `LANG`, `MROOM_SANDBOX`, `MROOM_INPUTS`, `MROOM_EVIDENCE`, `MROOM_HOLDER` and the `step-env` lines; read access to the copies and its inputs; write access to `/var/lib/mroom-sandbox/evidence` (the runner reads it afterwards) and its own home; the holder's wrapper, through `sudo -n -u mroom-holder "$MROOM_HOLDER"`; the network |
+| **Never** | the job's environment (no `GITHUB_TOKEN`, Claude token or secret); the runner's home (closed to `0700`: the workspace, git's credentials in it, `RUNNER_TEMP`); a runner process's environment; the secret, which only `mroom-holder` reads; sudo to root or to anything but the wrapper; writing the copies, the inputs, `/etc/mroom-sandbox`, the pinned host keys or `/usr/local/bin`; Docker's or containerd's socket |
+
+`step-env` refuses a name that reads like a credential (`*_TOKEN`, `*_KEY`, `*_SECRET`, `*_PASSWORD`, `*_DSN`
+and the like) or a runner's (`GITHUB_*`, `ACTIONS_*`, `RUNNER_*`, `CLAUDE*`), and `copy` refuses a path that
+leaves the working directory or goes through a link, since a copied tree may be the PR's.
+
+**The probe.** Unless `check: false`, the action then plants a value in the runner's environment, in a
+long-lived process's and in a file in the runner's home, and runs a hostile probe
+(`lib/runner-sandbox/probe.sh`) through `mroom-step`. It tries every "Never" above and reports each; the job
+fails, with one `::error::` per hole, if any succeeds, if any check is missing from its report, or if the
+planted value shows up. Run it again yourself with `/usr/local/lib/mroom-sandbox/check.sh [--socket <path>]`.
+
+**Claude Code's own sandbox stays off.** Its subprocess env scrub (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`) runs
+each Bash command in `bwrap --unshare-user`, which sets `no_new_privs`, so the sudo hop to `mroom-holder` is
+refused inside it. `lib/runner-sandbox/bwrap-probe.sh` shows that on a real runner, and warns if it ever
+changes. mroom's CI runs it, the probe and two weakened sandboxes (`tests/sandbox/real-test.sh`) on every pull
+request.
 
 ## CI templates
 

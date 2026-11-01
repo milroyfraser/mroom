@@ -1,0 +1,51 @@
+name: runner sandbox
+description: >-
+  Sets up the runner sandbox (design 8.5) on a throwaway runner, so untrusted code the job runs afterwards (a PR's
+  harness, a recipe an agent wrote) reaches no token, key or file it does not need: it runs as mroom-step through
+  mroom-step, with a clean environment, no sudo and no way into the runner's home, and a secret is readable only by
+  mroom-holder, through one root-owned wrapper. Then it runs a hostile probe through mroom-step and fails the job if
+  the probe reaches anything. Run it from the default branch's checkout, before any untrusted code runs. Pass the
+  secret as the MROOM_SANDBOX_SECRET env of this step, never as an input.
+inputs:
+  holder:
+    description: The trusted wrapper (a path in the default branch's checkout) that uses the secret, run as mroom-holder; empty for none
+    default: ""
+  known-hosts:
+    description: Pinned SSH host key lines ("<host> <type> <key>") for the holder's wrapper, root-owned
+    default: ""
+  copy:
+    description: Paths below the working directory, one per line, copied root-owned and read-only into /opt/mroom-sandbox
+    default: ""
+  path:
+    description: Absolute folders, one per line, put first on the step's PATH (such as node's)
+    default: ""
+  step-env:
+    description: NAME=value lines the step's environment gets; never a credential (such names are refused)
+    default: ""
+  socket:
+    description: More sockets, one per line, that the probe must not be able to connect to (Docker's and containerd's are always tried)
+    default: ""
+  check:
+    description: Run the probe after setting up, and fail the job if the sandbox does not hold
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Set up the runner sandbox
+      shell: bash
+      env:
+        MROOM_SANDBOX_HOLDER: ${{ inputs.holder }}
+        MROOM_SANDBOX_KNOWN_HOSTS: ${{ inputs.known-hosts }}
+        MROOM_SANDBOX_COPY: ${{ inputs.copy }}
+        MROOM_SANDBOX_PATH: ${{ inputs.path }}
+        MROOM_SANDBOX_ENV: ${{ inputs.step-env }}
+      run: sudo -E "$GITHUB_ACTION_PATH/../../lib/runner-sandbox/sandbox.sh"
+    - name: Check the sandbox holds
+      if: inputs.check == 'true'
+      shell: bash
+      env:
+        SANDBOX_SOCKETS: ${{ inputs.socket }}
+      run: |
+        args=()
+        while IFS= read -r s; do [ -z "$s" ] || args+=(--socket "$s"); done <<<"$SANDBOX_SOCKETS"
+        /usr/local/lib/mroom-sandbox/check.sh ${args[@]+"${args[@]}"}

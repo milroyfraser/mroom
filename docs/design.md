@@ -538,6 +538,19 @@ Invariants, each with a test:
 5. **Claude on a runner is boxed.** The sandbox (dedicated users, `env -i`, sudoers allowing exactly the
    wrappers, root-owned inputs), the tool allowlist and the pinned action ship as one locked block; `bwrap-probe`
    and `allowlist-probe` run in mroom's CI on every Claude Code bump.
+   - `actions/runner-sandbox` builds the sandbox on a throwaway runner from the default branch's checkout: untrusted
+     code runs as `mroom-step` through `mroom-step` (`sudo` then `env -i`, with only the variables the job names, and
+     never a name that reads like a credential); the runner's home, and so the workspace and its git credentials,
+     is closed to it; a secret is readable only by `mroom-holder`, through one root-owned copy of a trusted wrapper,
+     which `mroom-step` alone may run as that user; what the step loads is a root-owned copy in
+     `/opt/mroom-sandbox`, never copied through a link. It refuses a self-hosted runner that outlives the job.
+   - Before any untrusted code runs, a hostile probe runs through `mroom-step` and tries the secret, the runner's
+     files and a runner process's environment, sudo, writes outside the step's own folders, and Docker's socket;
+     the job fails if any succeeds, if a check goes unreported, or if a value planted in the runner shows up.
+   - bubblewrap is not one of the walls: Claude Code's env scrub would run each command in `bwrap
+     --unshare-user`, whose `no_new_privs` refuses the sudo hop the sandbox is built on, so the scrub stays off and
+     the users keep the step from the job's secrets. `bwrap-probe` shows the hop is refused inside bubblewrap,
+     and warns when it no longer is. The network stays open to the step (a browser step needs the QA site).
 6. **The read-only data boundary is explicit.** `qa.db_read_allowlist` has no default; browser QA refuses to start
    without it, and a test runs the allowlist against the app's schema. The gate holds its own copy, set by a
    person on the box (`MROOM_QA_DB_READ`), since it never reads the app's repository; `db-read` refuses every
