@@ -92,7 +92,9 @@ name = "shop"
 
 Only `app.name` is required in phase 0. Later phases make more keys required as the commands that read
 them arrive (for example `qa.zone` and `qa.db_read_allowlist` with QA environments in phase 2).
-`mroom config keys` lists every key, its type, and whether it is required.
+`mroom config keys` lists every key, its type, whether it is required, and mroom's default where it has one:
+`app.version_path` (`/version`), `qa.max_envs` (5) and `qa.env_memory_mb` (1024). `get` gives that default when
+the file leaves the key out, whatever `--default` says, so every reader agrees.
 
 ```bash
 mroom config get app.name                  # shop
@@ -100,6 +102,7 @@ mroom config get app.build.daemons         # one item per line
 mroom config get app.build.daemons --json  # ["horizon", "reverb"]
 mroom config get app.build --json          # a whole table, as JSON
 mroom config get app.php --default 8.4     # a fallback when the key is not set
+mroom config get app.version_path          # /version, mroom's default, when the file has none
 mroom config validate                      # check the whole file
 mroom config path                          # which mroom.toml was found
 mroom config keys                          # every key the schema knows
@@ -219,6 +222,18 @@ readable only by the box user: `watchdog.json`, and `watchdog.log` with one JSON
 start and end and each event. Its MCP check sends no login, so it finds servers that fail or vanish, not
 an expired login.
 
+## Memory preflight
+
+`mroom memory-preflight <MB> [<what>]` stops work the box cannot hold before it starts, since the kernel ends a
+build that runs out of memory half way, with whatever it had done left as it was. It exits 1, saying why, when
+the box's RAM available and free swap (`/proc/meminfo`) hold less than `<MB>` more, 0 otherwise, and 2 for a
+usage error;
+`MROOM_SKIP_MEMORY_CHECK=1` skips it, and a host without a readable `/proc/meminfo` skips it with a note.
+
+```bash
+mroom memory-preflight 4096 "the frontend build" && pnpm build
+```
+
 ## Forge API
 
 `forge-api` calls the Laravel Forge v2 API of this box, for agents and people. Every call goes to the box's
@@ -289,6 +304,7 @@ checks, and `template` for the job that builds the QA template. The `provision` 
 | `bucket-drop <N>` | every bucket the environment has, whatever its disks: their keys deleted, and each bucket emptied and deleted |
 | `reverb-app-add <N>` | an app of its own on mroom's Reverb host (D16), which reads its apps from a file on every lookup, so nothing restarts; prints `REVERB_APP_ID`, `REVERB_APP_KEY`, `REVERB_APP_SECRET` (new for a new app, the same while it has one), `REVERB_HOST`, `REVERB_PORT` and `REVERB_SCHEME` |
 | `reverb-app-remove <N>` | the environment's app; its sockets already open stay until they close |
+| `memory` | the box's memory, in MB: `total_mb`, `available_mb` and `swap_free_mb` from `/proc/meminfo`, and `reserve_mb`, what the box keeps for all but QA (`MROOM_QA_RESERVE_MB`, 4096 unless set); qa-up sizes its slots from them |
 
 The `browser` role reads and changes nothing:
 
@@ -382,7 +398,9 @@ site's user, and only on that environment's own two sites:
   named after the commit, a cut-off upload fails on gzip's checksum, and the tree replaces the site's whole
   tree except the backend's `.env` and `storage/`. Any `.env` in the tarball is skipped, a link at `.env`,
   `storage` or `bootstrap/cache` refuses the tarball, and the gate writes `version.json`
-  (`{"release": null, "commit": "<sha>"}`) into the backend, since a tarball has no git history.
+  (`{"release": null, "commit": "<sha>"}`) into the backend, since a tarball has no git history, in place of
+  any the tree holds. The app's `app.version_path` endpoint reports it; checks ask the gate instead
+  (`env-sha`), since the PR's code could write the file afterwards. `lib/core/version.sh` is the one reader they share.
 - **The swap** builds the new tree beside the live one, then exchanges the two entry by entry, each in one
   atomic step (`renameat2`), so the site never lacks an entry, even while its own code writes. A failed step
   undoes the steps done. A killed put's kept items go back live with the next put; if the site made its own
@@ -509,15 +527,21 @@ and runs it, which installs the `parts` named:
   `MROOM_QA_SMTP_PORT`, 1025 unless set.
 - `root-setup` reads no file the box user can write: it writes each unit from its own text, checks `site-op`
   against the SHA-256 it holds, and runs again without harm, rewriting and restarting only what changed, or
-  what a run that stopped halfway left. systemd itself, as root, still resolves the units' bind paths in the
-  box user's home each time a service starts (design D21 notes this limit).
+  what a run that stopped halfway left.
+- The services live in `/var/lib/mroom/services`, not in the box user's home. systemd, as root, resolves each
+  folder a unit binds, links and all, each time a service starts, so `root-setup` makes that path root's:
+  `/var/lib/mroom/services` and a folder for each service in it belong to root, mode 755, and only the
+  folders the units bind, one level down, belong to the box user, mode 700. The box user can change what is
+  in those folders, never the path to them. `root-setup` stops before it writes a unit if any part of that
+  path is a link, a file, or a folder someone other than root may change, or if a folder it would give the
+  box user belongs to someone else (design D21, open question 8). Each service sees only its own folders.
 - Never give a token on the box a `recipe:*` scope: even `recipe:view` runs any saved recipe.
 
 <!-- root-recipe: tests/root-test.sh checks sum against lib/root-setup, and runs this block -->
 ```bash
 set -euo pipefail
 v=v0.5.0
-sum=bd54e1d19f2255fb4dabadc9890b349daf4c24e7e8b3e3711647180767e08d0a
+sum=8c56e94b5501601b4e8ae2175308eededaca97bda19ae7b0149bc8495881ca7c
 user=forge
 parts=(site-op mailpit garage reverb)
 smtp_port=1025
@@ -669,39 +693,66 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
 11. In `box.env`: `MROOM_APP_NAME=shop`, `MROOM_QA_TEMPLATE=shop_qa_template` (58 characters at most, which
     leaves room for `_next`), `MROOM_QA_ZONE=qa.example.dev`, for browser QA `MROOM_QA_DB_READ` (the
     `table.column` entries `db-read` may read, space-separated, the same as `qa.db_read_allowlist`, such as
-    `MROOM_QA_DB_READ="users.id users.email bookmarks.user_id"`), and when they differ from the defaults, `MROOM_QA_BACKEND_DIR` (the
-    Laravel app's folder in the repository, `.`), `MROOM_QA_PHP` (`php`) and `MROOM_QA_PERSONA_DOMAIN`
-    (`.test`). A site user's name is at most 32 characters, so an app name of 19 characters or fewer always
-    fits.
+    `MROOM_QA_DB_READ="users.id users.email bookmarks.user_id"`), and when they differ from the defaults,
+    `MROOM_QA_BACKEND_DIR` (the Laravel app's folder in the repository, `.`), `MROOM_QA_PHP` (`php`),
+    `MROOM_QA_PERSONA_DOMAIN` (`.test`) and `MROOM_QA_RESERVE_MB` (`4096`: the memory, in MB, the box keeps for
+    the dev site, sessions and builds, which no QA environment may count on). A site user's name is at most 32
+    characters, so an app name of 19 characters or fewer always fits.
 
-12. The mail catcher, when `qa.parity.mail` is `catcher` (the default): `mroom baseline mailpit`, then,
-    *as root*, the root recipe with `mailpit` in its parts, then `mroom baseline mailpit` again. Baseline
+12. The mail catcher, when `qa.parity.mail` is `catcher` (the default): *as root*, the root recipe with
+    `mailpit` in its parts, then `mroom baseline mailpit`. The recipe makes the services' folders and
+    installs three systemd units and starts them: the socket on `127.0.0.1:1025` (`MROOM_QA_SMTP_PORT` in
+    `box.env`, and the recipe's `smtp_port`, to change it), the relay and Mailpit, both run as the box user.
+    Until baseline has run, the relay and Mailpit have nothing to run, and systemd keeps trying. Baseline
     downloads Mailpit at the build `lib/core/pins.txt` names, refuses it unless the archive and the binary
     match their SHA-256 pins, puts mroom's mail relay beside it and makes their logins (mode 600, in
-    `~/.config/mroom/secrets`). The recipe installs three systemd units and starts them: the socket on
-    `127.0.0.1:1025` (`MROOM_QA_SMTP_PORT` in `box.env`, and the recipe's `smtp_port`, to change it), the
-    relay and Mailpit, both run as the box user. Baseline can run again: what is in place is kept, it
-    restarts the relay or Mailpit itself when their files changed (systemd holds the port meanwhile), and it
-    says when the installed units are not this release's, which the recipe then rewrites. Nothing else may
-    listen on the port: on a box that ran an earlier mail catcher there, stop that first.
+    `/var/lib/mroom/services/mailpit/etc`; the gate's API login in `~/.config/mroom/secrets`). Before the
+    recipe has made the folders, it installs nothing and says so. Baseline can run again: what is in place
+    is kept, it restarts the relay or Mailpit itself when their files changed (systemd holds the port
+    meanwhile), and it says when the installed units are not this release's, which the recipe then
+    rewrites. Nothing else may listen on the port: on a box that ran an earlier mail catcher there, stop
+    that first.
 
-13. The file store, when `qa.parity.files` is `same` (the default): `mroom baseline garage`, then, *as
-    root*, the root recipe with `garage` in its parts, which installs Garage's systemd unit, then
-    `mroom baseline garage` again, which gives Garage its one-node layout. Baseline downloads Garage at the
-    build `lib/core/pins.txt` names and refuses any other, and makes its RPC secret and admin and metrics
-    tokens (mode 600, in `~/.config/mroom/secrets`). With `MROOM_QA_ZONE` set, it prints the nginx configs
-    of Garage's two hosts: create `s3.<zone>` and `files.<zone>` as sites in Forge, each with its
-    certificate, and put the printed blocks in place of their `location` blocks. Forge's nginx runs as the
-    box user, who alone can open Garage's sockets. The S3 host streams each body to Garage, so an unsigned
-    upload is refused before nginx stores any of it.
+13. The file store, when `qa.parity.files` is `same` (the default): *as root*, the root recipe with `garage`
+    in its parts, which makes its folders and installs Garage's systemd unit, then `mroom baseline garage`,
+    which gives Garage its one-node layout once it answers (run it again if it says Garage does not yet).
+    Baseline downloads Garage at the build `lib/core/pins.txt` names and refuses any other, and makes its RPC
+    secret and admin and metrics tokens (mode 600, in `/var/lib/mroom/services/garage/etc`). With
+    `MROOM_QA_ZONE` set, it prints the nginx configs of Garage's two hosts: create `s3.<zone>` and
+    `files.<zone>` as sites in Forge, each with its certificate, and put the printed blocks in place of their
+    `location` blocks. Forge's nginx runs as the box user, who alone can open Garage's sockets. The S3 host
+    streams each body to Garage, so an unsigned upload is refused before nginx stores any of it.
 
-14. WebSockets, when `qa.parity.broadcast` is `same` (the default): `mroom baseline reverb`, then, *as root*,
-    the root recipe with `reverb` in its parts, which installs the Reverb host's systemd unit, then
-    `mroom baseline reverb` again, which says whether it answers. Baseline installs this release's
+14. WebSockets, when `qa.parity.broadcast` is `same` (the default): *as root*, the root recipe with `reverb`
+    in its parts, which makes its folders and installs the Reverb host's systemd unit, then
+    `mroom baseline reverb`, which says whether it answers. Baseline installs this release's
     `reverb-host` with the packages its `composer.lock` pins, which takes Composer and PHP 8.3 or later at
-    `/usr/bin/php`, and makes its folders and an empty apps file (mode 600, in a folder of its own). With
+    `/usr/bin/php`, and an empty apps file (mode 600, in `/var/lib/mroom/services/reverb/apps`). With
     `MROOM_QA_ZONE` set, it prints the nginx config of the host: create `ws.<zone>` as a site in Forge, with
     its certificate, and put the printed block in place of its `location` blocks.
+
+**A box whose services ran before 0.5.0** keeps them in `~/.local/share/mroom-services`, and their logins
+and Garage's secrets in `~/.config/mroom/secrets`. Move them in one sitting, with no QA environment coming up
+or going down meanwhile: from step 1 to step 3 the gate looks for the services' files in their new folders,
+so it refuses mail logins, buckets and Reverb apps, and a teardown in that time would leave them behind. Do
+this for each part the box runs:
+
+1. Upgrade the box to the release.
+2. *As root*, the root recipe with the same parts. It makes the folders in `/var/lib/mroom/services` and
+   installs the new units, and restarts each service, which then has nothing to run until step 3: QA mail,
+   files and WebSockets are down from here to there.
+3. `mroom baseline <part>`. It checks that the units are this release's and that nothing runs from the old
+   folder any more, then moves the data into the new folders before it installs a build, so the service
+   cannot start while its data moves: Mailpit's mail and SMTP logins, Garage's metadata, data and secrets
+   (its node, layout, buckets and keys stay), and the Reverb host's apps. Then it installs the builds again.
+   It checks every move of a part before it makes any: a name in both places that is not the same file
+   stops it, with nothing moved. When `/home` and `/var` are separate filesystems, each move is a copy,
+   which needs room for the data twice over. Each move goes under a hidden `.<name>.moving` first: the next
+   run finishes one cut short once the old copy is gone, and stops while both are there, for a person to
+   keep the complete one. Run again, it moves nothing.
+4. Put the nginx blocks baseline prints in place of the old ones on `s3.<zone>`, `files.<zone>` and
+   `ws.<zone>`: the sockets moved.
+5. Remove `~/.local/share/mroom-services`, which holds only old builds and sockets now.
 
 ## QA environments
 
@@ -744,7 +795,7 @@ differently):
   teardown; one started by hand or by the reaper skips it. The second job runs every step, each skipping what is
   already gone, whether or not Forge still has a site: daemons first, since supervisor starts again what is
   stopped, then `user-clean`, then the sites right after (design 8.9), then the box's side. A `user-clean` that
-  fails keeps the sites. Once the sites are gone, the environment no longer counts against `qa.max_envs`, so its
+  fails keeps the sites. Once the sites are gone, the environment no longer takes a slot, so its
   slot is given on then, whatever the box's side comes to. When a step fails, the comment names it, and "Re-run
   failed jobs" or "Re-run all jobs" on that run finishes the teardown: the comment's hidden line keeps the state
   the teardown started from, which the check takes when Forge has no site left, as a teardown by hand or by the
@@ -804,14 +855,22 @@ differently):
   or not at all, kept only when Forge's record of it names the site user, and made again when its command changed
   (other queues, another PHP). Then `/up`, asked up to 6 times 5 seconds apart, since a new site, or any site
   while PHP-FPM or nginx reloads, answers 502 for a moment; only once it answers 200 is the commit said to be
-  deployed. Each step checks its own resource, so the next run repairs one that stopped halfway. From
-  `qa.max_envs` (5) environments on, a new one waits for a slot; one whose code went in, by the gate's record
-  (`env-sha`), is always refreshed. Two first deploys at once each count the others inside their own pull
-  request's turn, so a new environment counts again once its site is made, by the order Forge made the
-  environments' first sites in, and one past `qa.max_envs` gives way: its sites are deleted once Forge has made
-  them, waited for until Forge has them gone, and deleted again once if they stay, since Forge can refuse a
-  delete, or take one and never run it. One that will not go fails the run, and the next gives way again, since
-  the environment's code never went in.
+  deployed. Each step checks its own resource, so the next run repairs one that stopped halfway.
+- **Slots.** The box holds as many environments as its memory does: its RAM, less `MROOM_QA_RESERVE_MB` (4096),
+  in environments of `qa.env_memory_mb` (1024) each, and never more than `qa.max_envs` (5). qa-up asks the gate
+  (`memory`) for a new environment, and the run's log says how many fit. Once they are all in use, a new one
+  waits for a slot. While the box has less RAM available and free swap than one environment needs, it waits for
+  the memory, and is tried again when an environment goes down or on a later push; the comment says which. A box
+  whose memory holds none fails the deploy, saying so. Linux reports a little less RAM than the box was sold
+  with, so an 8 GB box holds 3 environments by default, not `qa.max_envs` (5), and a 4 GB one none: on a small
+  box, lower `MROOM_QA_RESERVE_MB` or `qa.env_memory_mb`. Upgrade the box before the app's workflow pins, since
+  a gate older than qa-up has no `memory` and every new environment fails until it does. One whose code went
+  in, by the gate's record (`env-sha`), is always refreshed. Two first deploys at once each count the others
+  inside their own pull request's turn, so a new environment counts again once its site is made, by the order
+  Forge made the environments' first sites in, and one past the slots gives way: its sites are deleted once
+  Forge has made them, waited for until Forge has them gone, and deleted again once if they stay, since Forge
+  can refuse a delete, or take one and never run it. One that will not go fails the run, and the next gives way
+  again, since the environment's code never went in.
 - **No required checks.** None of the QA workflows' checks can be a required one: the plan's build job is
   named after the commit it builds (`QA build <sha>`), so its name changes with every push, and a required
   check is matched by its name. The QA environment comment says how each deploy went; require the app's own
@@ -1024,6 +1083,87 @@ either. Name it in qa-up's `next-workflows`, and give it `workflow_dispatch` wit
 never by event, since a dispatched run is as much a run of its workflow as one `workflow_run` started. qa-up
 goes by the run's first starter here too, so a person's re-run of a dispatched qa-up starts it again; should
 that re-run also end with a `workflow_run`, it runs twice for one commit.
+
+## CI templates
+
+`templates/github/` holds CI workflows with the measured defaults of
+[section 10 of the design](docs/design.md#10-cicd-defaults-measured). `mroom init` (phase 1, still to come)
+copies them once into an app's `.github/`, and the app owns them from then on. Until then, copy them by hand
+and fill the placeholders below.
+
+| File | What it does |
+|---|---|
+| `workflows/ci-backend.yml` | static checks, the test shards, the `test` check, and a measuring mode |
+| `workflows/ci-frontend.yml` | `lint`, the unit-test shards and the `unit-tests` check |
+| `workflows/ci-e2e.yml` | the `e2e` check: browser tests against the served app |
+| `workflows/ci-cache-warm.yml` | saves the dependency caches on the default branch |
+| `workflows/ci-e2e-build-warm.yml` | saves the e2e frontend build on the default branch |
+| `actions/changed-areas/` | which parts a pull request changes, so a job can skip its work and still report |
+| `actions/setup-frontend/` | Node, pnpm (for pnpm), the package store (restore only) and the frontend's install |
+| `actions/e2e-frontend-build/` | the e2e build: restored when its inputs are unchanged, built otherwise |
+| `scripts/vitest-file-times.mjs` | a vitest reporter that records each test file's time |
+
+What they do, in short:
+
+- **Caches are saved only on the default branch** (by the two warm workflows) and only restored in pull
+  requests. No template uses `actions/cache` (which saves from any branch) or setup-node's own cache.
+- **apt's downloads are cached**, keyed on the lockfile that pins Playwright plus the ISO week, and the weekly
+  save runs `apt-get autoclean` first.
+- **The installed `vendor/` is cached** with a fallback key, so a changed lock starts from the last one.
+- **Backend shards are split by measured time**, and the last shard, `rest`, excludes the named suites, so a
+  new suite runs. Run the measuring mode (Actions, CI backend, Run workflow, tick `measure`) to get each
+  suite's time and a suggested split. The frontend shards split by count; each uploads its files' times.
+- **Required checks keep their names:** `test`, `lint`, `unit-tests` and `e2e`. Put these in the ruleset and
+  in `pr.required_checks`, never a shard's name, so changing a shard count needs no ruleset change.
+- **The e2e build is reused** when the frontend is unchanged, and built without source maps but minified.
+
+After the templates merge, run each warm workflow once (`gh workflow run ci-cache-warm.yml`, and
+`ci-e2e-build-warm.yml`), so the first pull request finds warm caches. `tools/ci-first-push.sh` measures what
+a pull request's first push waits for; its defaults match the templates' job and step names.
+
+Things to know:
+
+- With pnpm, the frontend's `package.json` needs a `packageManager` field: `pnpm/action-setup` reads the
+  pnpm version from it.
+- The workflows have no `merge_group` trigger. With a merge queue, add `merge_group:` beside `pull_request:`,
+  or the queue waits forever on the required checks.
+- Actions are pinned by version tag, as GitHub's own docs show. The warm workflows run third-party actions
+  (`shivammathur/setup-php`, `pnpm/action-setup`) on the default branch, where caches are written; pin
+  them to a commit if that matters more to you than easy updates.
+- The vitest reporter needs vitest 3 or later.
+- `ci-e2e.yml` waits for Laravel's `/up` route (Laravel 11 and later), and expects Playwright in the backend
+  folder's Node lockfile, as Pest's browser plugin has it: the backend folder needs a `package.json`.
+- In a public repository, GitHub turns off a scheduled workflow after 60 days with no activity. Turn the weekly
+  cache warm back on in the Actions tab if that happens.
+
+**Placeholders.** A `<<key>>` is filled from `mroom.toml` or the repository; a `<<fill:name>>` is a value
+config cannot know, and a person fills it. When a folder is `.` and a `/` follows the placeholder, both go:
+`<<app.backend_dir>>/vendor` becomes `vendor`. An app with no frontend (`app.frontend_dir = ""`) is not
+supported yet: the Node steps would build their paths from the repository's root.
+
+| Placeholder | Filled with |
+|---|---|
+| `<<app.backend_dir>>` | `app.backend_dir` |
+| `<<app.frontend_dir>>` | `app.frontend_dir` |
+| `<<app.php>>` | `app.php`, such as `8.4` |
+| `<<app.package_manager>>` | `app.package_manager`: `npm` or `pnpm` |
+| `<<app.build.frontend_dist>>` | `app.build.frontend_dist`; by default `dist`, or `public/build` when `app.frontend_dir` is `.` |
+| `<<tests.command>>` | `tests.command`; a shard adds its `--testsuite` options |
+| `<<tests.database>>` | `tests.database_pattern` with `{app}` as `app.name` and `{slug}` as `ci` |
+| `<<default_branch>>` | the repository's default branch, such as `main` |
+| `<<pm.lockfile>>` | `package-lock.json` (npm) or `pnpm-lock.yaml` (pnpm) |
+| `<<pm.install>>` | `npm ci` or `pnpm install --frozen-lockfile` |
+| `<<pm.exec>>` | `npx` or `pnpm exec` |
+| `<<pm.store_path>>` | `npm config get cache` or `pnpm store path --silent` |
+| `<<fill:node_version>>` | the Node version for CI, such as `22` |
+| `<<fill:backend_static_checks>>` | the backend checks that need no database, such as `vendor/bin/pint --test` |
+| `<<fill:slowest_suite>>` | a phpunit suite that needs a shard of its own; the measuring mode shows which (add more shards like it) |
+| `<<fill:e2e_suite>>` | the phpunit suite of the browser tests, which the backend shards leave out |
+| `<<fill:measured_times>>` | each suite's measured time and the date, as a comment for the next rebalance |
+| `<<fill:frontend_lint>>` | the frontend's lint, format and type checks, such as `pnpm lint && pnpm exec tsc --noEmit` |
+| `<<fill:frontend_src>>` | the frontend's source folder inside its own: `src` for a separate SPA, `resources` for Vite inside Laravel (then add the other folders Tailwind scans to the build's key) |
+| `<<fill:e2e_build>>` | the build without source maps but minified, with the env it needs, such as `VITE_API_URL=http://127.0.0.1:8000 pnpm exec vite build --sourcemap false` |
+| `<<fill:e2e_command>>` | the browser tests, failing when none are found, such as `php artisan test --testsuite=Browser --fail-on-empty-test-suite` |
 
 ## Regression label
 

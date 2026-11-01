@@ -12,7 +12,8 @@
 # probe-link links $SITE_OP_INSTALLED, the box's root-owned site-op, which the Forge stand-in serves when nginx
 # follows that link. As the gate does, it records the commit a code-put put in ($GATE/commit-<N>), which env-sha
 # reports and user-clean forgets, and keeps a Reverb app's secret while the app exists ($GATE/reverb-<N>): a new
-# one, reverb-pw-<N>-<how many apps N had>, only for an app reverb-app-remove took away.
+# one, reverb-pw-<N>-<how many apps N had>, only for an app reverb-app-remove took away. Its memory is a box with
+# room for many environments, unless the test wrote $GATE/memory.out.
 set -euo pipefail
 printf '%s\n' "$@" >>"$GATE/ssh.argv"
 echo "--" >>"$GATE/ssh.argv"
@@ -103,5 +104,6 @@ case "$op" in
     else
       echo "environment $n has no Reverb app, so nothing to remove"
     fi ;;
+  memory) printf 'total_mb=65536\navailable_mb=60000\nswap_free_mb=0\nreserve_mb=4096\n' ;;
   *) echo "mroom gate: refused: provision may not run '$op'" >&2; exit 1 ;;
 esac

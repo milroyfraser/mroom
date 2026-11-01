@@ -54,6 +54,9 @@
 #                                      REVERB_APP_ID, REVERB_APP_KEY, REVERB_APP_SECRET (new for a new app,
 #                                      the same while it has one), REVERB_HOST, REVERB_PORT and REVERB_SCHEME
 #               reverb-app-remove <N>  the environment's app; its sockets already open stay until they close
+#               memory                 the box's memory, in MB: total_mb, available_mb and swap_free_mb from
+#                                      /proc/meminfo, and reserve_mb, what the box keeps for all but QA
+#                                      (MROOM_QA_RESERVE_MB, 4096 by default); qa-up sizes its slots from them
 #
 #   browser     db-read <N> <table> <column>[,<column>...] [<column>=<value>...] [asc:|desc:<column>] [limit:<n>]
 #                                      at most 100 rows of one table of the environment's database, as JSON, read
@@ -146,6 +149,7 @@ case "$role:$op" in
   provision:mail-user-add | provision:mail-user-remove | provision:mail-read | provision:mail-clear) ;;
   provision:bucket-create | provision:bucket-drop) ;;
   provision:reverb-app-add | provision:reverb-app-remove) ;;
+  provision:memory) ;;
   browser:db-read | browser:signin-code | browser:mail-read | browser:env-sha) ;;
   template:template-load) ;;
   *) refuse "$role may not run '${op:0:24}'" ;;
@@ -1065,14 +1069,17 @@ cmd_app_key() {
   printf 'APP_KEY=%s\n' "$SECRET"
 }
 
+# The services' folders, which mroom's root recipe makes (lib/root-setup's SERVICES_DIR): MROOM_SERVICES_DIR
+# moves them only for tests.
+SERVICES="${MROOM_SERVICES_DIR:-/var/lib/mroom/services}"
 MAILPIT_SECRETS="$HOME/.config/mroom/secrets/mailpit.env"
-MAILPIT_LOGINS="$HOME/.config/mroom/secrets/mailpit-smtp.passwd"
-MAILPIT_HOME="$HOME/.local/share/mroom-services/mailpit"
+MAILPIT_HOME="$SERVICES/mailpit"
+MAILPIT_LOGINS="$MAILPIT_HOME/etc/mailpit-smtp.passwd"
 # Mailpit listens only on Unix sockets in a folder only the box user can open; apps reach its SMTP side
 # through mroom's mail relay, which holds the TCP port (lib/mail-relay).
 MAILPIT_HTTP="$MAILPIT_HOME/run/http.sock"
 MAILPIT_SMTP="$MAILPIT_HOME/run/smtp.sock"
-MAIL_RELAY="$HOME/.local/share/mroom-services/mail-relay/mail-relay"
+MAIL_RELAY="$SERVICES/mail-relay/bin/mail-relay"
 MAILPIT_AUTH="" SMTP_PORT="" MAIL_ERR="" LOGIN_TMP=""
 
 # mail_secret <KEY>: one value from mailpit.env, which mroom baseline mailpit writes; the one reader of it.
@@ -1107,7 +1114,7 @@ mail_error() { printable "$(grep -m1 . "$MAIL_ERR" 2>/dev/null || echo "no messa
 # than current is found too, and its restart starts the current one.
 mailpit_pids() {
   local home proc exe
-  home="$(readlink -f "$MAILPIT_HOME" 2>/dev/null)" || return 0
+  home="$(readlink -f "$MAILPIT_HOME/builds" 2>/dev/null)" || return 0
   for proc in /proc/[0-9]*; do
     [ -O "$proc" ] || continue
     exe="$(readlink "$proc/exe" 2>/dev/null)" || continue
@@ -1357,11 +1364,11 @@ cmd_mail_clear() {
   echo "mail of $user: $count deleted"
 }
 
-GARAGE_HOME="$HOME/.local/share/mroom-services/garage"
+GARAGE_HOME="$SERVICES/garage"
 # Garage listens only on Unix sockets in a folder only the box user can open (mroom baseline garage).
 GARAGE_ADMIN="$GARAGE_HOME/run/admin.sock"
 GARAGE_S3="$GARAGE_HOME/run/s3.sock"
-GARAGE_TOKEN="$HOME/.config/mroom/secrets/garage-admin-token"
+GARAGE_TOKEN="$GARAGE_HOME/etc/garage-admin-token"
 GARAGE_ERR="" DROP_KEY=""
 
 garage_ready() {
@@ -1543,7 +1550,7 @@ cmd_bucket_drop() {
   if [ "$dropped" = 0 ]; then echo "environment ${words[1]} has no buckets, so nothing to drop"; fi
 }
 
-REVERB_BASE="$HOME/.local/share/mroom-services/reverb"
+REVERB_BASE="$SERVICES/reverb"
 REVERB_APPS="$REVERB_BASE/apps/apps.json"
 
 reverb_ready() {
@@ -1619,6 +1626,17 @@ cmd_reverb_app_remove() {
   echo "Reverb app $id: removed; its sockets already open stay until they close"
 }
 
+# memory: the box's memory as qa-up sizes QA slots from it (lib/memory-preflight). Reads only /proc; MROOM_PROC, a
+# test seam, cannot come from a client, since sshd passes on only LANG and LC_*.
+cmd_memory() {
+  words_are 1
+  # shellcheck source=lib/memory-preflight
+  . "$MROOM_ROOT/lib/memory-preflight"
+  memory_read || fail "memory: cannot read MemTotal, MemAvailable and SwapFree from ${MROOM_PROC:-/proc}/meminfo"
+  printf 'total_mb=%s\navailable_mb=%s\nswap_free_mb=%s\nreserve_mb=%s\n' \
+    "$MEM_TOTAL" "$MEM_AVAILABLE" "$MEM_SWAP_FREE" "${BOX[MROOM_QA_RESERVE_MB]:-4096}"
+}
+
 # The operation and its environment only: each operation logs what it did, and an argument it refuses, such
 # as an address that is no persona's, never reaches the log.
 first="${words[1]:-}"
@@ -1648,4 +1666,5 @@ case "$op" in
   bucket-drop) cmd_bucket_drop ;;
   reverb-app-add) cmd_reverb_app_add ;;
   reverb-app-remove) cmd_reverb_app_remove ;;
+  memory) cmd_memory ;;
 esac

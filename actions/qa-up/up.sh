@@ -7,9 +7,11 @@
 #   1. refuses settings it cannot use, and a build that holds anything but files and folders, before anything is made
 #   2. refuses an environment brought up under the names of before mroom 0.5.0, which its teardown removes; waits
 #      for a site of the environment that Forge is still removing, sending the delete again when it is stuck; then,
-#      for a new environment (one whose code never went in, by the gate's record), counts the others: from
-#      qa.max_envs (5) on, it waits for a slot, and it counts again once its site is made, giving way to one that
-#      made its first site before it: its sites deleted, and waited for until Forge has them gone
+#      for a new environment (one whose code never went in, by the gate's record), counts the others. Its slots
+#      are the box's RAM less the box's reserve, qa.env_memory_mb each, at most qa.max_envs (the gate's memory).
+#      With all of them in use, or with less RAM available plus free swap than one environment needs, it waits.
+#      It counts again once its site is made, giving way to one that made its first site before it: its sites
+#      deleted, and waited for until Forge has them gone
 #   3. the api site, api.<N>.<zone>, and for a frontend of its own the site <N>.<zone>: Forge isolated sites in the
 #      home of the user <app>_qa_<N>, each with a certificate (one that failed is deleted and asked for again,
 #      once; one installed but not active is enabled), and nginx's disable_symlinks if_not_owner at the top of its
@@ -54,6 +56,8 @@ export MROOM_ROOT
 . "$MROOM_ROOT/lib/core/forge.sh"
 # shellcheck source=lib/core/qa.sh
 . "$MROOM_ROOT/lib/core/qa.sh"
+# shellcheck source=lib/memory-preflight
+. "$MROOM_ROOT/lib/memory-preflight"
 FORGE_NAME="mroom qa-up" QA_NAME="mroom qa-up"
 
 n="${1:-}" sha="${2:-}"
@@ -102,6 +106,10 @@ public_value() { sed -n "s/^$1=//p" <<<"$public_env" | head -n1; }
 mail="$(setting qa.parity.mail catcher)"
 files="$(setting qa.parity.files same)"
 max="$(setting qa.max_envs 5)"
+env_memory="$(setting qa.env_memory_mb 1024)"
+[[ "$max" =~ ^[1-9][0-9]{0,5}$ ]] || die "qa.max_envs must be a whole number of at most 6 digits"
+[[ "$env_memory" =~ ^[1-9][0-9]{0,6}$ ]] || die "qa.env_memory_mb must be a whole number of MB, of at most 7 digits"
+slots="$max" refused=""
 ttl="$(setting qa.ttl_days 5)"
 php="$(setting app.php 8.4)"
 [[ "$php" =~ ^([5-9])\.([0-9])$ ]] || die "app.php must be a version such as 8.4"
@@ -189,9 +197,14 @@ for domain in "$QA_API" "$QA_WEB" "$QA_OLD_API" "$QA_OLD_WEB"; do
   done
 done
 
-# wait_for_a_slot: says this pull request waits for a slot, and ends the run, as a success.
+# wait_for_a_slot: says this pull request waits for a slot, and why (refused, or all slots in use), and ends the
+# run, as a success.
 wait_for_a_slot() {
-  refused="All $max QA environments are in use, so this pull request waits for a slot. It deploys when one frees up, or on a later push once one is free."
+  if [ -z "$refused" ]; then
+    refused="All $slots QA environments"
+    if ((slots < max)); then refused+=" the box's memory holds (qa.max_envs is $max)"; fi
+    refused+=" are in use, so this pull request waits for a slot. It deploys when one frees up, or on a later push once one is free."
+  fi
   echo "::warning::$refused"
   output "refused=$refused"
   DONE=1
@@ -204,7 +217,7 @@ site_gone() {
   site="$(forge_site "$1")" || die "Forge's site $1 could not be read"
   [ "$(jq -r '.id // ""' <<<"${site:-null}")" != "$2" ]
 }
-# give_way: deletes the sites of this environment, a new one past qa.max_envs, waits until Forge has them gone, and
+# give_way: deletes the sites of this environment, a new one past the slots, waits until Forge has them gone, and
 # then waits for a slot. Forge can refuse a site's delete, or accept one and never run it (as it does a delete queued
 # right behind the delete of the site's daemon, which a later delete always gets past). So each site is first waited
 # for until Forge has made it, then deleted and waited for until its id is gone, and one still there gets the delete
@@ -233,7 +246,7 @@ give_way() {
           waited=$((waited + pause))
         done
         if site_gone "$domain" "$id"; then
-          echo "    site $id gave way, past qa.max_envs"
+          echo "    site $id gave way, past the slots"
           continue 2
         fi
       fi
@@ -242,14 +255,14 @@ give_way() {
         sleep "$pause"
       fi
     done
-    die "Forge did not remove site $id, made past qa.max_envs, though its delete went twice; the next run gives way again"
+    die "Forge did not remove site $id, made past the slots, though its delete went twice; the next run gives way again"
   done
   wait_for_a_slot
 }
 api_site="$(forge_site "$QA_API")" || die "Forge's site $QA_API could not be read"
 api_id="$(jq -r 'select(.attributes.status != "removing") | .id // empty' <<<"${api_site:-null}")"
 # An environment is new until its code has gone in: one with no api site, and one whose api site a first deploy left
-# before the code went in, as a run that stopped early leaves one, or a site that gave way past qa.max_envs and whose
+# before the code went in, as a run that stopped early leaves one, or a site that gave way past the slots and whose
 # delete Forge never ran. The gate's record of the commit code-put put in says which (env-sha), but a site Forge is
 # still making has had no code yet. An environment whose code went in is always refreshed; a new one counts the
 # others now, and again once its site is made (step 3).
@@ -262,10 +275,33 @@ else
   out="$(qa_gate env-sha "$n")" || die "the gate could not say whether environment $n's code ever went in (env-sha)"
   [[ "$(sed -n 's/^commit=//p' <<<"$out")" =~ ^[0-9a-f]{40}$ ]] || new_env=1
 fi
+# box_memory: sets slots to as many environments as the box's memory holds, from the gate's memory, and
+# MEM_AVAILABLE and MEM_SWAP_FREE for memory_fits (lib/memory-preflight).
+box_memory() {
+  local out value name total reserve mem_total_mb mem_available_mb mem_swap_free_mb mem_reserve_mb
+  out="$(qa_gate memory)" \
+    || die "the gate could not say how much memory the box has (memory); a box whose mroom is older than this one's has no memory operation, so upgrade the box first"
+  for name in total_mb available_mb swap_free_mb reserve_mb; do
+    value="$(sed -n "s/^$name=//p" <<<"$out" | head -n1)"
+    [[ "$value" =~ ^[0-9]{1,9}$ ]] || die "the gate's memory gave no $name"
+    printf -v "mem_$name" '%s' "$((10#$value))"
+  done
+  total="$mem_total_mb" reserve="$mem_reserve_mb" MEM_AVAILABLE="$mem_available_mb" MEM_SWAP_FREE="$mem_swap_free_mb"
+  slots="$(memory_slots "$total" "$reserve" "$env_memory" "$max")"
+  ((slots > 0)) || die "the box's memory holds no QA environment: it has $total MB, keeps $reserve MB for itself (MROOM_QA_RESERVE_MB in its box.env), and qa.env_memory_mb is $env_memory"
+  echo "==> The box's memory holds $slots QA environments ($total MB, $reserve MB kept for the box, $env_memory MB each; qa.max_envs is $max)"
+}
 if [ -n "$new_env" ]; then
   envs="$(qa_envs)"
   running="$(awk -v n="$n" '$1 != n && $2 != "removing"' <<<"$envs" | grep -c . || true)"
+  # From qa.max_envs on there is no slot, whatever the memory; below it, the box's memory says.
   ((running < max)) || give_way
+  box_memory
+  ((running < slots)) || give_way
+  if ! memory_fits "$env_memory"; then
+    refused="The box has $MEM_AVAILABLE MB of RAM available and $MEM_SWAP_FREE MB of free swap, less than the $env_memory MB a QA environment needs (qa.env_memory_mb), so this pull request waits until the box has the memory. It is tried again when a QA environment goes down, or on a later push."
+    give_way
+  fi
 fi
 
 # 3. The sites.
@@ -416,12 +452,12 @@ web_root=/public
 [ "$QA_BACKEND" = . ] || web_root="/$QA_BACKEND/public"
 make_site "$QA_API" php "$web_root"
 api_id="$SITE_ID"
-# Two first deploys at once each count under qa.max_envs before either has made its site, since each counts inside
+# Two first deploys at once each count under the slots before either has made its site, since each counts inside
 # its own pull request's group. So a new environment, once its site is made, counts again: by the order Forge made
-# the environments' first sites in, which its ids give, the ones past qa.max_envs give way.
+# the environments' first sites in, which its ids give, the ones past the slots give way.
 if [ -n "$new_env" ]; then
   rank="$(qa_env_rank "$n")" || die "Forge's sites could not be read to count the environments again"
-  if [[ "$rank" =~ ^[0-9]+$ ]] && ((rank > max)); then give_way; fi
+  if [[ "$rank" =~ ^[0-9]+$ ]] && ((rank > slots)); then give_way; fi
 fi
 site_ready "$QA_API" "$web_root"
 api_domain="$(primary_domain "$api_id")"

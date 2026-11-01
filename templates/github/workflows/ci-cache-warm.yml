@@ -1,0 +1,179 @@
+# mroom template (copied once by `mroom init`; the app owns it from then on). Placeholders: README, "CI templates".
+name: CI cache warm
+
+# Saves the dependency caches the CI jobs restore, so a pull request's first push starts warm
+# (design section 10, patterns 1 to 3).
+#
+# A run restores caches from its own ref and from the default branch only. So caches saved by a pull
+# request's jobs help that PR's re-runs and nothing else, and they fill the 10 GB store. The CI jobs
+# only restore; this workflow saves, on the default branch, for every PR.
+#
+# Keys and paths must match the restore steps in ci-backend.yml, ci-e2e.yml and
+# .github/actions/setup-frontend exactly: a cache's version includes its path, so a different path
+# string never restores. Editing this file runs the backend and e2e jobs (.github/actions/changed-areas),
+# where a mismatch shows as a miss. On a pull request this workflow runs too, to show it still works,
+# but it saves nothing.
+#
+# The e2e job's frontend build is saved by ci-e2e-build-warm.yml, which runs on frontend changes.
+
+on:
+  push:
+    branches: [<<default_branch>>]
+    paths:
+      - '<<app.backend_dir>>/composer.lock'
+      - '<<app.backend_dir>>/<<pm.lockfile>>'
+      - '<<app.frontend_dir>>/<<pm.lockfile>>'
+      - '.github/workflows/ci-cache-warm.yml'
+      # These hold the same keys (the PHP version in vendor's, say): a change there must warm again.
+      - '.github/workflows/ci-backend.yml'
+      - '.github/workflows/ci-e2e.yml'
+      - '.github/actions/setup-frontend/**'
+  pull_request:
+    paths:
+      - '.github/workflows/ci-cache-warm.yml'
+      - '.github/actions/setup-frontend/**'
+  # Mondays, before the working day: the apt packages are keyed by ISO week, so each week starts with
+  # a fresh set (security updates) instead of every PR fetching the changed ones.
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    # Each save step checks the branch itself: only the default branch saves.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '<<app.php>>'
+          extensions: pdo_pgsql, redis
+          coverage: none
+
+      # Node and the package manager only: the store is restored and saved below, by the same key.
+      - name: Setup Node
+        uses: ./.github/actions/setup-frontend
+        with:
+          install: 'false'
+          store: 'false'
+
+      # Backend: the installed vendor/. On a changed lock the fallback key restores the previous vendor/
+      # and composer installs, updates or removes only what differs.
+      - name: Restore vendor
+        id: vendor
+        uses: actions/cache/restore@v6
+        with:
+          path: <<app.backend_dir>>/vendor
+          key: ${{ runner.os }}-vendor-php<<app.php>>-${{ hashFiles('<<app.backend_dir>>/composer.lock') }}
+          restore-keys: ${{ runner.os }}-vendor-php<<app.php>>-
+
+      - name: Install backend dependencies
+        if: steps.vendor.outputs.cache-hit != 'true'
+        working-directory: <<app.backend_dir>>
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Save vendor
+        if: github.ref == 'refs/heads/<<default_branch>>' && steps.vendor.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: <<app.backend_dir>>/vendor
+          key: ${{ steps.vendor.outputs.cache-primary-key }}
+
+      # Node: one package store for both installs the e2e job runs (the frontend's and the backend's).
+      - name: Find the package store
+        id: store
+        working-directory: <<app.frontend_dir>>
+        run: echo "dir=$(<<pm.store_path>>)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the package store
+        id: store-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ steps.store.outputs.dir }}
+          key: ${{ runner.os }}-node-store-${{ hashFiles('<<app.frontend_dir>>/<<pm.lockfile>>', '<<app.backend_dir>>/<<pm.lockfile>>') }}
+          restore-keys: ${{ runner.os }}-node-store-
+
+      # The backend's packages pin Playwright, whose CLI fetches Chromium and its system packages.
+      - name: Install Node dependencies
+        working-directory: <<app.backend_dir>>
+        env:
+          FRONTEND_DIR: <<app.frontend_dir>>
+        run: |
+          <<pm.install>>
+          if [ "$FRONTEND_DIR" != "<<app.backend_dir>>" ]; then
+            (cd "$GITHUB_WORKSPACE/$FRONTEND_DIR" && <<pm.install>>)
+          fi
+
+      - name: Save the package store
+        if: github.ref == 'refs/heads/<<default_branch>>' && steps.store-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.store.outputs.dir }}
+          key: ${{ steps.store-cache.outputs.cache-primary-key }}
+
+      # e2e: Chromium's apt packages, in a folder outside $HOME (mode 0750) so apt's _apt user can
+      # download into it.
+      - name: Point apt at the cached package folder
+        id: apt-cache
+        run: |
+          sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0755 /var/cache/ci-apt /var/cache/ci-apt/partial
+          printf 'Dir::Cache::Archives "/var/cache/ci-apt";\nBinary::apt::APT::Keep-Downloaded-Packages "true";\nAPT::Keep-Downloaded-Packages "true";\n' \
+            | sudo tee /etc/apt/apt.conf.d/99ci-archives >/dev/null
+          echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Playwright system packages
+        id: debs-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: /var/cache/ci-apt
+          key: ${{ runner.os }}-playwright-debs-${{ hashFiles('<<app.backend_dir>>/<<pm.lockfile>>') }}-${{ steps.apt-cache.outputs.week }}
+          restore-keys: ${{ runner.os }}-playwright-debs-${{ hashFiles('<<app.backend_dir>>/<<pm.lockfile>>') }}-
+
+      - name: Download Playwright system packages
+        if: steps.debs-cache.outputs.cache-hit != 'true'
+        working-directory: <<app.backend_dir>>
+        run: |
+          <<pm.exec>> playwright install-deps chromium
+          # Last week's folder was restored as the starting point: drop the versions apt no longer
+          # offers, so the cache holds this week's packages and does not grow every week.
+          sudo apt-get autoclean
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/ci-apt
+
+      - name: Save Playwright system packages
+        if: github.ref == 'refs/heads/<<default_branch>>' && steps.debs-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: /var/cache/ci-apt
+          key: ${{ steps.debs-cache.outputs.cache-primary-key }}
+
+      - name: Restore Playwright Chromium
+        id: playwright-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('<<app.backend_dir>>/<<pm.lockfile>>') }}
+
+      - name: Download Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        working-directory: <<app.backend_dir>>
+        run: <<pm.exec>> playwright install chromium
+
+      - name: Save Playwright Chromium
+        if: github.ref == 'refs/heads/<<default_branch>>' && steps.playwright-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.playwright-cache.outputs.cache-primary-key }}

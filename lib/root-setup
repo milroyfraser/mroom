@@ -5,7 +5,7 @@
 # no file of theirs, and writes what it installs from its own text, or from its release's lib/site-op,
 # checked against the SHA-256 below.
 #
-#   root-setup --user <name> [--home <dir>] [--smtp-port <port>] [--release <tag>] <part>...
+#   root-setup --user <name> [--smtp-port <port>] [--release <tag>] <part>...
 #
 #   site-op   the gate's helper, owned by root, and the one sudoers line that lets the box user run it as any
 #             of Forge's isolated users, never as root (design 8.2)
@@ -15,11 +15,13 @@
 #   reverb    the systemd unit of mroom's Reverb host (D16), WebSockets for every QA environment, which runs
 #             as the box user
 #
-# --home is the box user's home, where its services live (the one /etc/passwd names when not given),
-# --smtp-port the port QA apps send mail to (mailpit; 1025 when not given), and --release the tag whose
-# lib/site-op to install (site-op; without it, the site-op beside this file, as in a checkout). mroom
-# baseline, run as the box user, reads this file for the units' text, to say whether the installed units are
-# this release's.
+# Each service lives in /var/lib/mroom/services/<service>, a folder root owns, in folders of the box user's
+# own one level down, which its unit binds: systemd, as root, resolves each bind's path, links and all, so
+# no part of that path may be one the box user can change (design D21, open question 8). --smtp-port is the
+# port QA apps send mail to (mailpit; 1025 when not given), and --release the tag whose lib/site-op to
+# install (site-op; without it, the site-op beside this file, as in a checkout). mroom baseline, run as the
+# box user, reads this file for the units' text and the services' folders, to say whether the installed
+# units are this release's.
 set -euo pipefail
 
 ROOT_SETUP_REPO="milroyfraser/mroom"
@@ -31,13 +33,20 @@ PHP=/usr/bin/php
 MAILPIT_UNITS=(mroom-mail-relay.socket mroom-mail-relay.service mroom-mailpit.service)
 GARAGE_UNITS=(mroom-garage.service)
 REVERB_UNITS=(mroom-reverb.service)
+# Where the services live: folders root owns, so no link the box user plants can move a bind.
+SERVICES_DIR=/var/lib/mroom/services
+# Each part's folders of the box user's own, <service>/<folder> under SERVICES_DIR: the only bind sources.
+MAILPIT_TREE=(mailpit/builds mailpit/data mailpit/etc mailpit/run mail-relay/bin)
+GARAGE_TREE=(garage/builds garage/data garage/etc garage/meta garage/run)
+REVERB_TREE=(reverb/apps reverb/builds reverb/run)
 
-# unit_text <unit> <user> <group> <home> <port>: one of mroom's systemd units, as this release writes it. The
-# socket holds the SMTP port from boot, as root, and hands it to the relay; the services run as the box user,
-# confined to what they use, and systemd starts them again however often they stop.
+# unit_text <unit> <user> <group> <port> <services>: one of mroom's systemd units, as this release writes it,
+# for the services in <services>. The socket holds the SMTP port from boot, as root, and hands it to the
+# relay; the services run as the box user, confined to what they use, and systemd starts them again however
+# often they stop. Each service sees only its own folders: <services> is an empty tmpfs to it, but for what
+# its unit binds, and it binds only folders of the box user's own one level below a folder root owns.
 unit_text() {
-  local user="$2" group="$3" home="$4" port="$5" services secrets base
-  services="$home/.local/share/mroom-services" secrets="$home/.config/mroom/secrets" base="$services/mailpit"
+  local user="$2" group="$3" port="$4" services="$5" base="$5/mailpit"
   case "$1" in
     mroom-mail-relay.socket) cat <<EOF
 # Written by mroom's root-setup (mailpit). QA apps send mail to this port, and systemd holds it from boot, as
@@ -66,13 +75,14 @@ StartLimitIntervalSec=0
 [Service]
 User=$user
 Group=$group
-ExecStart=$PYTHON -I $services/mail-relay/mail-relay 127.0.0.1 $port $base/run/smtp.sock
+ExecStart=$PYTHON -I $services/mail-relay/bin/mail-relay 127.0.0.1 $port $base/run/smtp.sock
 Restart=always
 RestartSec=1
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=tmpfs
-BindReadOnlyPaths=$services/mail-relay $base/run
+TemporaryFileSystem=$services:ro
+BindReadOnlyPaths=$services/mail-relay/bin $base/run
 PrivateTmp=yes
 PrivateDevices=yes
 RestrictAddressFamilies=AF_UNIX
@@ -93,7 +103,7 @@ EOF
       ;;
     mroom-mailpit.service) cat <<EOF
 # Written by mroom's root-setup (mailpit). Mailpit listens only on Unix sockets in a folder only $user can
-# open, and sees only its own files: its build, its data, its sockets and the two login files. The gate stops
+# open, and sees only its own folders: its builds, its data, its sockets and its two login files. The gate stops
 # it to add or remove a login, which Mailpit reads only when it starts, and systemd starts it again however
 # often that happens.
 [Unit]
@@ -105,14 +115,15 @@ StartLimitIntervalSec=0
 User=$user
 Group=$group
 WorkingDirectory=$base/data
-ExecStart=$base/current/mailpit --listen unix:$base/run/http.sock:0600 --smtp unix:$base/run/smtp.sock:0600 --database $base/data/mailpit.db --smtp-auth-file $secrets/mailpit-smtp.passwd --smtp-auth-allow-insecure --tags-username --tags-disable x-tags,plus-addresses --ui-auth-file $secrets/mailpit-ui.passwd --max 0 --max-age 7d
+ExecStart=$base/builds/current/mailpit --listen unix:$base/run/http.sock:0600 --smtp unix:$base/run/smtp.sock:0600 --database $base/data/mailpit.db --smtp-auth-file $base/etc/mailpit-smtp.passwd --smtp-auth-allow-insecure --tags-username --tags-disable x-tags,plus-addresses --ui-auth-file $base/etc/mailpit-ui.passwd --max 0 --max-age 7d
 Restart=always
 RestartSec=100ms
 UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=tmpfs
-BindReadOnlyPaths=$base $secrets/mailpit-smtp.passwd $secrets/mailpit-ui.passwd
+TemporaryFileSystem=$services:ro
+BindReadOnlyPaths=$base/builds $base/etc
 BindPaths=$base/data $base/run
 PrivateTmp=yes
 PrivateDevices=yes
@@ -139,7 +150,7 @@ EOF
       cat <<EOF
 # Written by mroom's root-setup (garage). Garage, mroom's QA file store: its S3, web and admin endpoints
 # listen only on Unix sockets in a folder only $user can open, its own RPC stays in a network of its own,
-# and it sees only its build, its config, its data and its three secret files.
+# and it sees only its own folders: its builds, its config and secrets, its metadata, its data and its sockets.
 [Unit]
 Description=Garage, mroom's QA file store
 After=network.target
@@ -148,7 +159,7 @@ StartLimitIntervalSec=0
 [Service]
 User=$user
 Group=$group
-ExecStart=$base/current/garage -c $base/garage.toml server
+ExecStart=$base/builds/current/garage -c $base/etc/garage.toml server
 Restart=always
 RestartSec=1
 UMask=0077
@@ -156,7 +167,8 @@ LimitNOFILE=65536
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=tmpfs
-BindReadOnlyPaths=$base $secrets/garage-rpc-secret $secrets/garage-admin-token $secrets/garage-metrics-token
+TemporaryFileSystem=$services:ro
+BindReadOnlyPaths=$base/builds $base/etc
 BindPaths=$base/meta $base/data $base/run
 PrivateTmp=yes
 PrivateDevices=yes
@@ -183,7 +195,7 @@ EOF
       cat <<EOF
 # Written by mroom's root-setup (reverb). mroom's Reverb host, one Reverb for every QA environment (design
 # D16): it listens only on a Unix socket in a folder only $user can open, which nginx passes the QA zone's
-# WebSocket host to, reads its apps from a file the gate replaces whole, and sees nothing else of the home.
+# WebSocket host to, reads its apps from a file the gate replaces whole, and sees only its own folders.
 # Its apps live in a folder, not a file bound on its own, which would keep the file it found at start. PHP's
 # JITs need memory both written and run, which this unit refuses, so both are off. LOG_LEVEL lets Reverb's errors
 # reach the journal, but not its info lines, which hold whole messages.
@@ -195,7 +207,7 @@ StartLimitIntervalSec=0
 [Service]
 User=$user
 Group=$group
-ExecStart=$PHP -d pcre.jit=0 -d opcache.jit=disable $base/current/artisan reverb-host:start
+ExecStart=$PHP -d pcre.jit=0 -d opcache.jit=disable $base/builds/current/artisan reverb-host:start
 Environment=APP_ENV=production APP_DEBUG=false LOG_CHANNEL=stderr LOG_LEVEL=error CACHE_STORE=array QUEUE_CONNECTION=sync
 Environment=REVERB_HOST_SOCKET=$base/run/reverb.sock REVERB_HOST_APPS=$base/apps/apps.json
 Restart=always
@@ -205,7 +217,8 @@ LimitNOFILE=65536
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=tmpfs
-BindReadOnlyPaths=$base
+TemporaryFileSystem=$services:ro
+BindReadOnlyPaths=$base/builds $base/apps
 BindPaths=$base/run
 PrivateTmp=yes
 PrivateDevices=yes
@@ -233,17 +246,83 @@ EOF
 
 root_die() { echo "root-setup: $*" >&2; exit 1; }
 
-# root_units <user> <group> <home> <port> <unit...>: writes each unit that is not as this release writes it,
+# root_owned <dir>: dies unless <dir> is a folder, not a link, that only its owner, root, can change. Under
+# MROOM_ROOT_SETUP_TEST the owner is the test's own user.
+root_owned() {
+  local got
+  got="$(stat -c '%u %a %F' -- "$1" 2>/dev/null)" || root_die "$1 is missing"
+  [ "${got#* * }" = directory ] || root_die "$1 is not a folder (a link, or a file): nothing changed"
+  [ "${got%% *}" = "$ROOT_UID" ] || root_die "$1 does not belong to root: nothing changed"
+  (( (8#$(cut -d' ' -f2 <<<"$got") & 8#022) == 0 )) || root_die "$1 can be changed by others than root (mode $(cut -d' ' -f2 <<<"$got")): nothing changed"
+}
+
+# root_chain: every folder above SERVICES_DIR that exists is root's alone, and anyone may pass through it, as
+# the box user's services and nginx must (not under MROOM_ROOT_SETUP_TEST, whose folders sit in a temporary
+# folder anyone may write to).
+root_chain() {
+  local dir="" part parts
+  [ -z "${MROOM_ROOT_SETUP_TEST:-}" ] || return 0
+  root_owned /
+  IFS=/ read -ra parts <<<"${SERVICES_DIR%/*}"
+  for part in "${parts[@]}"; do
+    [ -n "$part" ] || continue
+    dir+="/$part"
+    if [ -e "$dir" ] || [ -L "$dir" ]; then
+      root_owned "$dir"
+      [ -n "$(find "$dir" -maxdepth 0 -perm -001)" ] || root_die "$dir is closed to other users, so the box user's services could not reach their folders: chmod o+x it; nothing changed"
+    fi
+  done
+}
+
+# root_tree <user> <group> <service/folder>...: the services' folders, which their units bind. SERVICES_DIR
+# and each service's folder in it belong to root, mode 755, as does every folder above them, and each
+# <service/folder> to <user>, mode 700, made here when missing. So every part of a bind's path but the last
+# is root's, and the last, which the box user owns, sits in a folder only root can change: no link the box
+# user plants can take a bind elsewhere. root makes or changes only what is root's: an existing folder of
+# the box user's is checked, never changed, and one that belongs to anyone else stops the run.
+root_tree() {
+  local user="$1" group="$2" uid dir leaf made=() got
+  shift 2
+  uid="$(id -u "$user")"
+  # The folders above it, before anything is made there and again after.
+  root_chain
+  [ -e "$SERVICES_DIR" ] || [ -L "$SERVICES_DIR" ] || install -d -m 755 "$SERVICES_DIR"
+  root_chain
+  root_owned "$SERVICES_DIR"
+  chmod 755 "$SERVICES_DIR"
+  for leaf in "$@"; do
+    dir="$SERVICES_DIR/${leaf%%/*}"
+    [ -e "$dir" ] || [ -L "$dir" ] || install -d -m 755 "$dir"
+    root_owned "$dir"
+    chmod 755 "$dir"
+    dir="$SERVICES_DIR/$leaf"
+    if [ -L "$dir" ] || { [ -e "$dir" ] && ! [ -d "$dir" ]; }; then
+      root_die "$dir is not a folder (a link, or a file): nothing more changed"
+    elif [ -d "$dir" ]; then
+      got="$(stat -c %u -- "$dir")"
+      [ "$got" = "$uid" ] || root_die "$dir belongs to the user with id $got, not $user: nothing more changed"
+    else
+      # Made as root's, then given to the box user: nothing of the box user's is in the path yet.
+      install -d -m 700 "$dir"
+      chown -h "$user:$group" "$dir"
+      made+=("$leaf")
+    fi
+  done
+  if [ "${#made[@]}" -gt 0 ]; then echo "service folders made in $SERVICES_DIR, for $user: ${made[*]}"
+  else echo "service folders: $* already in $SERVICES_DIR, for $user"; fi
+}
+
+# root_units <user> <group> <port> <unit...>: writes each unit that is not as this release writes it,
 # starts them all, and restarts those that ran from an older text. Each restart is marked pending, in root's
 # own folder, before its unit is written, and cleared once done, so a run that stops halfway (a dropped
 # session, a failing systemctl) leaves it to the next run, which finds the files already written.
 root_units() {
-  local user="$1" group="$2" home="$3" port="$4" unit text written=() restart=() pending="$STATE_DIR/pending"
-  shift 4
+  local user="$1" group="$2" port="$3" unit text written=() restart=() pending="$STATE_DIR/pending"
+  shift 3
   mkdir -p "$pending"
   chmod 700 "$STATE_DIR" "$pending"
   for unit in "$@"; do
-    text="$(unit_text "$unit" "$user" "$group" "$home" "$port")"
+    text="$(unit_text "$unit" "$user" "$group" "$port" "$SERVICES_DIR")"
     if [ -f "$SYSTEMD_DIR/$unit" ] && [ "$(cat "$SYSTEMD_DIR/$unit")" = "$text" ]; then continue; fi
     if [ -f "$SYSTEMD_DIR/$unit" ]; then
       if [ "${unit##*.}" != socket ]; then : >"$pending/$unit"
@@ -315,12 +394,12 @@ root_site_op() {
 }
 
 root_main() {
-  local user="" home="" port=1025 release="" parts=() part entry group
+  local user="" port=1025 release="" parts=() part entry group
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --user | --home | --smtp-port | --release)
+      --user | --smtp-port | --release)
         [ "$#" -ge 2 ] || root_die "$1 needs a value"
-        case "$1" in --user) user="$2" ;; --home) home="$2" ;; --smtp-port) port="$2" ;; --release) release="$2" ;; esac
+        case "$1" in --user) user="$2" ;; --smtp-port) port="$2" ;; --release) release="$2" ;; esac
         shift 2
         ;;
       site-op | mailpit | garage | reverb) parts+=("$1"); shift ;;
@@ -334,11 +413,13 @@ root_main() {
     [ "$(id -u)" != 0 ] || root_die "MROOM_ROOT_SETUP_TEST is a setting for tests: never set it as root"
     SYSTEMD_DIR="${MROOM_SYSTEMD_DIR:?for tests, MROOM_SYSTEMD_DIR}" LIBEXEC_DIR="${MROOM_LIBEXEC_DIR:?for tests, MROOM_LIBEXEC_DIR}"
     SUDOERS_DIR="${MROOM_SUDOERS_DIR:?for tests, MROOM_SUDOERS_DIR}" STATE_DIR="${MROOM_ROOT_STATE_DIR:?for tests, MROOM_ROOT_STATE_DIR}"
-    echo "WARNING: MROOM_ROOT_SETUP_TEST is set, so this writes to $SYSTEMD_DIR, $LIBEXEC_DIR, $SUDOERS_DIR and $STATE_DIR: a setting for tests"
+    SERVICES_DIR="${MROOM_SERVICES_DIR:?for tests, MROOM_SERVICES_DIR}" ROOT_UID="$(id -u)"
+    [[ "$SERVICES_DIR" =~ ^/[A-Za-z0-9._/-]+$ && "/$SERVICES_DIR/" != */../* ]] || root_die "MROOM_SERVICES_DIR is not a plain path"
+    echo "WARNING: MROOM_ROOT_SETUP_TEST is set, so this writes to $SYSTEMD_DIR, $LIBEXEC_DIR, $SUDOERS_DIR, $STATE_DIR and $SERVICES_DIR: a setting for tests"
   else
     [ "$(id -u)" = 0 ] || root_die "run this as root, through mroom's root recipe (README, \"The root recipe\")"
     SYSTEMD_DIR=/etc/systemd/system LIBEXEC_DIR=/usr/local/libexec/mroom SUDOERS_DIR=/etc/sudoers.d
-    STATE_DIR=/var/lib/mroom/root-setup
+    STATE_DIR=/var/lib/mroom/root-setup ROOT_UID=0
   fi
   # Each value goes into a unit or a sudoers line as it is, so each must be plain.
   [[ "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || root_die "--user needs the box user's name"
@@ -346,8 +427,6 @@ root_main() {
   [ "$(cut -d: -f3 <<<"$entry")" != 0 ] || root_die "the box user cannot be root"
   group="$(id -gn "$user")"
   [[ "$group" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || root_die "the name of $user's group is not plain"
-  if [ -z "$home" ]; then home="$(cut -d: -f6 <<<"$entry")"; fi
-  [[ "$home" =~ ^/[A-Za-z0-9._/-]+$ && "/$home/" != */../* ]] || root_die "$user's home, $(printf '%q' "$home"), is not a plain path"
   if ! [[ "$port" =~ ^[0-9]{4,5}$ ]] || [ "$port" -lt 1024 ] || [ "$port" -gt 65535 ]; then
     root_die "--smtp-port takes a port from 1024 to 65535"
   fi
@@ -359,12 +438,17 @@ root_main() {
       site-op) root_site_op "$user" "$release" ;;
       mailpit)
         [ -x "$PYTHON" ] || root_die "$PYTHON is missing; the mail relay needs it (apt-get install -y python3)"
-        root_units "$user" "$group" "$home" "$port" "${MAILPIT_UNITS[@]}"
+        root_tree "$user" "$group" "${MAILPIT_TREE[@]}"
+        root_units "$user" "$group" "$port" "${MAILPIT_UNITS[@]}"
         ;;
-      garage) root_units "$user" "$group" "$home" "$port" "${GARAGE_UNITS[@]}" ;;
+      garage)
+        root_tree "$user" "$group" "${GARAGE_TREE[@]}"
+        root_units "$user" "$group" "$port" "${GARAGE_UNITS[@]}"
+        ;;
       reverb)
         [ -x "$PHP" ] || root_die "$PHP is missing; mroom's Reverb host needs PHP 8.3 or later"
-        root_units "$user" "$group" "$home" "$port" "${REVERB_UNITS[@]}"
+        root_tree "$user" "$group" "${REVERB_TREE[@]}"
+        root_units "$user" "$group" "$port" "${REVERB_UNITS[@]}"
         ;;
     esac
   done

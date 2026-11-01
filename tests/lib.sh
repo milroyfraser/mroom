@@ -6,7 +6,8 @@
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MROOM="$ROOT/bin/mroom"
 TOP="$(mktemp -d)"
-trap 'rm -rf "$TOP"' EXIT
+# A test may leave folders mode 555 (services_tree --locked).
+trap 'chmod -R u+w "$TOP" 2>/dev/null; rm -rf "$TOP"' EXIT
 ORIG_PATH="$PATH"
 failures=0
 passes=0
@@ -55,6 +56,22 @@ test_case() {
   CURRENT="$1"
   setup "$1"
   "$2"
+}
+
+# services_tree [--locked] [<service/folder>...]: the services' folders, as mroom's root recipe makes them
+# (lib/root-setup), in $T/services, which MROOM_SERVICES_DIR then names; with no folder named, every part's.
+# --locked makes the folders above them mode 555, as root's are to the box user.
+services_tree() {
+  local locked="" leaf leaves=()
+  if [ "${1:-}" = --locked ]; then locked=1; shift; fi
+  leaves=("$@")
+  # shellcheck disable=SC2016  # expanded by the inner bash
+  if [ "${#leaves[@]}" = 0 ]; then
+    read -ra leaves <<<"$(bash -c '. "$1"; echo "${MAILPIT_TREE[*]} ${GARAGE_TREE[*]} ${REVERB_TREE[*]}"' _ "$ROOT/lib/root-setup")"
+  fi
+  export MROOM_SERVICES_DIR="$T/services"
+  for leaf in "${leaves[@]}"; do mkdir -p "$T/services/$leaf"; chmod 700 "$T/services/$leaf"; done
+  if [ -n "$locked" ]; then chmod 555 "$T/services" "$T/services"/*; fi
 }
 
 # has_tomllib: python3 can read TOML (3.11+). Outside CI the TOML tests skip without it.

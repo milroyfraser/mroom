@@ -123,10 +123,10 @@ max_envs = "five"'
 t_default_takes_the_key_type() {
   toml '[app]
 name = "shop"'
-  run "$MROOM" config get qa.max_envs --default 3 --json; expect_rc 0; expect_out "3"
-  run "$MROOM" config get qa.max_envs --default 3; expect_out "3"
-  run "$MROOM" config get qa.max_envs --default three; expect_rc 2; expect_err_has "--default for qa.max_envs must be a whole number"
-  run "$MROOM" config get qa.max_envs --default 0; expect_rc 2; expect_err_has "--default: qa.max_envs must be a whole number of at least 1"
+  run "$MROOM" config get qa.ttl_days --default 3 --json; expect_rc 0; expect_out "3"
+  run "$MROOM" config get qa.ttl_days --default 3; expect_out "3"
+  run "$MROOM" config get qa.ttl_days --default three; expect_rc 2; expect_err_has "--default for qa.ttl_days must be a whole number"
+  run "$MROOM" config get qa.ttl_days --default 0; expect_rc 2; expect_err_has "--default: qa.ttl_days must be a whole number of at least 1"
   run "$MROOM" config get pr.required_checks --default '["test", "lint"]'; expect_rc 0; expect_out $'test\nlint'
   run "$MROOM" config get pr.required_checks --default '["test"]' --json; expect_out '["test"]'
   run "$MROOM" config get pr.required_checks --default test; expect_rc 2; expect_err_has "must be JSON, for example []"
@@ -139,6 +139,65 @@ name = "shop"'
   # a value that is set wins over --default, and a bad --default is refused even then
   run "$MROOM" config get app.name --default other; expect_out "shop"
   run "$MROOM" config get qa.ttl_days --default x; expect_rc 2
+}
+
+# A key mroom has decided a default for gives it when the file leaves it out, whatever a reader's --default says,
+# so every reader agrees; a value in the file wins.
+t_mroom_defaults() {
+  toml '[app]
+name = "shop"'
+  run "$MROOM" config get app.version_path; expect_rc 0; expect_out "/version"; expect_err_empty
+  run "$MROOM" config get app.version_path --json; expect_out '"/version"'
+  run "$MROOM" config get qa.max_envs; expect_rc 0; expect_out "5"
+  run "$MROOM" config get qa.env_memory_mb; expect_rc 0; expect_out "1024"
+  run "$MROOM" config get qa.env_memory_mb --json; expect_out "1024"
+  run "$MROOM" config get app.version_path --default /other; expect_rc 0; expect_out "/version"
+  run "$MROOM" config get qa.max_envs --default 3; expect_rc 0; expect_out "5"
+  # A bad --default is still refused.
+  run "$MROOM" config get qa.max_envs --default 0; expect_rc 2; expect_err_has "--default: qa.max_envs must be a whole number of at least 1"
+  toml '[app]
+name = "shop"
+version_path = "/api/release.json"
+
+[qa]
+max_envs = 8
+env_memory_mb = 1536'
+  run "$MROOM" config get app.version_path; expect_out "/api/release.json"
+  run "$MROOM" config get app.version_path --default /version; expect_out "/api/release.json"
+  run "$MROOM" config get qa.max_envs; expect_out "8"
+  run "$MROOM" config get qa.env_memory_mb; expect_out "1536"
+  run "$MROOM" config validate; expect_rc 0
+  run "$MROOM" config keys
+  expect_out_has "the release and commit the app runs (default /version)"
+  expect_out_has "(default 1024)"
+}
+
+t_version_path_rule() {
+  local good bad
+  for good in /version /v /api/version /api/version/ /.well-known/release /a_b/c-d~e.json; do
+    toml "[app]
+name = \"shop\"
+version_path = \"$good\""
+    run "$MROOM" config get app.version_path; expect_rc 0; expect_out "$good"
+  done
+  for bad in version / // /version?x=1 /version#top /a//b /a/../b /a/./b /. "/a b" /v%41 https://x.example/version \
+    "/$(printf 'a%.0s' {1..200})"; do
+    toml "[app]
+name = \"shop\"
+version_path = \"$bad\""
+    run "$MROOM" config get app.version_path; expect_rc 1; expect_err_has "app.version_path must be a path such as /version"
+    run "$MROOM" config validate; expect_rc 1
+  done
+  toml '[app]
+name = "shop"
+version_path = 3'
+  run "$MROOM" config get app.version_path; expect_rc 1; expect_err_has "app.version_path must be a string"
+  toml '[app]
+name = "shop"
+
+[qa]
+env_memory_mb = 0'
+  run "$MROOM" config get qa.env_memory_mb; expect_rc 1; expect_err_has "qa.env_memory_mb must be a whole number of at least 1"
 }
 
 t_type_errors() {
@@ -278,6 +337,8 @@ test_case missing-required t_missing_required
 test_case unknown-key-warns t_unknown_key_warns
 test_case get-errors-scoped-to-key t_get_errors_scoped_to_key
 test_case default-takes-the-key-type t_default_takes_the_key_type
+test_case mroom-defaults t_mroom_defaults
+test_case version-path-rule t_version_path_rule
 test_case type-errors t_type_errors
 test_case rules t_rules
 test_case qa-rules t_qa_rules

@@ -7,7 +7,7 @@
 #   mroom config validate      check mroom.toml: missing required keys and wrong types fail, unknown
 #                              keys warn
 #   mroom config path [--box]  where mroom.toml is (--box: where box.env is read from)
-#   mroom config keys          every mroom.toml key, its type and whether it is required
+#   mroom config keys          every mroom.toml key, its type, whether it is required, and mroom's default
 #   mroom config box [<KEY>]   a value from ~/.config/mroom/box.env (parsed, never sourced; $MROOM_BOX_ENV
 #                              overrides the path); no KEY prints every key that is set
 #   mroom watchdog run|status|report
@@ -24,6 +24,10 @@
 #   mroom baseline reverb      WebSockets for every QA environment: mroom's Reverb host with its pinned
 #                              packages, its apps file, whether its unit is this release's, and its host's
 #                              nginx config
+#   mroom memory-preflight <MB> [<what>]
+#                              exit 1, saying why, when the box's RAM available and free swap hold less than
+#                              <MB> more (2 for a usage error): run it before work the kernel would end half
+#                              way for lack of memory
 #   mroom version [--source]   the installed version (--source: the release or checkout it came from)
 #   mroom help
 #
@@ -60,6 +64,12 @@ case "$cmd" in
   job) exec "$ROOT/lib/job" "$@" ;;
   gate) exec "$ROOT/lib/gate" "$@" ;;
   baseline) exec "$ROOT/lib/baseline" "$@" ;;
+  memory-preflight)
+    if ! [[ "${1:-}" =~ ^[1-9][0-9]{0,6}$ ]] || [ "$#" -gt 2 ]; then die "usage: mroom memory-preflight <MB> [<what>]" 2; fi
+    # shellcheck source=lib/memory-preflight
+    . "$ROOT/lib/memory-preflight"
+    memory_preflight "$1" "${2:-this}"
+    ;;
   status | sessions | resume | restart | doctor | site | update | wt | user | keys | env | init | guard | default)
     not_yet "$cmd" 1
     ;;
