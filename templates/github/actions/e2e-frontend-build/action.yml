@@ -1,0 +1,56 @@
+# mroom template (copied once by `mroom init`; the app owns it from then on). Placeholders: README, "CI templates".
+name: e2e frontend build
+description: >-
+  The frontend build the e2e job serves, built once per frontend state. Restores the build when one of
+  the same inputs exists and builds it otherwise; with `save: 'true'` (ci-e2e-build-warm.yml, on the
+  default branch) it also saves a fresh build. One definition of the key and the build, so the job that
+  restores and the job that saves cannot drift apart. Needs Node (and pnpm) set up first.
+
+inputs:
+  save:
+    description: "'true' to save the build after building it (on the default branch only; PR jobs restore)"
+    default: 'false'
+
+outputs:
+  cache-hit:
+    description: "'true' when the build was restored instead of built"
+    value: ${{ steps.restore.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    # The key holds everything the build reads: the frontend's source (minus tests), public assets,
+    # index.html, the config files at the frontend's top (vite.config.*, tsconfig*), its env files, the
+    # package file, lockfile and .npmrc, this file (the build command and its env), Node's
+    # major.minor version and the backend's composer.lock (a build inside Laravel may read vendor/).
+    # Add any other input the build reads, or a stale build is restored. With Vite inside Laravel that
+    # includes every folder Tailwind scans for classes, such as app/**/*.php.
+    - name: Read the Node version
+      id: node
+      shell: bash
+      run: echo "version=$(node -p "process.versions.node.split('.').slice(0, 2).join('.')")" >> "$GITHUB_OUTPUT"
+
+    - name: Restore the frontend build
+      id: restore
+      uses: actions/cache/restore@v6
+      with:
+        path: <<app.frontend_dir>>/<<app.build.frontend_dist>>
+        key: ${{ runner.os }}-e2e-dist-node${{ steps.node.outputs.version }}-${{ hashFiles('<<app.frontend_dir>>/<<fill:frontend_src>>/**', '!<<app.frontend_dir>>/<<fill:frontend_src>>/**/__tests__/**', '!<<app.frontend_dir>>/<<fill:frontend_src>>/**/*.test.*', '!<<app.frontend_dir>>/<<fill:frontend_src>>/**/*.spec.*', '<<app.frontend_dir>>/public/**', '!<<app.frontend_dir>>/<<app.build.frontend_dist>>/**', '<<app.frontend_dir>>/index.html', '<<app.frontend_dir>>/*.ts', '<<app.frontend_dir>>/*.js', '<<app.frontend_dir>>/*.mjs', '<<app.frontend_dir>>/package.json', '<<app.frontend_dir>>/tsconfig*.json', '<<app.frontend_dir>>/.env*', '<<app.frontend_dir>>/.npmrc', '<<app.frontend_dir>>/<<pm.lockfile>>', '<<app.backend_dir>>/composer.lock', '.github/actions/e2e-frontend-build/action.yml') }}
+
+    # Build without source maps, which only an error tracker needs, but minified: e2e tests the code
+    # production ships, and minifying is faster than not (design section 10, pattern 7).
+    - name: Build the frontend
+      if: steps.restore.outputs.cache-hit != 'true'
+      shell: bash
+      working-directory: <<app.frontend_dir>>
+      # The e2e job has installed the packages already; the warm workflow has not.
+      run: |
+        [ -d node_modules ] || <<pm.install>>
+        <<fill:e2e_build>>
+
+    - name: Save the frontend build
+      if: inputs.save == 'true' && github.ref == 'refs/heads/<<default_branch>>' && steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: <<app.frontend_dir>>/<<app.build.frontend_dist>>
+        key: ${{ steps.restore.outputs.cache-primary-key }}
