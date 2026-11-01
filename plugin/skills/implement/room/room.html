@@ -195,29 +195,29 @@ div.invopt{cursor:default}
 .nextstep .nshow{margin:0;padding:8px 10px;background:var(--accent-soft);border-radius:6px;color:var(--ink);max-width:70ch}
 .nextstep .nsrow{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;color:var(--muted);font-size:13px}
 .nextstep a.nstitle{color:var(--ink);text-decoration:none}.nextstep a.nstitle:hover{text-decoration:underline}
-.prodcheck{display:grid;gap:10px;background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:10px;padding:14px 16px;margin-block:0 14px;min-width:0}
+.prodcheck{display:grid;gap:10px;background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:10px;padding:14px 16px;margin-block:0 14px;min-width:0;max-width:100%;box-sizing:border-box}
+.prodcheck>*{min-width:0}
 .prodcheck .pchead{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px;font:600 11px/1.2 var(--body);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.prodcheck .pctitle{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 10px}
 .prodcheck h3{margin:0;font:600 17px/1.3 var(--display);text-wrap:balance}
+.prodcheck .pcgo{font:700 12px/1 var(--body);padding:4px 8px;border-radius:999px;white-space:nowrap}
+.prodcheck .pcgo.go{color:var(--ok);background:var(--ok-soft)}
+.prodcheck .pcgo.nogo{color:var(--alarm);background:color-mix(in srgb,var(--alarm) 14%,var(--surface))}
 .prodcheck p{margin:0;max-width:70ch}
-.prodcheck .pcwhere{color:var(--muted);font-size:13px}
-.prodcheck ol.pchuman{margin:0;padding-left:20px;display:grid;gap:3px;max-width:70ch}
-.prodcheck .pcverdict{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;padding:8px 10px;border-radius:6px}
-.prodcheck .pcverdict.go{background:var(--ok-soft)}
-.prodcheck .pcverdict.nogo{background:color-mix(in srgb,var(--alarm) 14%,var(--surface))}
-.prodcheck .pcverdict b{font-weight:700}
-.prodcheck .pcverdict.go b{color:var(--ok)} .prodcheck .pcverdict.nogo b{color:var(--alarm)}
-.prodcheck ul.pccomp{list-style:none;margin:0;padding:0;display:grid;gap:4px}
-.prodcheck ul.pccomp li{display:grid;grid-template-columns:1.4em 1fr;gap:4px;font-size:13.5px}
-.prodcheck ul.pccomp li .pcmark{font-weight:700}
-.prodcheck ul.pccomp li.ok .pcmark{color:var(--ok)} .prodcheck ul.pccomp li.bad .pcmark{color:var(--alarm)}
-.prodcheck ul.pccomp li span.pcnote{color:var(--muted)}
-.prodcheck details.pcquery summary{cursor:pointer;color:var(--accent);font-size:13.5px}
-.prodcheck pre.pccode{margin:8px 0 0;padding:10px 12px;border-radius:8px;background:color-mix(in srgb,var(--ink) 6%,var(--surface));font:12.5px/1.5 var(--mono);overflow-x:auto;white-space:pre;max-width:100%}
+.prodcheck ol.pchuman{margin:0;padding-left:20px;display:grid;gap:2px;max-width:70ch}
+.prodcheck .pcbadges{display:flex;flex-wrap:wrap;gap:6px}
+.prodcheck .pcbadge{font:500 12px/1 var(--body);padding:5px 8px;border-radius:999px;border:1px solid var(--line);white-space:nowrap;cursor:default}
+.prodcheck .pcbadge.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,var(--line))}
+.prodcheck .pcbadge.bad{color:var(--alarm);border-color:color-mix(in srgb,var(--alarm) 50%,var(--line));font-weight:700}
+.prodcheck details.pcmore summary{cursor:pointer;color:var(--accent);font-size:13.5px}
+.prodcheck details.pcmore[open]{display:grid;gap:8px}
+.prodcheck pre.pccode{margin:8px 0 0;padding:10px 12px;border-radius:8px;background:color-mix(in srgb,var(--ink) 6%,var(--surface));font:12.5px/1.5 var(--mono);overflow-x:auto;white-space:pre;max-width:100%;box-sizing:border-box}
 .pccode .k{color:var(--accent);font-weight:600} .pccode .s{color:var(--ok)} .pccode .v{color:var(--warn)} .pccode .n{color:var(--warn)} .pccode .c{color:var(--muted);font-style:italic} .pccode .f{color:var(--ink);font-weight:600}
-.prodcheck table.pcread{border-collapse:collapse;font-size:13px;width:100%}
-.prodcheck .pcreadwrap{overflow-x:auto}
-.prodcheck table.pcread td{padding:4px 8px;border-top:1px solid var(--line);vertical-align:top}
-.prodcheck table.pcread td:first-child{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
+.prodcheck dl.pcread{margin:0;display:grid;gap:6px}
+.prodcheck dl.pcread div{display:grid;gap:1px}
+.prodcheck dl.pcread dt{font:500 12.5px/1.4 var(--mono)}
+.prodcheck dl.pcread dd{margin:0;color:var(--muted);font-size:13px}
+.prodcheck .pcsub{color:var(--muted);font-size:13px}
 .prodcheck .pcacts{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .prodcheck .pcacts button{font:600 13px var(--body);padding:7px 12px;border-radius:7px;border:1px solid var(--accent);background:var(--accent);color:var(--surface);cursor:pointer}
 .prodcheck .pcacts button:disabled{opacity:.45;cursor:not-allowed}
@@ -813,41 +813,34 @@ html[data-winddown] body::before{background:
       .sort((a, b) => String(a.askedAt || "").localeCompare(String(b.askedAt || "")));
     if (!open.length) { box.hidden = true; return; }
     const c = open[0];
-    const head = el("div", "pchead");
-    head.append(el("span", null, "Production check · run it and paste the output in the chat"), el("span", null, open.length > 1 ? "1 of " + open.length : (c.askedAt ? "asked " + ago(Date.parse(c.askedAt)) : "")));
-    box.append(head, el("h3", null, String(c.title || "A read-only production check")));
-    if (c.why) box.append(el("p", null, String(c.why)));
-    if (c.where) box.append(el("p", "pcwhere", "Where: " + String(c.where)));
     const v = c.verdict && typeof c.verdict === "object" ? c.verdict : null;
     const comp = Array.isArray(c.compliance) ? c.compliance.filter((x) => x && typeof x === "object") : [];
     const allOk = comp.length > 0 && comp.every((x) => x.ok === true);
     const go = !!(v && v.go === true && allOk);
-    const vb = el("div", "pcverdict " + (go ? "go" : "nogo"));
-    vb.append(el("b", null, go ? "Go" : "No-go"), el("span", null, String((v && v.call) || (go ? "Safe to run." : "Do not run this yet."))));
-    if (v && v.why) vb.append(el("span", "pcwhere", String(v.why)));
-    if (!allOk && comp.length) vb.append(el("span", "pcwhere", "A compliance point is not met."));
-    box.append(vb);
-    if (Array.isArray(c.human) && c.human.length) {
-      box.append(el("p", "pcwhere", "What it does, in plain words:"));
-      const ol = el("ol", "pchuman"); c.human.forEach((h) => ol.append(el("li", null, String(h)))); box.append(ol);
-    }
+    const head = el("div", "pchead");
+    head.append(el("span", null, "Production check" + (c.where ? " · " + String(c.where) : "")), el("span", null, open.length > 1 ? "1 of " + open.length : (c.askedAt ? "asked " + ago(Date.parse(c.askedAt)) : "")));
+    const tl = el("div", "pctitle");
+    tl.append(el("h3", null, String(c.title || "A read-only production check")), el("span", "pcgo " + (go ? "go" : "nogo"), go ? "Go · safe to run" : "No-go · " + String((v && v.call) || "don't run it yet")));
+    box.append(head, tl);
+    if (c.why) box.append(el("p", null, String(c.why)));
+    if (Array.isArray(c.human) && c.human.length) { const ol = el("ol", "pchuman"); c.human.forEach((h) => ol.append(el("li", null, String(h)))); box.append(ol); }
     if (comp.length) {
-      box.append(el("p", "pcwhere", "Compliance (read-only, GDPR):"));
-      const ul = el("ul", "pccomp");
-      comp.forEach((x) => { const li = el("li", x.ok === true ? "ok" : "bad"); li.append(el("span", "pcmark", x.ok === true ? "✓" : "✕")); const t = el("span"); t.append(document.createTextNode(String(x.label || ""))); if (x.note) { t.append(document.createTextNode(" ")); t.append(el("span", "pcnote", "· " + String(x.note))); } li.append(t); ul.append(li); });
-      box.append(ul);
+      const bs = el("div", "pcbadges"); bs.setAttribute("role", "list"); bs.setAttribute("aria-label", "Read-only and GDPR checks");
+      comp.forEach((x) => { const b = el("span", "pcbadge " + (x.ok === true ? "ok" : "bad"), (x.ok === true ? "✓ " : "✕ ") + String(x.label || "")); b.setAttribute("role", "listitem"); if (x.note) b.title = String(x.note); bs.append(b); });
+      box.append(bs);
     }
-    const det = el("details", "pcquery"); det.append(el("summary", null, "Show the command"));
-    const pre = el("pre", "pccode"); pre.append(pcHighlight(String(c.query))); det.append(pre); box.append(det);
+    const det = el("details", "pcmore"); det.append(el("summary", null, "Command and how to read the output"));
+    const pre = el("pre", "pccode"); pre.append(pcHighlight(String(c.query))); det.append(pre);
     if (Array.isArray(c.read) && c.read.length) {
-      const wrap = el("div", "pcreadwrap"); const tb = el("table", "pcread"); const body = el("tbody");
-      c.read.forEach((r) => { if (!r || typeof r !== "object") return; const tr = el("tr"); tr.append(el("td", null, String(r.result || "")), el("td", null, String(r.means || ""))); body.append(tr); });
-      tb.append(body); wrap.append(el("p", "pcwhere", "How to read the output:"), tb); box.append(wrap);
+      const dl = el("dl", "pcread");
+      c.read.forEach((r) => { if (!r || typeof r !== "object") return; const d = el("div"); d.append(el("dt", null, String(r.result || "")), el("dd", null, String(r.means || ""))); dl.append(d); });
+      det.append(dl);
     }
+    box.append(det);
     const acts = el("div", "pcacts");
     const btn = el("button", null, "Copy command"); btn.type = "button"; btn.disabled = !go;
     btn.addEventListener("click", async () => { try { await navigator.clipboard.writeText(String(c.query)); btn.textContent = "Copied"; } catch { det.open = true; const r = document.createRange(); r.selectNodeContents(pre); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); btn.textContent = "Select and copy"; } setTimeout(() => { btn.textContent = "Copy command"; }, 1800); });
-    acts.append(btn, el("span", "pcnote", go ? "Then paste its output in the chat; this card goes when Claude has read it." : "Claude must fix it before you run it."));
+    acts.append(btn, el("span", "pcnote", go ? "Paste the output in the chat." : (v && v.why ? String(v.why) : "A check point is not met; Claude fixes it first.")));
     box.append(acts);
     box.hidden = false;
   }
