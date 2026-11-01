@@ -800,6 +800,21 @@ timing() {
   for _ in $(seq 1 20); do wide+="cat${words:0:3980}; "; done
   fast 4 2 "$wide gh pr merge 1"
   fast 4 2 "git$(printf ' -c core.editor=true%.0s' $(seq 1 300)) status"
+  # Within-caps commands whose words each take a per-word path that lowers (a fork) and, before the fix,
+  # copied the positional parameters on every call: a push's refspecs (check_git_push, twice for a
+  # colon-less one), gh config get's flags, and gh api's fields. Ten simple commands, ~2000 upper-case
+  # words each, all inside every cap; before the fix each ran for minutes, past the hook timeout, so a
+  # refused command placed after it ran. They are allowed, and must be decided within the limit.
+  local seg uc=""
+  seg="git push origin$(printf ' A%.0s' $(seq 1 1990))"
+  for _ in $(seq 1 10); do uc+="$seg; "; done
+  fast 8 0 "$uc"
+  uc=""; seg="gh config get$(printf ' A%.0s' $(seq 1 1990))"
+  for _ in $(seq 1 10); do uc+="$seg; "; done
+  fast 8 0 "$uc"
+  uc=""; seg="gh api repos/o/r/issues$(printf ' -f A=A%.0s' $(seq 1 990))"
+  for _ in $(seq 1 10); do uc+="$seg; "; done
+  fast 8 0 "$uc"
 }
 
 awks=()

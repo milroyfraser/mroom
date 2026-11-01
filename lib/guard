@@ -457,6 +457,7 @@ normalize_endpoint() {
 
 check_gh_api() {
   local method="" endpoint="" fields=0 input="" approve=0 file_field=0 a v ep
+  local -a fvals=()
   while [ $# -gt 0 ]; do
     a=$1
     shift
@@ -475,10 +476,16 @@ check_gh_api() {
       *) [ -n "$endpoint" ] || endpoint=$a ;;
     esac
     if [ -n "$v" ]; then
-      lower "$v"; case "$LOWER" in event=approve) approve=1 ;; esac
+      fvals+=("$v")
       case "$v" in *=@*) file_field=1 ;; esac
     fi
   done
+  if [ "${#fvals[@]}" -gt 0 ]; then
+    # Lower once for all fields (not a fork each, with the positionals copied on every call), to spot
+    # event=approve in any case while many fields stay inside the hook timeout (see check_secrets).
+    lower_all "${fvals[@]}"
+    for v in "${LOWERED[@]}"; do case "$v" in event=approve) approve=1; break ;; esac; done
+  fi
   method=$(printf '%s' "$method" | tr '[:lower:]' '[:upper:]')
   if [ -z "$method" ]; then
     if [ "$fields" = 1 ] || [ -n "$input" ]; then method=POST; else method=GET; fi
@@ -567,8 +574,13 @@ check_gh() {
     "release delete" | "release delete-asset") block "gh release $p1 deletes a release" ;;
     "auth token") block "gh auth token prints the GitHub token" ;;
     "config get")
+      # Lower once for all flags (not a fork each, with the positional parameters copied on every call),
+      # so many flags stay inside the hook timeout (see check_secrets).
+      local gi=0
+      lower_all "$@"
       for flag in "$@"; do
-        lower "$flag"; case "$LOWER" in *token*) block "gh config get $flag prints a token" ;; esac
+        case "${LOWERED[$gi]}" in *token*) block "gh config get $flag prints a token" ;; esac
+        gi=$((gi + 1))
       done
       ;;
     "auth status")
@@ -961,10 +973,19 @@ is_protected_ref() {
 # git push [options] [remote [refspec...]]: any form of force (git takes a long option's unambiguous
 # abbreviation, so `--forc` is `--force`), a mirror, tags, or a push to a protected branch.
 check_git_push() {
-  local a g c npos=0 src dst
-  while [ $# -gt 0 ]; do
-    a=$1
-    shift
+  local a g c npos=0 src la i=0 n=$#
+  local -a w=("$@") lw
+  # Lower case once for every word, and drop the positional parameters, so is_protected_ref (called per
+  # refspec, twice for a colon-less one) neither forks `lc` nor copies the arguments on each call: a push
+  # of thousands of upper-case refspec words, inside every cap, once ran for minutes, past the hook
+  # timeout (see check_secrets).
+  lower_all "$@"
+  lw=("${LOWERED[@]}")
+  set --
+  while [ "$i" -lt "$n" ]; do
+    a=${w[$i]}
+    la=${lw[$i]}
+    i=$((i + 1))
     case "$a" in
       --no-*) continue ;;
       --for* | --m*) block "git push $a force-pushes"; return ;;
@@ -974,8 +995,8 @@ check_git_push() {
       --rec* | --ex*) block "git push $a runs a command of its choice to receive the push"; return ;;
       # With --repo, every positional word is a refspec.
       --repo=*) npos=1; continue ;;
-      --repo) shift; npos=1; continue ;;
-      --push-option) shift; continue ;;
+      --repo) i=$((i + 1)); npos=1; continue ;;
+      --push-option) i=$((i + 1)); continue ;;
       --*) continue ;;
       -*)
         g=${a#-}
@@ -985,7 +1006,7 @@ check_git_push() {
           g=${g:1}
           case "$c" in
             f) block "git push $a force-pushes"; return ;;
-            o) [ -n "$g" ] || shift; break ;; # -o takes a value, glued or next
+            o) [ -n "$g" ] || i=$((i + 1)); break ;; # -o takes a value, glued or next
           esac
         done
         continue
@@ -999,8 +1020,8 @@ check_git_push() {
       *"$DY"*) block "git push with a refspec from a variable cannot be checked"; return ;;
     esac
     src=${a%%:*}
-    dst=${a#*:}
-    if is_protected_ref "$dst" || { [ "$src" = "$a" ] && is_protected_ref "$src"; }; then
+    # la is the word already lowered; its dst and src halves feed is_protected_ref without a fork.
+    if is_protected_ref "${la#*:}" || { [ "$src" = "$a" ] && is_protected_ref "${la%%:*}"; }; then
       block "git push $a updates a protected branch or pushes a tag"
       return
     fi
