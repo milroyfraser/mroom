@@ -36,3 +36,4 @@ db_read_allowlist = []
 
 [persona]
 name = "Agent"
+channel = "C0123456789"
