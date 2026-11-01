@@ -74,12 +74,32 @@ with its saved ticks so the developer can change them; saving there steps forwar
 cards already read. Keep the learning generic when it
 is about the tool, and name the project only on that project's own Room.
 
+## 3b. Report and follow-through
+
+Record the retrospective where the project is managed: one report issue in the tracker that
+`issues.tracker` names, written through `mroom tracker` (a GitHub issue, a Linear issue, …), labelled
+or titled as a retrospective with its date. It lists each learning, its observation, and per action
+item the developer's decision (confirmed, declined, or not read yet), and later what was done with a
+link. Put its link in `meta/winddown.report`; the page shows it. When the tracker write needs the
+developer (a refused command, or a rule that asks first), give them the ready command and the text.
+
+Decisions arrive after this skill ends, so every regular check and every restart looks at
+`learnings`: for each confirmed action item without `acted[i]`, act on it as its `rec` says (start a
+helper, open a PR, add a to-do with the ready command when it needs the developer) and write
+`acted: {"<i>": {state: "doing"|"done", outcome, link, at}}`. Set `state: "done"` once the work has
+landed (a merged PR, a filed issue, a settings change made). An item that was read and not ticked is
+declined: record it as such in the report and do nothing. Update the report as items move, and close
+it when every action item is done or declined.
+
+The page keeps the retrospective section only while something is left: a card not read, or a
+confirmed action not done. After the last card it lists the confirmed actions still open with their
+state, and the section disappears once all are addressed.
+
 ## 4. Hand over
 
 In the chat, say in a few lines: what is paused and where, what is first tomorrow, and that the
-retrospective is on the Room. Act only on confirmed action items (`confirmed` on each learning):
-the developer's ticks are their confirmation. Turn each into the work its `rec` names (an issue,
-a helper, a settings change for the developer). Items left unticked are not done.
+retrospective is on the Room. Point to the report. Act only on confirmed action items, as step 3b says; items left unticked are
+declined.
 
 ## Restarting
 

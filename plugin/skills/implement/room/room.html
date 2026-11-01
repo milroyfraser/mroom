@@ -770,14 +770,38 @@ html[data-winddown] body::before{background:
     const cur = viewed || open[0];
     const idx = cur ? list.indexOf(cur) : list.length;
     const back = (to) => { const b = el("button", "lcback", "← Back"); b.type = "button"; b.addEventListener("click", () => { learnView = to.id; learnPick = { id: null, picked: new Set(), armed: false }; renderLearning(); }); return b; };
-    if (!cur && !on && !list.length) { box.hidden = true; return; }
+    /* An action item is addressed once it is declined (read, not ticked) or its acted[i].state is "done".
+       The whole section disappears when every card is read and every confirmed action is done. */
+    const actState = (l, i) => { const a = l.acted && typeof l.acted === "object" ? l.acted[String(i)] : null; return a && typeof a === "object" ? a : null; };
+    const pendingActs = [];
+    for (const l of list) {
+      if (l.status !== "done" || !Array.isArray(l.confirmed)) continue;
+      const as = Array.isArray(l.actions) ? l.actions : [];
+      for (const i of l.confirmed.map(Number)) { if (!as[i]) continue; const st = actState(l, i); if (!st || st.state !== "done") pendingActs.push({ l, i, a: as[i], st }); }
+    }
+    const allAddressed = !open.length && !pendingActs.length;
+    if (!cur && !on && (!list.length || allAddressed)) { box.hidden = true; return; }
     box.hidden = false;
     if (on) {
       const n = el("p", "wdnote", "Winding down" + (windDown.note ? " · " + String(windDown.note) : "") + (Array.isArray(windDown.paused) && windDown.paused.length ? " · Paused: " + windDown.paused.map(String).join("; ") : ""));
       box.append(n);
     }
     if (!cur) {
-      if (list.length) { const r = el("div", "lcrow"); r.append(el("span", "wdnote", "Retrospective done: " + list.length + " learnings read.")); if (!readOnly && db) r.append(back(list[list.length - 1])); box.append(r); }
+      if (list.length && !allAddressed) {
+        const head2 = el("div", "lchead"); head2.append(el("span", null, "Retrospective · confirmed actions"), el("span", null, pendingActs.length + " not done yet"));
+        const ul = el("ul", "lcacts");
+        for (const p of pendingActs) {
+          const li = el("li"); li.append(el("p", null, String(p.a.text)));
+          const stTxt = p.st && p.st.state === "doing" ? "In progress" + (p.st.outcome ? ": " + String(p.st.outcome) : "") : "Confirmed, not started";
+          const stp = el("p", "lcrec", stTxt);
+          if (p.st && typeof p.st.link === "string" && /^https:\/\//.test(p.st.link)) { const a = el("a", null, " ↗"); a.href = p.st.link; a.target = "_blank"; a.rel = "noopener"; stp.append(a); }
+          li.append(stp); ul.append(li);
+        }
+        box.append(head2, ul);
+        const r = el("div", "lcrow"); r.append(el("span", "wdnote", "All " + list.length + " learnings read.")); if (!readOnly && db) r.append(back(list[list.length - 1])); box.append(r);
+      }
+      const rep = windDown && typeof windDown.report === "string" && /^https:\/\//.test(windDown.report) ? windDown.report : null;
+      if (rep) { const a = el("a", "wdnote", "Retrospective report ↗"); a.href = rep; a.target = "_blank"; a.rel = "noopener"; box.append(a); }
       return;
     }
     const head = el("div", "lchead");
@@ -804,6 +828,8 @@ html[data-winddown] body::before{background:
         cb.type = "checkbox"; cb.checked = learnPick.picked.has(i); cb.disabled = !canWrite;
         cb.addEventListener("change", () => { if (cb.checked) learnPick.picked.add(i); else learnPick.picked.delete(i); learnPick.armed = false; label(); });
         const txt = el("span"); txt.append(el("p", null, String(a.text))); if (a.rec) txt.append(el("p", "lcrec", "Claude recommends: " + String(a.rec)));
+        const st = actState(cur, i);
+        if (st && st.state) txt.append(el("p", "wdnote", (st.state === "done" ? "Done" : "In progress") + (st.outcome ? ": " + String(st.outcome) : "")));
         lab.append(cb, txt); li.append(lab); ul.append(li);
       });
       p.append(el("b", null, "Recommended action items · tick the ones you confirm"), ul); box.append(p);
