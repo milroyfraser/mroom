@@ -244,6 +244,38 @@ usage error;
 mroom memory-preflight 4096 "the frontend build" && pnpm build
 ```
 
+## Scratch folders
+
+`mroom scratch` gives agents throwaway folders and repositories under one fixed root,
+`${XDG_CACHE_HOME:-~/.cache}/mroom/scratch`, so a check needs neither `rm -rf` nor a path of its own
+choosing.
+
+```bash
+d="$(mroom scratch new)"           # an empty folder; --git for a repository, --bare for a remote
+mroom scratch ls                   # id, kind (plain, git, bare or link), age in hours, path
+mroom scratch rm <id|path>...      # remove folders made by new
+mroom scratch prune --older-than 24
+```
+
+`rm` and `prune` remove only whole folders directly inside the root. They resolve the real path and
+refuse a link (in the root or on the way to it), `..`, and anything beside or above the root; they
+delete with `find -P`, so a link inside a folder goes as a link and what it points at stays. The root
+itself must be a folder you own, not reached through a link. `base.json` allows every `mroom scratch`
+command, while `rm -rf` stays denied.
+
+**Offline tag and release tests.** `mroom guard` lets a `git push` of tags, or of any branch, through
+when its remote is a repository inside the root, named by its absolute path or `file:///` URL:
+
+```bash
+remote="$(mroom scratch new --bare)"
+git push "$remote" v1.2.3          # allowed: name the tag (base.json still denies --tags by prefix)
+git push origin v1.2.3             # still refused, as is a file:// push outside the root
+```
+
+Force, mirror, `--all`, `--prune` and `+` refspecs stay refused there too. A remote that resolves out of
+the root through a link or `..`, that is not a repository itself, or that the git configuration could
+rewrite (`url.*.insteadOf`, or a remote configured under that name) is treated like any other remote.
+
 ## Doctor
 
 `mroom doctor` says whether the box is as mroom needs it, and `mroom doctor --app [<dir>]` also whether an app's
@@ -367,8 +399,9 @@ refuses, among others:
 - `gh pr merge`, `gh pr review --approve`, and `gh api` writes to `/merge`, `/merges`, `/reviews`
   with `APPROVE`, `/releases` and `/git/refs`, and GraphQL merges, ref updates and deploy approvals;
 - `git push` with any form of force (`-f`, `--force`, `--force-with-lease`, `--mirror`, a `+`
-  refspec, abbreviations too), with tags, or to `main`, `master` or `release`; git config or aliases
-  that would make a later push do one of those; `gh pr update-branch --rebase`;
+  refspec, abbreviations too), with tags, or to `main`, `master` or `release` (tags and any branch
+  may go to a [scratch repository](#scratch-folders)); git config or aliases that would make a later
+  push do one of those, or rewrite where it goes (`url.*.insteadOf`); `gh pr update-branch --rebase`;
 - reading `.env*` (not `*.example`), `~/.ssh` (not `*.pub`), `~/.config/gh*`,
   `~/.config/mroom/secrets`, any `*.env` under `~/.config`, `~/.forge-token` and Claude's
   credentials, through the common readers, interpreters, uploads and redirections, or a `cd` into

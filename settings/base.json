@@ -70,7 +70,12 @@
       "Bash(mroom errors new:*)",
       "Bash(mroom errors backend:*)",
       "Bash(mroom persona find:*)",
-      "Bash(mroom persona owned:*)"
+      "Bash(mroom persona owned:*)",
+      "Bash(mroom scratch new:*)",
+      "Bash(mroom scratch ls:*)",
+      "Bash(mroom scratch rm:*)",
+      "Bash(mroom scratch prune:*)",
+      "Bash(mroom scratch root:*)"
     ],
     "ask": [
       "Bash(git restore:*)",

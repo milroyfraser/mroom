@@ -25,6 +25,10 @@ on without it.
 - Tests run only against a test database: the worktree's own, named by `tests.database_pattern`.
   Never point tests at a dev, QA or production database.
 - Never add the `qa` label. It is a person's switch.
+- Throwaway copies and repositories (a clone to try something in, a remote to push a test tag to)
+  go in `mroom scratch new` (`--git` for a repository, `--bare` for a remote; it prints the path),
+  never in a folder you pick. Clean up with `mroom scratch rm <id>`, never `rm -rf`. The guard lets
+  a push to a scratch repository carry a tag; name the tag (`git push <scratch path> v1.2.3`).
 - Never check out, run or push to a pull request from a fork (`isCrossRepository` true). A fork's
   code never runs on this box, not even in a QA environment.
 - When the project runs its agents from an agreed host, commits for agent PRs go only from that

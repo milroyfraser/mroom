@@ -972,6 +972,67 @@ has "$err" "tokeniser"
 expect "no awk" 0 env MROOM_GUARD_AWK=no-such-awk "$guard" check 'gh pr merge 1'
 has "$err" "the Bash guard is off"
 
+# --- Pushes to a `mroom scratch` repository ------------------------------------------------------
+# Real folders this time: the guard resolves the remote. HOME and the cache are the test's own, so no
+# developer's git configuration counts.
+sc_home="$TOP/sc-home"
+mkdir -p "$sc_home" "$TOP/sc-session"
+sc() { env HOME="$sc_home" XDG_CACHE_HOME="$TOP/sc-cache" GIT_CONFIG_NOSYSTEM=1 "$@"; }
+sc_bare=$(sc "$mroom" scratch new --bare)
+sc_git=$(sc "$mroom" scratch new --git)
+sc_plain=$(sc "$mroom" scratch new)
+sc_root=${sc_bare%/*}
+git init -q --bare "$TOP/sc-outside.git"
+ln -s "$TOP/sc-outside.git" "$sc_root/evil"
+sc_check() { (cd "$TOP/sc-session" && sc "$mroom" guard check "$1"); }
+sc_allow() { expect "scratch push allowed: $1" 0 sc_check "$1"; }
+sc_refuse() { expect "scratch push refused: $1" 2 sc_check "$1"; }
+sc_allow "git push file://$sc_bare v1.2.3"
+sc_allow "git push $sc_bare refs/tags/release-v1.2.3"
+sc_allow "git push $sc_bare --tags"
+sc_allow "git push --follow-tags file://$sc_git HEAD:main"
+sc_allow "git push -u $sc_bare main"
+# git takes the argument over --repo, so here the remote is the scratch repository.
+sc_allow "git push --repo=origin $sc_bare v1.2.3"
+# A tag push to a network remote, or to a path outside the root, is still refused.
+sc_refuse "git push origin v1.2.3"
+sc_refuse "git push --tags origin"
+sc_refuse "git push https://github.com/acme/shop.git v1.2.3"
+sc_refuse "git push git@github.com:acme/shop.git refs/tags/v1.2.3"
+sc_refuse "git push file://$TOP/sc-outside.git v1.2.3"
+sc_refuse "git push $TOP/sc-outside.git --tags"
+# Out of the root through a link or `..`, a plain folder (git would try PATH.git next), a relative path.
+sc_refuse "git push file://$sc_root/evil v1.2.3"
+sc_refuse "git push $sc_bare/../../../../sc-outside.git v1.2.3"
+sc_refuse "git push file://$sc_plain v1.2.3"
+sc_refuse "git push ./x v1.2.3"
+sc_refuse "git push \"\$R\" v1.2.3"
+# Where git's own option parsing makes the scratch path something other than the remote.
+sc_refuse "git push --rep=$sc_bare origin v1.2.3"
+sc_refuse "git push --pus $sc_bare origin v1.2.3"
+sc_refuse "git push -o $sc_bare origin v1.2.3"
+sc_refuse "git push --repo=$sc_bare --repo=origin v1.2.3"
+# Force and its kin stay refused, scratch or not.
+sc_refuse "git push -f $sc_bare main"
+sc_refuse "git push --mirror $sc_bare"
+sc_refuse "git push $sc_bare +main"
+sc_refuse "git push --receive-pack=x $sc_bare v1"
+# A rewrite or a remote of that name in the git configuration could send the push to the network.
+sc_refuse "git -c url.https://github.com/acme/shop.pushInsteadOf=$sc_bare push $sc_bare v1.2.3"
+sc_refuse "git config --global url.https://github.com/acme/shop.insteadOf $sc_root"
+sc git config --global "url.https://github.com/acme/shop.pushInsteadOf" "$sc_bare"
+sc_refuse "git push $sc_bare v1.2.3"
+sc git config --global --unset "url.https://github.com/acme/shop.pushInsteadOf"
+sc git config --global "remote.$sc_bare.url" https://github.com/acme/shop.git
+sc_refuse "git push $sc_bare v1.2.3"
+sc git config --global --unset "remote.$sc_bare.url"
+sc_allow "git push $sc_bare v1.2.3"
+# A root reached through a link is no root.
+mv "$TOP/sc-cache/mroom/scratch" "$TOP/sc-real"
+ln -s "$TOP/sc-real" "$TOP/sc-cache/mroom/scratch"
+sc_refuse "git push $TOP/sc-cache/mroom/scratch/${sc_bare##*/} v1.2.3"
+sc_refuse "git push $TOP/sc-real/${sc_bare##*/} v1.2.3"
+
 # --- The plugin's hook ---------------------------------------------------------------------------
 plugin="$ROOT/plugin"
 count=$((count + 1))

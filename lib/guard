@@ -37,7 +37,7 @@
 #   - releasing and tagging: any non-GET `gh api` on .../releases (create and edit go through
 #     `gh release create/edit`, which a settings fragment makes ask), `gh release delete`, GraphQL release
 #     mutations, and pushing tags (`--tags`, `--follow-tags`, `refs/tags/...`, release-shaped names such as
-#     `v1.2` or `release-v1.2.3`);
+#     `v1.2` or `release-v1.2.3`), except to a `mroom scratch` repository (see below);
 #   - force-pushing: `git push` with -f, --force, --force-with-lease, --force-if-includes, --mirror or
 #     --prune (and their abbreviations), a `+` or pattern refspec, a push to main, master or release,
 #     --receive-pack, `git send-pack`, `git config` that makes a later push force, mirror or match, an alias
@@ -65,7 +65,12 @@
 # asks "is it merged?"), gh pr view/list/checks/create/edit/comment, `gh release create/edit` (an
 # `ask` rule prompts the developer), `git push` of a branch (an `ask` rule in base.json), `cp .env.example .env`
 # (.env is the destination), writes such as `echo X=y >> .env`, `git show HEAD:path` (committed content only),
-# and `bash script.sh` (a script file is not read here).
+# `bash script.sh` (a script file is not read here), and a `git push` of tags or of any branch (main too) to a
+# repository that `mroom scratch new --git|--bare` made, named by its literal absolute path or file:/// URL,
+# so tag and release flows can be tested offline (is_scratch_remote says what counts; force, mirror, --all,
+# --prune and + or pattern refspecs stay refused there too). Name the tag (`git push <path> v1.2.3`): the
+# settings fragment's deny rule on `git push*--tags*` matches by prefix and cannot tell a scratch remote
+# apart. That repository's own hooks run on the push, as a script file would.
 #
 # Contract (https://code.claude.com/docs/en/hooks): exit 2 blocks and its stderr is shown to the model, and
 # a block applies before permission rules, so it also beats an allow rule. Any other exit lets the command
@@ -122,6 +127,8 @@ command -v "$AWK" >/dev/null 2>&1 || warn_off "$AWK"
 
 HERE=$(cd "$(dirname "$(readlink -f "$SELF" 2>/dev/null || echo "$SELF")")" && pwd)
 TOKENIZER="$HERE/core/guard-tokenize.awk"
+# Where `mroom scratch` keeps throwaway folders: a push to one may carry tags (see is_scratch_remote).
+SCRATCH_LIB="$HERE/core/scratch.sh"
 MAX_BYTES=262144
 MAX_COMMANDS=3000
 # Words in one simple command (its name and arguments), and in the whole command. Far above an everyday
@@ -157,8 +164,11 @@ if [ "$mode" = hook ]; then
   tool=$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null) || exit 0
   [ "$tool" = "Bash" ] || exit 0
   command=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
+  # The session's folder, whose git configuration a scratch push is checked against (is_scratch_remote).
+  CWD=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null) || CWD=""
 else
   command=$2
+  CWD=$PWD
 fi
 [ -n "$command" ] || { [ "$mode" = check ] && echo allowed; exit 0; }
 
@@ -1042,6 +1052,8 @@ is_git_push_key() {
     # pushes to whatever branch the current one tracks, which can be main.
     push.default) case "$2" in matching | upstream | tracking) return 0 ;; esac ;; # $2 is already lower case
     branch.*.merge | branch.*.pushremote | remote.pushdefault) return 0 ;;
+    # A rewrite could turn a push to a scratch folder (which may carry tags) into one to a network remote.
+    url.*.insteadof | url.*.pushinsteadof) return 0 ;;
   esac
   return 1
 }
@@ -1073,10 +1085,57 @@ is_protected_ref() {
   return 1
 }
 
+# is_scratch_remote WORD: is this push's remote a folder inside `mroom scratch`'s root (lib/core/scratch.sh)?
+# Only a literal absolute path or file:/// URL counts: a word from a variable, a glob, a brace list, a `~`, a
+# percent escape (git decodes some), a relative path (the command may `cd` first) or a named remote does not.
+# The path must resolve, physically, strictly inside the root, and the root must be a real folder (not a
+# link), so a link or `..` out of it is not scratch. git tries PATH/.git before PATH: a .git there that is a
+# link or a gitfile (which can point anywhere) is not scratch either. Last, the session folder's git
+# configuration (with the global and system ones) may hold no url.*.insteadOf or pushInsteadOf, and no
+# remote named as the word itself (git looks a configured remote up by name before it takes the word as a
+# path), since either could send the push to a network remote. Configuration in another repository (after a
+# `cd`, or `git -C`) is not read here: like an alias already in a config file, it gets past the guard.
+is_scratch_remote() {
+  local r=$1 p root
+  case $r in
+    *[!A-Za-z0-9._/+@=,:-]*) return 1 ;;
+    file:///*) p=${r#file://} ;;
+    /*) p=$r ;;
+    *) return 1 ;;
+  esac
+  case $p in *:*) return 1 ;; esac
+  [ -f "$SCRATCH_LIB" ] || return 1
+  # shellcheck source=lib/core/scratch.sh
+  . "$SCRATCH_LIB"
+  root=$(scratch_real_root) || return 1
+  scratch_inside "$root" "$p" >/dev/null || return 1
+  if [ -L "$p/.git" ] || [ -f "$p/.git" ]; then return 1; fi
+  # The repository git will take: PATH/.git, else PATH. It must look like one (HEAD, objects, refs), or git
+  # would go on to PATH.git, which may be anything.
+  local repo=$p
+  if [ -e "$p/.git" ]; then
+    repo=$p/.git
+    scratch_inside "$root" "$repo" >/dev/null || return 1
+  fi
+  [ -f "$repo/HEAD" ] && [ -d "$repo/objects" ] && [ -d "$repo/refs" ] || return 1
+  command -v git >/dev/null 2>&1 || return 1
+  local dir=${CWD:-.} names key
+  [ -d "$dir" ] || dir=/
+  names=$(cd "$dir" 2>/dev/null && git config --name-only --get-regexp '^(url|remote)\.' 2>/dev/null) || true
+  while IFS= read -r key; do
+    case $key in
+      url.*.insteadof | url.*.pushinsteadof | "remote.$r".*) return 1 ;;
+    esac
+  done <<<"$names"
+  return 0
+}
+
 # git push [options] [remote [refspec...]]: any form of force (git takes a long option's unambiguous
-# abbreviation, so `--forc` is `--force`), a mirror, tags, or a push to a protected branch.
+# abbreviation, so `--forc` is `--force`), a mirror, tags, or a push to a protected branch. A push to a
+# `mroom scratch` folder (is_scratch_remote) may carry tags and update any branch; force, mirror, --all,
+# --prune, a command to receive it, a + refspec or a pattern stay refused there too.
 check_git_push() {
-  local a g c npos=0 src la i=0 n=$#
+  local a g c npos=0 src la i=0 n=$# remote="" scratch=""
   local -a w=("$@") lw
   # Lower case once for every word, and drop the positional parameters, so is_protected_ref (called per
   # refspec, twice for a colon-less one) neither forks `lc` nor copies the arguments on each call: a push
@@ -1085,6 +1144,35 @@ check_git_push() {
   lower_all "$@"
   lw=("${LOWERED[@]}")
   set --
+  # The remote, found first, since a tag option may come before it: the first word that is neither an option
+  # nor an option's value, or else the last --repo (git's own order: the argument beats --repo).
+  local repo=""
+  while [ "$i" -lt "$n" ]; do
+    a=${w[$i]}
+    i=$((i + 1))
+    case "$a" in
+      --no-*) ;;
+      --rep=* | --repo=*) repo=${a#*=} ;;
+      --rep | --repo) repo=${w[$i]:-}; i=$((i + 1)) ;;
+      --pu*=*) ;;
+      --pu*) i=$((i + 1)) ;;
+      --*) ;;
+      -*)
+        g=${a#-}
+        while [ -n "$g" ]; do
+          c=${g:0:1}
+          g=${g:1}
+          [ "$c" = o ] || continue
+          [ -n "$g" ] || i=$((i + 1)) # -o takes a value, glued or next
+          break
+        done
+        ;;
+      *) remote=$a; break ;;
+    esac
+  done
+  [ -n "$remote" ] || remote=$repo
+  i=0
+  if [ -n "$remote" ] && is_scratch_remote "$remote"; then scratch=1; fi
   while [ "$i" -lt "$n" ]; do
     a=${w[$i]}
     la=${lw[$i]}
@@ -1092,14 +1180,20 @@ check_git_push() {
     case "$a" in
       --no-*) continue ;;
       --for* | --m*) block "git push $a force-pushes"; return ;;
-      --ta* | --fol*) block "git push $a pushes tags, which can start a release"; return ;;
+      --ta* | --fol*)
+        [ -n "$scratch" ] && continue
+        block "git push $a pushes tags, which can start a release"; return
+        ;;
       --al* | --b*) block "git push $a pushes every branch, the default branch too"; return ;;
       --pr*) block "git push $a deletes remote branches"; return ;;
       --rec* | --ex*) block "git push $a runs a command of its choice to receive the push"; return ;;
-      # With --repo, every positional word is a refspec.
-      --repo=*) npos=1; continue ;;
-      --repo) i=$((i + 1)); npos=1; continue ;;
-      --push-option) i=$((i + 1)); continue ;;
+      # With --repo (or --rep: git takes a long option's unambiguous abbreviation), every positional word is
+      # a refspec.
+      --rep=* | --repo=*) npos=1; continue ;;
+      --rep | --repo) i=$((i + 1)); npos=1; continue ;;
+      # --push-option and its abbreviations (--pu, --pus, ...) take a value, glued or next.
+      --pu*=*) continue ;;
+      --pu*) i=$((i + 1)); continue ;;
       --*) continue ;;
       -*)
         g=${a#-}
@@ -1123,6 +1217,7 @@ check_git_push() {
       *"$DY"*) block "git push with a refspec from a variable cannot be checked"; return ;;
       ":") block "git push : is a matching push, which can update a protected branch"; return ;;
     esac
+    [ -n "$scratch" ] && continue # a branch or a tag in a scratch repository
     src=${a%%:*}
     # la is the word already lowered; its dst and src halves feed is_protected_ref without a fork. git
     # splits a refspec at its last colon, so the destination is everything after it (${la##*:}).
