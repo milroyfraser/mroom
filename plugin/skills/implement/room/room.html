@@ -783,7 +783,9 @@ html[data-winddown] body::before{background:
     const allAddressed = !open.length && !pendingActs.length;
     if (!cur && !on && (!list.length || allAddressed)) { box.hidden = true; return; }
     box.hidden = false;
-    if (on) {
+    /* The "Winding down · Paused: …" line is only for before the retrospective is read: once every
+       card is read it goes, and closing the retrospective ends the wind-down mood too. */
+    if (on && open.length) {
       const n = el("p", "wdnote", "Winding down" + (windDown.note ? " · " + String(windDown.note) : "") + (Array.isArray(windDown.paused) && windDown.paused.length ? " · Paused: " + windDown.paused.map(String).join("; ") : ""));
       box.append(n);
     }
@@ -814,9 +816,9 @@ html[data-winddown] body::before{background:
           cb.addEventListener("click", () => {
             if (!armed) { armed = true; cb.textContent = "Click again to close"; setTimeout(() => { if (armed) { armed = false; cb.textContent = "Close retrospective"; } }, 5000); return; }
             const at = new Date().toISOString(); const before = windDown;
-            windDown = Object.assign({}, windDown || {}, { retroClosedAt: at });
+            windDown = Object.assign({}, windDown || {}, { retroClosedAt: at, on: false });
             renderLearning();
-            db.doc("meta/winddown").update({ retroClosedAt: at }).catch(() => { windDown = before; learnErr = "Couldn't close the retrospective. Please try again."; renderLearning(); });
+            db.doc("meta/winddown").update({ retroClosedAt: at, on: false }).catch(() => { windDown = before; learnErr = "Couldn't close the retrospective. Please try again."; renderLearning(); });
           });
           end.append(cb);
         }

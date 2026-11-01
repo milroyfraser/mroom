@@ -98,7 +98,8 @@ can change a decision after the report is written, so never treat the report as 
 when every action item is done or declined.
 
 After the last card the page shows the report's link and a **Close retrospective** button (two
-clicks). Closing writes `meta/winddown.retroClosedAt` and hides the cards; then close the report in
+clicks). Closing writes `meta/winddown.retroClosedAt` and `on: false`: the cards and the wind-down mood go,
+and the day mood comes back. The "Winding down · Paused" line already goes once every card is read; then close the report in
 the tracker, or comment on it what is still in progress (give the developer the command when the
 write needs them). Confirmed items not done yet still get acted on.
 
