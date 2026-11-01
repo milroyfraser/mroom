@@ -540,6 +540,9 @@ that Claude Code reads; in a session they are `/mroom:<name>`.
 - **Rules in every skill:** an agent never merges, approves, deploys or releases; a person does.
   Tracker writes are only the state of the issue being worked and comments on it. A skill asks
   before it files an issue or a label, never touches production, and never reads a secret.
+- **Earlier work is the app's own:** `deliver`, `implement` and `fix-issue` resume only a pull
+  request whose branch is in the app's repository. A fork's pull request is never checked out or
+  run on the box, just as the QA workflows refuse it.
 - **Release asks twice:** once in the session, and again through the `ask` rule on
   `gh release create` in `settings/base.json`. It only ever drafts; publishing is a person's click.
 - **From `mroom.toml`:** the issue id and link (`issues.id_pattern`, `issues.url`), the started and

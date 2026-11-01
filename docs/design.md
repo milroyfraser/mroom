@@ -424,8 +424,9 @@ The workflow skills (`plugin/skills/`: refine, deliver, implement, fix-issue, re
 reach the trackers only through these two commands, never an API or an MCP server of their own. Each
 writes to the tracker only the state of the issue it works and comments on it, and asks a person before
 it files an issue. A design waiting for approval is a comment (`Design for review: <link>`, then
-`Design approved by <name>: <link>`), not a label. `tests/skills-test.sh` checks each skill against this
-contract.
+`Design approved by <name>: <link>`), not a label. A skill that resumes earlier work takes only a pull
+request whose branch is in the app's repository, never a fork's (8.1). `tests/skills-test.sh` checks each
+skill against this contract.
 
 `issue_find_by_marker` (`mroom tracker find <key>`) lists the issues whose description holds the
 persona's hidden marker for an alert, `<!-- mroom-alert key=<provider>:<numeric id> -->`, with
@@ -469,7 +470,9 @@ Invariants, each with a test:
    the box only in a QA site that runs as its own user (D17) and whose `.env` holds credentials for that
    environment's own resources. "PR code" here means code that reaches the box through qa-up; what a developer or
    agent runs in a worktree or on the dev site runs as `forge`, and is trusted as they are, with what `forge`
-   holds: on GitHub, only the agents' account (D22).
+   holds: on GitHub, only the agents' account (D22). A fork's pull request is never part of that: qa-plan and
+   qa-up refuse one, and a workflow skill resumes only a pull request whose branch is in the app's repository,
+   so no agent checks a fork's code out on the box.
 2. **QA provisioning keeps PR code away from every secret:**
    - `qa-plan` (`pull_request`, no secrets): scope the change with path rules, build the frontend from the PR with
      public values only, upload `dist/` as an artifact; qa-up scopes the change again itself, since nothing a job

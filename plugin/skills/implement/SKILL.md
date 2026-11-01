@@ -23,6 +23,8 @@ on without it.
 - Tests run only against a test database: the worktree's own, named by `tests.database_pattern`.
   Never point tests at a dev, QA or production database.
 - Never add the `qa` label. It is a person's switch.
+- Never check out, run or push to a pull request from a fork (`isCrossRepository` true). A fork's
+  code never runs on this box, not even in a QA environment.
 
 **No tracker.** Every `mroom tracker` call exits 3 when `issues.tracker` is `none`. Then skip the
 tracker step and put its note on the pull request instead: in the body, or with `gh pr comment`.
@@ -41,8 +43,10 @@ tracker step and put its note on the pull request instead: in the body, or with 
 
 ## 1. Branch
 
-**Resume first.** If the issue already has a PR (draft or ready), or a worktree with unpushed
-commits on its branch, continue that work. `/mroom:deliver`, "Resume", says how to find it.
+**Resume first.** If the issue already has a PR (draft or ready) whose branch is in this
+repository, or a worktree with unpushed commits on its branch, continue that work.
+`/mroom:deliver`, "Resume", says how to find it. A PR from a fork (`isCrossRepository` true) is
+never earlier work: leave it alone and name it in the report.
 
 The branch is the issue's `branch` from `mroom tracker get` (the tracker links it to the issue).
 With no tracker, use `<type>/<short-slug>`, such as `fix/empty-seat-override`.

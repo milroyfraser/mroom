@@ -32,7 +32,8 @@ run `/mroom:implement` on a task the person writes. Stop there.
 ## 2. Tag and show the list
 
 For each issue show: id, title, state, priority, a size guess (S, M or L), whether a branch or PR
-already exists (`gh pr list --head <branch> --state all`), and a **Design** value:
+already exists (`gh pr list --head <branch> --state all --json number,state,isCrossRepository,url`;
+a PR from a fork is not the issue's work), and a **Design** value:
 
 | Design | Meaning | Build behaviour |
 |---|---|---|
