@@ -2086,7 +2086,7 @@ The check is a backstop, not a gate. CI runs once a pull request is open, and by
   1. Create a GitHub environment named `privacy` (Settings → Environments). Under "Deployment branches and
      tags", choose "Selected branches and tags" and add only the default branch.
   2. Add the environment secret `MROOM_PRIVATE_WORDS`, with one entry per line. Paste it in the environment's
-     page, or run `gh secret set MROOM_PRIVATE_WORDS --env privacy < words.txt` from a file kept outside the
+     page, or pipe the list into `gh secret set MROOM_PRIVATE_WORDS --env privacy` from a file kept outside the
      repository.
 
   Until the secret is set, the job passes with a notice. The job holds the secret, so it never runs the pull
