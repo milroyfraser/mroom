@@ -90,9 +90,9 @@ agree() {
 # Load scaling. The timing limits below are for an idle machine; on a loaded one (a busy CI runner, a box
 # running other suites) everything runs slower, the guard included, and fixed limits fail for no fault of
 # the guard. So timing() first times a fixed workload (bash arithmetic and awk forks, the guard's own mix)
-# and stretches each limit by how much slower than IDLE_BASELINE it ran: never shrinking a limit, and never
-# past TIMING_CEILING, well under the 60-second hook timeout and the guard's own 30-second deadline. A real
-# slowdown (a quadratic path takes minutes) still fails however loaded the machine is.
+# and stretches each limit by how much slower than IDLE_BASELINE it ran: never shrinking a limit, never past
+# twice its base, and never past TIMING_CEILING, well under the 60-second hook timeout and the guard's own
+# 30-second deadline. A real slowdown (a quadratic path takes minutes) still fails however loaded the machine.
 IDLE_BASELINE=0.5
 TIMING_CEILING=25
 load_factor=1
@@ -104,23 +104,23 @@ baseline_work() {
   for i in $(seq 1 30); do awk 'BEGIN { exit }'; done
 }
 
-# measure_load: sets load_factor from the slowest of three runs of the workload (at least 1).
+# measure_load: sets load_factor from the median of three runs of the workload (at least 1), so one noisy
+# run does not stretch every limit.
 measure_load() {
-  local t worst=0 factor
+  local runs=() median factor
   TIMEFORMAT=%R
-  for _ in 1 2 3; do
-    t=$({ time baseline_work; } 2>&1)
-    worst=$(awk -v a="$worst" -v b="$t" 'BEGIN { print (b > a) ? b : a }')
-  done
-  factor=$(awk -v w="$worst" -v i="$IDLE_BASELINE" 'BEGIN { f = w / i; printf "%.2f", (f < 1) ? 1 : f }')
+  for _ in 1 2 3; do runs+=("$({ time baseline_work; } 2>&1)"); done
+  median=$(printf '%s\n' "${runs[@]}" | sort -n | sed -n 2p)
+  factor=$(awk -v w="$median" -v i="$IDLE_BASELINE" 'BEGIN { f = w / i; printf "%.2f", (f < 1) ? 1 : f }')
   # Load only ever raises the limits during a run: a quieter moment does not undo an earlier stretch.
   load_factor=$(awk -v a="$load_factor" -v b="$factor" 'BEGIN { print (b > a) ? b : a }')
-  echo "  load: the baseline workload took ${worst}s (${IDLE_BASELINE}s idle): limits x${load_factor}, at most ${TIMING_CEILING}s"
+  echo "  load: the baseline workload took ${median}s, the median of ${runs[*]} (${IDLE_BASELINE}s idle): limits x${load_factor}, at most twice each and ${TIMING_CEILING}s"
 }
 
-# scaled LIMIT: the limit for this machine's load, capped at TIMING_CEILING.
+# scaled LIMIT: the limit for this machine's load, capped at min(TIMING_CEILING, 2 x LIMIT).
 scaled() {
-  awk -v l="$1" -v f="$load_factor" -v c="$TIMING_CEILING" 'BEGIN { s = l * f; printf "%.2f", (s > c) ? c : s }'
+  awk -v l="$1" -v f="$load_factor" -v c="$TIMING_CEILING" \
+    'BEGIN { s = l * f; if (s > 2 * l) s = 2 * l; if (s > c) s = c; printf "%.2f", s }'
 }
 
 within() { awk -v e="$1" -v l="$2" 'BEGIN { exit !(e < l) }'; }
@@ -976,14 +976,27 @@ slow_guard() {
   fi
 }
 slow_guard
-# However loaded the machine, no limit passes the ceiling, well under the 60-second hook timeout.
+# However loaded the machine, no limit passes twice its base or the ceiling, well under the 60-second hook
+# timeout; an idle machine keeps the base limits.
+scale_case() { # scale_case FACTOR BASE WANT
+  count=$((count + 1))
+  local saved=$load_factor got
+  load_factor=$1 got=$(scaled "$2") load_factor=$saved
+  if [ "$got" != "$3" ]; then
+    echo "FAIL (at load x$1 a ${2}s limit scaled to ${got}s, want ${3}s)" >&2
+    failures=$((failures + 1))
+  fi
+}
+scale_case 1 4 4.00
+scale_case 1.5 4 6.00
+scale_case 1000 4 8.00
+scale_case 1000 8 16.00
+scale_case 1000 15 "$TIMING_CEILING.00"
 count=$((count + 1))
-saved_factor=$load_factor load_factor=1000
-if [ "$(scaled 4)" != "$TIMING_CEILING.00" ] || [ "$TIMING_CEILING" -ge 60 ]; then
-  echo "FAIL (a scaled limit passed the ${TIMING_CEILING}s ceiling: $(scaled 4)s)" >&2
+if [ "$TIMING_CEILING" -ge 30 ]; then
+  echo "FAIL (TIMING_CEILING ${TIMING_CEILING}s reaches the guard's 30-second deadline)" >&2
   failures=$((failures + 1))
 fi
-load_factor=$saved_factor
 
 # --- The subcommand, through bin/mroom -----------------------------------------------------------
 expect() { # expect <what> <want exit> <command...>

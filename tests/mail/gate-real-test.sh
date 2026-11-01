@@ -118,7 +118,11 @@ wait_ready() {
   for try in 1 2 3; do
     for _ in $(seq 1 80); do
       if ready; then
-        [ "$try" = 1 ] || echo "::warning::the mail units came up on try $try" >&2
+        case $try in
+          1) ;;
+          2) echo "::warning::the mail units came up only on try 2 of 3, after one restart" >&2 ;;
+          *) echo "::warning::the mail units came up only on the LAST try ($try of 3), after two restarts: one more slow start would fail this job; check the units' start-up" >&2 ;;
+        esac
         return 0
       fi
       sleep 0.25
