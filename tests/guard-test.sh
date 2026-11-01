@@ -771,6 +771,39 @@ EOF
   allow 'php artisan test --compact --parallel'
   allow 'pnpm test'
   allow '# just a comment mentioning gh pr merge'
+
+  # --- lower_all strips a trailing newline, like lower() ---------------------------------------
+  # A review approval whose field value ends in a newline must still be refused (lower_all must strip the
+  # trailing newline the tokeniser decoded, as $(lc ...) does in lower).
+  refuse "gh api repos/o/r/pulls/1/reviews -f \$'event=APPROVE\\n'"
+  refuse "gh api repos/o/r/pulls/1/reviews -F \$'event=approve\\n'"
+
+  # --- Push refspecs: case, the last colon, and a bare : ---------------------------------------
+  refuse 'git push origin feature:MAIN'
+  refuse 'git push origin V1.2.3'
+  refuse 'git push origin a:b:main'  # git splits at the last colon, so the destination is main
+  refuse 'git push origin :'          # a matching push, which can update main
+  refuse 'git push origin :main'
+  allow 'git push origin a:b:feature'
+  allow 'git push origin :feature'
+  refuse 'git -c push.default=MATCHING push'
+  refuse 'git config push.default MATCHING'
+
+  # --- A glob too complex to match safely is worst-cased, not run through bash's backtracker ----
+  refuse 'cat ~/.ss*[!Z]*[!Z]*[!Z]*[!Z]*[!Z]*[!Z]*[!Z]*[!Z]*[!Z]Z'
+  refuse 'find . -regex "(.*)*Z" -print0'  # a nested-quantifier regex is worst-cased too
+  # ...but ordinary ** path globs (adjacent stars collapse) and a few separated stars are matched normally
+  allow 'find . -path "src/**/*.ts" -exec cat {} ";"'
+  allow 'find . -path "build/**" -print0'
+  allow 'cat ~/.config/**/settings.json'
+  allow 'find . -regex ".*\.ts" -print0'
+
+  # --- A secret-valued BASH_ENV is still caught after restructuring the assignment handlers -----
+  refuse 'BASH_ENV=backend/.env bash script.sh'    # a leading assignment
+  refuse 'env BASH_ENV=backend/.env true'          # the env handler
+  refuse 'export BASH_ENV=backend/.env'            # the export handler
+  allow 'BASH_ENV=/tmp/rc.sh bash script.sh'       # not a secret file
+  allow 'export FOO=bar BAZ=qux'
 }
 
 # Time: a 64 KB command, allowed or refused, and the most simple commands it checks, are checked in a
@@ -800,6 +833,50 @@ timing() {
   for _ in $(seq 1 20); do wide+="cat${words:0:3980}; "; done
   fast 4 2 "$wide gh pr merge 1"
   fast 4 2 "git$(printf ' -c core.editor=true%.0s' $(seq 1 300)) status"
+  # Within-caps commands whose words each take a per-word path that lowers (a fork) and, before the fix,
+  # copied the positional parameters on every call: a push's refspecs (check_git_push, twice for a
+  # colon-less one), gh config get's flags, and gh api's fields. Ten simple commands, ~2000 upper-case
+  # words each, all inside every cap; before the fix each ran for minutes, past the hook timeout, so a
+  # refused command placed after it ran. They are allowed, and must be decided within the limit.
+  local seg uc=""
+  seg="git push origin$(printf ' A%.0s' $(seq 1 1990))"
+  for _ in $(seq 1 10); do uc+="$seg; "; done
+  fast 8 0 "$uc"
+  uc=""; seg="gh config get$(printf ' A%.0s' $(seq 1 1990))"
+  for _ in $(seq 1 10); do uc+="$seg; "; done
+  fast 8 0 "$uc"
+  uc=""; seg="gh api repos/o/r/issues$(printf ' -f A=A%.0s' $(seq 1 990))"
+  for _ in $(seq 1 10); do uc+="$seg; "; done
+  fast 8 0 "$uc"
+  # A pathological glob (many `*` segments) in one short argument must be decided fast: before the fix it
+  # ran bash's backtracking matcher, which a tiny command could hang on (there is no word cap on one
+  # argument). It is now worst-cased (refused) at once.
+  # shellcheck disable=SC2088 # a literal ~ on purpose: the guard parses it as the home directory
+  local redos="~/"; for _ in $(seq 1 20); do redos+='*[!Z]'; done; redos+="Z"
+  fast 4 2 "cat '$redos'"
+  # A reader argument that is a long run of newlines (which lower_all strips to match a short exact value)
+  # must be decided fast: the per-newline strip was quadratic and ran past the hook timeout.
+  local nlword; nlword=$(head -c 200000 /dev/zero | tr '\0' '\n'; printf x); nlword=${nlword%x}
+  fast 4 0 "cat '$nlword'"
+  # Many separated-star glob patterns in one command stay fast: the per-command budget worst-cases them
+  # after a bound, so total matcher work is capped.
+  local many_glob="find ."; for _ in $(seq 1 500); do many_glob+=" -iname '*[!Z]*[!Z]*Z'"; done
+  many_glob+=" -exec cat {} ';'"
+  fast 4 2 "$many_glob"
+  # The other per-word paths, within every cap: a git -c push.default per command, env and export
+  # assignments, and find -iname patterns. Each must be decided inside the limit.
+  uc=""; seg="git$(printf ' -c push.default=A%.0s' $(seq 1 660)) status"
+  for _ in $(seq 1 10); do uc+="$seg; "; done
+  fast 8 0 "$uc"
+  uc=""; seg="export$(printf ' ENV=A%.0s' $(seq 1 1990))"
+  for _ in $(seq 1 10); do uc+="$seg; "; done
+  fast 8 0 "$uc"
+  uc=""; seg="env$(printf ' ENV=A%.0s' $(seq 1 1980)) true"
+  for _ in $(seq 1 10); do uc+="$seg; "; done
+  fast 8 0 "$uc"
+  uc=""; seg="find .$(printf ' -iname A%.0s' $(seq 1 990))"
+  for _ in $(seq 1 10); do uc+="$seg; "; done
+  fast 8 0 "$uc"
 }
 
 awks=()
