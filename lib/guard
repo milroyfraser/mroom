@@ -73,17 +73,23 @@
 #
 # A broken guard must not brick every session: without jq or awk it allows and warns. A command it cannot
 # check (over 256 KB, over 3000 simple commands, over 2000 words in a simple command or 20,000 in all, over
-# 200 commands inside other commands, or one the tokeniser fails on) is refused instead.
+# 200 commands inside other commands, more than 128 interpreter or inline-code commands, or one the tokeniser
+# fails on) is refused instead.
 #
 # Time is part of the contract: a hook that runs past its timeout is non-blocking, so the command runs. The
 # plugin's hooks.json sets this hook's timeout to 60 seconds explicitly (Claude Code's default for a command
-# hook, written down so nobody lowers it by accident), and the checks stay linear and far inside it: no fork
-# per word (lower case is one `tr` per simple command at most, see lower_all), and the caps above bound the
-# rest. A fork per argument once let `cat x x x ...` with 100k words, then a merge, run past the timeout.
+# hook, written down so nobody lowers it by accident). The checks avoid a fork per word (lower case is one
+# `tr` per simple command at most, see lower_all) and the caps above bound each kind of work, but several of
+# them at their cap, or a path super-linear in the command's size, can still add up; so check_segment also
+# stops at a wall-clock DEADLINE (see DEADLINE), failing closed, so checking lasts at most DEADLINE plus one
+# simple command. A fork per argument once let `cat x x x ...` with 100k words, then a merge, run past it.
 #
 # Bash 3.2 compatible (macOS). Tests: tests/guard-test.sh. No `set -u`: bash 3.2 treats an empty
 # "${array[@]}" as unbound, and any exit other than 0 or 2 lets the command through.
 export LC_ALL=C
+# Start the wall-clock from here (bash's $SECONDS, used by the DEADLINE check): bash would otherwise import
+# SECONDS from the environment, where a large or negative value would disable or trip that check.
+SECONDS=0
 # extglob, set before any function is parsed, so `%%+($'\n')` strips a trailing newline run in one O(n)
 # step (the per-newline loop was quadratic) and a glob's star runs collapse in one step. No existing glob
 # pattern uses an extglob operator (?* + @ ! before a paren), so this changes nothing else.
@@ -128,6 +134,22 @@ WORDS=0
 # forks awk, so a command that hands hundreds of them on is refused rather than checked slowly.
 MAX_PARSES=200
 PARSES=0
+# The wall-clock stop that keeps the hook deciding before its timeout. Each cap above bounds one kind of work,
+# but several of them at their cap, or a path super-linear in the command's size (for example
+# check_graphql_text, which rescans the whole command for each `gh api graphql`), can still add up past the
+# timeout, after which the hook is non-blocking and the command runs unchecked. So check_segment, the one
+# entry every simple command (and every find -exec group) goes through, stops and fails closed once checking
+# has run this many seconds ($SECONDS is a bash builtin, no fork). The guarantee is then DEADLINE plus the
+# work of one more simple command (a single scan: well under a second on a fast host, a few seconds on a much
+# slower one), kept under hooks.json's 60s and far above any real command (which decides in under a second).
+# Overridable for tests and for an operator who sets a lower hook timeout; see the sanitiser below.
+DEADLINE=${MROOM_GUARD_DEADLINE:-30}
+# A plain one- or two-digit count of seconds, no leading zero (so never 0), and at most 45, which leaves room
+# for that last simple command's check before hooks.json's 60s timeout. Anything else — empty, non-numeric,
+# zero, or too many digits (which would overflow the `-ge` test and silently disable the deadline) — falls back
+# to the default.
+case $DEADLINE in '' | *[!0-9]* | 0* | ???*) DEADLINE=30 ;; esac
+[ "$DEADLINE" -le 45 ] || DEADLINE=30
 
 if [ "$mode" = hook ]; then
   command -v jq >/dev/null 2>&1 || warn_off jq
@@ -150,6 +172,14 @@ COMMANDS=0
 # rest are worst-cased, so total matcher work stays bounded (see glob_stars_over_cap).
 GLOB_SEEN=0
 GLOB_BUDGET=48
+# How many interpreter or inline-code commands (a `-c`/`-e`/`-r` program, a bare `node --version`, an awk
+# `system()`, a heredoc into an interpreter) this command has had check_code scan. Each scan forks a few times
+# to lower case and match, which is cheap once but a command could carry thousands within every other cap (a
+# run of `python -c ...;` separated by `;`), and the forks then add up past the hook timeout, which is a
+# bypass. Past this budget the rest are refused instead of scanned, so total check_code work stays bounded
+# (see check_code). The wall-clock DEADLINE is the catch-all; this is the faster, deterministic cut-off here.
+CODE_SEEN=0
+CODE_BUDGET=128
 RAW=$(printf '%s' "$command" | tr '[:upper:]' '[:lower:]')
 
 block() { [ -n "$BLOCKED" ] || BLOCKED=$1; }
@@ -336,6 +366,16 @@ mentions_forbidden() {
 
 check_code() {
   local what=$1 code=$2
+  # Bound the total scanning work: a command with thousands of interpreter or inline-code commands (a run of
+  # `python -c ...;`, `node --version;`, awk programs, heredocs into an interpreter) would otherwise fork its
+  # way past the hook timeout (a bypass), so past the budget each further one is refused unscanned. A command
+  # with more than CODE_BUDGET of them is pathological; blocking it matches the other "too many to check in
+  # time" caps, and is a faster, deterministic cut-off than the wall-clock DEADLINE for this common path.
+  CODE_SEEN=$((CODE_SEEN + 1))
+  if [ "$CODE_SEEN" -gt "$CODE_BUDGET" ]; then
+    block "the command has more than $CODE_BUDGET interpreter or inline-code commands, too many to check in time"
+    return
+  fi
   if mentions_secret "$code"; then
     block "$what names a secret file"
   elif mentions_forbidden "$code"; then
@@ -1120,6 +1160,13 @@ check_assignment() {
 check_segment() {
   local depth=$1 meta=$2 prev=$3
   shift 3
+  # The wall-clock stop (see DEADLINE), checked here because every simple command — through analyze's record
+  # loop, and through check_find's -exec loop, which does not go through analyze — passes through check_segment.
+  # So the longest span that cannot be interrupted is one check_segment, not a whole record of many -exec groups.
+  if [ "$SECONDS" -ge "$DEADLINE" ]; then
+    block "checking the command is taking too long (over ${DEADLINE}s), so it is refused rather than run unchecked past the hook timeout"
+    return
+  fi
   local -a words=()
   local a k base stdin="" stdin_kind="" stdin_file="" brace_list=0
   local -a raw=("$@") lraw=()
@@ -1688,6 +1735,9 @@ check_interpreter() {
 # analyze STRING DEPTH: tokenise STRING and check each simple command.
 analyze() {
   local s=$1 depth=$2 out rec prev="" status=0
+  # Already refused (BLOCKED is never cleared): stop at once rather than tokenise what is left, so unwinding
+  # after a block — the deadline's included — forks nothing more.
+  [ -n "$BLOCKED" ] && return
   [ "$depth" -le 8 ] || { block "the command nests shells too deeply to check"; return; }
   PARSES=$((PARSES + 1))
   [ "$PARSES" -le "$MAX_PARSES" ] || { block "the command holds more than $MAX_PARSES commands to check inside it, too many to check in time"; return; }

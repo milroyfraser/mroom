@@ -100,10 +100,20 @@ nmae = "x"
 [extra]
 thing = 1'
   run "$MROOM" config validate; expect_rc 0; expect_out_has "ok"
-  expect_err_has "warning: $T/mroom.toml: unknown key app.nmae (ignored); did you mean app.name?"
-  expect_err_has "unknown key extra.thing (ignored)"
+  expect_err_has "warning: $T/mroom.toml: unknown key \"app.nmae\" (ignored); did you mean app.name?"
+  expect_err_has "unknown key \"extra.thing\" (ignored)"
   # get stays quiet about unknown keys: a script reading many keys must not repeat the warning each time.
   run "$MROOM" config get app.name; expect_rc 0; expect_out "shop"; expect_err_empty
+}
+
+t_an_unknown_keys_name_reaches_the_terminal_escaped() {
+  toml '[app]
+name = "shop"
+"a\u001b[31mred\nwarning: forged" = 1'
+  run "$MROOM" config validate; expect_rc 0
+  expect_err_has 'unknown key "app.a\u001b[31mred\nwarning: forged" (ignored)'
+  expect_err_lacks $'\e'
+  expect_err_lacks $'\nwarning: forged'
 }
 
 t_get_errors_scoped_to_key() {
@@ -481,7 +491,7 @@ name = "shop"
 [app.build]
 frontend_env = { "VITE.KEY" = "env:KEY" }'
   run "$MROOM" config validate; expect_rc 0
-  expect_err_has "unknown key extra.thing (ignored)"; expect_err_has "unknown key app.x.y (ignored)"
+  expect_err_has "unknown key \"extra.thing\" (ignored)"; expect_err_has "unknown key \"app.x.y\" (ignored)"
   run "$MROOM" config get app.build.frontend_env; expect_rc 0; expect_out "VITE.KEY=env:KEY"
 }
 
@@ -531,6 +541,7 @@ t_keys_and_help() {
   run "$MROOM" config frob; expect_rc 2; expect_err_has "unknown command frob"
 }
 
+test_case unknown-key-escaped t_an_unknown_keys_name_reaches_the_terminal_escaped
 test_case examples-read t_examples_read
 test_case examples-validate t_examples_validate
 test_case walk-up t_walk_up

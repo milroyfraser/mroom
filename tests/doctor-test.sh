@@ -238,7 +238,7 @@ t_an_invalid_mroom_toml_fails_and_stops_the_app_checks() {
   doctor_app
   expect_rc 0
   expect_out_has "warn  config: "
-  expect_out_has "unknown key persona.nmae"
+  expect_out_has "unknown key \"persona.nmae\""
 }
 
 t_qa_off_skips_the_qa_checks() {
@@ -337,7 +337,7 @@ t_the_gate_keys_are_restricted_and_forced_to_a_role() {
   rm "$HOME/.ssh/authorized_keys"
   doctor_app
   expect_rc 1
-  expect_out_has "fail  gate-keys: no key in ~/.ssh/authorized_keys is forced to mroom gate provision"
+  expect_out_has "fail  gate-keys: no key in ~/.ssh/authorized_keys or authorized_keys2 is forced to mroom gate provision"
   expect_out_has "warn  gate-keys: no key is forced to mroom gate template"
   {
     printf 'command="%s gate provision" ssh-ed25519 AAAAC3a qa-up\n' "$MROOM"
@@ -353,6 +353,124 @@ t_the_gate_keys_are_restricted_and_forced_to_a_role() {
   expect_out_has "fail  gate-keys: a key in ~/.ssh/authorized_keys is forced to \"$MROOM gate shell\""
   expect_out_has "warn  gate-keys: no key is forced to mroom gate browser"
   expect_out_lacks "AAAAC3"
+}
+
+# gate_line <role> [<key>]: the README's line for a role's key (its own key unless one is named).
+gate_line() { printf 'restrict,command="%s gate %s" ssh-ed25519 AAAAC3%s mroom-qa-%s\n' "$MROOM" "$1" "${2:-$1}" "$1"; }
+
+# authorized_keys as sshd reads it (OpenSSH's auth-options.c and auth2-pubkeyfile.c): the options apply in order,
+# so a word after restrict gives back what restrict took; a word in a quoted value is no option; options after the
+# key are its comment; and of the lines that hold a key, in authorized_keys and then authorized_keys2, the first
+# decides what the key may do.
+t_the_gate_keys_are_read_as_sshd_reads_them() {
+  world
+  local word
+  # A word after restrict turns back on what restrict turned off, whatever its case.
+  for word in port-forwarding Agent-Forwarding X11-FORWARDING pty user-rc; do
+    {
+      printf 'restrict,%s,command="%s gate provision" ssh-ed25519 AAAAC3provision mroom-qa-up\n' "$word" "$MROOM"
+      gate_line template
+    } >"$HOME/.ssh/authorized_keys"
+    doctor_app
+    expect_rc 1
+    expect_out_has "fail  gate-keys: the provision key in ~/.ssh/authorized_keys turns ${word,,} back on after restrict"
+  done
+  # restrict in another option's quoted value is no option, so the key has no restriction at all; \" ends no value.
+  for word in 'from="*,restrict,*"' 'environment="A=\",restrict,\""'; do
+    {
+      printf 'command="%s gate provision",%s ssh-ed25519 AAAAC3provision mroom-qa-up\n' "$MROOM" "$word"
+      gate_line template
+    } >"$HOME/.ssh/authorized_keys"
+    doctor_app
+    expect_rc 1
+    expect_out_has "fail  gate-keys: the provision key in ~/.ssh/authorized_keys is not restrict-ed"
+  done
+  # Options after the key are its comment to sshd, so that key gets no forced command at all, with mroom's path in
+  # the command or without one.
+  for word in "$MROOM" mroom; do
+    {
+      gate_line provision
+      printf 'ssh-ed25519 AAAAC3template mroom-qa-template restrict,command="%s gate template"\n' "$word"
+    } >"$HOME/.ssh/authorized_keys"
+    doctor_app
+    expect_rc 1
+    expect_out_has "fail  gate-keys: ~/.ssh/authorized_keys:2 names mroom gate after its key"
+  done
+  # Two command= options make sshd refuse the line, so its key gets nothing from it.
+  {
+    printf 'restrict,command="%s gate shell",command="%s gate provision" ssh-ed25519 AAAAC3provision up\n' "$MROOM" "$MROOM"
+    gate_line template
+  } >"$HOME/.ssh/authorized_keys"
+  doctor_app
+  expect_rc 1
+  expect_out_has "fail  gate-keys: sshd refuses ~/.ssh/authorized_keys:1, which has two command= options"
+  expect_out_has "fail  gate-keys: no key in ~/.ssh/authorized_keys or authorized_keys2 is forced to mroom gate provision"
+  # A copy of the key on a line of its own, as a host's key screen stores it: sshd takes the first line holding the
+  # key that it accepts, so the copy gives it a shell.
+  {
+    printf 'ssh-ed25519 AAAAC3provision a-copy\n'
+    gate_line provision
+    gate_line template
+  } >"$HOME/.ssh/authorized_keys"
+  doctor_app
+  expect_rc 1
+  expect_out_has "fail  gate-keys: the provision key is on 2 lines (~/.ssh/authorized_keys:1, ~/.ssh/authorized_keys:2)"
+  # The same with CRs after the key, or under a key type that is a signature's name, which sshd reads as the key's.
+  for word in 'ssh-ed25519 AAAAC3provision\r\r' 'rsa-sha2-256 AAAAC3provision c' 'rsa-sha2-512 AAAAC3provision c' \
+    'webauthn-sk-ecdsa-sha2-nistp256@openssh.com AAAAC3provision c'; do
+    {
+      printf '%b\n' "$word"
+      gate_line provision
+      gate_line template
+    } >"$HOME/.ssh/authorized_keys"
+    doctor_app
+    expect_rc 1
+    expect_out_has "fail  gate-keys: the provision key is on 2 lines (~/.ssh/authorized_keys:1, ~/.ssh/authorized_keys:2)"
+  done
+  # A copy on the last line counts too, with no newline after it, since an edit can move it up.
+  {
+    gate_line provision
+    gate_line template
+    printf 'ssh-ed25519 AAAAC3provision a-copy'
+  } >"$HOME/.ssh/authorized_keys"
+  doctor_app
+  expect_rc 1
+  expect_out_has "fail  gate-keys: the provision key is on 2 lines (~/.ssh/authorized_keys:1, ~/.ssh/authorized_keys:3)"
+  # One key for two roles: the first line decides, so the browser job's key would provision.
+  {
+    gate_line provision
+    gate_line browser provision
+    gate_line template
+  } >"$HOME/.ssh/authorized_keys"
+  doctor_app
+  expect_rc 1
+  expect_out_has "fail  gate-keys: the provision key is on 2 lines (~/.ssh/authorized_keys:1, ~/.ssh/authorized_keys:2)"
+  expect_out_lacks "AAAAC3"
+  # sshd reads authorized_keys2 after authorized_keys, so a copy there counts as well; a blank line before it counts
+  # in its line number.
+  { gate_line provision; gate_line template; } >"$HOME/.ssh/authorized_keys"
+  printf '\nssh-ed25519 AAAAC3provision a-copy\n' >"$HOME/.ssh/authorized_keys2"
+  doctor_app
+  expect_rc 1
+  expect_out_has "fail  gate-keys: the provision key is on 2 lines (~/.ssh/authorized_keys:1, ~/.ssh/authorized_keys2:2)"
+  rm "$HOME/.ssh/authorized_keys2"
+  # What sshd reads as restricted passes: blanks before the options, two spaces or a tab between them and the key, a
+  # quoted option before command=, restrict in capitals, a word before restrict, restrict again, and a word turned
+  # off again, once or twice. A comment, after blanks or holding a gate key, is no line, so its key is no copy.
+  {
+    printf '  restrict,pty,pty,no-pty,from="10.0.0.0/8,192.168.0.0/16",command="%s gate provision"  ssh-ed25519 AAAAC3provision mroom-qa-up\n' "$MROOM"
+    printf 'port-forwarding,RESTRICT,command="%s gate template"\tssh-ed25519 AAAAC3template mroom-qa-template\n' "$MROOM"
+    printf 'restrict,pty,restrict,port-forwarding,no-port-forwarding,command="%s gate browser" ssh-ed25519 AAAAC3browser b\n' "$MROOM"
+    printf '\t# command="%s gate browser" ssh-ed25519 AAAAC3provision an old line\n' "$MROOM"
+    printf '# ssh-ed25519 AAAAC3provision an old copy\n'
+    printf 'ssh-ed25519 AAAAC3person a-person\n'
+  } >"$HOME/.ssh/authorized_keys"
+  doctor_app
+  expect_rc 0
+  expect_out_has "ok    gate-keys: a key is forced to mroom gate provision"
+  expect_out_has "ok    gate-keys: a key is forced to mroom gate template"
+  expect_out_has "ok    gate-keys: a key is forced to mroom gate browser"
+  expect_out_lacks "fail  gate-keys"
 }
 
 t_the_gate_secret_files_are_private_and_complete() {
@@ -564,6 +682,7 @@ test_case other-pins t_every_other_use_of_mroom_is_pinned_too
 test_case names t_box_env_must_name_what_mroom_toml_names
 test_case db-read t_the_gate_allowlist_must_be_the_app_allowlist
 test_case gate-keys t_the_gate_keys_are_restricted_and_forced_to_a_role
+test_case gate-keys-as-sshd t_the_gate_keys_are_read_as_sshd_reads_them
 test_case secrets t_the_gate_secret_files_are_private_and_complete
 test_case postgres t_postgres_is_checked_as_the_gate_sees_it
 test_case redis t_redis_is_checked_as_the_gate_sees_it
