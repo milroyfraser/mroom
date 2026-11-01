@@ -310,7 +310,7 @@ The `browser` role reads and changes nothing:
 
 | Operation | What it does |
 |---|---|
-| `db-read <N> <table> <column>[,<column>...] [<column>=<value>...] [asc:\|desc:<column>] [limit:<n>]` | at most 100 rows (`limit:` fewer) of one table in the environment's database, as JSON, read as the environment's read-only role; every column it names, filters on (at most 5, each an exact match on the column's text) or orders by must be in `MROOM_QA_DB_READ` |
+| `db-read <N> <table> <column>... [<column>=<value>...] [asc:\|desc:<column>] [limit:<n>]` | at most 100 rows (`limit:` fewer) of one table in the environment's database, as JSON, read as the environment's read-only role; every column it names, filters on (at most 5, each an exact match on the column's text) or orders by must be in `MROOM_QA_DB_READ` |
 | `signin-code`, `mail-read`, `env-sha` | as above |
 
 The `template` role has one:

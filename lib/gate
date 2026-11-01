@@ -58,7 +58,7 @@
 #                                      /proc/meminfo, and reserve_mb, what the box keeps for all but QA
 #                                      (MROOM_QA_RESERVE_MB, 4096 by default); qa-up sizes its slots from them
 #
-#   browser     db-read <N> <table> <column>[,<column>...] [<column>=<value>...] [asc:|desc:<column>] [limit:<n>]
+#   browser     db-read <N> <table> <column>... [<column>=<value>...] [asc:|desc:<column>] [limit:<n>]
 #                                      at most 100 rows of one table of the environment's database, as JSON, read
 #                                      as its read-only role (D18) and only from the table.column entries
 #                                      MROOM_QA_DB_READ lists, filtered and ordered by those alone
@@ -523,26 +523,36 @@ db_read_column() {
 }
 
 cmd_db_read() {
-  if [ "${#words[@]}" -lt 4 ] || [ "${#words[@]}" -gt 11 ]; then
-    refuse "db-read takes <N> <table> <columns>, then at most 5 filters, an order and a limit"
+  if [ "${#words[@]}" -lt 4 ] || [ "${#words[@]}" -gt 42 ]; then
+    refuse "db-read takes <N> <table> and at most 32 columns, then at most 5 filters, an order and a limit"
   fi
   env_number "${words[1]}"
   local n="${words[1]}" table="${words[2]}" db="${app}_qa_${words[1]}" reader="${app}_qa_${words[1]}_read"
-  local column columns=() seen=" " select="" where="" order="" limit="$DB_READ_MAX_ROWS" word value filters=0
+  local column columns=0 seen=" " select="" where="" order="" limit="$DB_READ_MAX_ROWS" word value filters=0
   local sets="" secret rows code why
   DB_READ_LIST="${BOX[MROOM_QA_DB_READ]:-}"
   [ -n "$DB_READ_LIST" ] || refuse "db-read: MROOM_QA_DB_READ in box.env lists no table.column a check may read (design 8.6)"
   [[ "$table" =~ $PG_IDENT_RE ]] || refuse "db-read: the table's name is not [a-z_][a-z0-9_]{0,62}"
-  [[ "${words[3]}" =~ ^[a-z_][a-z0-9_]{0,62}(,[a-z_][a-z0-9_]{0,62}){0,31}$ ]] \
-    || refuse "db-read: the columns are not names separated by commas (32 at most)"
-  IFS=, read -r -a columns <<<"${words[3]}"
-  for column in "${columns[@]}"; do
-    db_read_column "$table" "$column"
-    [[ "$seen" != *" $column "* ]] || refuse "db-read: $column is named twice"
-    seen+="$column "
-    select+="${select:+, }\"$column\""
+  # A word is a column to read, a <column>=<value> filter, an asc: or desc: order, or a limit:.
+  for word in "${words[@]:3}"; do
+    case "$word" in
+      *=* | *:*) ;;
+      *)
+        db_read_column "$table" "$word"
+        [[ "$seen" != *" $word "* ]] || refuse "db-read: $word is named twice"
+        seen+="$word "
+        select+="${select:+, }\"$word\""
+        columns=$((columns + 1))
+        ;;
+    esac
   done
-  for word in "${words[@]:4}"; do
+  [ "$columns" -gt 0 ] || refuse "db-read: name at least one column to read"
+  [ "$columns" -le 32 ] || refuse "db-read: 32 columns at most"
+  for word in "${words[@]:3}"; do
+    case "$word" in
+      *=* | *:*) ;;
+      *) continue ;;
+    esac
     case "$word" in
       asc:* | desc:*)
         [ -z "$order" ] || refuse "db-read: one order at most"
@@ -567,7 +577,7 @@ cmd_db_read() {
         sets+="\\set v$filters '$value'"$'\n'
         where+="${where:+ AND }(\"$column\")::pg_catalog.text OPERATOR(pg_catalog.=) :'v$filters'"
         ;;
-      *) refuse "db-read: an argument is neither <column>=<value>, asc:<column>, desc:<column> nor limit:<n>" ;;
+      *) refuse "db-read: an argument is neither a column, <column>=<value>, asc:<column>, desc:<column> nor limit:<n>" ;;
     esac
   done
   need jq
@@ -602,7 +612,7 @@ SQL
   ((${#rows} <= DB_READ_MAX_BYTES)) || fail "db-read $n: the rows are larger than $DB_READ_MAX_BYTES bytes; ask for fewer columns or rows"
   rows="$(jq -c 'if type == "array" then . elif . == null then [] else error("not rows") end' <<<"${rows:-null}" 2>/dev/null)" \
     || fail "db-read $n: Postgres gave no rows as JSON"
-  gate_log "db-read $n: $table, ${#columns[@]} column(s), $filters filter(s)"
+  gate_log "db-read $n: $table, $columns column(s), $filters filter(s)"
   printf '%s\n' "$rows"
 }
 

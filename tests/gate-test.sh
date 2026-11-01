@@ -823,7 +823,7 @@ t_db_read_reads_listed_columns_as_the_read_only_role() {
   reader="$(sed -n 's/^DB_READ_PASSWORD=//p' <<<"$(kept 12)")"
   : >"$T/psql.log"
   printf '[{"id":1,"email":"ada@shop.test"}, \n {"id":2,"email":"ada@shop.test"}]\n' >"$T/pg/rows"
-  gate browser "db-read 12 users id,email email=ada@shop.test desc:created_at limit:5"
+  gate browser "db-read 12 users id email email=ada@shop.test desc:created_at limit:5"
   expect_rc 0; expect_out '[{"id":1,"email":"ada@shop.test"},{"id":2,"email":"ada@shop.test"}]'
   log="$(sql)"
   expect_true "it did not read as the read-only role, in the environment's database, without the service file" has "$log" \
@@ -841,22 +841,22 @@ t_db_read_reads_listed_columns_as_the_read_only_role() {
 t_db_read_refuses_what_the_list_does_not_name() {
   world; reads "users.id users.email notes.body"
   local c
-  for c in "db-read 12 users password" "db-read 12 users id,password" "db-read 12 users id password=x" \
+  for c in "db-read 12 users password" "db-read 12 users id password" "db-read 12 users id password=x" \
     "db-read 12 users id asc:password" "db-read 12 sessions id" "db-read 12 notes id"; do
     gate browser "$c"; expect_rc 1; expect_err_has "is not in MROOM_QA_DB_READ"
   done
   gate browser "db-read 12 public.users id"; expect_rc 1; expect_err_has "the table's name is not"
   gate browser "db-read 12 Users id"; expect_rc 1; expect_err_has "the table's name is not"
-  gate browser "db-read 12 users id,,email"; expect_rc 1; expect_err_has "the columns are not names separated by commas"
-  gate browser "db-read 12 users id,email,id"; expect_rc 1; expect_err_has "id is named twice"
+  gate browser "db-read 12 users email=x"; expect_rc 1; expect_err_has "name at least one column to read"
+  gate browser "db-read 12 users id email id"; expect_rc 1; expect_err_has "id is named twice"
   gate browser "db-read 12 users id asc:id desc:email"; expect_rc 1; expect_err_has "one order at most"
   for c in limit:0 limit:101 limit:01 limit:x; do
     gate browser "db-read 12 users id $c"; expect_rc 1; expect_err_has "limit: takes 1 to 100"
   done
-  gate browser "db-read 12 users id email"; expect_rc 1; expect_err_has "an argument is neither"
+  gate browser "db-read 12 users id foo:bar"; expect_rc 1; expect_err_has "an argument is neither"
   gate browser "db-read 12 users id id=1 id=2 id=3 id=4 id=5 id=6"; expect_rc 1; expect_err_has "5 filters at most"
   gate browser "db-read 12 users id email=$(printf 'a%.0s' $(seq 257))"; expect_rc 1; expect_err_has "longer than 256"
-  gate browser "db-read 12 users"; expect_rc 1; expect_err_has "db-read takes <N> <table> <columns>"
+  gate browser "db-read 12 users"; expect_rc 1; expect_err_has "db-read takes <N> <table> and at most 32 columns"
   gate browser "db-read x users id"; expect_rc 1; expect_err_has "is not an environment number"
   reads ""
   gate browser "db-read 12 users id"; expect_rc 1; expect_err_has "MROOM_QA_DB_READ in box.env lists no table.column"

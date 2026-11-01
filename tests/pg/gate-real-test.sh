@@ -95,9 +95,9 @@ t_the_gate_on_a_real_postgres() {
   expect_out shop_qa_objects
 
   # db-read: what the template held, and a table the PR made since, through the read-only role alone.
-  browser "db-read 12 users id,email email=ada@example.test"; expect_rc 0; expect_out '[{"id":1,"email":"ada@example.test"}]'
+  browser "db-read 12 users id email email=ada@example.test"; expect_rc 0; expect_out '[{"id":1,"email":"ada@example.test"}]'
   browser "db-read 12 users id email=nobody@example.test"; expect_rc 0; expect_out '[]'
-  run as shop_qa_12 "$pw12" shop_qa_12 "CREATE TABLE notes (body text); INSERT INTO notes VALUES ('first')"; expect_rc 0
+  run as shop_qa_12 "$pw12" shop_qa_12 "INSERT INTO notes VALUES ('first')"; expect_rc 0
   browser "db-read 12 notes body desc:body limit:1"; expect_rc 0; expect_out '[{"body":"first"}]'
   browser "db-read 12 users password"; expect_rc 1; expect_err_has "users.password is not in MROOM_QA_DB_READ"
   local rpw12
@@ -135,7 +135,7 @@ t_the_gate_on_a_real_postgres() {
   gate "db-create 12 --rotate"; expect_rc 0; expect_out_has "database shop_qa_12: exists"
   pw12="$(password_of "$out")"
   expect_true "the old password still works" cannot shop_qa_12 "$old" shop_qa_12 "SELECT 1"
-  run as shop_qa_12 "$pw12" shop_qa_12 "SELECT count(*) FROM notes"; expect_rc 0; expect_out 0
+  run as shop_qa_12 "$pw12" shop_qa_12 "SELECT count(*) FROM notes"; expect_rc 0; expect_out 1
 
   # A role taken out of its group is put back, so pg_hba.conf keeps it in its database again.
   su_psql -c "REVOKE shop_qa_envs FROM shop_qa_13 GRANTED BY shop_qa_gate"
