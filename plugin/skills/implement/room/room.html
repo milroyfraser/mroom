@@ -187,7 +187,7 @@ div.invopt{cursor:default}
    for real failures only. */
 .focus{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:10px;padding:16px 18px;display:grid;gap:14px;min-width:0}
 .focus > div{min-width:0}
-.nextstep{display:grid;gap:6px;background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--wait1);border-radius:10px;padding:12px 16px;margin-block:4px 14px;min-width:0}
+.nextstep{display:grid;gap:6px;background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:10px;padding:12px 16px;margin-block:4px 14px;min-width:0}
 .nextstep .nslabel{font:600 11px/1.2 var(--body);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .nextstep .nstitle{font:600 17px/1.3 var(--display);text-wrap:balance}
 .nextstep .nstext{margin:0;color:var(--ink);max-width:70ch}
@@ -222,9 +222,10 @@ div.invopt{cursor:default}
 .fwtab{display:inline-flex;align-items:center;gap:6px;font:600 12.5px var(--body);color:var(--muted);background:transparent;border:0;border-bottom:2px solid transparent;padding:8px 10px;cursor:pointer;white-space:nowrap;margin-bottom:-1px}
 .fwtab.done{color:var(--ok)}
 .fwtab.now{color:var(--accent)}
-/* The current step's tab header blinks, so the step in play is easy to spot. */
+/* The current step's tab header blinks three times when drawn, then keeps an underline, so the step in play
+   stands out without moving for long. */
 @keyframes fwnow{0%,100%{opacity:1}50%{opacity:.3}}
-.fwtab.now{animation:fwnow 1.4s ease-in-out infinite}
+.fwtab.now{animation:fwnow 1.4s ease-in-out 3;text-decoration:underline;text-underline-offset:5px}
 @media (prefers-reduced-motion:reduce){.fwtab.now{animation:none;text-decoration:underline}}
 .fwtab.todo{opacity:.55}
 .fwtab[aria-selected="true"]{border-bottom-color:currentColor}
@@ -240,7 +241,7 @@ div.invopt{cursor:default}
 .fcklabel{font:700 11.5px/1.2 var(--body);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-right:2px}
 .fckchip{display:inline-flex;align-items:center;gap:4px;font:600 12px/1 var(--body);color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:3px 8px}
 .fckchip.success{color:var(--ok)}
-.fckchip.failure,.fckchip.cancelled{color:var(--alarm)}
+.fckchip.failure{color:var(--alarm)}
 .fckchip.pending,.fckchip.in_progress{color:var(--warn)}
 .fckat{font:12px var(--body);color:var(--muted)}
 .fckdet[open] .fcklist{margin-top:8px}
@@ -249,9 +250,9 @@ div.invopt{cursor:default}
 .fckname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
 .fckicon{font:700 12px/1 var(--mono);width:14px;flex:none;text-align:center;color:var(--muted)}
 .fck.success .fckicon{color:var(--ok)}
-.fck.failure .fckicon,.fck.cancelled .fckicon{color:var(--alarm)}
+.fck.failure .fckicon{color:var(--alarm)}
 .fck.pending .fckicon,.fck.in_progress .fckicon{color:var(--warn)}
-.fck.skipped .fckname{color:var(--muted)}
+.fck.skipped .fckname,.fck.cancelled .fckname{color:var(--muted)}
 .fround{margin:0;padding-left:20px;display:grid;gap:4px;font-size:13px}
 .fround li{display:flex;flex-wrap:wrap;gap:6px;align-items:baseline}
 .fround .fsum{font-weight:400;min-width:0}
@@ -361,7 +362,7 @@ li.item{background:var(--surface);border:1px solid var(--line);border-radius:10p
 .checks.running{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
 .checks.red{color:var(--alarm);background:var(--now-soft);border-color:var(--alarm)}
 .checks.behind{color:var(--decide);background:var(--decide-soft)}
-@media (prefers-reduced-motion:no-preference){@keyframes ckpulse{50%{opacity:.35}}.checks.running .ckicon{animation:ckpulse 1.2s ease-in-out infinite}}
+@media (prefers-reduced-motion:no-preference){@keyframes ckpulse{50%{opacity:.35}}.checks.running .ckicon{animation:ckpulse 1.2s ease-in-out 3}}
 li.item.next-up{border-color:color-mix(in srgb,var(--accent) 45%,var(--line))}
 .na-label{font:700 11.5px/1.2 var(--body);letter-spacing:.06em;text-transform:uppercase;color:var(--accent)}
 .ibody{display:grid;gap:6px;min-width:0}
@@ -440,6 +441,7 @@ li.row:first-child{border-top:0}
 .mood{flex:none;display:grid;justify-items:start;gap:3px;width:max-content;max-width:calc(100vw - 32px);border:1px solid var(--line);border-radius:999px;padding:6px 12px;background:var(--surface);cursor:pointer;font:inherit;color:inherit;text-align:left}
 .says{display:flex;align-items:center;gap:6px;font:700 11.5px/1.2 var(--body);letter-spacing:.05em;text-transform:uppercase;color:var(--muted);white-space:nowrap}
 .light{width:9px;height:9px;border-radius:50%;background:var(--line);flex:none}
+.alertdot{width:8px;height:8px;border-radius:50%;background:var(--alarm);flex:none}
 .mood[data-mood="fire"] .says{color:var(--ink)}
 .mood[data-mood="fire"] .light{background:var(--now)}
 .mood[data-mood="cooking"] .says{color:var(--accent)}
@@ -448,13 +450,13 @@ li.row:first-child{border-top:0}
 .mood[data-mood="waiting"] .light{background:var(--decide)}
 .mood[data-mood="clear"] .says{color:var(--ok)}
 .mood[data-mood="clear"] .light{background:var(--ok)}
-@media (prefers-reduced-motion:no-preference){@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:.15}}.mood[data-mood="fire"] .light{animation:blink 1s steps(1) infinite}}
+@media (prefers-reduced-motion:no-preference){@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:.15}}.mood[data-mood="fire"] .light{animation:blink 1s steps(1) 3}}
 footer{font-size:11px;line-height:1.4;color:var(--muted);display:flex;flex-wrap:nowrap;justify-content:space-between;align-items:baseline;gap:16px;white-space:nowrap}
 footer > span{min-width:0;overflow:hidden;text-overflow:ellipsis}
 footer > .copy{flex:none}
 footer a{color:inherit}
 @media (max-width:480px){li.item,.focus{padding:12px 13px}.cmd{flex-direction:column}li.row{padding:9px 11px;gap:8px}.row .rt{max-width:60%}.decision{padding:10px 12px}}
-/* Page background: a slow aurora in the progress bar's colours (accent to ok), with a faint dot grid. */
+/* Page background: a still aurora in the progress bar's colours (accent to ok), with a faint dot grid. */
 html{background:var(--bg)}
 body{position:relative;isolation:isolate;min-height:100vh}
 body::before,body::after{content:"";position:fixed;inset:-20vmax;z-index:-1;pointer-events:none}
@@ -465,10 +467,6 @@ body::before{background:
   filter:blur(40px) saturate(1.1);opacity:.9}
 body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink) 9%,transparent) 1px,transparent 1.2px);background-size:22px 22px;
   -webkit-mask-image:radial-gradient(ellipse at 50% 0%,#000 30%,transparent 75%);mask-image:radial-gradient(ellipse at 50% 0%,#000 30%,transparent 75%)}
-@media (prefers-reduced-motion:no-preference){
-  @keyframes aurora{0%{transform:translate3d(0,0,0) rotate(0deg) scale(1)}33%{transform:translate3d(4vmax,-3vmax,0) rotate(8deg) scale(1.08)}66%{transform:translate3d(-3vmax,3vmax,0) rotate(-6deg) scale(.96)}100%{transform:translate3d(0,0,0) rotate(0deg) scale(1)}}
-  body::before{animation:aurora 28s ease-in-out infinite;will-change:transform}
-}
 /* Plans tab footer: what each row mark means. */
 .legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin:4px 0 0;font-size:12.5px;color:var(--muted)}
 .legend .mark{display:inline-block;width:1.1em;text-align:center;font-weight:700}
@@ -488,8 +486,8 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
 /* A card whose checks are running, or whose branch is behind main, pulses its left border. */
 @keyframes cardpulse{0%,100%{border-left-color:var(--accent)}50%{border-left-color:color-mix(in srgb,var(--accent) 25%,transparent)}}
 @keyframes cardbehind{0%,100%{border-left-color:var(--warn)}50%{border-left-color:color-mix(in srgb,var(--warn) 25%,transparent)}}
-.focus[data-checks="running"]{animation:cardpulse 1.6s ease-in-out infinite}
-.focus[data-checks="behind"]{animation:cardbehind 1.6s ease-in-out infinite}
+.focus[data-checks="running"]{animation:cardpulse 1.6s ease-in-out 3}
+.focus[data-checks="behind"]{animation:cardbehind 1.6s ease-in-out 3}
 @media (prefers-reduced-motion:reduce){.focus[data-checks]{animation:none;border-left-style:dashed}}
 </style>
 
@@ -498,11 +496,11 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     <div class="top">
       <div class="titles who">
         <span class="avatar" id="meAvatar" aria-hidden="true">·</span>
-        <div class="whotext"><h1 id="pageTitle">mroom</h1><span class="boxline" id="boxLine">Session room</span></div>
+        <div class="whotext"><h1 id="pageTitle">Session room</h1><span class="boxline" id="boxLine">Session room</span></div>
       </div>
       <div class="navwrap">
         <button type="button" class="mood" id="mood" data-mood="loading" aria-live="polite" aria-haspopup="true" aria-expanded="false" aria-controls="navMenu">
-          <span class="says"><span class="light"></span><span id="moodSays">Opening</span></span>
+          <span class="says"><span class="light"></span><span id="moodSays">Opening</span><span class="alertdot" id="viewAlert" hidden title="Engine needs a look"></span></span>
         </button>
         <div class="navmenu" id="navMenu" hidden>
     <div class="tabs" role="tablist" aria-label="Views" aria-orientation="vertical">
@@ -558,9 +556,12 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
   let db = null, readOnly = false, todos = [], work = [], session = null;
   /* meta/next: the developer's single next action, written by Claude. */
   let nextMeta = null;
+  /* The cards meta/next names, as last drawn: only they pulse while their checks run. */
+  let nextCardIds = new Set();
+  /* Who is viewing, shown as "viewing as"; the page's title is the session's. */
+  let viewerName = "";
   const boards = { session: null, box: null, plans: null };
   const loaded = { todos: false, work: false };
-  const openRows = new Set();
 
   /* Views: the choice is remembered per viewer; #live (or #task), #plan or #engine opens that view. The status pill
      is the main navigation: it shows the current view's title and opens a menu with the views.
@@ -615,26 +616,36 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
 
   /* The pill's light shows the status: Needs you, Working, Waiting or All clear; the aria-label names it. */
   const MOODS = { fire: "Needs you", cooking: "Working", waiting: "Waiting", clear: "All clear" };
-  function ago(ms) {
-    const m = Math.max(0, Math.round(ms / 60000));
-    if (m < 1) return "just now";
-    if (m < 60) return m + " min ago";
-    const h = Math.round(m / 60);
-    return h < 24 ? h + " h ago" : Math.round(h / 24) + " d ago";
+  /* What really waits on the developer: a card marked waitingSince, a PR card whose current step is theirs with
+     a Go the page doesn't block, an investigation with a decision still open, or a to-do to do now or decide.
+     A ranked card waiting on CI or Claude doesn't count. */
+  function waitsOnYou(i) {
+    if (!i || i.status === "done") return false;
+    if (i.waitingSince) return true;
+    if (i.kind === "investigation") return !!(i.inv && Array.isArray(i.inv.decisions) && i.inv.decisions.some((d) => d && d.key && !(i.choices && i.choices[d.key])));
+    const steps = i.brief && Array.isArray(i.brief.steps) ? i.brief.steps.filter((x) => x && x.text) : [];
+    if (steps.length) {
+      const st = steps[Math.min(Math.max(Number(i.brief.current) || 0, 1), steps.length) - 1];
+      const v = st.verdict ? blockVerdict(st.verdict, st.title, i) : null;
+      return st.who === "you" && !!v && v.go === true;
+    }
+    return i.when === "now" || i.when === "decide";
   }
-  const FOCUS_MAX = 2;
   function actionable() { return todos.filter((i) => i.status !== "done" && (prio(i) < Infinity || i.when === "now")).sort(byRank); }
   function renderMood() {
     const btn = $("mood");
     if (loaded.todos && loaded.work) {
-      const needs = actionable().length;
+      const needs = todos.filter(waitsOnYou).length;
       const doing = work.filter((w) => w.state === "doing").length;
       const waiting = work.filter((w) => w.state === "waiting" || w.state === "watching").length;
       btn.dataset.mood = needs ? "fire" : doing ? "cooking" : waiting ? "waiting" : "clear";
     }
     const status = MOODS[btn.dataset.mood] || "Opening";
     $("moodSays").textContent = currentView || status;
-    btn.setAttribute("aria-label", (currentView || "Views") + ". " + status + ". Open the menu.");
+    /* A red row on the Engine tab shows as a dot on the pill while another view is open. */
+    const engineAlert = $("countBox").classList.contains("hot") && currentView !== "Engine";
+    $("viewAlert").hidden = !engineAlert;
+    btn.setAttribute("aria-label", (currentView || "Views") + ". " + status + "." + (engineAlert ? " Engine needs a look." : "") + " Open the menu.");
   }
 
   let first = location.hash.replace("#", "");
@@ -654,7 +665,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (!Number.isFinite(t)) return "";
     return fmtDay.format(new Date(t)) === fmtDay.format(new Date()) ? fmtTime.format(new Date(t)) : fmt.format(new Date(t)).replace(",", "");
   }
-  function updated(b) { return b && b.updatedAt ? "Updated " + ago(Date.now() - (Date.parse(b.updatedAt) || Date.now())) + " · " + when(b.updatedAt) : "Not filled in yet"; }
+  function updated(b) { return b && b.updatedAt ? "Updated " + humanWhen(b.updatedAt) + " · " + when(b.updatedAt) : "Not filled in yet"; }
   function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
   function safeUrl(u) { try { const x = new URL(String(u)); return x.protocol === "https:" ? x.href : null; } catch { return null; } }
   function goodLinks(list) { return (Array.isArray(list) ? list : []).map((l) => ({ label: l && l.label, url: safeUrl(l && l.url) })).filter((l) => l.url); }
@@ -808,10 +819,32 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
      steps: [{text, who?, cmd?, size?, checks?, checksAt?, reviews?, qa?, evidence?, evidenceNote?, verdict?}],
      current}): Title, Problem, Solution, then a step wizard. It has no action buttons: actions go through the chat. */
   const wizardStep = new Map();
+  /* Folds the viewer opened or closed stay that way when the cards are drawn again (every database write):
+     each is keyed by its card and what it holds. */
+  const folds = new Map();
+  function fold(det, it, key, open) {
+    const k = String((it && it.id) || "") + "\u0000" + key;
+    det.open = folds.has(k) ? folds.get(k) : !!open;
+    det.addEventListener("toggle", () => folds.set(k, det.open));
+    return det;
+  }
+  /* A relative time that moves on by itself: tickTimes rewrites it every 30 s without drawing the cards again. */
+  function liveTime(cls, prefix, iso) {
+    const t = el("span", cls, prefix + humanWhen(iso));
+    t.dataset.ts = String(iso);
+    t.dataset.prefix = prefix;
+    return t;
+  }
+  function tickTimes() {
+    for (const t of document.querySelectorAll("[data-ts]")) t.textContent = t.dataset.prefix + humanWhen(t.dataset.ts);
+    $("sessUpdated").textContent = updated(boards.plans && boards.plans.updatedAt ? boards.plans : null);
+    $("boxUpdated").textContent = updated(boards.box);
+  }
   /* A review step's CI results (step.checks: [{name, state, url}]): count chips per state, the list folded. */
-  const CK_ORDER = { failure: 0, cancelled: 1, pending: 2, in_progress: 2, neutral: 3, success: 4, skipped: 5 };
+  /* A cancelled run is one a newer push replaced, as gh pr checks counts it: muted, never a failure. */
+  const CK_ORDER = { failure: 0, pending: 1, in_progress: 1, neutral: 2, success: 3, cancelled: 4, skipped: 4 };
   const CK_ICON = { failure: "✕", cancelled: "⊘", pending: "●", in_progress: "●", neutral: "–", success: "✓", skipped: "·" };
-  function stepChecks(list, at, embedded) {
+  function stepChecks(list, at, embedded, it, key) {
     const rows = Array.isArray(list) ? list.filter((c) => c && c.name) : [];
     if (!rows.length) return null;
     const norm = (c) => String(c.state || "").toLowerCase();
@@ -819,7 +852,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     const box = el("div", "fchecks");
     const counts = {};
     for (const c of rows) counts[norm(c)] = (counts[norm(c)] || 0) + 1;
-    const det = el("details", "fckdet");
+    const det = fold(el("details", "fckdet"), it, "checks:" + (key || ""));
     const sum = el("summary", "fcksum");
     sum.append(embedded ? el("span", "rvmore", "All checks") : el("span", "fcklabel", "Checks"));
     for (const k of embedded ? [] : Object.keys(CK_ORDER)) {
@@ -893,8 +926,8 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (ck.length) {
       const f = el("span", "rvfact");
       countChips(f, ck);
-      if (s.checksAt) f.append(el("span", "fckat", "checked " + humanWhen(s.checksAt)));
-      rows.push(["Checks", f, stepChecks(ck, null, true), v.checks]);
+      if (s.checksAt) f.append(liveTime("fckat", "checked ", s.checksAt));
+      rows.push(["Checks", f, stepChecks(ck, null, true, it, s.title), v.checks]);
     }
     const rounds = (list) => (Array.isArray(list) ? list.filter((r) => r && (r.summary || r.result)) : []);
     for (const [label, list, key] of [["Code review", rounds(s.reviews), "review"], ["Browser QA", rounds(s.qa), "qa"]]) {
@@ -916,13 +949,13 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
       const fixes = list.reduce((n, r) => n + (Number(r.corrections) || 0), 0);
       f.append(document.createTextNode(list.length + (list.length === 1 ? " round · " : " rounds · ") + (counted ? corrections(fixes) + " · " : "")));
       if (last.result) f.append(el("span", "fres " + resCls(last.resultClass), String(last.result)));
-      if (last.at) f.append(el("span", "fckat", "last " + humanWhen(last.at)));
-      const det = el("details", "fckdet");
+      if (last.at) f.append(liveTime("fckat", "last ", last.at));
+      const det = fold(el("details", "fckdet"), it, "rounds:" + s.title + ":" + key);
       det.append(el("summary", "fcksum rvmore", "Rounds"));
       const ol = el("ol", "fround");
       list.forEach((r, n) => {
         const li = el("li");
-        li.append(el("span", "fckat", "Round " + (n + 1) + (r.at ? " · " + humanWhen(r.at) : "")));
+        li.append(r.at ? liveTime("fckat", "Round " + (n + 1) + " · ", r.at) : el("span", "fckat", "Round " + (n + 1)));
         if (r.result) li.append(el("span", "fres " + resCls(r.resultClass), String(r.result)));
         if (r.corrections != null) li.append(el("span", "fckat", corrections(r.corrections)));
         if (r.summary) li.append(el("span", "fsum", String(r.summary)));
@@ -971,7 +1004,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     item(el("span", "rvverdict ok", "Green text"), "fine as it is");
     item(el("span", "rvverdict warn", "Amber text"), "look at it, not blocking");
     item(el("span", "rvverdict bad", "Red text"), "must be fixed");
-    for (const [k, txt] of [["success", "passed"], ["failure", "failed"], ["neutral", "neutral"], ["skipped", "skipped"]]) { const c = el("span", "fckchip " + k); c.append(el("span", "fckicon", CK_ICON[k])); item(c, txt); }
+    for (const [k, txt] of [["success", "passed"], ["failure", "failed"], ["neutral", "neutral"], ["skipped", "skipped"], ["cancelled", "cancelled"]]) { const c = el("span", "fckchip " + k); c.append(el("span", "fckicon", CK_ICON[k])); item(c, txt); }
     item(el("span", "fwkey done", "Title"), "step done");
     item(el("span", "fwkey now", "Title"), "step now");
     item(el("span", "fwkey todo", "Title"), "step to do");
@@ -1039,7 +1072,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
       if (c.basis) box.append(el("p", "fconfbasis", String(c.basis)));
       const rows = Array.isArray(c.criteria) ? c.criteria.filter((r) => r && r.name) : [];
       if (rows.length) {
-        const det = el("details", "fconfdet");
+        const det = fold(el("details", "fconfdet"), it, "conf:" + String(v.step || ""));
         det.append(el("summary", "fcksum rvmore", "How the score is built"));
         const ul = el("ul", "fconflist");
         for (const r of rows) {
@@ -1075,7 +1108,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
       const verdict = c.key && v[c.key] && typeof v[c.key] === "object" ? v[c.key] : null;
       const stale = verdict && isStale(verdict, it);
       const k = verdict && Object.hasOwn(PROOF, verdict.pill) ? verdict.pill : "ok";
-      const det = el("details", "qashot");
+      const det = fold(el("details", "qashot"), it, "qa:" + s.title + ":" + String(c.key || c.title));
       const sum = el("summary", "qasum");
       sum.append(el("b", "qacase", String(c.title)), stale ? el("span", "qapill recalc", "Recalculating…") : verdict ? el("span", "qapill " + k, PROOF[k]) : el("span", "qapill none", "Not judged"));
       const body = el("div", "qabody");
@@ -1287,7 +1320,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     }
     const evidence = Array.isArray(I.evidence) ? I.evidence.filter((e) => e && typeof e === "object") : [];
     if (evidence.length) {
-      const det = el("details", "invev");
+      const det = fold(el("details", "invev"), it, "inv-evidence");
       det.append(el("summary", null, "Evidence and queries"));
       for (const e of evidence) {
         const blk = el("div", "invevb");
@@ -1315,7 +1348,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     const sent = await tellClaude(btn, "Room: an investigation pick is saved on " + cardRef(it) + ". Read its choices there.");
     setStatus(sent ? "Sent to Claude: " + label + "." : "Saved: " + label + ". Claude picks it up at its next check.");
   }
-  function stepEvidence(list, note, full) {
+  function stepEvidence(list, note, full, it, key) {
     const shots = (Array.isArray(list) ? list : []).map((e) => e && { src: assetSrc(e.src), href: safeUrl(e.href), caption: e.caption, proves: e.proves }).filter((e) => e && e.src);
     if (!shots.length && !note) return null;
     const box = el("div", "fevidence");
@@ -1325,8 +1358,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
       /* QA tab: one expandable row per screenshot (the case and what it proves), the first open. */
       const rowsBox = el("div", "fshots");
       shots.forEach((e, n) => {
-        const det = el("details", "fshot");
-        if (n === 0) det.open = true;
+        const det = fold(el("details", "fshot"), it, "shot:" + key + ":" + n, n === 0);
         const sum = el("summary", "fshotsum");
         sum.append(el("b", null, String(e.caption || "Screenshot " + (n + 1))));
         if (e.proves) sum.append(el("span", "fproves", String(e.proves)));
@@ -1365,7 +1397,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     const card = el("div", "focus");
     card.dataset.id = it.id;
     /* While checks run or the branch is behind main, the card's left border pulses. */
-    if (it.checks === "running" || it.checks === "behind") card.dataset.checks = it.checks;
+    if ((it.checks === "running" || it.checks === "behind") && nextCardIds.has(String(it.id))) card.dataset.checks = it.checks;
     card.tabIndex = -1;
     const head = el("div", "ftitle");
     const title = titleWithLinks(it.title, it.links);
@@ -1378,7 +1410,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
       const n = pr.behindBy;
       head.append(el("span", "fbehind " + (n ? "behind" : "even"), n ? n + (n === 1 ? " commit" : " commits") + " behind main" : "Up to date with main"));
     }
-    if (pr.updatedAt) head.append(el("span", "fupdated", "updated " + humanWhen(pr.updatedAt)));
+    if (pr.updatedAt) head.append(liveTime("fupdated", "updated ", pr.updatedAt));
     /* Where the work lives (it.pr.worktree, it.pr.session): the box worktree and the Claude session on it. */
     if (pr.worktree) {
       const w = el("code", "fwt", String(pr.worktree));
@@ -1411,7 +1443,8 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (!isIssueBeforePr(it, steps) && steps.length && !steps.some((s) => s.title === "QA")) {
       const at = Math.max(0, steps.findIndex((s) => s.title === "Review") + 1);
       steps.splice(at, 0, { title: "QA", who: "Claude", text: "No QA recorded for this PR yet.", evidenceNote: "Claude adds the test cases, the tests that prove each one, and browser screenshots when the change has a screen.", verdict: { go: false, call: "No QA yet", why: "QA cases and their tests are missing." } });
-      if (cur >= at) cur += 1;
+      /* `at` is where the placeholder goes (0-based), `cur` the step in play (1-based): only a step after it moves. */
+      if (cur > at) cur += 1;
     }
     if (steps.length) {
       /* One tab per step, named by its short title and coloured by status (done green, now blue, to do grey),
@@ -1501,7 +1534,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
         const hasCases = Array.isArray(s.cases);
         const rv = hasCases ? qaCases(s, it) : reviewTable(s, it);
         if (rv) panel.append(rv);
-        const ev = hasCases ? (s.evidenceNote ? el("p", "fevnote", String(s.evidenceNote)) : null) : stepEvidence(s.evidence, s.evidenceNote, s.title === "QA");
+        const ev = hasCases ? (s.evidenceNote ? el("p", "fevnote", String(s.evidenceNote)) : null) : stepEvidence(s.evidence, s.evidenceNote, s.title === "QA", it, s.title);
         for (const node of [ev, stepVerdict(Object.assign({ step: s.title }, s.verdict || {}), it.pr, it), rolloutTimeline(s.timeline)]) if (node) panel.append(node);
         panel.append(el("div", "fwstate " + state, (state === "done" ? "Done" : state === "now" ? "Now" : "To do") + " · " + k + " of " + steps.length));
       };
@@ -1649,6 +1682,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
        stack, right under the box, whatever their priority. */
     {
       const nextIds = new Set([].concat(nextMeta && nextMeta.cardId ? nextMeta.cardId : [], (nextMeta && Array.isArray(nextMeta.cardIds) && nextMeta.cardIds) || []).map(String));
+      nextCardIds = nextIds;
       if (nextIds.size) {
         const pinned = [];
         for (const id of nextIds) {
@@ -1692,11 +1726,12 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (s && Number(s.pr)) line.push("PR #" + Number(s.pr));
     if (s && s.branch) line.push(String(s.branch));
     if (s && Object.hasOwn(CHECKS, s.checks)) line.push(CHECKS[s.checks][1]);
+    if (viewerName) line.push("viewing as " + viewerName);
     $("boxLine").textContent = line.length ? line.join(" · ") : "Session room";
+    $("pageTitle").textContent = (s && (s.title || s.issue)) ? String(s.title || s.issue) : "Session room";
     if (!s) return;
     const u = safeUrl(s.url);
     if (s.issue) box.append(u ? (() => { const a = anchor(String(s.issue), u); a.className = "sid"; return a; })() : el("span", "sid", String(s.issue)));
-    if (s.title) box.append(el("span", "stitle", String(s.title)));
     if (s.branch) box.append(el("span", "sbranch", String(s.branch)));
     if (s.startedAt) box.append(el("span", "meta", "started " + when(s.startedAt)));
   }
@@ -1782,6 +1817,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     const cnt = $("countBox");
     cnt.textContent = bad ? String(bad) : "";
     cnt.classList.toggle("hot", countItems(b, (i) => i.state === "bad") > 0);
+    renderMood();
   }
 
   /* QA slots: one cell per slot with its PR, whether its site answers, its browser QA and links; this
@@ -1847,9 +1883,11 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
       try {
         const me = await user.me();
         const name = String((me && me.name) || "").trim();
-        $("pageTitle").textContent = name || "mroom";
+        viewerName = name;
         const ini = name.split(/\s+/).filter(Boolean).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
         $("meAvatar").textContent = ini || "·";
+        $("meAvatar").title = name ? "Viewing as " + name : "";
+        renderSession();
       } catch {}
     }
     if (user && typeof user.can === "function") {
@@ -1882,7 +1920,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
       session = await getDoc("meta/session");
       renderSession();
     };
-    setInterval(() => { renderWork(); renderPlan(); renderBox(); }, 30000);
+    setInterval(tickTimes, 30000);
   }
   start();
 })();
