@@ -24,7 +24,7 @@ a time.
 ## 1. Wind-down mood
 
 Write `meta/winddown` on the session Room: `{on: true, at, note, paused: []}`. The page turns to its
-dusk palette at once. `note` says in a few words why (e.g. "End of day"), and `paused` fills in as
+dusk palette at once, with a floating crescent moon and twinkling stars. `note` says in a few words why (e.g. "End of day"), and `paused` fills in as
 step 2 goes.
 
 ## 2. Bring work to a pausable state

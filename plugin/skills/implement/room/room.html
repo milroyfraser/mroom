@@ -506,6 +506,28 @@ html[data-winddown] body::before{background:
   radial-gradient(40vmax 26vmax at 80% 20%,color-mix(in srgb,var(--wd-glow3) 40%,transparent),transparent 70%),
   radial-gradient(60vmax 24vmax at 50% 105%,color-mix(in srgb,var(--wd-glow2) 45%,transparent),transparent 70%);
   filter:blur(40px);opacity:1}
+
+/* Wind-down sky: a crescent moon with a soft halo and a few twinkling stars, fixed behind the page.
+   It floats slowly; under reduced motion it stays still. */
+:root{--wd-moon:#f3e7c4;--wd-moonglow:rgba(243,231,196,.45);--wd-star:#6b4fa3}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--wd-moon:#f6edd2;--wd-moonglow:rgba(246,237,210,.35);--wd-star:#e9e2ff}}
+:root[data-theme="dark"]{--wd-moon:#f6edd2;--wd-moonglow:rgba(246,237,210,.35);--wd-star:#e9e2ff}
+.wdsky{position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden}
+.wdsky[hidden]{display:none}
+.wdsky .moon{position:absolute;top:clamp(56px,9vh,96px);right:clamp(20px,8vw,120px);width:clamp(64px,9vmin,104px);aspect-ratio:1;border-radius:50%;
+  box-shadow:inset calc(-1 * clamp(14px,2vmin,24px)) calc(clamp(6px,.9vmin,10px)) 0 0 var(--wd-moon);
+  filter:drop-shadow(0 0 18px var(--wd-moonglow)) drop-shadow(0 0 42px var(--wd-moonglow));transform:rotate(-18deg)}
+.wdsky .halo{position:absolute;top:clamp(26px,6vh,66px);right:clamp(-10px,5vw,90px);width:clamp(124px,17vmin,164px);aspect-ratio:1;border-radius:50%;
+  background:radial-gradient(circle,var(--wd-moonglow) 0%,transparent 65%);opacity:.6}
+.wdsky .star{position:absolute;width:3px;height:3px;border-radius:50%;background:var(--wd-star);opacity:.5;box-shadow:0 0 6px var(--wd-star)}
+@media (prefers-reduced-motion:no-preference){
+  @keyframes moonfloat{0%,100%{transform:translateY(0) rotate(-18deg)}50%{transform:translateY(-10px) rotate(-14deg)}}
+  @keyframes halopulse{0%,100%{opacity:.45;transform:scale(1)}50%{opacity:.75;transform:scale(1.06)}}
+  @keyframes twinkle{0%,100%{opacity:.15;transform:scale(.7)}50%{opacity:.9;transform:scale(1.2)}}
+  .wdsky .moon{animation:moonfloat 9s ease-in-out infinite}
+  .wdsky .halo{animation:halopulse 7s ease-in-out infinite}
+  .wdsky .star{animation:twinkle 3.6s ease-in-out infinite}
+}
 .learncard{display:grid;gap:10px;border:1px solid var(--line);border-left:3px solid var(--wd-accent);border-radius:10px;background:var(--surface);padding:14px 16px;margin-block:0 14px}
 .learncard .lchead{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px;font-size:12px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}
 .learncard h3{margin:0;font-size:17px;text-wrap:balance}
@@ -696,11 +718,26 @@ html[data-winddown] body::before{background:
      "Back" opens the previous card with its saved ticks, to change them. The first one not "done" (by order) shows above the next step; "Next learning"
      marks it done. Rows are data: every field lands as text. */
   let learnings = [], windDown = null, learnPick = { id: null, picked: new Set(), armed: false }, learnView = null;
+
+  /* The wind-down sky, built once and shown while the mood is on. Fixed star spots, staggered twinkles. */
+  function windSky(on) {
+    let sky = document.getElementById("wdSky");
+    if (!sky) {
+      sky = el("div", "wdsky"); sky.id = "wdSky"; sky.setAttribute("aria-hidden", "true"); sky.hidden = true;
+      sky.append(el("span", "halo"), el("span", "moon"));
+      [[12, 18], [22, 62], [8, 44], [30, 30], [16, 80], [40, 12], [26, 90], [6, 70], [36, 52], [44, 74]].forEach(([t, l], i) => {
+        const st = el("span", "star"); st.style.top = t + "vh"; st.style.left = l + "vw"; st.style.animationDelay = (i * 0.37).toFixed(2) + "s"; sky.append(st);
+      });
+      document.body.append(sky);
+    }
+    sky.hidden = !on;
+  }
   function renderLearning() {
     const box = document.getElementById("learnCard");
     if (!box) return;
     const on = !!(windDown && windDown.on === true);
     if (on) document.documentElement.dataset.winddown = "1"; else delete document.documentElement.dataset.winddown;
+    windSky(on);
     box.replaceChildren();
     const list = learnings.slice().sort((x, y) => (Number(x.order) || 0) - (Number(y.order) || 0));
     const open = list.filter((l) => l.status !== "done");
