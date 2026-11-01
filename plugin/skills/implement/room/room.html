@@ -509,6 +509,9 @@ body[data-winddown]{--bg:var(--wd-bg);--surface:var(--wd-surface);background:var
 .learncard .lcrow{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px}
 .learncard button{font:inherit;border:1px solid var(--wd-accent);background:transparent;color:var(--wd-accent);border-radius:999px;padding:6px 14px;cursor:pointer}
 .learncard button:focus-visible{outline:2px solid var(--wd-accent);outline-offset:2px}
+.learncard .lcacts{list-style:none;padding-left:0}
+.learncard .lcact{display:flex;gap:10px;align-items:flex-start;cursor:pointer}
+.learncard .lcact input{margin-top:3px;accent-color:var(--wd-accent);flex:none;width:16px;height:16px}
 .learncard .wdnote{font-size:13px;color:var(--muted);margin:0}
 </style>
 
@@ -678,9 +681,10 @@ body[data-winddown]{--bg:var(--wd-bg);--surface:var(--wd-surface);background:var
 
   /* Wind-down and the retrospective. meta/winddown {on, note, paused:[...]} puts the page in its dusk mood;
      each learnings doc {order, title, observation, actions:[{text,rec}], status} is one card: what was seen,
-     then the recommended action items, each with Claude's recommendation. The first one not "done" (by order) shows above the next step; "Next learning"
+     then the recommended action items, each with Claude's recommendation and a check box. Ticking items
+     and pressing the button twice saves them as `confirmed` (indexes into actions) and moves to the next card. The first one not "done" (by order) shows above the next step; "Next learning"
      marks it done. Rows are data: every field lands as text. */
-  let learnings = [], windDown = null;
+  let learnings = [], windDown = null, learnPick = { id: null, picked: new Set(), armed: false };
   function renderLearning() {
     const box = document.getElementById("learnCard");
     if (!box) return;
@@ -703,22 +707,38 @@ body[data-winddown]{--bg:var(--wd-bg);--surface:var(--wd-surface);background:var
     const obs = cur.observation || cur.happened;
     if (obs) { const p = el("div", "lcpart"); p.append(el("b", null, "Observation"), el("p", null, String(obs))); box.append(p); }
     const acts = Array.isArray(cur.actions) ? cur.actions.filter((a) => a && a.text) : [];
+    if (learnPick.id !== cur.id) learnPick = { id: cur.id, picked: new Set(), armed: false };
+    const canWrite = !readOnly && !!db;
+    const btn = el("button");
+    btn.type = "button";
+    const label = () => {
+      const n = learnPick.picked.size;
+      btn.textContent = learnPick.armed ? "Click again to confirm" : n ? "Confirm " + n + (n === 1 ? " action" : " actions") + (open.length > 1 ? " and go to next" : " and finish") : open.length > 1 ? "None confirmed, go to next" : "None confirmed, finish";
+    };
     if (acts.length) {
-      const p = el("div", "lcpart"); const ul = el("ul");
-      for (const a of acts) { const li = el("li"); li.append(el("p", null, String(a.text))); if (a.rec) li.append(el("p", "lcrec", "Claude recommends: " + String(a.rec))); ul.append(li); }
-      p.append(el("b", null, "Recommended action items"), ul); box.append(p);
+      const p = el("div", "lcpart"); const ul = el("ul", "lcacts");
+      acts.forEach((a, i) => {
+        const li = el("li"); const lab = el("label", "lcact"); const cb = el("input");
+        cb.type = "checkbox"; cb.checked = learnPick.picked.has(i); cb.disabled = !canWrite;
+        cb.addEventListener("change", () => { if (cb.checked) learnPick.picked.add(i); else learnPick.picked.delete(i); learnPick.armed = false; label(); });
+        const txt = el("span"); txt.append(el("p", null, String(a.text))); if (a.rec) txt.append(el("p", "lcrec", "Claude recommends: " + String(a.rec)));
+        lab.append(cb, txt); li.append(lab); ul.append(li);
+      });
+      p.append(el("b", null, "Recommended action items · tick the ones you confirm"), ul); box.append(p);
     }
     const row = el("div", "lcrow");
     row.append(el("span", "wdnote", open.length - 1 ? (open.length - 1) + " more after this" : "Last one"));
-    if (!readOnly && db) {
-      const b = el("button", null, open.length > 1 ? "Next learning →" : "Finish retrospective");
-      b.type = "button";
-      b.addEventListener("click", async () => {
-        b.disabled = true;
-        try { await db.doc("learnings/" + cur.id).update({ status: "done", doneAt: new Date().toISOString() }); }
-        catch (e) { b.disabled = false; }
+    if (canWrite) {
+      label();
+      /* Two clicks: the first arms the button, the second saves the ticked actions and moves on. */
+      btn.addEventListener("click", async () => {
+        if (!learnPick.armed) { learnPick.armed = true; label(); setTimeout(() => { if (learnPick.id === cur.id && learnPick.armed) { learnPick.armed = false; label(); } }, 5000); return; }
+        btn.disabled = true;
+        const confirmed = Array.from(learnPick.picked).sort((x, y) => x - y);
+        try { await db.doc("learnings/" + cur.id).update({ status: "done", doneAt: new Date().toISOString(), confirmed }); learnPick = { id: null, picked: new Set(), armed: false }; }
+        catch (e) { btn.disabled = false; learnPick.armed = false; label(); }
       });
-      row.append(b);
+      row.append(btn);
     }
     box.append(row);
   }

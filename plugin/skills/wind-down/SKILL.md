@@ -66,15 +66,18 @@ the Room's `learnings` collection:
   change). Each `rec` is Claude's recommendation: how to do it, how big it is, and whether it needs
   the developer's decision first.
 
-The page shows one learning at a time on top of "Your next step", with "Learning n of N", until
-the developer has read each one ("Next learning" marks it done). Keep the learning generic when it
+The page shows one learning at a time on top of "Your next step", with "Learning n of N". Each
+action item has a check box: the developer ticks the ones they confirm and presses the button twice
+(the first click arms it, the second saves). The page writes `status: "done"` and `confirmed` (the
+indexes of the ticked items in `actions`) and shows the next card. Keep the learning generic when it
 is about the tool, and name the project only on that project's own Room.
 
 ## 4. Hand over
 
 In the chat, say in a few lines: what is paused and where, what is first tomorrow, and that the
-retrospective is on the Room. Ask whether to file the action items (as issues, after the
-developer confirms the list); never file them on your own.
+retrospective is on the Room. Act only on confirmed action items (`confirmed` on each learning):
+the developer's ticks are their confirmation. Turn each into the work its `rec` names (an issue,
+a helper, a settings change for the developer). Items left unticked are not done.
 
 ## Restarting
 
