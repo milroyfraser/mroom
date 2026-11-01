@@ -17,8 +17,8 @@
 #     footer copyright and naming no host but github.com and Google Fonts;
 #   - the Room is published with a db rule that lets only its owner and Editors write, and the page tells
 #     Claude which card changed without quoting a row;
-#   - no skill names a host, address, id or person (and none of the words in $MROOM_PRIVATE_WORDS, a file
-#     of one case-insensitive regular expression per line, kept outside the repository).
+#   - no skill names a host, address, id or person (and none of the private words, which
+#     tools/privacy_check.py reads from $MROOM_PRIVATE_WORDS or the gitignored .private-words).
 #
 #   tests/skills-test.sh            (SKILLS_DIR and COMMANDS_DIR override the folders, for mutation checks)
 set -euo pipefail

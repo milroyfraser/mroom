@@ -649,8 +649,7 @@ earlier work or for one to stack on, and that none names a host, an IP address, 
 address.
 For `fix-issue` it also checks that the branch names both ids, that a failing test comes before the
 fix, that the only links are the `Fixes` lines, and that it stops at a PR in review.
-Names of people and projects come from `$MROOM_PRIVATE_WORDS`, a file of patterns kept outside the
-repository.
+Names of people and projects come from the private list (see [Privacy check](#privacy-check)).
 
 Not here yet: `blast-radius` (later in phase 3), the principle skills (named in the
 skills, read when installed), and `verify-app` with `qa-engineer` (phase 2b).
@@ -2040,6 +2039,27 @@ tests/run.sh --skip qa-up  # all but tests/qa-up-test.sh, which CI runs in a job
 The tests need what the box needs (bash 5, python3 3.11+); on a host without them the TOML and install
 tests skip locally, and CI on `ubuntu-latest` runs them all, plus shellcheck on every shell script and an
 install on a bare `ubuntu:24.04` container. Releases are cut by hand: [docs/releasing.md](docs/releasing.md).
+
+### Privacy check
+
+This repository is public, and the box it came from is not. `tools/privacy_check.py` checks a change for the
+owner's private words: names of people, projects, hosts and ids. It reads the lines a change adds, the paths it
+touches, its commit messages, and the pull request's title and body. A hit names the place (file and line,
+commit, title or body line) and the entry's number in the list, never the word, and fails.
+
+The list is one case-insensitive regular expression per line; blank lines are skipped and do not count.
+
+- **CI**: the `privacy` job of `ci.yml` reads the repository secret `MROOM_PRIVATE_WORDS`. Set it under
+  Settings → Secrets and variables → Actions → New repository secret, or with
+  `gh secret set MROOM_PRIVATE_WORDS < words.txt` from a file kept outside the repository. The job masks each
+  entry before it runs. Without the secret (a fork's pull request, or before the owner sets it) the job passes
+  with a notice. A change to only the title or body runs no check until the next push.
+- **Before a push**: `$MROOM_PRIVATE_WORDS` (the path of a file, or the list itself) or else `.private-words` at
+  the top of the checkout, which is gitignored. The repository ships no git hook; to run the check before each
+  push, write an executable `.git/hooks/pre-push` of `#!/bin/sh` and
+  `exec python3 tools/privacy_check.py`, which checks `origin/main...HEAD`. With no list it passes with a notice.
+
+`tests/skills-test.sh` reads the same list, through the same code, for the skills and the Room.
 
 ## Licence
 

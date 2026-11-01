@@ -5,6 +5,11 @@ library only."""
 import json, os, re, subprocess, sys
 
 root = os.environ["MROOM_ROOT_DIR"]
+sys.path.insert(0, os.path.join(root, "tools"))
+from privacy_check import private_words  # noqa: E402
+
+# The private list: $MROOM_PRIVATE_WORDS (a file or the list itself) or the gitignored .private-words.
+PRIVATE_WORDS = private_words(root) or []
 skills_dir = os.environ["SKILLS_DIR"]
 commands_dir = os.environ["COMMANDS_DIR"]
 
@@ -216,10 +221,8 @@ for label, (name, kind, meta, body, text) in sorted(docs.items()):
     say(all(h.rstrip(".") == "github.com" or h.rstrip(".").endswith("example.dev") or h == "<production_url>"
             for h in hosts),
         f"{label} links only github.com or an example host ({hosts})")
-    words = os.environ.get("MROOM_PRIVATE_WORDS")
-    if words:
-        for word in [w.strip() for w in read(words).split("\n") if w.strip()]:
-            say(re.search(word, text, flags=re.I) is None, f"{label} names none of the private words (one of them)")
+    for word in PRIVATE_WORDS:
+        say(re.search(word, text, flags=re.I) is None, f"{label} names none of the private words (one of them)")
 
 # --- Earlier work is this repository's own ----------------------------------------------------------------
 # A search for an issue's id, or a list by its branch's name, finds pull requests from forks too, and anyone
@@ -381,11 +384,9 @@ for f in room_files:
     hosts = re.findall(r"https?://([^/\s)`\"'>]+)", text)
     say(all(h in ("github.com", "fonts.googleapis.com", "fonts.gstatic.com") for h in hosts),
         f"{label} links only github.com or Google Fonts ({hosts})")
-    words = os.environ.get("MROOM_PRIVATE_WORDS")
-    if words:
-        rest = plain.replace(COPYRIGHT, "")
-        for word in [w.strip() for w in read(words).split("\n") if w.strip()]:
-            say(re.search(word, rest, flags=re.I) is None, f"{label} names none of the private words (one of them)")
+    rest = plain.replace(COPYRIGHT, "")
+    for word in PRIVATE_WORDS:
+        say(re.search(word, rest, flags=re.I) is None, f"{label} names none of the private words (one of them)")
 # The Room's rows are data. Only the owner and Editors write them: by default anyone the page is shared with as a
 # Contributor could, and the page shows every card, copy command and next step as Claude's. And the page's
 # comments to Claude, which go out as the viewer's own words, name the card that changed and never quote a row.
