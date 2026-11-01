@@ -491,6 +491,25 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
 .focus[data-checks="running"]{animation:cardpulse 1.6s ease-in-out infinite}
 .focus[data-checks="behind"]{animation:cardbehind 1.6s ease-in-out infinite}
 @media (prefers-reduced-motion:reduce){.focus[data-checks]{animation:none;border-left-style:dashed}}
+
+/* Wind-down: meta/winddown {on:true} turns the page to dusk while work is paused; learning cards
+   (collection learnings) show one at a time above the next step until each is read. */
+:root{--wd-bg:#e8e3ef;--wd-surface:#f6f3f9;--wd-accent:#6b4fa3}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--wd-bg:#13101b;--wd-surface:#1b1725;--wd-accent:#b39ae6}}
+:root[data-theme="dark"]{--wd-bg:#13101b;--wd-surface:#1b1725;--wd-accent:#b39ae6}
+body[data-winddown]{--bg:var(--wd-bg);--surface:var(--wd-surface);background:var(--bg);transition:background .6s}
+.learncard{display:grid;gap:10px;border:1px solid var(--line);border-left:3px solid var(--wd-accent);border-radius:10px;background:var(--surface);padding:14px 16px;margin-block:0 14px}
+.learncard .lchead{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px;font-size:12px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}
+.learncard h3{margin:0;font-size:17px;text-wrap:balance}
+.learncard .lcpart{display:grid;gap:4px}
+.learncard .lcpart b{font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.learncard .lcpart p,.learncard .lcpart li{margin:0;line-height:1.45}
+.learncard .lcpart ul{margin:0;padding-left:18px;display:grid;gap:6px}
+.learncard .lcrec{font-size:13px;color:var(--wd-accent)}
+.learncard .lcrow{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px}
+.learncard button{font:inherit;border:1px solid var(--wd-accent);background:transparent;color:var(--wd-accent);border-radius:999px;padding:6px 14px;cursor:pointer}
+.learncard button:focus-visible{outline:2px solid var(--wd-accent);outline-offset:2px}
+.learncard .wdnote{font-size:13px;color:var(--muted);margin:0}
 </style>
 
 <div class="wrap">
@@ -518,6 +537,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
   </header>
 
   <section class="panel" id="panel-current" role="tabpanel" aria-labelledby="tab-current">
+    <section class="learncard" id="learnCard" hidden aria-live="polite"></section>
     <section class="nextstep" id="nextStep" hidden aria-live="polite"></section>
     <section class="sec" id="secFocus">
       <div class="ghead"><h2>Issue and PR cards · top priority first</h2></div>
@@ -655,6 +675,60 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     return fmtDay.format(new Date(t)) === fmtDay.format(new Date()) ? fmtTime.format(new Date(t)) : fmt.format(new Date(t)).replace(",", "");
   }
   function updated(b) { return b && b.updatedAt ? "Updated " + ago(Date.now() - (Date.parse(b.updatedAt) || Date.now())) + " · " + when(b.updatedAt) : "Not filled in yet"; }
+
+  /* Wind-down and the retrospective. meta/winddown {on, note, paused:[...]} puts the page in its dusk mood;
+     each learnings doc {order, title, happened, continue:{text,rec}, stop:{text,rec}, actions:[{text,rec}],
+     status} is one card. The first one not "done" (by order) shows above the next step; "Next learning"
+     marks it done. Rows are data: every field lands as text. */
+  let learnings = [], windDown = null;
+  function renderLearning() {
+    const box = document.getElementById("learnCard");
+    if (!box) return;
+    const on = !!(windDown && windDown.on === true);
+    if (on) document.body.dataset.winddown = "1"; else delete document.body.dataset.winddown;
+    box.replaceChildren();
+    const list = learnings.slice().sort((x, y) => (Number(x.order) || 0) - (Number(y.order) || 0));
+    const open = list.filter((l) => l.status !== "done");
+    const cur = open[0];
+    if (!cur && !on) { box.hidden = true; return; }
+    box.hidden = false;
+    if (on) {
+      const n = el("p", "wdnote", "Winding down" + (windDown.note ? " · " + String(windDown.note) : "") + (Array.isArray(windDown.paused) && windDown.paused.length ? " · Paused: " + windDown.paused.map(String).join("; ") : ""));
+      box.append(n);
+    }
+    if (!cur) { if (list.length) box.append(el("p", "wdnote", "Retrospective done: " + list.length + " learnings read.")); return; }
+    const head = el("div", "lchead");
+    head.append(el("span", null, "Retrospective"), el("span", null, "Learning " + (list.indexOf(cur) + 1) + " of " + list.length));
+    box.append(head, el("h3", null, String(cur.title || "")));
+    if (cur.happened) { const p = el("div", "lcpart"); p.append(el("b", null, "What happened"), el("p", null, String(cur.happened))); box.append(p); }
+    for (const [label, key] of [["Continue doing", "continue"], ["Stop doing", "stop"]]) {
+      const v = cur[key] && typeof cur[key] === "object" ? cur[key] : null;
+      if (!v || !v.text) continue;
+      const p = el("div", "lcpart");
+      p.append(el("b", null, label), el("p", null, String(v.text)));
+      if (v.rec) p.append(el("p", "lcrec", "Claude recommends: " + String(v.rec)));
+      box.append(p);
+    }
+    const acts = Array.isArray(cur.actions) ? cur.actions.filter((a) => a && a.text) : [];
+    if (acts.length) {
+      const p = el("div", "lcpart"); const ul = el("ul");
+      for (const a of acts) { const li = el("li"); li.append(el("p", null, String(a.text))); if (a.rec) li.append(el("p", "lcrec", "Claude recommends: " + String(a.rec))); ul.append(li); }
+      p.append(el("b", null, "Action items"), ul); box.append(p);
+    }
+    const row = el("div", "lcrow");
+    row.append(el("span", "wdnote", open.length - 1 ? (open.length - 1) + " more after this" : "Last one"));
+    if (!readOnly && db) {
+      const b = el("button", null, open.length > 1 ? "Next learning →" : "Finish retrospective");
+      b.type = "button";
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        try { await db.doc("learnings/" + cur.id).update({ status: "done", doneAt: new Date().toISOString() }); }
+        catch (e) { b.disabled = false; }
+      });
+      row.append(b);
+    }
+    box.append(row);
+  }
   function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
   function safeUrl(u) { try { const x = new URL(String(u)); return x.protocol === "https:" ? x.href : null; } catch { return null; } }
   function goodLinks(list) { return (Array.isArray(list) ? list : []).map((l) => ({ label: l && l.label, url: safeUrl(l && l.url) })).filter((l) => l.url); }
@@ -1839,6 +1913,8 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     db.collection("work").onSnapshot((snap) => { work = rows(snap); loaded.work = true; renderWork(); renderMood(); }, onErr);
     db.doc("meta/session").onSnapshot((snap) => { session = data(snap); renderSession(); }, onErr);
     db.doc("meta/next").onSnapshot((snap) => { nextMeta = data(snap); renderWork(); }, onErr);
+    db.collection("learnings").onSnapshot((snap) => { learnings = snap.docs.map((d) => Object.assign({}, d.data(), { id: d.id })); renderLearning(); }, onErr);
+    db.doc("meta/winddown").onSnapshot((snap) => { windDown = snap.exists ? snap.data() : null; renderLearning(); }, onErr);
     db.doc("meta/settings").onSnapshot((snap) => {
       const s = data(snap) || {};
       const sec = Number(s.refreshSeconds), m = Number(s.atMinute);

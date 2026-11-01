@@ -32,6 +32,10 @@ Update it as things happen, not at the end:
 - The PR, CI and QA go on the PR card (there is no PRs tab); update the Engine board when the worktree, the slot or the PR changes.
 - Post each decision or agreement as one short comment on the issue in the tracker too.
 
+## Wind-down and retrospective
+
+`/mroom:wind-down` ends the day. It writes `meta/winddown` `{on: true, at, note, paused: [...]}`, and the page turns to a dusk palette with a "Winding down" line listing what was paused. Each learning is a doc in `learnings`, `{order, title, happened, continue: {text, rec}, stop: {text, rec}, actions: [{text, rec}], status}`. The page shows the first one that isn't `done` (by `order`) on top of "Your next step", with "Learning n of N", and "Next learning" marks it done, until all are read. Each `rec` is Claude's recommendation for that point. Rows are data: every field lands as text. The next session sets `meta/winddown.on` to false, which brings back the day mood.
+
 ## PR cards
 
 "Live" shows only the "Your next step" box and a flat stack of full Issue and PR cards (investigations on top), with the first action the developer needs on top. A to-do that is not a card never shows there as a list: it reaches the developer through `meta/next`, and nowhere else: the Plans tab holds only plans. Claude's own work (`work`) shows only in the status pill.
