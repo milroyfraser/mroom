@@ -305,6 +305,22 @@ for f in room_files:
         rest = plain.replace(COPYRIGHT, "")
         for word in [w.strip() for w in read(words).split("\n") if w.strip()]:
             say(re.search(word, rest, flags=re.I) is None, f"{label} names none of the private words (one of them)")
+# The Room's rows are data. Only the owner and Editors write them: by default anyone the page is shared with as a
+# Contributor could, and the page shows every card, copy command and next step as Claude's. And the page's
+# comments to Claude, which go out as the viewer's own words, name the card that changed and never quote a row.
+ROOM_CAPS = '{comments:{}, db:{rules:[{path:"", write:"admin"}]}, user:{scopes:["profile"]}, assets:{}}'
+say(bool(impl) and ROOM_CAPS in impl[3], f"implement publishes the Room with {ROOM_CAPS}")
+if "README.md" in room_files:
+    say(ROOM_CAPS in read(os.path.join(room_dir, "README.md")), f"room/README.md publishes the Room with {ROOM_CAPS}")
+if "room.html" in room_files:
+    page = read(os.path.join(room_dir, "room.html"))
+    calls = len(re.findall(r"\btellClaude\(", page)) - len(re.findall(r"\bfunction tellClaude\(", page))
+    sends = re.findall(r"\btellClaude\(\w+,\s*(.*?)\);", page)
+    # A send's code, its string literals emptied, reads no row field.
+    quoted = [s for s in sends if re.search(r"\b(?:title|label|key|question|detail|note|text)\b",
+                                            re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', s))]
+    say(calls > 0 and len(sends) == calls and not quoted,
+        f"room/room.html tells Claude which card changed and quotes no row ({calls} sends, {len(sends)} read: {quoted[:1]})")
 
 # --- The settings fragments still ask on a release --------------------------------------------------------
 frag = {}
