@@ -75,6 +75,16 @@ t_the_gate_on_a_real_postgres() {
   start_postgres
   set_up
 
+  # mroom doctor reads the same Postgres as the gate: its groups are there, and no template is loaded yet.
+  run "$MROOM" doctor; expect_rc 1
+  expect_out_has "ok    postgres: Postgres "
+  expect_out_has "ok    postgres: the gate holds shop_qa_objects with ADMIN OPTION"
+  expect_out_has "ok    postgres: the gate holds shop_qa_envs with ADMIN OPTION"
+  expect_out_has "ok    postgres: the gate holds shop_qa_readers with ADMIN OPTION"
+  expect_out_has "fail  template: the QA template shop_qa_template is not loaded"
+  expect_out_has "warn  postgres: any role may connect to shop_seed"
+  case "$out" in *"$GATE_PW"*) fail "doctor printed the gate's password" ;; *) ok ;; esac
+
   # The template, from the seeded database's archive; the objects role owns it and has no login left.
   load shop_seed; expect_rc 0; expect_out_has "template shop_qa_template: loaded from"
   run su_psql -c "SELECT rolcanlogin FROM pg_roles WHERE rolname = 'shop_qa_objects'"; expect_out f
@@ -114,6 +124,10 @@ t_the_gate_on_a_real_postgres() {
 
   gate "db-create 13"; expect_rc 0
   pw13="$(password_of "$out")"
+  run "$MROOM" doctor
+  expect_out_has "ok    template: the QA template shop_qa_template is loaded"
+  expect_out_has "ok    postgres: PUBLIC may connect to neither the template nor any environment's database"
+  case "$out" in *"fail  postgres"*) fail "doctor failed a Postgres check" ;; *) ok ;; esac
   expect_true "env 13 cannot use its database" can shop_qa_13 "$pw13" shop_qa_13 "SELECT 1"
   expect_true "env 12 reached env 13's database" cannot shop_qa_12 "$pw12" shop_qa_13 "SELECT 1"
   expect_true "env 12's read-only role reached env 13's database" cannot shop_qa_12_read "$rpw12" shop_qa_13 "SELECT 1"

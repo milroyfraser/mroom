@@ -42,11 +42,17 @@
 #                              exit 1, saying why, when the box's RAM available and free swap hold less than
 #                              <MB> more (2 for a usage error): run it before work the kernel would end half
 #                              way for lack of memory
+#   mroom doctor [--app [<dir>]]
+#                              whether the box is as mroom needs it: box.env, the QA gate's keys and logins,
+#                              site-op, Postgres, Redis, the QA services, memory, the kernel and sshd; --app also
+#                              checks an app's mroom.toml, its pins of mroom's workflows and the app contract,
+#                              and the box against what that mroom.toml needs. ok, warn or fail, each with its
+#                              fix; exit 1 when a check fails
 #   mroom version [--source]   the installed version (--source: the release or checkout it came from)
 #   mroom help
 #
-# Coming in later phases (see docs/design.md, section 11): status, sessions, resume, restart, doctor,
-# site, update, wt, user, keys, env, init, default (phase 1).
+# Coming in later phases (see docs/design.md, section 11): status, sessions, resume, restart, site,
+# update, wt, user, keys, env, init, default (phase 1).
 set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
@@ -78,6 +84,7 @@ case "$cmd" in
   job) exec "$ROOT/lib/job" "$@" ;;
   gate) exec "$ROOT/lib/gate" "$@" ;;
   baseline) exec "$ROOT/lib/baseline" "$@" ;;
+  doctor) exec "$ROOT/lib/doctor" "$@" ;;
   guard) exec "$ROOT/lib/guard" "$@" ;;
   tracker) exec "$ROOT/lib/tracker" "$@" ;;
   errors) exec "$ROOT/lib/errors" "$@" ;;
@@ -88,7 +95,7 @@ case "$cmd" in
     . "$ROOT/lib/memory-preflight"
     memory_preflight "$1" "${2:-this}"
     ;;
-  status | sessions | resume | restart | doctor | site | update | wt | user | keys | env | init | default)
+  status | sessions | resume | restart | site | update | wt | user | keys | env | init | default)
     not_yet "$cmd" 1
     ;;
   *) die "unknown command '$cmd' (mroom help lists the commands)" 2 ;;
