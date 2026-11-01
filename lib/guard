@@ -160,9 +160,17 @@ lower() {
 lower_all() {
   LOWERED=("$@")
   case "$*" in *[A-Z]* | *$'\035'*) ;; *) return 0 ;; esac
-  local -a out=()
-  IFS=$US read -r -d '' -a out < <(printf '%s\037' "$@" | tr '[:upper:]' '[:lower:]' | tr '\035' '\n') || true
-  [ "${#out[@]}" = "$#" ] && LOWERED=("${out[@]}")
+  local -a low=()
+  IFS=$US read -r -d '' -a low < <(printf '%s\037' "$@" | tr '[:upper:]' '[:lower:]' | tr '\035' '\n') || true
+  if [ "${#low[@]}" = "$#" ]; then
+    # lower() takes LOWER from $(lc ...), and command substitution strips trailing newlines; match it per
+    # word, or an exact comparison such as event=approve would miss a value with a trailing newline.
+    local j
+    for ((j = 0; j < ${#low[@]}; j++)); do
+      while [ "${low[j]%$'\n'}" != "${low[j]}" ]; do low[j]=${low[j]%$'\n'}; done
+    done
+    LOWERED=("${low[@]}")
+  fi
   return 0
 }
 # NAME = basename of a command word (no fork: this runs per command); a word too long to be a path is left alone.
@@ -176,6 +184,22 @@ COPIERS=" cp mv ln scp rsync install "
 # Readers that read a folder whole, so a folder holding secrets counts as a secret.
 RECURSIVE=" cp scp rsync tar zip 7z grep egrep fgrep rg ag ack zgrep "
 INTERPRETERS=" python python3 php node ruby perl deno bun osascript "
+
+# glob_or_regex_risky PATTERN: a glob or regex that can make bash's matcher recurse at every position
+# (many `*`, or a quantifier stacked on a group or another quantifier). Against even a short fixed
+# candidate the cost grows combinatorially, so a tiny command could hang the hook (a bypass; there is no
+# word cap on one argument's length). Over the cap the caller takes the worst case instead of matching.
+glob_or_regex_risky() {
+  [ "${#1}" -gt 512 ] && return 0
+  case "$1" in
+    *'**'* | *'*+'* | *'+*'* | *'++'* | *')*'* | *')+'* | *')?'* | *'){'* | *'}*'* | *'}+'*) return 0 ;;
+  esac
+  local rest=$1 n=0
+  while [ "$n" -le 8 ]; do
+    case "$rest" in *[\*+]*) rest=${rest#*[\*+]}; n=$((n + 1)) ;; *) break ;; esac
+  done
+  [ "$n" -gt 8 ]
+}
 
 # is_secret_path TOKEN: does this argument name a secret file?
 is_secret_path() {
@@ -205,6 +229,7 @@ is_secret_path() {
   esac
   # A glob starting with a dot (`.env*`, `.*`) that would match a secret file.
   if [[ $base == .* && $base == *[\*\?\[]* ]]; then
+    glob_or_regex_risky "$base" && return 0 # too complex to match safely: assume it could
     for name in .env .env.local .env.testing .env.production .envrc .forge-token .credentials.json; do
       # shellcheck disable=SC2053 # $base is a glob on purpose
       [[ $name == $base ]] && return 0
@@ -212,6 +237,7 @@ is_secret_path() {
   fi
   # A glob under the home folder (`~/.config/mroom/secret*`, `~/.c*/gh/*`) that would match a secret file.
   if [[ $t == *[\*\?\[]* ]] && home_rest "$t"; then
+    glob_or_regex_risky "$REST" && return 0 # too complex to match safely: assume it could
     for name in .ssh/id_rsa .ssh/id_ed25519 .config/gh/hosts.yml .config/mroom/secrets/forge-token \
       .config/tool/mcp.env .forge-token .claude/.credentials.json .aws/credentials; do
       # shellcheck disable=SC2053 # $REST is a glob on purpose
@@ -702,8 +728,8 @@ check_find() {
     case "$a" in
       -name | -iname | -path | -ipath | -wholename | -iwholename | -regex | -iregex)
         v=${w[$i]:-}
+        find_pattern_secret "$a" "$v" "${lw[$i]:-}" && secret=1
         i=$((i + 1))
-        find_pattern_secret "$a" "$v" && secret=1
         ;;
       -exec | -execdir | -ok | -okdir)
         hands_on=1
@@ -722,9 +748,13 @@ check_find() {
   fi
 }
 
+# find_pattern_secret FLAG PATTERN [LOWERED-PATTERN]: the caller passes the lowered pattern so a case-folding
+# flag (-iname, -i*) does not fork once for every pattern; without it (any other caller) it lowers itself.
 find_pattern_secret() {
-  local flag=$1 pat=$2 cand
+  local flag=$1 pat=$2 lpat cand
+  if [ "$#" -ge 3 ]; then lpat=$3; else lower "$pat"; lpat=$LOWER; fi
   case "$pat" in *"$DY"*) return 0 ;; esac # a pattern from a variable: assume the worst
+  glob_or_regex_risky "$pat" && return 0 # too complex to match safely: assume it names a secret
   case "$flag" in
     -regex | -iregex)
       for cand in ./backend/.env ./.env /home/u/.ssh/id_rsa /home/u/.forge-token /home/u/.claude/.credentials.json /home/u/.config/mroom/secrets/forge-token; do
@@ -732,14 +762,14 @@ find_pattern_secret() {
       done
       ;;
     -name | -iname)
-      [ "$flag" = -iname ] && { lower "$pat"; pat=$LOWER; }
+      [ "$flag" = -iname ] && pat=$lpat
       for cand in .env .env.local .env.testing .env.production .envrc .forge-token .credentials.json id_rsa id_ed25519 hosts.yml forge-token mcp.env; do
         # shellcheck disable=SC2053 # $pat is a glob on purpose
         [[ $cand == $pat ]] && return 0
       done
       ;;
     *)
-      [[ $flag == -i* ]] && { lower "$pat"; pat=$LOWER; }
+      [[ $flag == -i* ]] && pat=$lpat
       for cand in ./backend/.env ./.env /home/u/.ssh/id_rsa /home/u/.ssh/id_ed25519 /home/u/.config/gh/hosts.yml /home/u/.forge-token /home/u/.claude/.credentials.json /home/u/.config/mroom/secrets/forge-token /home/u/.config/tool/mcp.env; do
         # shellcheck disable=SC2053 # $pat is a glob on purpose
         [[ $cand == $pat ]] && return 0
@@ -772,8 +802,9 @@ check_git() {
       *) sub=$a; rest=("${w[@]:$i}"); break ;;
     esac
     if [ -n "$v" ]; then
-      # The key in lower case (so check_git_config_pair does not fork for it), the value as written.
-      check_git_config_pair "$depth" "${lv%%=*}=${v#*=}"
+      # The key in lower case (so check_git_config_pair does not fork for it), the value as written, and
+      # the value in lower case (so is_git_push_key does not fork once for every -c).
+      check_git_config_pair "$depth" "${lv%%=*}=${v#*=}" "${lv#*=}"
       # An alias defined here and used as this command's subcommand: remembered, to check what it runs.
       case "${lv%%=*}" in alias.*) aliases+="${lv%%=*}=${v#*=}$US" ;; esac
     fi
@@ -858,7 +889,7 @@ is_git_command_key() {
 # git -c KEY=VALUE for one command: a shell alias or a hooks directory is refused, a command value
 # is checked as a command (so `-c core.editor=true` still works).
 check_git_config_pair() {
-  local depth=$1 pair=$2 key value
+  local depth=$1 pair=$2 lvalue=${3:-} key value
   [ "${#pair}" -le 4096 ] || { block "a git -c value too long to check"; return; }
   lower "${pair%%=*}"; key=$LOWER
   value=${pair#*=}
@@ -872,7 +903,7 @@ check_git_config_pair() {
       ;;
     core.hookspath) block "git -c core.hooksPath runs hooks from a directory this hook cannot read" ;;
     *)
-      if is_git_push_key "$key" "$value"; then
+      if is_git_push_key "$key" "$lvalue"; then
         block "git -c $key changes what a push does, or loads configuration from elsewhere"
       elif is_git_command_key "$key"; then
         analyze "${value#!}" $((depth + 1))
@@ -919,9 +950,10 @@ check_git_config_set() {
       fi
       ;;
     *)
+      lower "$value" # one git config command, not a per-word loop: a fork here is fine
       if is_git_command_key "$key"; then
         block "git config sets $key, which makes git run a command"
-      elif is_git_push_key "$key" "$value"; then
+      elif is_git_push_key "$key" "$LOWER"; then
         block "git config sets $key, which changes what a later push does, or loads configuration from elsewhere"
       fi
       ;;
@@ -937,7 +969,7 @@ is_git_push_key() {
     remote.*.push | remote.*.mirror | push.followtags | push.pushoption) return 0 ;;
     # matching pushes every branch that exists on both sides, the default branch too; upstream (tracking)
     # pushes to whatever branch the current one tracks, which can be main.
-    push.default) lower "$2"; case "$LOWER" in matching | upstream | tracking) return 0 ;; esac ;;
+    push.default) case "$2" in matching | upstream | tracking) return 0 ;; esac ;; # $2 is already lower case
     branch.*.merge | branch.*.pushremote | remote.pushdefault) return 0 ;;
   esac
   return 1
@@ -1018,10 +1050,12 @@ check_git_push() {
       +*) block "git push $a force-pushes (a + refspec)"; return ;;
       *[\*\?\[]*) block "git push $a pushes by a pattern, which can reach a protected branch"; return ;;
       *"$DY"*) block "git push with a refspec from a variable cannot be checked"; return ;;
+      ":") block "git push : is a matching push, which can update a protected branch"; return ;;
     esac
     src=${a%%:*}
-    # la is the word already lowered; its dst and src halves feed is_protected_ref without a fork.
-    if is_protected_ref "${la#*:}" || { [ "$src" = "$a" ] && is_protected_ref "${la%%:*}"; }; then
+    # la is the word already lowered; its dst and src halves feed is_protected_ref without a fork. git
+    # splits a refspec at its last colon, so the destination is everything after it (${la##*:}).
+    if is_protected_ref "${la##*:}" || { [ "$src" = "$a" ] && is_protected_ref "${la%%:*}"; }; then
       block "git push $a updates a protected branch or pushes a tag"
       return
     fi
@@ -1032,7 +1066,7 @@ check_git_push() {
 # variables are refused outright (they can set any key above, invisibly); command-valued ones
 # (pagers, editors) are checked as commands; BASH_ENV/ENV naming a secret is a read.
 check_assignment() {
-  local depth=$1 word=$2 name value
+  local depth=$1 word=$2 lvalue=${3:-} name value
   [ "${#word}" -le 4096 ] || return
   name=${word%%=*}
   name=${name%+}
@@ -1044,7 +1078,7 @@ check_assignment() {
     GIT_EXTERNAL_DIFF | GIT_PAGER | GIT_EDITOR | GIT_SEQUENCE_EDITOR | GIT_ASKPASS | SSH_ASKPASS | PAGER | EDITOR | VISUAL | PROMPT_COMMAND)
       analyze "$value" $((depth + 1))
       ;;
-    BASH_ENV | ENV) is_secret_path "$value" && block "$name would source a secret file ($value)" ;;
+    BASH_ENV | ENV) is_secret_path "${lvalue:-$value}" && block "$name would source a secret file ($value)" ;; # lvalue is lowered: no fork per word
     # Another home or config folder gives git (and gh) configuration this hook never sees.
     HOME | XDG_CONFIG_HOME) block "$name points git and gh at configuration this hook cannot read" ;;
   esac
@@ -1094,6 +1128,21 @@ check_segment() {
   SEG_STDIN=$stdin
 
   set -- ${words[@]+"${words[@]}"}
+  # Peel leading NAME=value assignments and check them with the positional parameters cleared, so
+  # check_assignment is not called once per assignment with thousands of words still set (quadratic; see
+  # check_secrets), and batch-lower them so a secret-valued one (BASH_ENV=) does not fork per word either.
+  if [[ ${1:-} =~ ^[A-Za-z_][A-Za-z0-9_]*\+?= ]]; then
+    local -a lead=() restw=()
+    local li
+    while [ $# -gt 0 ] && [[ $1 =~ ^[A-Za-z_][A-Za-z0-9_]*\+?= ]]; do lead+=("$1"); shift; done
+    restw=("$@"); set --
+    lower_all "${lead[@]}"
+    for ((li = 0; li < ${#lead[@]}; li++)); do
+      check_assignment "$depth" "${lead[$li]}" "${LOWERED[$li]#*=}"
+      [ -n "$BLOCKED" ] && return
+    done
+    set -- ${restw[@]+"${restw[@]}"}
+  fi
   while [ $# -gt 0 ]; do
     [ -n "$BLOCKED" ] && return
     if [[ $1 =~ ^[A-Za-z_][A-Za-z0-9_]*\+?= ]]; then
@@ -1112,23 +1161,40 @@ check_segment() {
         ;;
       env)
         shift
-        while [ $# -gt 0 ] && [[ $1 == -* || $1 =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; do
-          case "$1" in
-            -S | --split-string) analyze "${2:-}" $((depth + 1)); return ;;
-            -S*) analyze "${1#-S}" $((depth + 1)); return ;;
-            --split-string=*) analyze "${1#--split-string=}" $((depth + 1)); return ;;
+        # Walk env's options and assignments by index with the positional parameters cleared, deferring the
+        # per-word checks until after the loop, so check_assignment and is_secret_path are not called once
+        # per word with thousands still set (quadratic; see check_secrets).
+        local -a ea=("$@") edefer=()
+        local ei=0 en=$#
+        set --
+        while [ "$ei" -lt "$en" ] && { [[ ${ea[$ei]} == -* ]] || [[ ${ea[$ei]} =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; }; do
+          case "${ea[$ei]}" in
+            -S | --split-string) analyze "${ea[$((ei + 1))]:-}" $((depth + 1)); return ;;
+            -S*) analyze "${ea[$ei]#-S}" $((depth + 1)); return ;;
+            --split-string=*) analyze "${ea[$ei]#--split-string=}" $((depth + 1)); return ;;
             -*S*) block "env with -S in a group of options cannot be checked"; return ;;
-            -C | --chdir)
-              is_secret_path "${2:-}/x" && { block "env -C into a folder of secret files (${2:-})"; return; }
-              shift
-              ;;
-            --chdir=*) is_secret_path "${1#*=}/x" && { block "env --chdir into a folder of secret files"; return; } ;;
-            -u | -P | --unset) shift ;;
+            -C | --chdir) edefer+=("C${ea[$((ei + 1))]:-}"); ei=$((ei + 1)) ;;
+            --chdir=*) edefer+=("C${ea[$ei]#*=}") ;;
+            -u | -P | --unset) ei=$((ei + 1)) ;;
             -*) ;;
-            *) check_assignment "$depth" "$1" ;;
+            *) edefer+=("A${ea[$ei]}") ;;
           esac
-          shift
+          ei=$((ei + 1))
         done
+        if [ "${#edefer[@]}" -gt 0 ]; then
+          local ed edi
+          local -a edval=()
+          for ed in "${edefer[@]}"; do edval+=("${ed:1}"); done
+          lower_all "${edval[@]}" # one fork for all the values, not one per word
+          for ((edi = 0; edi < ${#edefer[@]}; edi++)); do
+            case "${edefer[$edi]}" in
+              C*) is_secret_path "${LOWERED[$edi]}/x" && { block "env -C into a folder of secret files (${edval[$edi]})"; return; } ;;
+              A*) check_assignment "$depth" "${edval[$edi]}" "${LOWERED[$edi]#*=}" ;;
+            esac
+            [ -n "$BLOCKED" ] && return
+          done
+        fi
+        set -- "${ea[@]:$ei}"
         ;;
       flock)
         # flock [options] FILE COMMAND... or flock [options] FILE -c 'COMMAND'.
@@ -1224,10 +1290,17 @@ check_segment() {
         fi
         ;;
       export | declare | typeset | readonly | local)
-        # Each NAME=value is an assignment for every later command; there is no command to check.
+        # Each NAME=value is an assignment for every later command; there is no command to check. Clear the
+        # positional parameters and batch-lower, so check_assignment is not called once per word with
+        # thousands still set, forking on a secret-valued one (quadratic; see check_secrets).
         shift
-        for a in "$@"; do
-          [[ $a =~ ^[A-Za-z_][A-Za-z0-9_]*\+?= ]] && check_assignment "$depth" "$a"
+        local -a xa=("$@")
+        local xi
+        set --
+        lower_all "${xa[@]}"
+        for ((xi = 0; xi < ${#xa[@]}; xi++)); do
+          [[ ${xa[$xi]} =~ ^[A-Za-z_][A-Za-z0-9_]*\+?= ]] && check_assignment "$depth" "${xa[$xi]}" "${LOWERED[$xi]#*=}"
+          [ -n "$BLOCKED" ] && return
         done
         return
         ;;

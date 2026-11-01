@@ -771,6 +771,33 @@ EOF
   allow 'php artisan test --compact --parallel'
   allow 'pnpm test'
   allow '# just a comment mentioning gh pr merge'
+
+  # --- lower_all strips a trailing newline, like lower() ---------------------------------------
+  # A review approval whose field value ends in a newline must still be refused (lower_all must strip the
+  # trailing newline the tokeniser decoded, as $(lc ...) does in lower).
+  refuse "gh api repos/o/r/pulls/1/reviews -f \$'event=APPROVE\\n'"
+  refuse "gh api repos/o/r/pulls/1/reviews -F \$'event=approve\\n'"
+
+  # --- Push refspecs: case, the last colon, and a bare : ---------------------------------------
+  refuse 'git push origin feature:MAIN'
+  refuse 'git push origin V1.2.3'
+  refuse 'git push origin a:b:main'  # git splits at the last colon, so the destination is main
+  refuse 'git push origin :'          # a matching push, which can update main
+  refuse 'git push origin :main'
+  allow 'git push origin a:b:feature'
+  allow 'git push origin :feature'
+  refuse 'git -c push.default=MATCHING push'
+  refuse 'git config push.default MATCHING'
+
+  # --- A glob too complex to match safely is worst-cased, not run through bash's backtracker ----
+  refuse 'cat ~/.ss*[!Z]*[!Z]*[!Z]*[!Z]*[!Z]*[!Z]*[!Z]*[!Z]*[!Z]Z'
+
+  # --- A secret-valued BASH_ENV is still caught after restructuring the assignment handlers -----
+  refuse 'BASH_ENV=backend/.env bash script.sh'    # a leading assignment
+  refuse 'env BASH_ENV=backend/.env true'          # the env handler
+  refuse 'export BASH_ENV=backend/.env'            # the export handler
+  allow 'BASH_ENV=/tmp/rc.sh bash script.sh'       # not a secret file
+  allow 'export FOO=bar BAZ=qux'
 }
 
 # Time: a 64 KB command, allowed or refused, and the most simple commands it checks, are checked in a
@@ -813,6 +840,26 @@ timing() {
   for _ in $(seq 1 10); do uc+="$seg; "; done
   fast 8 0 "$uc"
   uc=""; seg="gh api repos/o/r/issues$(printf ' -f A=A%.0s' $(seq 1 990))"
+  for _ in $(seq 1 10); do uc+="$seg; "; done
+  fast 8 0 "$uc"
+  # A pathological glob (many `*` segments) in one short argument must be decided fast: before the fix it
+  # ran bash's backtracking matcher, which a tiny command could hang on (there is no word cap on one
+  # argument). It is now worst-cased (refused) at once.
+  # shellcheck disable=SC2088 # a literal ~ on purpose: the guard parses it as the home directory
+  local redos="~/"; for _ in $(seq 1 20); do redos+='*[!Z]'; done; redos+="Z"
+  fast 4 2 "cat '$redos'"
+  # The other per-word paths, within every cap: a git -c push.default per command, env and export
+  # assignments, and find -iname patterns. Each must be decided inside the limit.
+  uc=""; seg="git$(printf ' -c push.default=A%.0s' $(seq 1 660)) status"
+  for _ in $(seq 1 10); do uc+="$seg; "; done
+  fast 8 0 "$uc"
+  uc=""; seg="export$(printf ' ENV=A%.0s' $(seq 1 1990))"
+  for _ in $(seq 1 10); do uc+="$seg; "; done
+  fast 8 0 "$uc"
+  uc=""; seg="env$(printf ' ENV=A%.0s' $(seq 1 1980)) true"
+  for _ in $(seq 1 10); do uc+="$seg; "; done
+  fast 8 0 "$uc"
+  uc=""; seg="find .$(printf ' -iname A%.0s' $(seq 1 990))"
   for _ in $(seq 1 10); do uc+="$seg; "; done
   fast 8 0 "$uc"
 }
