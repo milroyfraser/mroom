@@ -1482,9 +1482,9 @@ starts it; a person deploys another tag, a rollback included, with
   default branch. The branch moves forward for a release, back for a rollback (with a warning), or stays for a
   re-run; when someone else moved it (to a commit off the default branch, or neither before nor after the tag),
   or while a tag named `release` exists, the job stops for a person. That stop is a backstop, since a tag can
-  come after it: steps 2 and 6 below keep such a tag out. Then, when `MROOM_DEPLOY_HOOK` is set, it calls the
-  host's deploy hook. This job builds and installs nothing, and runs no action but `actions/checkout`, since it
-  holds the key.
+  come after it: step 6 below keeps such a tag from being made, and step 2 has the host ignore one. Then, when
+  `MROOM_DEPLOY_HOOK` is set, it calls the host's deploy hook. This job builds and installs nothing, and runs no
+  action but `actions/checkout`, since it holds the key.
 - **`verify`**, with no environment and no secret: `deploy-verify` asks `app.version_path` (and a separate
   SPA's `/version.json`) with a query no cache has seen, every 10 seconds, until each reports the tag's commit
   three times in a row with `/up` answering 200, and fails after 10 minutes. A fixed sleep and a health ping
@@ -1530,7 +1530,10 @@ account with Write can create the branch:
    as the tag: a moved one, deployed as a rollback, would run someone else's code. Publishing a draft release
    makes its tag at the draft's target, which anyone with Write can change, so the person who publishes checks the
    target first. A tag named `release` would shadow the branch for a host that fetches it by its short name
-   (step 2).
+   (step 2). An app whose workflow tags every merge (`vX.Y.Z`) gives the tags it deploys a prefix of their own,
+   `release.tag_prefix` (`release-` makes `release-vX.Y.Z`), and points `<<fill:tag_pattern>>`, the environment
+   and this ruleset at those, rather than adding GitHub Actions to the bypass: then a workflow anyone with Write
+   pushes on a branch could make a tag that deploys.
 
 A re-run of the same tag leaves the branch where it is: Quick Deploy then deploys nothing and `verify` passes at
 once, while a deploy hook deploys again.

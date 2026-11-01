@@ -187,6 +187,11 @@ t_a_tag_named_like_the_branch_is_left_for_a_person() {
 # The host's fetch as the README gives it takes the branch over a tag named release that came after the deploy's
 # check, brings the release's tag for the version file's git describe, and moves the site back for a rollback.
 t_the_hosts_fetch_takes_the_branch_and_its_tag() {
+  # host_fetch runs the README's own commands.
+  expect_true "the README's host fetch is not the one host_fetch runs" \
+    grep -qxF '   git fetch origin +refs/heads/release:refs/remotes/origin/release &&' "$ROOT/README.md"
+  expect_true "the README's host reset is not the one host_fetch runs" \
+    grep -qxF '     git reset --hard refs/remotes/origin/release' "$ROOT/README.md"
   repo
   deploy v1.0.0
   g clone -q -b release "$T/origin.git" "$T/site"
