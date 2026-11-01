@@ -241,6 +241,11 @@ id_pattern = "(SHOP"'
   expect_err_has "tests.database_pattern must contain {slug}"
   expect_err_has "issues.url must contain {id}"
   expect_err_has "issues.id_pattern is not a valid regular expression"
+  # The whole name: a newline after it would pass a rule that only anchors with ^ and $.
+  toml '[app]
+name = "shop\n"'
+  run "$MROOM" config validate; expect_rc 1; expect_err_has 'app.name must match [a-z][a-z0-9_]*'
+  run "$MROOM" config get app.name --json; expect_rc 1; expect_out ""
 }
 
 t_workflow_keys() {
@@ -436,10 +441,20 @@ issues.token_env = "GH_TOKEN"
 name = "shop"'
   run "$MROOM" config validate; expect_rc 1
   expect_err_has 'issues.token_env must not be one quoted key with a dot ("issues.token_env")'
-  run "$MROOM" config get issues.token_env; expect_rc 1; expect_out ""
-  run "$MROOM" config get issues --json; expect_rc 1; expect_out ""
+  expect_err_has 'such as [issues] and token_env = ...'
+  run "$MROOM" config get issues.token_env; expect_rc 1; expect_out ""; expect_err_has "one quoted key with a dot"
+  run "$MROOM" config get issues --json; expect_rc 1; expect_out ""; expect_err_has "one quoted key with a dot"
   run "$MROOM" config get issues.tracker; expect_rc 0; expect_out "linear"
   run "$MROOM" config get app.name; expect_rc 0; expect_out "shop"
+  # The quoted key first, the table after it.
+  toml '"issues.token_env" = "LINEAR_API_KEY"
+
+[issues]
+token_env = "SHOP_LINEAR_API_KEY"
+
+[app]
+name = "shop"'
+  run "$MROOM" config validate; expect_rc 1; expect_err_has 'issues.token_env must not be one quoted key with a dot'
   # Inside a table: a folder QA builds paths from.
   toml '[app]
 name = "shop"
@@ -447,21 +462,27 @@ build.frontend_dist = "../.."
 "build.frontend_dist" = "dist"'
   run "$MROOM" config validate; expect_rc 1
   expect_err_has 'app.build.frontend_dist must not be one quoted key with a dot ("build.frontend_dist")'
-  run "$MROOM" config get app.build.frontend_dist; expect_rc 1; expect_out ""
+  run "$MROOM" config get app.build.frontend_dist; expect_rc 1; expect_out ""; expect_err_has "one quoted key with a dot"
   # A whole table in one quoted key.
   toml 'app.name = "shop"
 qa.parity.mail = "smtp"
 "qa.parity" = { mail = "catcher" }'
-  run "$MROOM" config validate; expect_rc 1; expect_err_has 'qa.parity must not be one quoted key with a dot'
-  run "$MROOM" config get qa.parity.mail; expect_rc 1; expect_out ""
-  # One that spells no key mroom reads is an unknown key, as ever: a warning.
+  run "$MROOM" config validate; expect_rc 1
+  expect_err_has 'qa.parity must not be one quoted key with a dot ("qa.parity"): write it as tables and keys, such as [qa.parity]'
+  run "$MROOM" config get qa.parity.mail; expect_rc 1; expect_out ""; expect_err_has "one quoted key with a dot"
+  # One that spells no key mroom reads is an unknown key, as ever: a warning. A dot inside a table of strings
+  # (app.build.frontend_env) is the table's data, not a key's name.
   toml '"extra.thing" = 1
 
 [app]
 name = "shop"
-"x.y" = 2'
+"x.y" = 2
+
+[app.build]
+frontend_env = { "VITE.KEY" = "env:KEY" }'
   run "$MROOM" config validate; expect_rc 0
   expect_err_has "unknown key extra.thing (ignored)"; expect_err_has "unknown key app.x.y (ignored)"
+  run "$MROOM" config get app.build.frontend_env; expect_rc 0; expect_out "VITE.KEY=env:KEY"
 }
 
 t_bad_toml() {
