@@ -18,6 +18,7 @@ TRACKER_NAME="mroom tracker"
 LINEAR_URL="https://api.linear.app/graphql"
 TRACKER_MAX_PAGES=100
 TRACKER_MAX_BODY=65536
+TRACKER_MAX_TITLE=200
 LINEAR_AUTH=""
 
 tracker_say() { echo "$TRACKER_NAME: $*" >&2; }
@@ -455,7 +456,7 @@ issue_create() {
   fi
   title="${title//[$'\r\n']/ }"
   [ -n "${title// /}" ] || { tracker_say "create needs --title"; return 2; }
-  [ "${#title}" -le 200 ] || { tracker_say "the title is longer than 200 characters"; return 2; }
+  [ "${#title}" -le "$TRACKER_MAX_TITLE" ] || { tracker_say "the title is longer than $TRACKER_MAX_TITLE characters"; return 2; }
   [ -z "$priority" ] || [[ "$priority" =~ ^[0-4]$ ]] || { tracker_say "--priority is 0 (none), 1 (urgent) to 4 (low)"; return 2; }
   local l
   for l in ${labels[@]+"${labels[@]}"}; do

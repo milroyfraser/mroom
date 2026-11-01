@@ -552,8 +552,10 @@ channel = "C0123456789"            # the chat channel it pings when triage canno
   body, so no text, however it nests one, can hold a marker, and it writes one per key; reading an issue
   back, it stops as for a lost marker when it finds one it did not write. It refuses text holding a
   token, defangs links to hosts other than GitHub's, the trackers' and the app's, and caps a run at 10
-  issues and 30 comments. A dispatch is a dry run unless `live` is ticked: it prints what it would file,
-  and writes nothing.
+  issues and 30 comments. Escaping and defanging lengthen text, so it also refuses text that would then
+  go over the tracker's own limits (200 characters for a title, 64 KiB for a description or a comment):
+  that one alert is refused and the run goes on, where a write the tracker refused would stop the run.
+  A dispatch is a dry run unless `live` is ticked: it prints what it would file, and writes nothing.
 - **When the tracker drops the markers.** After each issue it files, the guard reads the issue back.
   When a marker is missing, the next run could not find the issue and would file it again, every 15
   minutes. It also searches for each issue as the next run will, three times, since a tracker's search

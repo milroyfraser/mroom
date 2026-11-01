@@ -245,6 +245,28 @@ t_a_refused_alert_fails_the_run() {
   expect_true "the summary does not say why" grep -q "the guard refused to file sentry:1001" "$T/summary.md"
 }
 
+# Alert text the guard's escaping or defanging lengthens past what the tracker takes is refused, alert by alert:
+# it never stops the run before the alerts after it.
+t_lengthened_alert_text_never_stops_the_others() {
+  pworld
+  add_alert new 1001 2026-10-28T11:50:00Z "TypeError: x is undefined"
+  # Newer, so looked at first: a title escaping lengthens, and an event defanging lengthens.
+  add_alert new 1002 2026-10-28T11:55:00Z "$(printf '<!--%.0s' {1..40})"
+  add_alert new 1003 2026-10-28T11:54:00Z "Error: bad link"
+  local line
+  line="http://$(printf '.%.0s' {1..290})"
+  add_event 1003 "$(for _ in $(seq 1 100); do printf '%s\n' "$line"; done)"
+  triage
+  expect_rc 1
+  expect_true "the plain alert was not filed: $(cat "$T/summary.md")" [ "$(count_ops linear issueCreate)" = 1 ]
+  expect_true "the plain alert's issue lacks its marker" json_is "$(issues)" \
+    '[.[] | .description | scan("<!-- mroom-alert key=([^ ]+) -->") | .[0]] == ["sentry:1001"]'
+  expect_true "the summary does not say the title was refused" grep -q "the guard refused to file sentry:1002" "$T/summary.md"
+  expect_true "the summary does not say the event was refused" grep -q "the guard refused to file sentry:1003" "$T/summary.md"
+  expect_true "the summary does not say why the title was refused" grep -q "the tracker takes 200" "$T/summary.md"
+  expect_true "the summary does not say why the event was refused" grep -q "the tracker takes 65536" "$T/summary.md"
+}
+
 t_no_write_to_an_issue_the_persona_did_not_file() {
   pworld
   a_window
@@ -432,6 +454,7 @@ test_case filed-never-crowd-out t_filed_alerts_never_crowd_out_a_new_one
 test_case ten-a-run t_at_most_ten_filed_and_the_rest_wait
 test_case one-error-one-issue t_one_error_one_issue_in_a_run
 test_case refused-fails t_a_refused_alert_fails_the_run
+test_case lengthened-text t_lengthened_alert_text_never_stops_the_others
 test_case lost-after-refusal t_lost_markers_end_the_step_green_even_after_a_refusal
 test_case odd-event-text t_odd_event_text_is_cleaned_and_cut_never_refused
 test_case long-event-cut t_a_long_event_is_cut_and_closed
