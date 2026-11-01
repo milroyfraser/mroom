@@ -927,11 +927,12 @@ has "$TOP/out" allowed
 expect "check refuses" 2 "$mroom" guard check 'git push --force origin x'
 has "$err" "Refused by mroom guard: git push --force force-pushes."
 # The wall-clock deadline fails closed: a command too slow to check is refused, not left to run past the hook
-# timeout, whatever path makes it slow. With a one-second deadline, thousands of forking simple commands (a
-# shape the per-command caps alone do not bound in time) are refused after about a second, instead of scanned
-# to the end (far slower) and allowed. A fast command is untouched — the whole suite runs at the default.
+# timeout, whatever path makes it slow. `gh api graphql` rescans the whole command each time, so thousands of
+# them (within every count cap) take far longer than a second to check — a shape the counts alone do not bound
+# in time. With a one-second deadline it is refused after about a second instead of scanned to the end and
+# allowed. A fast command is untouched, so the whole suite runs at the default deadline.
 deadline_slow=""
-for _ in $(seq 1 2999); do deadline_slow+="git push origin A; "; done
+for _ in $(seq 1 2999); do deadline_slow+="gh api graphql; "; done
 expect "deadline fails closed" 2 env MROOM_GUARD_DEADLINE=1 "$mroom" guard check "$deadline_slow"
 has "$err" "taking too long"
 expect "deadline leaves a fast command alone" 0 env MROOM_GUARD_DEADLINE=1 "$mroom" guard check 'git status; ls; echo hi'
