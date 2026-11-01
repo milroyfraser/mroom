@@ -607,6 +607,10 @@ that Claude Code reads; in a session they are `/mroom:<name>`.
 - **Rules in every skill:** an agent never merges, approves, deploys or releases; a person does.
   Tracker writes are only the state of the issue being worked and comments on it. A skill asks
   before it files an issue or a label, never touches production, and never reads a secret.
+- **Earlier work is the app's own:** `deliver`, `implement` and `fix-issue` resume only a pull
+  request whose branch is in the app's repository, and no workflow skill checks out or runs a fork's
+  pull request on the box, just as the QA workflows refuse it. That is the skills' rule: the guard
+  does not refuse such a checkout.
 - **Release asks twice:** once in the session, and again through the `ask` rule on
   `gh release create` in `settings/base.json`. It only ever drafts; publishing is a person's click.
 - **From `mroom.toml`:** the issue id and link (`issues.id_pattern`, `issues.url`), the started and
@@ -630,9 +634,10 @@ The settings fragment `base.json` allows the adapters' reads (`mroom tracker get
 `owned`) and asks before `mroom tracker create`, `mroom errors resolve` and the guard's writes
 (`mroom persona create`, `comment`). `tests/skills-test.sh` checks the skills as a contract: their frontmatter,
 that every `mroom` command, skill and key they name exists, the rules above, the release's draft and
-question, that no skill resolves an error issue, and that none names a host, an IP address, an id or
-an email address. For `fix-issue` it also checks that the branch names both ids, that a failing test
-comes before the fix, that the only links are the `Fixes` lines, and that it stops at a PR in review.
+question, that no skill resolves an error issue, that a skill resuming earlier work never takes a
+fork's pull request for it, and that none names a host, an IP address, an id or an email address.
+For `fix-issue` it also checks that the branch names both ids, that a failing test comes before the
+fix, that the only links are the `Fixes` lines, and that it stops at a PR in review.
 Names of people and projects come from `$MROOM_PRIVATE_WORDS`, a file of patterns kept outside the
 repository.
 
@@ -1620,8 +1625,10 @@ starts it; a person deploys another tag, a rollback included, with
   tag matching `<<fill:tag_pattern>>`, a release whose tag is not the run's, and a tag whose commit is not on the
   default branch. The branch moves forward for a release, back for a rollback (with a warning), or stays for a
   re-run; when someone else moved it (to a commit off the default branch, or neither before nor after the tag),
-  the job stops for a person. Then, when `MROOM_DEPLOY_HOOK` is set, it calls the host's deploy hook. This job
-  builds and installs nothing, and runs no action but `actions/checkout`, since it holds the key.
+  or while a tag named `release` exists, the job stops for a person. That stop is a backstop, since a tag can
+  come after it: step 6 below keeps such a tag from being made, and step 2 has the host ignore one. Then, when
+  `MROOM_DEPLOY_HOOK` is set, it calls the host's deploy hook. This job builds and installs nothing, and runs no
+  action but `actions/checkout`, since it holds the key.
 - **`verify`**, with no environment and no secret: `deploy-verify` asks `app.version_path` (and a separate
   SPA's `/version.json`) with a query no cache has seen, every 10 seconds, until each reports the tag's commit
   three times in a row with `/up` answering 200, and fails after 10 minutes. A fixed sleep and a health ping
@@ -1630,7 +1637,8 @@ starts it; a person deploys another tag, a rollback included, with
 - **One deploy at a time:** the whole run takes the group `deploy-production` and never cancels one in
   progress, so a second deploy waits until the first is verified.
 
-What the app sets up once:
+What the app sets up once, the GitHub rules (4 to 6) before the host deploys `release` (2), since until then any
+account with Write can create the branch:
 
 1. **The version endpoint** (design section 9): `app.version_path` answers `{"release": "<tag>", "commit":
    "<sha>"}` with `Cache-Control: no-store`, from a file the host's deploy script writes from the code it
@@ -1640,18 +1648,36 @@ What the app sets up once:
    and the site's deploy hook URL in the `production` secret `MROOM_DEPLOY_HOOK` (one or the other: with both, it
    deploys twice). A separate SPA's host deploys the same branch, or the app adds a job of its own between
    `release` and `verify` that builds the tag. The deploy script restarts the workers and clears caches, so a
-   rollback runs the old code.
+   rollback runs the old code. It takes the branch by its full name into a ref of its own, so the release tags
+   come along for `git describe`, and resets to it; never by its short name, as
+   `git pull origin $FORGE_SITE_BRANCH` does, since git takes a tag named `release` over the branch, and a merging
+   pull never moves the site back for a rollback:
+
+   ```bash
+   git fetch origin +refs/heads/release:refs/remotes/origin/release &&
+     git reset --hard refs/remotes/origin/release
+   ```
 3. **A deploy key** with write access (`ssh-keygen -t ed25519 -N '' -f release-key`; Settings, Deploy keys, Allow
    write access), its private half in the `production` secret `MROOM_RELEASE_KEY`, and no other deploy key with
-   write access.
+   write access. Make it where no agent runs, never on the box, and delete the private half once it is in the
+   secret: whoever can read a copy can push `release` without any reviewer.
 4. **The GitHub environment `production`:** deployment branches and tags limited to tags matching the release
    tags (such as `v*`), required reviewers who are people, and "Prevent self-review", so each deploy is approved
    by a person other than the one who started it (design 8.8, D22).
 5. **A ruleset on `release`** (target `refs/heads/release`): restrict creations, updates and deletions, and block
    force pushes, with deploy keys as the only bypass. Without it, any account with Write, the agents' included,
    could push the branch production deploys.
-6. **Who may create release tags:** a tag ruleset, so that only people can make one. The environment admits any
-   tag that matches, and the workflow file at that tag is the one that runs with the deploy key.
+6. **Who may make release tags:** a tag ruleset on the release tags and on the tag `release` that restricts
+   creations, updates and deletions and blocks force pushes, with people as the only bypass, so that only people
+   can make, move or delete one. The environment admits any tag that matches, and the workflow file and script at
+   that tag are what run with the deploy key, so their check that the tag is on the default branch is only as good
+   as the tag: a moved one, deployed as a rollback, would run someone else's code. Publishing a draft release
+   makes its tag at the draft's target, which anyone with Write can change, so the person who publishes checks the
+   target first. A tag named `release` would shadow the branch for a host that fetches it by its short name
+   (step 2). An app whose workflow tags every merge (`vX.Y.Z`) gives the tags it deploys a prefix of their own,
+   `release.tag_prefix` (`release-` makes `release-vX.Y.Z`), and points `<<fill:tag_pattern>>`, the environment
+   and this ruleset at those, rather than adding GitHub Actions to the bypass: then a workflow anyone with Write
+   pushes on a branch could make a tag that deploys.
 
 A re-run of the same tag leaves the branch where it is: Quick Deploy then deploys nothing and `verify` passes at
 once, while a deploy hook deploys again.

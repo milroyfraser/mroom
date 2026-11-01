@@ -425,8 +425,9 @@ The workflow skills (`plugin/skills/`: refine, deliver, implement, fix-issue, re
 reach the trackers only through these two commands, never an API or an MCP server of their own. Each
 writes to the tracker only the state of the issue it works and comments on it, and asks a person before
 it files an issue. A design waiting for approval is a comment (`Design for review: <link>`, then
-`Design approved by <name>: <link>`), not a label. `tests/skills-test.sh` checks each skill against this
-contract.
+`Design approved by <name>: <link>`), not a label. A skill that resumes earlier work takes only a pull
+request whose branch is in the app's repository, never a fork's (8.1). `tests/skills-test.sh` checks each
+skill against this contract.
 
 `issue_find_by_marker` (`mroom tracker find <key>`) lists the issues whose description holds the
 persona's hidden marker for an alert, `<!-- mroom-alert key=<provider>:<numeric id> -->`, with
@@ -470,7 +471,12 @@ Invariants, each with a test:
    the box only in a QA site that runs as its own user (D17) and whose `.env` holds credentials for that
    environment's own resources. "PR code" here means code that reaches the box through qa-up; what a developer or
    agent runs in a worktree or on the dev site runs as `forge`, and is trusted as they are, with what `forge`
-   holds: on GitHub, only the agents' account (D22).
+   holds: on GitHub, only the agents' account (D22). A fork's pull request is never part of that: qa-plan and
+   qa-up refuse one, and a workflow skill resumes only a pull request whose branch is in the app's repository,
+   so no workflow skill checks a fork's code out on the box. That rule is the skills' own; the guard does not
+   refuse such a checkout. The skills also judge a local branch by what it tracks, not by where its commits came
+   from, so a fork's pull request that a person fetches into a branch of the issue's name would pass as the
+   repository's own.
 2. **QA provisioning keeps PR code away from every secret:**
    - `qa-plan` (`pull_request`, no secrets): scope the change with path rules, build the frontend from the PR with
      public values only, upload `dist/` as an artifact; qa-up scopes the change again itself, since nothing a job
@@ -806,9 +812,15 @@ The deploy template (`templates/github/workflows/deploy-production.yml`) runs th
 concurrency group that never cancels a deploy. `release`, in `production`, checks out the run's own tag with the
 deploy key and runs `release-branch.sh`, which also stops when the branch is at a commit off the default branch or
 neither before nor after the tag, since then someone else moved it; that job runs no action but `actions/checkout`
-beside the key. `verify` holds no secret and runs `deploy-verify` on the commit `release` pushed; a poll counts only
-when the app's `/up` answers 200 too, and a release name other than the tag, for the right commit, is a warning. The
-run takes no input: a rollback is a dispatch from the older tag.
+beside the key. It stops too while a tag named `release` exists: git takes a tag over a branch of the same short
+name, anyone with Write can push one, and the branch's ruleset does not cover it. That stop is a backstop, since a
+tag can come after it; the host fetches `refs/heads/release` by its full name, and the tag ruleset covers the name
+`release` as well. That script's check that the tag is on the default branch runs from the tag, so it holds only for
+a tag a person made and no one can move: the tag ruleset restricts updates and deletions too, and a draft release's
+target, which Write can change, is where publishing makes the tag. `verify` holds no secret and runs `deploy-verify`
+on the commit `release` pushed; a poll counts only when the app's `/up` answers 200 too, and a release name other
+than the tag, for the right commit, is a warning. The run takes no input: a rollback is a dispatch from the older
+tag.
 
 **Sharded jobs.** The frontend unit tests came next: four vitest shards, the slowest shard's job 254 s, and a
 count the ruleset held in place, because it required each shard by name. With six shards the slowest shard's job

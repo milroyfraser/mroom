@@ -335,14 +335,20 @@ pg_endpoint() {
   [[ "$PG_PORT" =~ ^[0-9]{1,5}$ ]] || fail "the [mroom-gate] service's port is not a number"
 }
 # pg_as <role> <password> <database> [<program>]: psql (or another libpq program, given its own arguments by the
-# caller) as that role, over TCP to the gate's host and port. The password travels in the environment, which
-# only the box user and root can read, never on a command line; no service file is read.
+# caller) as that role, over TCP to the gate's host and port. The password travels in the program's environment,
+# which only the box user and root can read, never on a command line: every user on the box can read a running
+# program's arguments, env(1)'s too, so the subshell exports it and the program is exec'd with it. No service file
+# is read.
 pg_as() {
   local who="$1" secret="$2" database="$3"
   shift 3
   if [ "$#" = 0 ]; then set -- psql -X -q -A -t -v ON_ERROR_STOP=1 -v VERBOSITY=verbose -d "$database"; fi
-  env -u PGSERVICE -u PGSERVICEFILE -u PGPASSFILE PGHOST="$PG_HOST" PGPORT="$PG_PORT" PGUSER="$who" \
-    PGPASSWORD="$secret" PGDATABASE="$database" PGCONNECT_TIMEOUT=10 "$@" 2>"$PG_ERR"
+  (
+    unset PGSERVICE PGSERVICEFILE PGPASSFILE || exit 1
+    export PGHOST="$PG_HOST" PGPORT="$PG_PORT" PGUSER="$who" PGPASSWORD="$secret" PGDATABASE="$database"
+    export PGCONNECT_TIMEOUT=10
+    exec "$@"
+  ) 2>"$PG_ERR"
 }
 
 # read_role_ready <N>: environment N's read-only role, <app>_qa_<N>_read (D18), which db-read signs in as. No app
@@ -1603,11 +1609,12 @@ cmd_reverb_app_add() {
     [ "${#secret}" = 48 ] || fail "could not read random bytes for the secret"
   fi
   # Only the environment's two sites may open its sockets from a browser, at most 100 subscribed at once, and
-  # only a socket subscribed to a channel may send client events on it.
-  # shellcheck disable=SC2016 # jq's own $id, $secret, $n and $zone
-  reverb_put --arg id "$id" --arg secret "$secret" --arg n "$n" --arg zone "$zone" '
+  # only a socket subscribed to a channel may send client events on it. The secret reaches jq in its environment,
+  # never as an argument: every user on the box can read a running program's arguments.
+  # shellcheck disable=SC2016 # jq's own $id, $n, $zone and $ENV
+  MROOM_REVERB_SECRET="$secret" reverb_put --arg id "$id" --arg n "$n" --arg zone "$zone" '
     .apps |= ((. // []) | map(select(.app_id != $id)) + [{
-      app_id: $id, key: $id, secret: $secret,
+      app_id: $id, key: $id, secret: $ENV.MROOM_REVERB_SECRET,
       allowed_origins: ["api.\($n).\($zone)", "\($n).\($zone)"],
       ping_interval: 60, activity_timeout: 30, max_message_size: 10000, max_connections: 100,
       accept_client_events_from: "members"
