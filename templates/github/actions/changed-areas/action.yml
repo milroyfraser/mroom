@@ -35,7 +35,12 @@ runs:
         # branch, so the diff between them is exactly the PR's change. Read from git rather than the
         # API, which the job token may be refused. The checkout is shallow, so fetch the two parents.
         git fetch --no-tags --quiet --depth=2 origin "$GITHUB_SHA" || all "could not fetch the merge commit's parents"
-        files=$(git diff --name-only HEAD^1 HEAD) || all "could not diff the merge commit against its base"
+        # --no-renames: a moved file is listed under its old name too, or moving one out of a folder would
+        # change nothing there. -z: each name as it is, since git quotes one with a byte above 0x7f, a tab or a
+        # quote ("api/caf\303\251.php") and the quote hides its folder. A newline in a name then splits it in
+        # two, which can add an area but never lose one.
+        files=$(git diff --no-renames --name-only -z HEAD^1 HEAD | tr '\0' '\n') ||
+          all "could not diff the merge commit against its base"
         [ -n "$files" ] || all "no files listed"
         # A folder of "." is the whole repository; "" (no frontend) matches nothing.
         dir() {
