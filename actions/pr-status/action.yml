@@ -1,0 +1,57 @@
+name: PR status
+description: >-
+  One status note per pull request, edited in place: its QA environment, CI, the Claude review, the review
+  findings check and browser QA, each with the commit it refers to. A chat ping goes to the author only when
+  they must act, at most once per change. It reads the pull request as data, through the API
+  (actions/pr-status/pr-status.sh says how it keeps to one note and one ping).
+inputs:
+  pr:
+    description: The pull request's number
+    required: true
+  config:
+    description: The default branch's mroom.toml
+    default: app/mroom.toml
+  chat-token:
+    description: The chat bot's token (Slack, chat:write); without it no pings go out
+    default: ""
+  dry-run:
+    description: true to print what it would write and ping, and change nothing
+    default: "false"
+  reviewer:
+    description: The GitHub login that posts the Claude review
+    default: claude[bot]
+  review-check:
+    description: The Claude review's check run, as the app's workflow names it (<caller job> / review)
+    default: claude / review
+  findings-check:
+    description: The review findings check run; empty when the app has none
+    default: Review findings
+  browser-check:
+    description: The browser QA check run; empty (the default, until phase 2b) when the app has none
+    default: ""
+  qa-workflow:
+    description: The app's qa-up workflow file
+    default: qa-up.yml
+  qa-deploy-job:
+    description: The deploy job in it (a caller's job shows as <caller job> / QA deploy)
+    default: QA deploy
+runs:
+  using: composite
+  steps:
+    - name: Update the note and send pings
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        MROOM_CONFIG: ${{ inputs.config }}
+        MROOM_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        SLACK_BOT_TOKEN: ${{ inputs.chat-token }}
+        MROOM_PR_STATUS_LIVE: '1'
+        MROOM_PR_STATUS_DRY_RUN: ${{ inputs.dry-run == 'true' && '1' || '' }}
+        MROOM_PR_STATUS_REVIEWER: ${{ inputs.reviewer }}
+        MROOM_PR_STATUS_REVIEW_CHECK: ${{ inputs.review-check }}
+        MROOM_PR_STATUS_FINDINGS_CHECK: ${{ inputs.findings-check }}
+        MROOM_PR_STATUS_BROWSER_CHECK: ${{ inputs.browser-check }}
+        MROOM_PR_STATUS_QA_WORKFLOW: ${{ inputs.qa-workflow }}
+        MROOM_PR_STATUS_QA_DEPLOY_JOB: ${{ inputs.qa-deploy-job }}
+        PR: ${{ inputs.pr }}
+      run: '"$GITHUB_ACTION_PATH/pr-status.sh" "$PR"'

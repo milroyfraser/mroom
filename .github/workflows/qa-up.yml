@@ -142,7 +142,9 @@ jobs:
           config: app/mroom.toml
 
   deploy:
-    name: QA deploy
+    # The pull request it resolved (resolve.sh), in the name: PR status (actions/pr-status) trusts a run as this pull
+    # request's only by it, since a run-name can come from a fork's own QA plan.
+    name: "QA deploy · PR #${{ needs.pr.outputs.number }}"
     needs: [pr, plan]
     if: needs.pr.outputs.go == 'true' && needs.plan.result == 'success'
     runs-on: ubuntu-latest

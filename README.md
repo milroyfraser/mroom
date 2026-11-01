@@ -24,9 +24,11 @@ The full design, including how each requirement is measured, is in [docs/design.
 `mroom config`, the one reader of `mroom.toml` and `box.env`, `install.sh`, tests and CI) and the first
 part of phase 1: the [box watchdog](#box-watchdog) with its job records, the
 [regression label](#regression-label) check with its measures, and the
-[guard, the plugin's skeleton and the settings fragments](#guard-and-settings), and, from phase 3, the
-[tracker and error-tracker adapters](#tracker-and-error-tracker) and the [workflow skills](#workflow-skills),
-and, from phase 5, [alert triage](#alert-triage) with its alarm and its guard. Every other command prints
+[guard, the plugin's skeleton and the settings fragments](#guard-and-settings); from phase 3, the
+[tracker and error-tracker adapters](#tracker-and-error-tracker) and the [workflow skills](#workflow-skills);
+ahead of its phase, part of phase 4: the [Claude review](#claude-review) and its
+[review findings](#review-findings) check; and, from phase 5, [alert triage](#alert-triage) with its alarm and
+its guard, and ahead of it the persona's [PR status](#pr-status) notes and pings. Every other command prints
 `not yet: phase N`. The phases and what each delivers are in
 [section 11 of the design](docs/design.md#11-phases). Expect breaking changes in every `0.x` release.
 
@@ -238,6 +240,70 @@ usage error;
 ```bash
 mroom memory-preflight 4096 "the frontend build" && pnpm build
 ```
+
+## Doctor
+
+`mroom doctor` says whether the box is as mroom needs it, and `mroom doctor --app [<dir>]` also whether an app's
+mroom setup fits the box (design 8.7, 8.9 and 9). Run it as the box user, on the box: after setting the box up,
+after an upgrade, and whenever the app's `mroom.toml` or its workflow pins change. Each check prints a line,
+`ok`, `warn` or `fail`, and under a `warn` or a `fail` the fix. It exits 1 when a check fails (a `warn` passes),
+2 for a usage error. It changes nothing and prints no secret: it reads the gate's secret files only to see that
+they are there, mode 600 and complete, and signs in to Postgres and Redis as the gate to read settings, never data.
+
+```bash
+mroom doctor                     # the box
+cd ~/shop && mroom doctor --app  # the app whose mroom.toml is found from here, and the box against it
+```
+
+With `--app`, the app's checks:
+
+- **config**: `mroom.toml` validates (`mroom config validate`); an unknown key warns. The rest of the app's checks
+  wait until it does. Without `qa.zone` the app has no QA environments, and the QA checks are skipped.
+- **workflow qa-plan, qa-up, qa-down, qa-reap**: a workflow in `.github/workflows` calls each of mroom's QA
+  workflows, pinned to the release tag the box runs, and passes by name the secrets it takes. A pin newer than the
+  box says to upgrade the box first, since the box goes before the pins; one older, or a branch or a commit, says
+  to pin the box's tag. **pins**: any other use of mroom's workflows or actions is pinned to that tag too.
+- **parity**: each `[qa.parity]` value that is not production's service, a swap, warns as a known gap.
+- **sockets**: with `broadcast = "same"` and a frontend, `app.build.frontend_env` maps the four `VITE_REVERB_*`
+  values Laravel Echo reads (a warn: a frontend may open no sockets).
+- **redis-commands**: no `app.build.after_deploy` command, `.mroom/hooks/qa-deploy` line or scheduled command
+  (`routes/console.php`, `app/Console/Kernel.php`, `bootstrap/app.php`) runs `cache:clear`, `optimize:clear`,
+  `cache:prune-stale-tags` or `horizon:clear-metrics`, which the environment's Redis user is refused and phpredis
+  reports as done.
+- **isolation**: the backend reads every setting qa-up sets to keep environments apart: `DB_DATABASE`,
+  `DB_USERNAME`, `REDIS_USERNAME`, `REDIS_PREFIX`, `CACHE_PREFIX`, `SESSION_COOKIE`, `SESSION_DOMAIN`,
+  `XSRF_COOKIE_NAME`, `HORIZON_PREFIX` when the app has Horizon, and with a frontend of its own `CLIENT_URL`,
+  `CORS_ALLOWED_ORIGINS` and `SANCTUM_STATEFUL_DOMAINS`. A config file the app has not published leaves Laravel's
+  (or the package's) own, which reads its keys; one it has published must read them itself.
+- **health**: the backend has `/up` and `app.version_path` among its routes (a warn: a search can miss a route).
+
+The box's checks, for what the app's `mroom.toml` needs with `--app`, or for the box as it is without:
+
+- **box.env** reads; **names**: `MROOM_APP_NAME`, `MROOM_QA_ZONE`, `MROOM_QA_BACKEND_DIR` and
+  `MROOM_QA_PERSONA_DOMAIN` are `mroom.toml`'s `app.name`, `qa.zone`, `app.backend_dir` and `qa.persona_domain`,
+  `MROOM_QA_TEMPLATE` is set (and is `qa.template_database` when the file has one), and `MROOM_QA_PHP` runs
+  `app.php`. A box with no `MROOM_APP_NAME` has no QA gate, and its checks are skipped.
+- **db-read**: `MROOM_QA_DB_READ` holds the same entries as `qa.db_read_allowlist`, in any order; it names those
+  only in one or the other. With no `qa.db_read_allowlist`, an `MROOM_QA_DB_READ` warns.
+- **gate-keys**: a key in `~/.ssh/authorized_keys` is forced to `mroom gate provision`, each gate key is
+  `restrict`-ed and forced to an mroom that runs, with one role alone; a missing `template` key warns, and a missing
+  `browser` key warns once the app or the box has an allowlist.
+- **secrets**: `pg_service.conf` (with its `[mroom-gate]` service) and `redis-gate.env` are there, mode 600, and
+  set their login.
+- **postgres**: 16 or later, reached as the gate's role; the gate holds `<app>_qa_objects`, `<app>_qa_envs` and
+  `<app>_qa_readers` with `ADMIN OPTION`; the objects role owns no database or tablespace; and `PUBLIC` may connect
+  to neither the template nor an environment's database (any other database `PUBLIC` may connect to warns).
+  **template**: the template database is loaded, and no load was cut short (a `_next` or `_old` left warns).
+- **redis**: 7 or later, reached as the gate's user, with an `aclfile`, and the default user off.
+- **site-op**: installed, root's, out of the box user's reach, and this release's.
+- **mailpit**, **garage**, **reverb**: each service `[qa.parity]` needs (`mail = "catcher"`, `files = "same"`,
+  `broadcast = "same"`) is set up, its login file mode 600, and answers on its socket. Without `--app`, a service
+  the box has not set up is left out.
+- **memory**: the box's RAM, less `MROOM_QA_RESERVE_MB`, holds `qa.max_envs` environments of `qa.env_memory_mb`;
+  fewer warns, none fails.
+- **kernel**: `fs.protected_hardlinks` is 1. **sshd**: `DenyGroups isolated` and `AllowAgentForwarding no`,
+  read from `sshd_config` and `sshd_config.d/*.conf` outside `Match` blocks (a hint; `sshd -T` as root is the
+  answer).
 
 ## Forge API
 
@@ -1584,6 +1650,268 @@ tools/regressions.sh example/shop 2026-07-01
 # Production problems per release: 0.07 (6 over 85)
 # Time from a release to the first report of a problem: median 21h, longest 6d 2h (6 problems)
 ```
+
+## Claude review
+
+A reusable workflow gives each pull request one full Claude review, then follow-ups. The full review marks
+each finding 🔴 blocking, 🟡 optional or 🟣 pre-existing, with at most 5 optional ones. A later push gets a
+follow-up that only re-checks the earlier blocking findings (✅ fixed, ❌ still open, or 💬 settled by a
+reply) and looks for new blocking ones in what changed since. It raises no new nits. Each review ends with
+a hidden line naming the commit it reviewed, and the earlier reviews are folded as outdated.
+
+The app calls it on `pull_request`, pinned to a mroom release (`v0.5.0` below stands for the first release
+that has it), and passes its Claude Code OAuth token or Anthropic API key under the name the workflow
+expects:
+
+```yaml
+# .github/workflows/claude-review.yml
+name: Claude review
+on:
+  pull_request:
+    types: [opened, synchronize]
+permissions:
+  contents: read
+jobs:
+  claude:
+    permissions:
+      contents: read
+      pull-requests: write # to post the review and fold the earlier ones
+      issues: read
+      id-token: write # the Claude GitHub app's token
+    uses: milroyfraser/mroom/.github/workflows/claude-review.yml@v0.5.0
+    with:
+      paths: |                      # review only a change that touches these (empty: every change)
+        backend/**
+        frontend/**
+      review-guide: .claude/commands/review.md   # the app's review standard (empty: none)
+      review-guide-paths: |         # the code the guide covers (empty: every reviewed path)
+        backend/app/**
+        backend/tests/**
+      # reviewer: claude[bot]                        the login that posts the review, the default
+      # allowed-bots: claude[bot],github-actions[bot]  bots whose pull requests are reviewed too
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # or ANTHROPIC_API_KEY
+```
+
+Patterns match as a workflow's own `paths` do: `*` and `?` stay inside one folder, `**` crosses folders. A
+rename counts by both names. The review guide is any Markdown file on the default branch: a review command,
+a style guide or a checklist. In a full review that touches the guide's paths, Claude checks the changed code
+against it. A rule the guide marks blocking is 🔴 only at a line the pull request adds or changes.
+
+How it keeps the secret away from pull request code (design 8.1 and 8.5):
+
+- A `scope` job, with no secret, reads the event and the changed files and decides whether to review.
+- The `review` job holds the secret. It checks out the app's default branch, for its `CLAUDE.md`, the
+  review guide and the code around the change, and mroom at the commit of the called workflow. It never
+  checks out the pull request. Claude reads the diff and the conversation through `gh`, as data.
+- A fork's pull request and Dependabot's get no review, whatever the caller's trigger. Nor does one based on
+  another branch than the default: the action restores `.claude/`, `CLAUDE.md` and `.mcp.json` from the base
+  branch, and their hooks would run next to the secret.
+- The pinned `anthropics/claude-code-action` and its tool allowlist live in one composite action
+  (`actions/claude-review`). Claude may read files, read issues and pull requests, and comment on this pull
+  request; nothing else. Deny rules keep its reading tools out of the checkout's `.git` (where the action
+  puts its token), the runner's temp folder, `~/.claude`, `/proc` and `/sys`.
+- One review per pull request runs at a time: a newer push cancels the older review.
+
+The Claude GitHub app must be installed on the repository (`/install-github-app` in Claude Code sets it up and
+stores the token). The runner sandbox comes in phase 2b; until then the allowlist and the default-branch
+checkout are the box. Text in the diff and the comments can still try to steer Claude. The deny rules on
+`gh pr comment` (no `--body-file`, no `-F`) match a command's start only, so they are best effort: an
+injected prompt that gets `gh` to read a file could still post it. The sandbox's clean environment closes
+that.
+
+## Review findings
+
+A check run on the pull request's head commit, `Review findings`, that is red while the latest Claude review
+has an open 🔴 blocking finding. It also reads a table the author's session may post, headed
+**Review findings and how each was resolved**: a row with neither ✅ nor ➖ in any cell keeps it red. Only a
+table by the pull request's author or the repository's owners, members and collaborators counts. With
+no review and no table it is neutral, "Not reviewed yet". A review whose format it cannot read is neutral too,
+unless the table is red.
+
+```yaml
+# .github/workflows/review-findings.yml
+name: Review findings
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  issue_comment:
+    types: [created, edited, deleted]
+  workflow_run:
+    workflows: [Claude review] # the review workflow's name
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  findings:
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      checks: write # to post the check run
+    uses: milroyfraser/mroom/.github/workflows/review-findings.yml@v0.5.0
+    # with:
+    #   reviewer: claude[bot]          # the login that posts the review, the default
+    #   check-name: Review findings    # the default
+```
+
+Every run rereads the pull request's comments, so any of these events gives the same answer. Only a pull
+request's comments that are, or were, a review or a findings table wake it. `workflow_run` is a backstop for
+a review comment whose own event started nothing. The triggers all run the default branch's copy of this
+workflow, so a pull request cannot change what checks it. It reads the pull request through the API, checks
+out only mroom and holds no secret. Text from a comment in the summary is escaped: no mentions, no HTML, no
+links.
+
+The check is a signal for the person who reviews, not a gate. GitHub counts a neutral check as passing, and
+any workflow with `checks: write`, one a pull request adds among them, can post a check run of the same name.
+The gate is a person's approval of the latest push, which shows such a change.
+
+## PR status
+
+The persona keeps one status note on each pull request, edited in place, and pings the author in chat
+only when they must act. The note has a line each for the QA environment, CI, the Claude review, the
+review findings check and browser QA, and each line names the commit it refers to and links what it
+rests on:
+
+```
+✅ **Agent's notes** · ready for review
+
+- **Environment:** ✅ [app](https://42.qa.example.dev) · [API](https://api.42.qa.example.dev) · [comment](…) · `aaaaaaa`
+- **CI:** ✅ 4/4 required pass · [checks](…) · `aaaaaaa`
+- **Claude review:** ✅ [no blocking findings](…) · `aaaaaaa`
+- **Review findings:** ✅ [No open findings](…) · `aaaaaaa`
+- **Browser QA:** not set up
+```
+
+What was not checked says "not run" or "unknown", never a pass, and an unknown or pending line keeps
+the pull request from ready. When two lines disagree (CI green but browser QA failed, an environment
+serving an older commit than the head), the note asks an **Open question** with the next thing to
+check. It is a reusable workflow, `.github/workflows/pr-status.yml`, with the composite action
+`actions/pr-status`, which the app calls from a workflow of its own:
+
+```yaml
+# .github/workflows/pr-status.yml
+name: PR status
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]
+  workflow_run:
+    # Each workflow's name: what the note reads, so it updates when one completes.
+    workflows: [CI, Claude review, QA plan, QA environment up]
+    types: [completed]
+  # By hand; by the called workflow itself (relay, retry-closed); and by qa-up, when it is in its
+  # next-workflows, which passes up_run_id too.
+  workflow_dispatch:
+    inputs:
+      pr: { description: The pull request to update, required: true, type: string }
+      up_run_id: { description: The qa-up run that started this one, if any, required: false, type: string }
+permissions:
+  contents: read
+jobs:
+  status:
+    permissions:
+      actions: write # to start this workflow again for a qa-up run's or a closed pull request's update
+      checks: read
+      contents: read
+      issues: write
+      pull-requests: write # to write the note
+    uses: milroyfraser/mroom/.github/workflows/pr-status.yml@v0.5.0 # the first release with PR status
+    with:
+      pr: ${{ inputs.pr }}
+      # review-check: claude / review   # the Claude review's check run: <your caller job> / review
+      # findings-check: Review findings # empty when the app has no review findings check
+      # browser-check: ""               # the browser QA check run, once the app has one (phase 2b)
+      # qa-workflow: qa-up.yml          # your qa-up workflow's file, and qa-up-name its name
+      # qa-up-name: QA environment up
+    secrets:
+      MROOM_CHAT_TOKEN: ${{ secrets.MROOM_CHAT_TOKEN }}
+```
+
+The review findings check runs on events of its own (README, Review findings), and a check the job token
+posts starts no workflow, so the app's review findings workflow runs the note after its check, as a second
+job:
+
+```yaml
+# .github/workflows/review-findings.yml, after its findings job
+  status:
+    needs: findings
+    if: always() && needs.findings.result != 'skipped' && (github.event_name != 'issue_comment' || github.event.issue.pull_request)
+    permissions: { actions: write, checks: read, contents: read, issues: write, pull-requests: write }
+    uses: milroyfraser/mroom/.github/workflows/pr-status.yml@v0.5.0
+    with:
+      pr: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}
+    secrets:
+      MROOM_CHAT_TOKEN: ${{ secrets.MROOM_CHAT_TOKEN }}
+```
+
+And a qa-up run that the job token started ends with no `workflow_run` (README, QA environments), so name
+`pr-status.yml` in qa-up's `next-workflows`.
+
+```toml
+[persona]
+name = "Agent"                          # the name on every note and ping
+channel = "C0123456789"                 # the chat channel pings go to (a Slack channel id)
+chat_users = ".github/chat-users.json"  # the chat user map, the default
+
+[github]
+agent_login = "shop-agents"             # the box's agents' GitHub account (design D22)
+
+[issues]                                # optional: pings link the pull request's issue
+id_pattern = "SHOP-[0-9]+"
+url = "https://tracker.example.dev/issue/{id}"
+```
+
+- **Pings.** One goes out when CI turns red, the review has blocking findings, the deploy fails, or
+  browser QA fails or cannot verify, and once per pull request when it is ready for review. Each says
+  what happened, links the evidence, the pull request and its issue, and ends with the question for the
+  author. None for a draft or a closed pull request, and none for one by anyone but the repository's
+  owner, members and collaborators, or from a fork: on a public repository anyone can open one. Those
+  get the note alone.
+- **Whom a ping mentions.** The chat user map, a JSON object in the app's repository read from the default
+  branch, maps a GitHub login or a commit email to a Slack user id (`{"dev1": "U0123456789"}`); an entry
+  whose value is not a user id is dropped. The author of a pull request is mentioned through it, or
+  named when it has no entry. An agent's pull request (opened as `github.agent_login`) mentions the
+  author of its first commit, since a profile commits under its developer's name: by GitHub account,
+  else by email. Later commits never count. A first commit the map knows by neither, such as the
+  agents' own, mentions the developer the map names for `github.agent_login`.
+- **One note, one ping per change.** The note ends with a hidden line, `<!-- mroom-pr-status pr=42
+  final=0 sent=… -->`, holding the pings already sent, each keyed by commit, kind and outcome. A ping is
+  recorded in the note before it goes out: when the note cannot be written, none goes; when a ping fails
+  after that, it is missed, not sent again. Should a person's edit lose the hidden line, the note is found
+  by its footer and edited in place, and since what was sent is lost with it, that run's pings and the
+  ready ping are recorded without being sent; only a failure that goes away and comes back on the same
+  commit could ping twice then. Should there be two notes (a post whose answer was lost, then another),
+  the oldest is kept current, the pings any of them recorded count, and the others are edited once to say
+  they are copies. Deleting the note resets its pings.
+- **Closed pull requests.** A closed pull request's note shows the final state and is left alone until it
+  reopens. It is marked final only once GitHub took that edit, and every `workflow_run` also retries the
+  pull requests closed in the last day whose note is not final yet.
+- **Which events.** Every run rebuilds the note from GitHub (the pull request; the required checks of the
+  rulesets and the branch protection on its base branch, or `pr.required_checks` when those name none; the
+  check runs on its head; its comments; and the app's latest qa-up run with its deploy job), so it does
+  not matter which event woke it. A qa-up run links no pull request, so the called workflow's `relay` job
+  starts the app's workflow by dispatch for the number its run-name ends in. That name can come from a
+  fork's own QA plan, so a run counts only when its deploy job, which qa-up names after the pull request
+  it resolved itself (`QA deploy · PR #42`), names this one. One update per pull request runs at a time.
+  A pull request based on another branch than the default gets no note.
+- **Secrets.** Only the chat bot's token (`chat:write`, invited to the channel), in the `persona`
+  environment (design 8.8; default branch only), never a repository or organisation secret. Without it
+  the note is still kept, and no pings go out until it is set. The note is written with the job token.
+  No trigger runs a pull request's own copy of the app's workflow (`pull_request_target` runs its base
+  branch's, the others the default branch's), the update runs only for a pull request based on the
+  default branch, the jobs check out only the default branch's `mroom.toml` and mroom at the commit of
+  the workflow, and the pull request is read as data, through the API. Text in the note that does not
+  come from mroom, such as a check's name or title, is escaped, with no mentions and no links, and so is
+  the title in a ping.
+- **A dry run.** `actions/pr-status/pr-status.sh <pr>`, run anywhere without `MROOM_PR_STATUS_LIVE=1`,
+  prints the note, what it would do with it, and the pings, and changes nothing.
+
+For now the note lives on the pull request, as the design's tracker `none` has it, even when the app has
+a tracker; keeping it on the tracker's issue instead comes with the tracker adapter. The note is a signal,
+not a gate. A pull request's own workflow can post a check run of any name, such as a required check's
+or `Review findings`, and can post as `github-actions[bot]`, so it could make its own note show a pass
+or forge its hidden line. The gate is a person's review of the latest push, and the required checks
+GitHub itself enforces.
 
 ## Development
 

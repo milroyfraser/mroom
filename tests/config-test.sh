@@ -431,6 +431,37 @@ name = "shop"'
   run "$MROOM" config validate; expect_rc 1; expect_err_has "$T/mroom.toml: not valid TOML"
 }
 
+t_persona_rules() {
+  toml '[app]
+name = "shop"
+
+[persona]
+name = "Bot <b>"
+channel = "#asks"
+chat_users = "../users.json"
+
+[github]
+agent_login = "agents account"'
+  run "$MROOM" config validate; expect_rc 1
+  expect_err_has 'persona.name must be a name of letters, digits, spaces, - and _, at most 40 (got "Bot <b>")'
+  expect_err_has 'persona.channel must be a Slack channel id, such as C0123456789 (got "#asks")'
+  expect_err_has 'persona.chat_users must be a .json file inside the repository, with no . or .. part (got "../users.json")'
+  expect_err_has 'github.agent_login must be a GitHub login (got "agents account")'
+  toml '[app]
+name = "shop"
+
+[persona]
+name = "Bot One"
+channel = "C0123456789"
+chat_users = ".github/chat-users.json"
+
+[github]
+agent_login = "shop-agents"'
+  run "$MROOM" config validate; expect_rc 0
+  run "$MROOM" config get persona.chat_users --default .github/chat-users.json; expect_out ".github/chat-users.json"
+  run "$MROOM" config get github.agent_login; expect_out "shop-agents"
+}
+
 t_keys_and_help() {
   run "$MROOM" config keys; expect_rc 0
   expect_out_has "app.name"; expect_out_has "required"; expect_out_has "qa.db_read_allowlist"
@@ -460,6 +491,7 @@ test_case optional t_optional_prints_nothing_for_an_unset_key
 test_case workflow-keys t_workflow_keys
 test_case adapter-rules t_adapter_rules
 test_case qa-rules t_qa_rules
+test_case persona-rules t_persona_rules
 test_case shape-errors t_shape_errors
 test_case bad-toml t_bad_toml
 test_case keys-and-help t_keys_and_help

@@ -333,6 +333,35 @@ if fix:
         and re.search(r"^Stop\. No merge, no deploy, no change in the error tracker\.$", last, flags=re.M) is not None,
         "fix-issue ends at a PR in review and stops")
 
+# --- The implement skill's Session Room -----------------------------------------------------------------
+room_dir = os.path.join(skills_dir, "implement", "room")
+room_files = sorted(os.listdir(room_dir)) if os.path.isdir(room_dir) else []
+say(room_files == ["README.md", "room.html"], f"implement's room/ holds exactly README.md and room.html ({room_files})")
+impl = docs.get("skill implement")
+say(bool(impl) and "`room/room.html`" in impl[3] and "`room/README.md`" in impl[3] and "**Room first.**" in impl[3],
+    "implement publishes the Room first and names room/room.html and room/README.md")
+COPYRIGHT = "© 2026 Milroy Fraser · MIT License"
+for f in room_files:
+    text = read(os.path.join(room_dir, f))
+    label = f"room/{f}"
+    plain = re.sub(r"<[^>]+>", "", text) if f.endswith(".html") else text
+    say(COPYRIGHT in plain, f"{label} keeps the footer copyright ({COPYRIGHT})")
+    if f.endswith(".html"):
+        say(re.search(r"<title>[^<]+</title>", text) is not None, f"{label} has a <title> for the session to set")
+    for pattern, what in [(r"\b(?!0\.0\.0\.0\b|127\.0\.0\.1\b)(?:\d{1,3}\.){3}\d{1,3}\b", "IP address"),
+                          (r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}", "email address"),
+                          (r"/Users/|/home/|~[a-z]", "home folder")]:
+        hits = re.findall(pattern, text)
+        say(not hits, f"{label} names no {what} ({hits[:3]})")
+    hosts = re.findall(r"https?://([^/\s)`\"'>]+)", text)
+    say(all(h in ("github.com", "fonts.googleapis.com", "fonts.gstatic.com") for h in hosts),
+        f"{label} links only github.com or Google Fonts ({hosts})")
+    words = os.environ.get("MROOM_PRIVATE_WORDS")
+    if words:
+        rest = plain.replace(COPYRIGHT, "")
+        for word in [w.strip() for w in read(words).split("\n") if w.strip()]:
+            say(re.search(word, rest, flags=re.I) is None, f"{label} names none of the private words (one of them)")
+
 # --- The settings fragments still ask on a release --------------------------------------------------------
 frag = {}
 for f in sorted(os.listdir(os.path.join(root, "settings"))):

@@ -1,0 +1,24 @@
+name: Review findings
+description: >-
+  A check run on the pull request's head commit, red while the latest Claude review (actions/claude-review)
+  has open blocking findings, or while a "Review findings and how each was resolved" table in a comment has
+  a row with neither ✅ nor ➖. So a reviewer sees in the checks list, without reading every comment, whether
+  anything raised in review is still open. It reads the pull request as data, through the API.
+inputs:
+  reviewer:
+    description: The GitHub login that posts the Claude review
+    default: claude[bot]
+  check-name:
+    description: The check run's name
+    default: Review findings
+runs:
+  using: composite
+  steps:
+    - name: Post the review findings check run
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        MROOM_REVIEWER: ${{ inputs.reviewer }}
+        MROOM_CHECK_NAME: ${{ inputs.check-name }}
+      run: '"$GITHUB_ACTION_PATH/review-findings.sh" --event "$GITHUB_EVENT_PATH"'

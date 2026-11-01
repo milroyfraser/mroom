@@ -129,7 +129,11 @@ SCHEMA = {
     "persona.environment": ("str", False, 'environment = "production"',
                             "the error tracker's environment alert triage reads (default production)"),
     "persona.channel": ("str", False, 'channel = "C0123456789"',
-                        "the chat channel the persona pings when triage cannot run (a Slack channel id)"),
+                        "the chat channel the persona pings: PR status, and triage when it cannot run (a Slack channel id)"),
+    "persona.chat_users": ("str", False, 'chat_users = ".github/chat-users.json"',
+                           "the chat user map: GitHub logins and commit emails to chat user ids, on the default branch"),
+    "github.agent_login": ("str", False, 'agent_login = "shop-agents"',
+                           "the GitHub account the box's agents work as (D22)"),
 }
 
 # What get gives for a single key the file leaves out, before any --default: only keys mroom has decided. A whole
@@ -267,6 +271,11 @@ def rule_error(key: str, value) -> str | None:
                 return f"{key} has a disk name that is not [a-z][a-z0-9]{{0,15}}: {json.dumps(disk)}"
             if not ENV_PREFIX.fullmatch(prefix):
                 return f"{key}.{disk} must be the prefix of env names, such as AWS_ (got {json.dumps(prefix)})"
+    # PR status reads the chat user map from the default branch, and tells the agent's pull requests apart.
+    if key == "persona.chat_users" and not REPO_JSON.fullmatch(value):
+        return f"{key} must be a .json file inside the repository, with no . or .. part (got {json.dumps(value)})"
+    if key == "github.agent_login" and not GITHUB_LOGIN.fullmatch(value):
+        return f"{key} must be a GitHub login (got {json.dumps(value)})"
     if key == "qa.public_disks":
         for disk in value:
             if not DISK.fullmatch(disk):
@@ -403,11 +412,14 @@ DNS_ZONE = re.compile(r"(?=.{1,200}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a
 REPO_DIR = re.compile(r"\.|(?=.{1,200}$)[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*")
 PHP_BINARY = re.compile(r"php(?:[0-9]+(?:\.[0-9]+)?)?")
 DISK = re.compile(r"[a-z][a-z0-9]{0,15}")
+# A committed .json file: plain path characters, folders such as .github allowed, no . or .. part.
+REPO_JSON = re.compile(r"(?=.{1,200}$)(?:(?!\.\.?/)[A-Za-z0-9._-]+/)*(?!\.json$)[A-Za-z0-9._-]+\.json")
+GITHUB_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
 TEAM_KEY = re.compile(r"[A-Z0-9][A-Z0-9_]{0,31}")
 ORG_SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,49}")
 STATE_NAME = re.compile(r"(?=.{1,40}$)[A-Za-z0-9_-]+(?: [A-Za-z0-9_-]+)*")
 # The persona's name goes into every note it writes, its label and state to the tracker, its environment to
-# the error tracker's search and its channel to chat (actions/triage): each a plain value.
+# the error tracker's search and its channel to chat (actions/triage, actions/pr-status): each a plain value.
 PERSONA_NAME = re.compile(r"(?=.{1,40}$)[A-Za-z0-9_-]+(?: [A-Za-z0-9_-]+)*")
 LABEL_NAME = re.compile(r"[^\x00-\x1f\x7f]{1,80}")
 ENV_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
