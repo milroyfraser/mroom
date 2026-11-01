@@ -4,7 +4,7 @@
 # and mroom at the workflow's commit. The pull request's code reaches the box only as data, GitHub's tarball of the
 # commit and the frontend qa-plan built, which the gate unpacks as the environment's own site user. Each step checks
 # its own resource, so a run that stopped halfway is repaired by the next. In order:
-#   1. refuses what it cannot do yet, and a build that holds anything but files and folders, before anything is made
+#   1. refuses settings it cannot use, and a build that holds anything but files and folders, before anything is made
 #   2. refuses an environment brought up under the names of before mroom 0.5.0, which its teardown removes; waits
 #      for a site of the environment that Forge is still removing, sending the delete again when it is stuck; then,
 #      for a new environment (one whose code never went in, by the gate's record), counts the others: from
@@ -23,11 +23,12 @@
 #      root, and what the link answers must not be that file
 #   5. the code: GitHub's tarball of the commit through the gate's code-put, with Vite's build inside the Laravel
 #      app put into it; a frontend of its own goes to its own site through dist-put
-#   6. the environment's services through the gate: its database and role, Redis user, mail login and a bucket for
-#      each file disk, as [qa.parity] says, and its app key. The gate keeps their passwords and the key, so each
-#      deploy gets the same ones and its users stay signed in
+#   6. the environment's services through the gate: its database and role, Redis user, mail login, a bucket for
+#      each file disk and an app on the box's Reverb host, as [qa.parity] says, and its app key. The gate keeps their
+#      passwords, the Reverb app's secret and the key, so each deploy gets the same ones: its users stay signed in,
+#      and its open sockets keep their private channels
 #   7. its .env file: MROOM_QA_ENV_TEMPLATE less the entries whose keys mroom sets, then mroom's own values,
-#      through env-put, as the site user
+#      through env-put, as the site user, and never through Forge's API for a site's environment
 #   8. Forge's deploy, whose script refuses to run as any user but the site user, pulls nothing, and runs the app's
 #      qa-deploy and qa-fixtures hooks or their defaults; then one queue worker, which also refuses any other user,
 #      kept only when Forge's record names the site user, and made again when its command changed
@@ -95,9 +96,9 @@ qa_gate_init
 # setting <key> <default>: one value of the app's mroom.toml.
 setting() { qa_config "$1" "$2" || die "mroom.toml's $1 could not be read"; }
 broadcast="$(setting qa.parity.broadcast same)"
-if [ "$broadcast" = same ]; then
-  die "not yet: qa.parity.broadcast = \"same\" needs mroom's Reverb host, which exists but is not wired into QA environments yet (design D16); set it to \"log\" in mroom.toml until then"
-fi
+# The environment's values that are not secret, which qa-plan built the frontend with (lib/core/qa.sh).
+public_env="$(qa_public_env)" || die "mroom.toml's qa.parity.broadcast could not be read"
+public_value() { sed -n "s/^$1=//p" <<<"$public_env" | head -n1; }
 mail="$(setting qa.parity.mail catcher)"
 files="$(setting qa.parity.files same)"
 max="$(setting qa.max_envs 5)"
@@ -591,8 +592,25 @@ if [ "$files" = same ]; then
 else
   set_env FILESYSTEM_DISK local
 fi
-set_env BROADCAST_CONNECTION log
-set_env BROADCAST_DRIVER log
+if [ "$broadcast" = same ]; then
+  # An app of its own on the box's Reverb host, which takes sockets from the environment's own hosts alone. Its id,
+  # key, host, port and scheme are public, and qa-plan builds the frontend with them, from mroom.toml and the pull
+  # request's number (lib/core/qa.sh, qa_public_env): the gate's must be the ones derived here, from the default
+  # branch's mroom.toml, or the frontend would open its sockets for another app or on another host.
+  # Each deploy asks for the app again, and never removes it first: the gate keeps its secret while it exists, since
+  # each open socket holds the app it opened with, and a new secret would fail their private channels.
+  service "Reverb app" reverb-app-add "$n"
+  for key in REVERB_APP_ID REVERB_APP_KEY REVERB_HOST REVERB_PORT REVERB_SCHEME; do
+    [ "$(gate_value "$key")" = "$(public_value "$key")" ] \
+      || die "the gate's Reverb app has another $key than $(public_value "$key"), which mroom.toml gives for the frontend: box.env's MROOM_APP_NAME and MROOM_QA_ZONE must be mroom.toml's app.name and qa.zone, and the box must run the mroom release the workflows pin"
+  done
+  keep REVERB_APP_SECRET
+  set_env BROADCAST_CONNECTION reverb
+  set_env BROADCAST_DRIVER reverb
+else
+  set_env BROADCAST_CONNECTION log
+  set_env BROADCAST_DRIVER log
+fi
 service "app key" app-key "$n"
 keep APP_KEY
 
@@ -602,7 +620,13 @@ set_env APP_ENV qa
 set_env APP_DEBUG false
 # The hosts answer over https alone, so the cookies never go over http, not even to Forge's redirect on port 80.
 set_env SESSION_SECURE_COOKIE true
-while IFS= read -r line; do set_env "${line%%=*}" "${line#*=}"; done < <(qa_public_env)
+while IFS= read -r line; do set_env "${line%%=*}" "${line#*=}"; done <<<"$public_env"
+# For an app with a frontend, the build values Reverb's installer puts in a Laravel app's .env, set as a frontend
+# that maps them (README, sockets in the frontend) is built. A template's own would stay otherwise, and one such as
+# VITE_REVERB_HOST="${REVERB_HOST}" names a key that comes later in this file, so Laravel keeps that text as it is.
+if [ "$broadcast" = same ] && [ -n "$QA_FRONTEND" ]; then
+  for key in APP_KEY HOST PORT SCHEME; do set_env "VITE_REVERB_$key" "$(public_value "REVERB_$key")"; done
+fi
 set_env CACHE_PREFIX "${QA_USER}_cache_"
 # Entry by entry, so a quoted value of several lines stays whole (actions/qa-up/env-merge).
 printf '%s\n' "${MROOM_QA_ENV_TEMPLATE:-}" | python3 -I "$HERE/env-merge" "$WORK/values" >"$WORK/env" \

@@ -2,9 +2,10 @@
 # shellcheck disable=SC2317  # the t_* functions run indirectly, through test_case
 # Tests for whether a qa-up run brings the environment up (actions/qa-up/start.sh): GitHub is read first, so a pull
 # request that closed or moved on gets nothing; then Forge; the label and the draft state as they are now; a plan a
-# person started is a yes, one a freed slot started decides as a push does; a failed build, broadcast = "same" and a
-# pull request whose mroom.toml puts the frontend elsewhere say why in the comment, and keep the job green; a
-# pull request that waited and no longer needs an environment stops waiting. Offline: Forge and GitHub are fakes.
+# person started is a yes, one a freed slot started decides as a push does; a failed build and a pull request whose
+# mroom.toml puts the frontend elsewhere say why in the comment, and keep the job green; broadcasting with Reverb or
+# to the log comes up alike; a pull request that waited and no longer needs an environment stops waiting. Offline:
+# Forge and GitHub are fakes.
 set -euo pipefail
 SUITE=qa-start
 # shellcheck source=tests/lib.sh
@@ -115,21 +116,18 @@ t_a_failed_build_says_so_and_deploys_nothing() {
   expect_out $'failed\nThe QA build of `'"$SHA"'` failed, so nothing was deployed ([run](https://github.example/runs/1)). The next push tries again.'
 }
 
-t_broadcast_same_is_skipped_with_a_comment() {
+t_broadcast_same_comes_up_as_log_does() {
   world
   printf '%s\n' "${TOML/broadcast = \"log\"/broadcast = \"same\"}" >"$MROOM_CONFIG"
   pr_toml "$SHA"
   start SCOPE=maybe BUILT=true; expect_rc 0
-  expect_out 'false|qa.parity.broadcast is "same", which qa-up does not wire in yet'
-  run status
-  expect_out_has $'skipped\nNo QA environment yet: this app\'s mroom.toml sets qa.parity.broadcast = "same", which needs mroom\'s Reverb host. The host exists, but qa-up does not wire environments into it yet.'
-  # A change no user could notice gets no comment about it.
-  : >"$T/status"
-  start SCOPE=none BUILT=true
+  expect_out "true|a user could notice it: 1 of 1 paths could reach the app: 1 frontend"
   run status; expect_out ""
-  # It defaults to same.
+  # The default, same, too.
   printf '[app]\nname = "shop"\n\n[qa]\nzone = "qa.example.dev"\n' >"$MROOM_CONFIG"
-  start SCOPE=maybe BUILT=true; expect_out_has 'false|qa.parity.broadcast is "same"'
+  pr_toml "$SHA"
+  start SCOPE=maybe BUILT=true; expect_out_has 'true|a user could notice it'
+  run status; expect_out ""
 }
 
 t_a_pull_request_that_moves_the_frontend_is_skipped() {
@@ -167,7 +165,7 @@ test_case decisions t_what_decides_whether_it_comes_up
 test_case github-first t_github_is_read_first_and_a_newer_head_wins
 test_case woken-like-a-push t_a_woken_plan_decides_as_a_push_does
 test_case build-failed t_a_failed_build_says_so_and_deploys_nothing
-test_case broadcast-same t_broadcast_same_is_skipped_with_a_comment
+test_case broadcast-same t_broadcast_same_comes_up_as_log_does
 test_case frontend-moved t_a_pull_request_that_moves_the_frontend_is_skipped
 test_case usage t_usage
 finish
