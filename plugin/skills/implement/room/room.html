@@ -762,7 +762,8 @@ html[data-winddown] body::before{background:
     if (on) document.documentElement.dataset.winddown = "1"; else delete document.documentElement.dataset.winddown;
     windSky(on);
     box.replaceChildren();
-    const list = learnings.map((l) => (learnLocal[l.id] ? Object.assign({}, l, learnLocal[l.id]) : l)).sort((x, y) => (Number(x.order) || 0) - (Number(y.order) || 0));
+    /* A closed retrospective (meta/winddown.retroClosedAt) shows no cards at all. */
+    const list = (windDown && windDown.retroClosedAt ? [] : learnings).map((l) => (learnLocal[l.id] ? Object.assign({}, l, learnLocal[l.id]) : l)).sort((x, y) => (Number(x.order) || 0) - (Number(y.order) || 0));
     const open = list.filter((l) => l.status !== "done");
     /* learnView is the card the developer stepped back to (Back); otherwise the first card not done. */
     const viewed = learnView ? list.find((l) => l.id === learnView) : null;
@@ -801,7 +802,25 @@ html[data-winddown] body::before{background:
         const r = el("div", "lcrow"); r.append(el("span", "wdnote", "All " + list.length + " learnings read.")); if (!readOnly && db) r.append(back(list[list.length - 1])); box.append(r);
       }
       const rep = windDown && typeof windDown.report === "string" && /^https:\/\//.test(windDown.report) ? windDown.report : null;
-      if (rep) { const a = el("a", "wdnote", "Retrospective report ↗"); a.href = rep; a.target = "_blank"; a.rel = "noopener"; box.append(a); }
+      if (list.length) {
+        /* End of the retrospective: the report link and a Close button (two clicks, saved in the background). */
+        const end = el("div", "lcrow");
+        if (rep) { const a = el("a", null, "Retrospective report ↗"); a.href = rep; a.target = "_blank"; a.rel = "noopener"; end.append(a); }
+        else end.append(el("span", "wdnote", "Report not filed yet."));
+        if (!readOnly && db) {
+          const cb = el("button", null, "Close retrospective"); cb.type = "button";
+          let armed = false;
+          cb.addEventListener("click", () => {
+            if (!armed) { armed = true; cb.textContent = "Click again to close"; setTimeout(() => { if (armed) { armed = false; cb.textContent = "Close retrospective"; } }, 5000); return; }
+            const at = new Date().toISOString(); const before = windDown;
+            windDown = Object.assign({}, windDown || {}, { retroClosedAt: at });
+            renderLearning();
+            db.doc("meta/winddown").update({ retroClosedAt: at }).catch(() => { windDown = before; learnErr = "Couldn't close the retrospective. Please try again."; renderLearning(); });
+          });
+          end.append(cb);
+        }
+        box.append(end);
+      }
       return;
     }
     const head = el("div", "lchead");

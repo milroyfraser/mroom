@@ -94,6 +94,11 @@ landed (a merged PR, a filed issue, a settings change made). An item that was re
 declined: record it as such in the report and do nothing. Update the report as items move, and close
 it when every action item is done or declined.
 
+After the last card the page shows the report's link and a **Close retrospective** button (two
+clicks). Closing writes `meta/winddown.retroClosedAt` and hides the cards; then close the report in
+the tracker, or comment on it what is still in progress (give the developer the command when the
+write needs them). Confirmed items not done yet still get acted on.
+
 The page keeps the retrospective section only while something is left: a card not read, or a
 confirmed action not done. After the last card it lists the confirmed actions still open with their
 state, and the section disappears once all are addressed.
