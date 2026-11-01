@@ -972,9 +972,12 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     return d;
   }
   /* The final verdict, always last (step.verdict: {go: true|false, call, why}), with a Go / No-go pill. */
-  /* Each tab's verdict answers that tab's question: Review is the merge verdict, QA the QA verdict, and so on. */
-  function verdictLabel(v) {
+  /* Each tab's verdict answers that tab's question: Review is the merge verdict, QA the QA verdict, and so on.
+     A draft PR (it.draft) can't be merged yet, so its Review tab gives the Open verdict instead: should it
+     be marked ready for review. */
+  function verdictLabel(v, it) {
     const t = String((v && v.step) || "").toLowerCase();
+    if (t === "review" && it && it.draft === true) return "Open verdict";
     return ({ review: "Merge verdict", qa: "QA verdict", release: "Release verdict", rollout: "Rollout verdict", dod: "Definition of done" })[t] || "Claude's verdict";
   }
   function stepVerdict(v, pr, it) {
@@ -982,7 +985,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (isStale(v, it)) {
       const box0 = el("div", "fverdict");
       const head0 = el("div", "fvhead");
-      head0.append(el("span", "flabel", verdictLabel(v)), el("span", "fgo recalc", "Recalculating…"));
+      head0.append(el("span", "flabel", verdictLabel(v, it)), el("span", "fgo recalc", "Recalculating…"));
       box0.append(head0, el("p", "fevnote", "Checks are running on the latest push. Claude rewrites this when they finish."));
       return box0;
     }
@@ -991,7 +994,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (behind && v.go === true) v = { go: false, step: v.step, call: "No-go: behind main.", why: "The branch is " + pr.behindBy + (pr.behindBy === 1 ? " commit" : " commits") + " behind main, so its checks did not run on today's main. Update the branch and let CI pass first. Otherwise: " + String(v.why || v.call) };
     const box = el("div", "fverdict");
     const head = el("div", "fvhead");
-    head.append(el("span", "flabel", verdictLabel(v)));
+    head.append(el("span", "flabel", verdictLabel(v, it)));
     if (typeof v.go === "boolean") head.append(el("span", "fgo " + (v.go ? "go" : "nogo"), String(v.step || "").toLowerCase() === "dod" ? (v.go ? "Live" : "Not yet") : v.go ? "Go" : "No-go"));
     box.append(head);
     const p = el("p");
@@ -1361,6 +1364,8 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     /* A merge can't be Go while something blocks it: the branch is behind main or conflicts (checks
        "behind"), a check is red or still running, or the card names a blocker (it.blockers). The page shows
        the Review verdict as No-go with the reason, whatever was written. */
+    /* The same blocks hold for the Open verdict of a draft (it.draft): being a draft is not itself a blocker,
+       it's what that verdict decides, so don't list it in it.blockers. */
     {
       const why = it.checks === "behind" ? "behind main or conflicting; update the branch first"
         : it.checks === "red" ? "a check failed"
