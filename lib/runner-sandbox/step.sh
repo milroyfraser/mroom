@@ -9,7 +9,7 @@
 #   PATH            sandbox.sh's MROOM_SANDBOX_PATH folders, then /usr/local/bin:/usr/bin:/bin
 #   HOME, LANG      mroom-step's home, C.UTF-8
 #   MROOM_SANDBOX=1, MROOM_INPUTS, MROOM_EVIDENCE (the folder the step writes for the runner to read)
-#   MROOM_HOLDER    /usr/local/bin/mroom-holder, when the sandbox has a holder: run it with `sudo -n -u mroom-holder`
+#   MROOM_HOLDER    /usr/lib/mroom-sandbox/holder, when the sandbox has a holder: run it with `sudo -n -u mroom-holder`
 #   the NAME=value lines of MROOM_SANDBOX_ENV, read as data and never sourced
 # It exits with the command's status, or 2 for a bad call.
 set -euo pipefail
@@ -25,7 +25,7 @@ inputs=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --input)
-      [ "$#" -ge 2 ] && [ -f "$2" ] || die "--input takes a file: ${2:-}"
+      [[ "$#" -ge 2 && -f "$2" ]] || die "--input takes a file: ${2:-}"
       [[ "$(basename "$2")" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$ ]] || die "an input's name must be letters, digits, '.', '_' or '-': $(basename "$2")"
       inputs+=("$2")
       shift 2
@@ -34,10 +34,10 @@ while [ "$#" -gt 0 ]; do
     *) die "$usage" ;;
   esac
 done
-[ "$#" -ge 1 ] && [ -n "$1" ] || die "$usage"
+[[ "$#" -ge 1 && -n "$1" ]] || die "$usage"
 # env would take a NAME=value command as one more variable.
 [[ "$1" != *=* ]] || die "the command has an '=' in its name: $1"
-[ -d "$SANDBOX_VAR/inputs" ] && [ -f "$SANDBOX_ETC/env" ] || die "the runner sandbox is not set up (run the runner-sandbox action first)"
+[[ -d "$SANDBOX_VAR/inputs" && -f "$SANDBOX_ETC/env" ]] || die "the runner sandbox is not set up (run the runner-sandbox action first)"
 
 for f in ${inputs[@]+"${inputs[@]}"}; do install -m 0644 "$f" "$SANDBOX_VAR/inputs/$(basename "$f")"; done
 

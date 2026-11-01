@@ -317,7 +317,8 @@ inputs = a["inputs"]
 assert not any("secret" in k or "key" == k for k in inputs), inputs
 assert inputs["check"]["default"] == "true"
 steps = a["runs"]["steps"]
-assert "lib/runner-sandbox/sandbox.sh" in steps[0]["run"] and steps[0]["run"].startswith("sudo -E ")
+assert "lib/runner-sandbox/sandbox.sh" in steps[0]["run"] and " sudo -E " in steps[0]["run"]
+assert steps[0]["run"].startswith('MROOM_SANDBOX_RUNNER_PATH="$PATH" ')
 assert "MROOM_SANDBOX_SECRET" not in steps[0].get("env", {})
 assert steps[1]["if"] == "inputs.check == 'true'" and "check.sh" in steps[1]["run"]
 EOF

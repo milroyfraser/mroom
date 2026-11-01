@@ -8,7 +8,7 @@
 # file in the runner's home holding it. Then it runs probe.sh through mroom-step, as the job's code would run, and
 # reads the report: every check must be denied (or ok, for the evidence the step writes), every check must be there,
 # and the planted value must appear nowhere. Writes it tries: the copies, the inputs, the sandbox's /etc, the pinned
-# host keys, /usr/local/bin, the runner's home and the workspace. Sockets: Docker's and containerd's when present,
+# host keys, the sandbox's scripts, every folder on the runner's PATH, the runner's home and the workspace. Sockets: Docker's and containerd's when present,
 # and each --socket. MROOM_SANDBOX_STEP names another mroom-step, for the tests.
 # Exits 0 when the sandbox holds, 1 when it does not (each failure an ::error:: line), 2 for a bad call.
 set -euo pipefail
@@ -74,8 +74,14 @@ main() {
 
   args=(--value "$value" --secret "$SANDBOX_ETC/holder/secret" --holder-dir "$SANDBOX_ETC/holder"
     --runner-file "$planted" --runner-home "$HOME" --pid "$holder")
-  for w in "$SANDBOX_OPT" "$SANDBOX_VAR/inputs" "$SANDBOX_ETC" "$SANDBOX_ETC/known_hosts" /usr/local/bin "$HOME" \
-    ${GITHUB_WORKSPACE:+"$GITHUB_WORKSPACE"}; do
+  local runner_path seen=" "
+  IFS=: read -ra runner_path <<<"$PATH"
+  for w in "$SANDBOX_OPT" "$SANDBOX_VAR/inputs" "$SANDBOX_ETC" "$SANDBOX_ETC/known_hosts" "$SANDBOX_LIB" /usr/local/bin \
+    "$HOME" ${GITHUB_WORKSPACE:+"$GITHUB_WORKSPACE"} "${runner_path[@]}"; do
+    # The runner's PATH: each existing folder once, by the name it was given.
+    [[ "$w" == /* && "$w" != *[[:space:]]* ]] || continue
+    case "$seen" in *" $w "*) continue ;; esac
+    seen+="$w "
     args+=(--write "$w")
   done
   for s in ${sockets[@]+"${sockets[@]}"}; do args+=(--socket "$s"); done

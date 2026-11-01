@@ -1411,7 +1411,7 @@ What the step (user `mroom-step`, run through `mroom-step`) gets and does not:
 | | |
 |---|---|
 | **Gets** | `env -i` with only `PATH` (`path`, then `/usr/local/bin:/usr/bin:/bin`), `HOME`, `LANG`, `MROOM_SANDBOX`, `MROOM_INPUTS`, `MROOM_EVIDENCE`, `MROOM_HOLDER` and the `step-env` lines; read access to the copies and its inputs; write access to `/var/lib/mroom-sandbox/evidence` (the runner reads it afterwards) and its own home; the holder's wrapper, through `sudo -n -u mroom-holder "$MROOM_HOLDER"`; the network |
-| **Never** | the job's environment (no `GITHUB_TOKEN`, Claude token or secret); the runner's home (closed to `0700`: the workspace, git's credentials in it, `RUNNER_TEMP`); a runner process's environment; the secret, which only `mroom-holder` reads; sudo to root or to anything but the wrapper; writing the copies, the inputs, `/etc/mroom-sandbox`, the pinned host keys or `/usr/local/bin`; Docker's or containerd's socket |
+| **Never** | the job's environment (no `GITHUB_TOKEN`, Claude token or secret); the runner's home (closed to `0700`: the workspace, git's credentials in it, `RUNNER_TEMP`); a runner process's environment; the secret, which only `mroom-holder` reads; sudo to root or to anything but the wrapper; writing the copies, the inputs, `/etc/mroom-sandbox`, the pinned host keys, the sandbox's scripts or any folder on the runner's `PATH` (GitHub's images leave `/usr/local/bin` writable by all; the action closes it, so a step cannot plant a `git` the runner's next step runs); Docker's or containerd's socket |
 
 `step-env` refuses a name that reads like a credential (`*_TOKEN`, `*_KEY`, `*_SECRET`, `*_PASSWORD`, `*_DSN`
 and the like) or a runner's (`GITHUB_*`, `ACTIONS_*`, `RUNNER_*`, `CLAUDE*`), and `copy` refuses a path that
@@ -1421,7 +1421,7 @@ leaves the working directory or goes through a link, since a copied tree may be 
 long-lived process's and in a file in the runner's home, and runs a hostile probe
 (`lib/runner-sandbox/probe.sh`) through `mroom-step`. It tries every "Never" above and reports each; the job
 fails, with one `::error::` per hole, if any succeeds, if any check is missing from its report, or if the
-planted value shows up. Run it again yourself with `/usr/local/lib/mroom-sandbox/check.sh [--socket <path>]`.
+planted value shows up. Run it again yourself with `/usr/lib/mroom-sandbox/check.sh [--socket <path>]`.
 
 **Claude Code's own sandbox stays off.** Its subprocess env scrub (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`) runs
 each Bash command in `bwrap --unshare-user`, which sets `no_new_privs`, so the sudo hop to `mroom-holder` is

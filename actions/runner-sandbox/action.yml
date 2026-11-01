@@ -39,7 +39,7 @@ runs:
         MROOM_SANDBOX_COPY: ${{ inputs.copy }}
         MROOM_SANDBOX_PATH: ${{ inputs.path }}
         MROOM_SANDBOX_ENV: ${{ inputs.step-env }}
-      run: sudo -E "$GITHUB_ACTION_PATH/../../lib/runner-sandbox/sandbox.sh"
+      run: MROOM_SANDBOX_RUNNER_PATH="$PATH" sudo -E "$GITHUB_ACTION_PATH/../../lib/runner-sandbox/sandbox.sh"
     - name: Check the sandbox holds
       if: inputs.check == 'true'
       shell: bash
@@ -48,4 +48,4 @@ runs:
       run: |
         args=()
         while IFS= read -r s; do [ -z "$s" ] || args+=(--socket "$s"); done <<<"$SANDBOX_SOCKETS"
-        /usr/local/lib/mroom-sandbox/check.sh ${args[@]+"${args[@]}"}
+        /usr/lib/mroom-sandbox/check.sh ${args[@]+"${args[@]}"}

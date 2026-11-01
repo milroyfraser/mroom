@@ -543,7 +543,10 @@ Invariants, each with a test:
      never a name that reads like a credential); the runner's home, and so the workspace and its git credentials,
      is closed to it; a secret is readable only by `mroom-holder`, through one root-owned copy of a trusted wrapper,
      which `mroom-step` alone may run as that user; what the step loads is a root-owned copy in
-     `/opt/mroom-sandbox`, never copied through a link. It refuses a self-hosted runner that outlives the job.
+     `/opt/mroom-sandbox`, never copied through a link. No folder on the runner's `PATH` stays writable by other
+     users (GitHub's images leave `/usr/local/bin` open to all, so a step could plant a `git` the runner's next step
+     runs), and every folder the sandbox trusts, up to `/`, is one only root or the runner can change. It refuses a
+     self-hosted runner that outlives the job.
    - Before any untrusted code runs, a hostile probe runs through `mroom-step` and tries the secret, the runner's
      files and a runner process's environment, sudo, writes outside the step's own folders, and Docker's socket;
      the job fails if any succeeds, if a check goes unreported, or if a value planted in the runner shows up.

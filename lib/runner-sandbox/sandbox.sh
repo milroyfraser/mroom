@@ -15,12 +15,15 @@
 #   MROOM_SANDBOX_PATH         absolute folders, one per line, put first on the step's PATH (node's, for example)
 #   MROOM_SANDBOX_ENV          NAME=value lines the step gets; never a credential (common.sh refuses those names)
 #   MROOM_SANDBOX_EPHEMERAL    1 on a self-hosted runner that is thrown away after the job; refused otherwise
+#   MROOM_SANDBOX_RUNNER_PATH  the runner's PATH (sudo replaces PATH); /usr/local/bin and /usr/local/sbin always count
 #
 # What it builds:
 #   mroom-step      runs the untrusted code (mroom-step, step.sh): env -i, no sudo but mroom-holder as the holder,
 #                   and the runner's home closed (0700), so it reads no workspace, credential or runner process.
 #   mroom-holder    the only user that can read the secret ($ETC/holder/secret, 0600), through
-#                   /usr/local/bin/mroom-holder, a root-owned copy of MROOM_SANDBOX_HOLDER.
+#                   /usr/lib/mroom-sandbox/holder, a root-owned copy of MROOM_SANDBOX_HOLDER.
+#   the runner's PATH  no folder on it left writable by other users (GitHub's images leave /usr/local/bin
+#                   open to all), or a step could put a `git` there that the runner's next step runs
 #   /opt/mroom-sandbox             the copies, root-owned
 #   /var/lib/mroom-sandbox/inputs  written by the runner (mroom-step --input), read-only to the step
 #   /var/lib/mroom-sandbox/evidence  written by the step, read by the runner afterwards
@@ -33,7 +36,7 @@ SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 HERE="$(dirname "$SELF")"
 # shellcheck source=lib/runner-sandbox/common.sh
 . "$HERE/common.sh"
-LIB=/usr/local/lib/mroom-sandbox
+LIB="$SANDBOX_LIB"
 
 die() { echo "runner-sandbox: $*" >&2; exit "${2:-2}"; }
 
@@ -45,7 +48,7 @@ here="$(pwd -P)"
 
 if [ -n "$secret" ] && [ -z "$holder" ]; then die "MROOM_SANDBOX_SECRET needs MROOM_SANDBOX_HOLDER, the wrapper that uses it"; fi
 if [ -n "$holder" ]; then
-  [ -f "$holder" ] && [ ! -L "$holder" ] || die "MROOM_SANDBOX_HOLDER is not a regular file: $holder"
+  [[ -f "$holder" && ! -L "$holder" ]] || die "MROOM_SANDBOX_HOLDER is not a regular file: $holder"
   holder="$(readlink -f "$holder")"
 fi
 if [ -n "$known" ]; then
@@ -79,7 +82,7 @@ done <<<"${MROOM_SANDBOX_ENV:-}"
 
 [ "$(id -u)" = 0 ] || die "run as root (sudo -E)" 1
 runner="${SUDO_USER:-}"
-[ -n "$runner" ] && [ "$runner" != root ] || die "run through sudo from the runner's user, which SUDO_USER names" 1
+[[ -n "$runner" && "$runner" != root ]] || die "run through sudo from the runner's user, which SUDO_USER names" 1
 if [ "${RUNNER_ENVIRONMENT:-}" = self-hosted ] && [ "${MROOM_SANDBOX_EPHEMERAL:-}" != 1 ]; then
   die "a self-hosted runner keeps the sandbox's users, secret and sudoers after the job; set MROOM_SANDBOX_EPHEMERAL=1 only on one thrown away after it" 1
 fi
@@ -96,6 +99,17 @@ home="$(getent passwd "$runner" | cut -d: -f6)"
 [ -d "$home" ] || die "no home for $runner" 1
 # The runner's home holds the workspace (and git's credentials in it), temp files and tool state.
 chmod 0700 "$home"
+
+# --- No folder the runner runs from left writable by the step ---
+
+IFS=: read -ra runner_path <<<"/usr/local/bin:/usr/local/sbin:${MROOM_SANDBOX_RUNNER_PATH:-}"
+for dir in "${runner_path[@]}"; do
+  [[ "$dir" == /* && -d "$dir" && ! -L "$dir" ]] || continue
+  if [ -n "$(find "$dir" -maxdepth 0 -perm -o+w)" ]; then
+    chmod o-w "$dir"
+    echo "runner-sandbox: $dir was writable by every user; closed (o-w)" >&2
+  fi
+done
 
 # --- What the holder alone reads, and what everyone reads but nobody but root changes ---
 
@@ -144,4 +158,19 @@ install -m 0440 -o root -g root "$tmp" "$SANDBOX_SUDOERS"
 rm -f "$tmp"
 
 if [ -n "$secret" ]; then held="readable by $SANDBOX_HOLDER_USER only"; else held="not set"; fi
+# Every folder the sandbox trusts, and each one above it, must be one only root or the runner can change: else the
+# step could rename it away and put its own in its place.
+runner_uid="$(id -u "$runner")" runner_gid="$(id -g "$runner")"
+for path in "$LIB" "$SANDBOX_ETC" "$SANDBOX_OPT" "$SANDBOX_VAR" "$(dirname "$SANDBOX_STEP_BIN")" "${runner_path[@]}"; do
+  [[ "$path" == /* && -e "$path" ]] || continue
+  while :; do
+    read -r owner group mode <<<"$(stat -c '%u %g %a' "$path")"
+    if [ "$owner" != 0 ] && [ "$owner" != "$runner_uid" ]; then die "$path is owned by uid $owner, which the step might be" 1; fi
+    if (((8#$mode & 8#002) != 0)); then die "$path is writable by every user" 1; fi
+    if (((8#$mode & 8#020) != 0)) && [ "$group" != 0 ] && [ "$group" != "$runner_gid" ]; then die "$path is writable by group $group" 1; fi
+    [ "$path" = / ] && break
+    path="$(dirname "$path")"
+  done
+done
+
 echo "runner-sandbox: ready (steps run as $SANDBOX_STEP_USER through mroom-step; the secret is $held)" >&2

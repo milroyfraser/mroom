@@ -32,20 +32,20 @@ set -euo pipefail
 [ "$(id -un)" = mroom-holder ] && [ -s /etc/mroom-sandbox/holder/secret ] && echo holder-ok
 EOF
   cd "$APP"
-  run sudo -E env MROOM_SANDBOX_SECRET="$SECRET" MROOM_SANDBOX_HOLDER=holder.sh MROOM_SANDBOX_COPY=harness \
+  run sudo -E env MROOM_SANDBOX_RUNNER_PATH="$PATH" MROOM_SANDBOX_SECRET="$SECRET" MROOM_SANDBOX_HOLDER=holder.sh MROOM_SANDBOX_COPY=harness \
     MROOM_SANDBOX_PATH="$(dirname "$(command -v node)")" MROOM_SANDBOX_ENV='QA_DB=qa_1' \
     MROOM_SANDBOX_KNOWN_HOSTS='qa.example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJAL4XYtQyl1WalugDy7r5RDPoMgJhIDreu8WeEGPU/k' \
     "$RS/sandbox.sh"
   expect_rc 0; expect_err_has "the secret is readable by mroom-holder only"; expect_err_lacks "$SECRET"
 
-  run /usr/local/lib/mroom-sandbox/check.sh
+  run /usr/lib/mroom-sandbox/check.sh
   expect_rc 0; expect_err_has "the sandbox holds"
   [ "$rc" = 0 ] || echo "$out" >&2
 
   run mroom-step -- id -un
   expect_out mroom-step
   run mroom-step -- env
-  expect_out_has "QA_DB=qa_1"; expect_out_has "MROOM_HOLDER=/usr/local/bin/mroom-holder"
+  expect_out_has "QA_DB=qa_1"; expect_out_has "MROOM_HOLDER=/usr/lib/mroom-sandbox/holder"
   case "$out" in *GITHUB_* | *"$SECRET"* | *RUNNER_*) fail "the runner's environment reached the step" ;; *) ok ;; esac
   run mroom-step -- node -e 'console.log(process.version)'
   expect_rc 0
@@ -54,6 +54,8 @@ EOF
   run mroom-step -- sh -c 'echo found >"$MROOM_EVIDENCE/result.txt"'
   expect_true "the runner reads the step's evidence" [ "$(cat /var/lib/mroom-sandbox/evidence/result.txt)" = found ]
 
+  expect_true "no folder on the runner's PATH is left writable by all" \
+    [ -z "$(IFS=:; for d in $PATH; do [ -d "$d" ] && find "$d" -maxdepth 0 -perm -o+w; done)" ]
   expect_true "the secret is the holder's, mode 600" [ "$(sudo stat -c '%U %a' /etc/mroom-sandbox/holder/secret)" = "mroom-holder 600" ]
   run cat /etc/mroom-sandbox/holder/secret
   expect_rc 1
@@ -73,7 +75,7 @@ EOF
 t_a_weakened_sandbox_fails_the_check() {
   export HOME="$RUNNER_HOME"
   chmod 0755 "$HOME"
-  run /usr/local/lib/mroom-sandbox/check.sh
+  run /usr/lib/mroom-sandbox/check.sh
   chmod 0700 "$HOME"
   expect_rc 1
   expect_out_has "::error::runner-sandbox: the sandbox does not hold"
@@ -81,13 +83,13 @@ t_a_weakened_sandbox_fails_the_check() {
 
   echo 'mroom-step ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/zz-weakened >/dev/null
   sudo chmod 0440 /etc/sudoers.d/zz-weakened
-  run /usr/local/lib/mroom-sandbox/check.sh
+  run /usr/lib/mroom-sandbox/check.sh
   sudo rm -f /etc/sudoers.d/zz-weakened
   expect_rc 1
   expect_out_has "(sudo-root)"
   expect_out_has "(sudo-holder)"
 
-  run /usr/local/lib/mroom-sandbox/check.sh
+  run /usr/lib/mroom-sandbox/check.sh
   expect_rc 0
 }
 
