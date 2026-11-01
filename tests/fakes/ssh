@@ -55,7 +55,7 @@ if [ -f "$GATE/$op.out" ]; then cat "$GATE/$op.out"; exit 0; fi
 read -r -a words <<<"$request"
 # The gate's names for environment N of the app shop in the zone qa.example.dev, built here alone (lib/gate builds
 # them from box.env).
-user="shop_qa_$n" api="api-$n.qa.example.dev" web="go-$n.qa.example.dev"
+user="shop_qa_$n" api="api.$n.qa.example.dev" web="$n.qa.example.dev"
 case "$op" in
   db-create) printf 'database %s: created\nDB_DATABASE=%s\nDB_USERNAME=%s\nDB_PASSWORD=db-pw-%s\n' "$user" "$user" "$user" "$n" ;;
   redis-user-add)

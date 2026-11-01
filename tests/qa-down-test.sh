@@ -39,6 +39,9 @@ t_an_environment_comes_down_in_order() {
   comment 7 302 'github-actions[bot]' $'## Another check\n\nNot this one.'
   run "$DOWN" 7 --reason closed --state present
   expect_rc 0; expect_out_has "environment 7: removed"
+  # The names of before mroom 0.5.0 are looked for, and said only when Forge has a site by one.
+  expect_true "the teardown said a name Forge has no site by" lacks "$out" "==> Site $(old_api_host 7)"
+  expect_true "the teardown said a name Forge has no site by" lacks "$out" "==> Site $(old_web_host 7)"
   # Daemons first, and gone before user-clean; the sites right after it; then the box's side.
   run order
   expect_out $'forge DELETE /background-processes/5\nforge DELETE /background-processes/6\ngate user-clean 7
@@ -49,7 +52,8 @@ gate mail-user-remove 7\ngate mail-clear 7\ngate bucket-drop 7'
   run gh_log
   expect_out $'PATCH 301 ### QA environment\\n<!-- mroom-qa: removing was=present -->\\n\\nBeing removed: the pull request closed.
 PATCH 301 ### QA environment\\n<!-- mroom-qa: removed -->\\n\\nRemoved: the pull request closed.'
-  run jq -r '[.sites[] | "\(.id) \(.status)"] | join(",")' "$FORGE_STATE"; expect_out "11 removing,12 removing,13 installed"
+  # Environment 7's sites are removing, or gone already; environment 70's stays.
+  run jq -r '[.sites[] | select(.status != "removing") | .id] | join(",")' "$FORGE_STATE"; expect_out "13"
   run jq -r '[.processes[].id] | join(",")' "$FORGE_STATE"; expect_out "7"
   # It held a slot, which the wake job gives on.
   run freed; expect_out true
@@ -275,13 +279,42 @@ t_the_check_reads_forge_and_changes_nothing() {
   forge_set '.sites[0].status = "removing" | .sites[1].status = "removing"'
   run "$CHECK" 7; expect_out "state=removing"
   run "$CHECK" 8; expect_out "state=absent"
-  # The go site alone is an environment too.
+  # The frontend's site alone is an environment too.
   forge_set '.sites[1].status = "installed"'
   run "$CHECK" 7; expect_out "state=present"
   run forge_writes; expect_out ""
   run gate_log; expect_out ""
   forge_set '.fail["GET /sites"] = 500'
   run "$CHECK" 7; expect_rc 1; expect_out ""
+}
+
+t_an_environment_of_the_old_names_comes_down_too() {
+  qa_world
+  # Brought up before mroom 0.5.0, as api-7 and go-7, with a worker of its own and daemons of forge's that run from
+  # folders of its old names.
+  site 11 "$(old_api_host 7)" installed
+  site 12 "$(old_web_host 7)" installed
+  site 13 "$(api_host 70)" installed
+  process 5 "$(site_user 7)" "/home/$(site_user 7)/$(old_api_host 7)/."
+  process 6 forge "/var/www/$(old_web_host 7)"
+  process 8 forge "/var/www/$(old_api_host 7)"
+  run "$CHECK" 7; expect_rc 0; expect_out "state=present"
+  run "$DOWN" 7 --reason closed --state present
+  expect_rc 0; expect_out_has "environment 7: removed"
+  expect_out_has "==> Site $(old_api_host 7)"$'\n'"    deleted site 11"
+  expect_out_has "==> Site $(old_web_host 7)"$'\n'"    deleted site 12"
+  run order
+  expect_out $'forge DELETE /background-processes/5\nforge DELETE /background-processes/6\nforge DELETE /background-processes/8
+gate user-clean 7\nforge DELETE /sites/11\nforge DELETE /sites/12\n'"gate ${BOX_SIDE//$'\n'/$'\ngate '}"
+  run jq -r '[.sites[] | select(.status != "removing") | .id] | join(",")' "$FORGE_STATE"; expect_out "13"
+  run freed; expect_out true
+  # Its frontend's site alone, as a teardown that stopped halfway leaves it, is the environment still; and once Forge
+  # is removing that, the environment is being removed.
+  qa_world
+  site 12 "$(old_web_host 7)" installed
+  run "$CHECK" 7; expect_rc 0; expect_out "state=present"
+  forge_set '.sites[0].status = "removing"'
+  run "$CHECK" 7; expect_rc 0; expect_out "state=removing"
 }
 
 t_an_environment_on_a_later_page_is_found() {
@@ -351,6 +384,7 @@ test_case delete-404-is-done t_a_delete_that_finds_nothing_counts_as_done
 test_case parity-swaps t_services_qa_does_not_use_are_left_alone
 test_case forge-unreadable t_a_forge_that_cannot_be_read_stops_it
 test_case check t_the_check_reads_forge_and_changes_nothing
+test_case old-names-come-down t_an_environment_of_the_old_names_comes_down_too
 test_case later-page t_an_environment_on_a_later_page_is_found
 test_case label-stops-wait t_a_label_off_a_waiting_pull_request_stops_its_wait
 test_case not-set-up t_a_qa_environment_not_set_up_has_nothing_to_tear_down

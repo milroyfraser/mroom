@@ -14,8 +14,8 @@ trap 'chmod -R u+w "$TOP" 2>/dev/null; rm -rf "$TOP"' EXIT
 skip_unless has_box_tools "this host lacks bash 5, flock or GNU date, which box commands need"
 
 COMMIT=abc1234def5678abc1234def5678abc1234def56
-SITE="api-12.qa.example.test"
-WEB="go-12.qa.example.test"
+SITE="api.12.qa.example.test"
+WEB="12.qa.example.test"
 
 # world: box.env, a root-like copy of site-op in a folder the box user cannot change, the site user's home
 # with a live tree, and fakes for sudo, id and logger.
@@ -343,10 +343,14 @@ t_unpacked_files_lose_setuid_and_dirs_stay_removable() {
 
 t_site_op_works_only_on_its_own_environments_sites() {
   world; repo_tarball
-  site_op shop_qa_12 unpack dist "$SITE" <"$T/code.tgz"; expect_rc 1; expect_err_has "is not this environment's go-12 site"
-  site_op shop_qa_12 unpack code "$WEB" backend "$COMMIT" <"$T/code.tgz"; expect_rc 1; expect_err_has "is not this environment's api-12 site"
-  site_op shop_qa_12 env-sha api-13.qa.example.test backend; expect_rc 1; expect_err_has "is not this environment's api-12 site"
-  site_op shop_qa_12 env-sha api-123.qa.example.test backend; expect_rc 1
+  site_op shop_qa_12 unpack dist "$SITE" <"$T/code.tgz"; expect_rc 1; expect_err_has "is not this environment's 12.<zone> site"
+  site_op shop_qa_12 unpack code "$WEB" backend "$COMMIT" <"$T/code.tgz"; expect_rc 1; expect_err_has "is not this environment's api.12.<zone> site"
+  site_op shop_qa_12 env-sha api.13.qa.example.test backend; expect_rc 1; expect_err_has "is not this environment's api.12.<zone> site"
+  site_op shop_qa_12 env-sha api.123.qa.example.test backend; expect_rc 1; expect_err_has "is not this environment's api.12.<zone> site"
+  site_op shop_qa_12 unpack dist 123.qa.example.test <"$T/code.tgz"; expect_rc 1; expect_err_has "is not this environment's 12.<zone> site"
+  # The names of before mroom 0.5.0 are no environment's sites now.
+  site_op shop_qa_12 env-sha api-12.qa.example.test backend; expect_rc 1; expect_err_has "is not this environment's api.12.<zone> site"
+  site_op shop_qa_12 unpack dist go-12.qa.example.test <"$T/code.tgz"; expect_rc 1; expect_err_has "is not this environment's 12.<zone> site"
   site_op forge env-sha "$SITE" backend; expect_rc 1; expect_err_has "forge is not a QA site's isolated user"
   expect_true "a refused call changed the site" unchanged
 }
@@ -421,7 +425,7 @@ t_probe_link_puts_a_link_to_site_op_at_each_web_root() {
   gate provision "probe-link 12 both"; expect_rc 1; expect_err_has "its second argument is api or web"
   gate provision "probe-link 12"; expect_rc 1
   # Only a QA site's own user puts it, in its own site.
-  site_op shop_qa_12 probe-link api-13.qa.example.test backend; expect_rc 1; expect_err_has "is not this environment's api-12 site"
+  site_op shop_qa_12 probe-link api.13.qa.example.test backend; expect_rc 1; expect_err_has "is not this environment's api.12.<zone> site"
   site_op forge probe-link "$WEB"; expect_rc 1; expect_err_has "forge is not a QA site's isolated user"
   # What site-op says is passed on only as a file's SHA-256 and path: a release whose site-op says anything else.
   mkdir -p "$T/release"

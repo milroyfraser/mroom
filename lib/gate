@@ -64,17 +64,18 @@
 # sets: the database, role and Redis user are <MROOM_APP_NAME>_qa_<N>, the database is cloned from
 # MROOM_QA_TEMPLATE, and the Redis prefix is <MROOM_APP_NAME>:qa<N>:, so no argument can reach another
 # environment. Its buckets are <MROOM_APP_NAME>-qa-<N>-<disk>, each _ of the name a -, for the disk name
-# bucket-create also takes: [a-z][a-z0-9]{0,15}, with no - in it, so no disk's bucket is another
-# environment's or another disk's. Its Reverb app's id and key are both <MROOM_APP_NAME>-qa-<N>: public, so
-# the frontend builds without a secret, and the PR's alone, so no other PR is ever given an id whose sockets
-# may still be open. Its sites, api-<N>.<MROOM_QA_ZONE> and go-<N>.<MROOM_QA_ZONE>, live in the home of a Forge
-# isolated user of its own, also <MROOM_APP_NAME>_qa_<N>. The gate works in them only through site-op, run
-# as that user with sudo from a root-owned copy of this release's lib/site-op, so it never unpacks a
-# tarball, follows a PR's link or runs its code as the box user. It connects to Postgres 16 or later as its own role, through the libpq service mroom-gate
-# in ~/.config/mroom/secrets/pg_service.conf, and to Redis 7 or later as its own user, from
-# ~/.config/mroom/secrets/redis-gate.env (both mode 600). Each request and refusal is logged, never a
-# secret, to ~/.local/state/mroom/gate.log and to syslog. It runs from the installed release, never from an
-# app checkout, so a pull request cannot change it.
+# bucket-create also takes: [a-z][a-z0-9]{0,15}, with no - in it, so no disk's bucket is another environment's
+# or another disk's. Its Reverb app's id and key are both <MROOM_APP_NAME>-qa-<N>: public, so the frontend
+# builds without a secret, and the PR's alone, so no other PR is ever given an id whose sockets may still be
+# open. Its sites, api.<N>.<MROOM_QA_ZONE> for the Laravel app and <N>.<MROOM_QA_ZONE> for a frontend of its
+# own, live in the home of a Forge isolated user of its own, also <MROOM_APP_NAME>_qa_<N>. The gate works in
+# them only through site-op, run as that user with sudo from a root-owned copy of this release's lib/site-op,
+# so it never unpacks a tarball, follows a PR's link or runs its code as the box user. It connects to Postgres
+# 16 or later as its own role, through the libpq service mroom-gate in
+# ~/.config/mroom/secrets/pg_service.conf, and to Redis 7 or later as its own user, from
+# ~/.config/mroom/secrets/redis-gate.env (both mode 600). Each request and refusal is logged, never a secret,
+# to ~/.local/state/mroom/gate.log and to syslog. It runs from the installed release, never from an app
+# checkout, so a pull request cannot change it.
 #
 # Exit codes: 0 done, 1 failed or refused, 2 not run as a forced command with a role.
 set -euo pipefail
@@ -609,7 +610,7 @@ site_ready() {
   zone="${BOX[MROOM_QA_ZONE]:-}"
   [ -n "$zone" ] || fail "MROOM_QA_ZONE is not set in box.env"
   BACKEND="${BOX[MROOM_QA_BACKEND_DIR]:-.}"
-  SITE_USER="${app}_qa_${n}" API_DOMAIN="api-${n}.${zone}" WEB_DOMAIN="go-${n}.${zone}"
+  SITE_USER="${app}_qa_${n}" API_DOMAIN="api.${n}.${zone}" WEB_DOMAIN="${n}.${zone}"
   ((${#SITE_USER} <= 32)) || fail "$SITE_USER is longer than a user name may be (32); shorten MROOM_APP_NAME"
   need sudo cmp
   if [ ! -f "$SITE_OP" ] || [ -L "$SITE_OP" ]; then fail "$SITE_OP is not installed, or is a link (README, QA gate)"; fi
@@ -1292,7 +1293,7 @@ cmd_reverb_app_add() {
   reverb_put --arg id "$id" --arg secret "$secret" --arg n "$n" --arg zone "$zone" '
     .apps |= ((. // []) | map(select(.app_id != $id)) + [{
       app_id: $id, key: $id, secret: $secret,
-      allowed_origins: ["api-\($n).\($zone)", "go-\($n).\($zone)"],
+      allowed_origins: ["api.\($n).\($zone)", "\($n).\($zone)"],
       ping_interval: 60, activity_timeout: 30, max_message_size: 10000, max_connections: 100,
       accept_client_events_from: "members"
     }])'
