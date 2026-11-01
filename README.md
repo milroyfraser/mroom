@@ -1444,9 +1444,12 @@ either. Name it in qa-up's `next-workflows`, and give it `workflow_dispatch` wit
 `up_run_id`: qa-up starts it once its deploy ran, whether the environment came up or not, as the
 `workflow_run` would have. It takes the rest from GitHub, how the deploy went included, from the run
 `up_run_id` names, as qa-up does from its plan's run, and finds the runs it looks for by workflow and name,
-never by event, since a dispatched run is as much a run of its workflow as one `workflow_run` started. qa-up
-goes by the run's first starter here too, so a person's re-run of a dispatched qa-up starts it again; should
-that re-run also end with a `workflow_run`, it runs twice for one commit.
+never by the usual event alone, since a dispatched run is as much a run of its workflow as one `workflow_run`
+started. It trusts only a run of the default branch's copy of the workflow, on `workflow_run` or dispatched on
+the default branch, the one that started it included: a pull request's own copy of the workflow's file, or a
+branch's, runs on events of its own and names its runs and jobs as it likes, and its runs start a
+`workflow_run` too. qa-up goes by the run's first starter here too, so a person's re-run of a dispatched qa-up
+starts it again; should that re-run also end with a `workflow_run`, it runs twice for one commit.
 
 ## CI templates
 

@@ -921,9 +921,11 @@ What the pilot's scripts learned after this table was drawn, which their ports k
   that may write the default branch's caches (`workflow_dispatch`, `push`, `schedule` and the like) sets
   `cache-mode: read`, or the pull request's code can save a cache the default branch's own builds restore.
 - **Finding runs (phase 2a).** A lookup of a workflow's runs, such as whether a deploy for a pull request is
-  running or which of its runs is the newest, finds them by workflow and by run name, never filtered by event: a
-  run started by `workflow_dispatch` is as much a run of that workflow as one started by `workflow_run`, and a
-  filter on the usual event hides it.
+  running or which of its runs is the newest, finds them by workflow and by run name, never by the usual event
+  alone: a run started by `workflow_dispatch` is as much a run of that workflow as one started by `workflow_run`,
+  and a filter on the usual event hides it. Of those, it trusts only runs of the default branch's copy of the
+  workflow, on `workflow_run` or dispatched on the default branch: a pull request's own copy of the file, or a
+  branch's, runs on events of its own and names its runs and jobs as it likes (`actions/pr-status`, phase 5).
 - **Chains of runs (phase 2a).** A run started with the job token (`GITHUB_TOKEN`) starts no `workflow_run` when it
   ends, and neither does a run it dispatches in turn. So in a chain the token started, each link dispatches the
   next itself, all the way down: a woken plan dispatches qa-up, and qa-up dispatches what follows it. A workflow

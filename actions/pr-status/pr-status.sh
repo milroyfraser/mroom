@@ -40,7 +40,8 @@
 #   GH_TOKEN, GITHUB_REPOSITORY           the job token, and owner/name
 #   MROOM_CONFIG                          the default branch's mroom.toml
 #   SLACK_BOT_TOKEN                       the chat bot's token; without it no pings go out (a notice says so)
-#   MROOM_DEFAULT_BRANCH                  where the chat user map is read (the repository's default if unset)
+#   MROOM_DEFAULT_BRANCH                  where the chat user map is read, and the one branch a dispatched qa-up
+#                                         run counts on (the repository's default if unset)
 #   MROOM_PR_STATUS_LIVE=1                act: write the note and send pings. Only the action sets it.
 #   MROOM_PR_STATUS_DRY_RUN=1             a dry run even with MROOM_PR_STATUS_LIVE=1
 #   MROOM_PR_STATUS_REVIEWER              the login that posts the Claude review (claude[bot])
