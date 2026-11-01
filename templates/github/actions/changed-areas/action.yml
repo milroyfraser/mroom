@@ -29,6 +29,9 @@ runs:
         FRONTEND_DIR: <<app.frontend_dir>>
       run: |
         set -uo pipefail
+        # Bytes, not characters: names come as they are (-z below), and in a UTF-8 locale grep's "." matches no
+        # byte that is not UTF-8, so a folder of "." could miss a file.
+        export LC_ALL=C
         all() { printf 'backend=true\nfrontend=true\ne2e=true\n' >> "$GITHUB_OUTPUT"; echo "areas: all ($1)"; exit 0; }
         [ "$EVENT" = pull_request ] || all "not a pull request"
         # On a pull request the checkout is GitHub's merge commit, whose first parent is the base
@@ -36,10 +39,11 @@ runs:
         # API, which the job token may be refused. The checkout is shallow, so fetch the two parents.
         git fetch --no-tags --quiet --depth=2 origin "$GITHUB_SHA" || all "could not fetch the merge commit's parents"
         # --no-renames: a moved file is listed under its old name too, or moving one out of a folder would
-        # change nothing there. -z: each name as it is, since git quotes one with a byte above 0x7f, a tab or a
-        # quote ("api/caf\303\251.php") and the quote hides its folder. A newline in a name then splits it in
-        # two, which can add an area but never lose one.
-        files=$(git diff --no-renames --name-only -z HEAD^1 HEAD | tr '\0' '\n') ||
+        # change nothing there. --ignore-submodules=none: a submodule is listed even when the PR's .gitmodules
+        # marks it `ignore`. -z: each name as it is, since git quotes a name with a control character, a double
+        # quote, a backslash or a byte of 0x7f or above ("api/caf\303\251.php"), and the quote hides its folder.
+        # A newline in a name then splits it in two, which can add an area but never lose one.
+        files=$(git diff --no-renames --ignore-submodules=none --name-only -z HEAD^1 HEAD | tr '\0' '\n') ||
           all "could not diff the merge commit against its base"
         [ -n "$files" ] || all "no files listed"
         # A folder of "." is the whole repository; "" (no frontend) matches nothing.
