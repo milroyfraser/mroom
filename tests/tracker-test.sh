@@ -467,7 +467,7 @@ $M")" false null)"
   expect_true "the filter: $(vars 1)" [ "$(vars 1)" = '{"f":{"description":{"contains":"<!-- mroom-alert key=sentry:1001"},"team":{"key":{"eq":"ENG"}}}}' ]
   expect_true "the answer: $out" json_is "$out" '. == [{identifier: "ENG-7", title: "Issue ENG-7",
     url: "https://tracker.example.dev/issue/ENG-7", branch: "b/ENG-7", state: "Triage", state_type: "triage",
-    creator: "Agent", labels: ["found-by-agent"], created_at: "2026-01-03T00:00:00Z"}]'
+    creator: "Agent", labels: ["found-by-agent"], created_at: "2026-01-03T00:00:00Z", keys: ["sentry:1001"]}]'
   expect_true "the description was passed on" lacks "$out" "Seen in checkout"
   expect_true "the token leaked" token_nowhere
   expect_true "a file was left in TMPDIR" tmp_empty
@@ -504,6 +504,54 @@ t_find_reads_every_page_and_puts_the_first_filed_first() {
   expect_true "expected 2 calls, got $(calls)" [ "$(calls)" = 2 ]
   expect_true "the second page lost the cursor" [ "$(vars 2 | jq -r .after)" = cursor-f-2 ]
   expect_true "not every match, the first filed first: $out" json_is "$out" '[.[].identifier] == ["ENG-2", "ENG-4", "ENG-9"]'
+  expect_true "the keys of each: $out" json_is "$out" '[.[].keys] == [["sentry:1001"], ["sentry:1001:regressed:v1.4.0"], ["sentry:1001"]]'
+}
+
+t_find_lists_only_this_errors_keys() {
+  world
+  answer 200 "$(list_page "$(find_node ENG-3 2026-01-03T00:00:00Z '<!-- mroom-alert key=sentry:1001 -->
+<!-- mroom-alert key=sentry:10011 -->
+<!-- mroom-alert key=sentry:1001:escalating:2026-10-28 -->
+<!-- mroom-alert key=sentry:1001:escalating:2026-10-28 -->
+<!-- mroom-alert key=triage:20261028 -->')" false null)"
+  run "$MROOM" tracker find sentry:1001
+  expect_rc 0
+  expect_true "the keys: $out" json_is "$out" '.[0].keys == ["sentry:1001", "sentry:1001:escalating:2026-10-28"]'
+}
+
+ME='{"data":{"viewer":{"id":"uuid-user-me"},"issue":{"identifier":"ENG-12","creator":{"id":"uuid-user-me"}}}}'
+
+t_owned_says_whether_the_tokens_user_filed_the_issue() {
+  world
+  answer 200 "$ME"
+  run "$MROOM" tracker owned ENG-12
+  expect_rc 0; expect_err_empty
+  expect_true "one call" [ "$(calls)" = 1 ]
+  expect_true "the query" has "$(query 1)" 'viewer { id } issue(id: $id) { identifier creator { id } }'
+  expect_true "the variables" [ "$(vars 1)" = '{"id":"ENG-12"}' ]
+  expect_true "the answer: $out" json_is "$out" '. == {identifier: "ENG-12", owned: true}'
+  reset; world
+  answer 200 '{"data":{"viewer":{"id":"uuid-user-me"},"issue":{"identifier":"ENG-12","creator":{"id":"uuid-user-sam"}}}}'
+  run "$MROOM" tracker owned ENG-12
+  expect_rc 0
+  expect_true "someone else's issue: $out" json_is "$out" '.owned == false'
+  reset; world
+  answer 200 '{"data":{"viewer":{"id":"uuid-user-me"},"issue":{"identifier":"ENG-12","creator":null}}}'
+  run "$MROOM" tracker owned ENG-12
+  expect_true "an issue with no creator (an integration's): $out" json_is "$out" '.owned == false'
+  reset; world
+  answer 200 '{"data":{"viewer":{"id":null},"issue":{"identifier":"ENG-12","creator":null}}}'
+  run "$MROOM" tracker owned ENG-12
+  expect_rc 1; expect_err_has "did not say who the token's user is"
+  reset; world
+  answer 200 '{"data":{"viewer":{"id":"uuid-user-me"},"issue":null}}'
+  run "$MROOM" tracker owned ENG-99
+  expect_rc 1; expect_err_has "Linear has no issue ENG-99"
+  run "$MROOM" tracker owned; expect_rc 2
+  run "$MROOM" tracker owned 'ENG-1 x'; expect_rc 2
+  world $'tracker = "none"'
+  run "$MROOM" tracker owned ENG-12; expect_rc 3
+  expect_true "the token leaked" token_nowhere
 }
 
 t_find_refuses_a_bad_key_and_calls_nothing_without_a_tracker() {
@@ -585,6 +633,8 @@ test_case find-whole-marker-only t_find_keeps_only_the_descriptions_that_hold_th
 test_case find-none t_find_answers_an_empty_list_when_none_holds_it
 test_case find-many-first-filed-first t_find_reads_every_page_and_puts_the_first_filed_first
 test_case find-refuses t_find_refuses_a_bad_key_and_calls_nothing_without_a_tracker
+test_case find-this-errors-keys t_find_lists_only_this_errors_keys
+test_case owned t_owned_says_whether_the_tokens_user_filed_the_issue
 test_case backend-from-config t_the_backend_comes_from_config_and_none_calls_nothing
 test_case usage-errors t_usage_errors
 finish

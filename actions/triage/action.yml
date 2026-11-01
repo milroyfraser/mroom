@@ -1,0 +1,88 @@
+name: alert triage
+description: >-
+  The persona's alert triage (design section 11, phase 5). mode triage files one tracker issue per alert key
+  (an error-tracker issue new, regressed or escalating in the window), deduplicated by the hidden marker
+  the persona's guard writes, and never writes to an issue the persona did not file. mode alarm pings
+  persona.channel, once a UTC day, when a live triage run failed. mode switch-off turns the app's triage
+  workflow off and asks a person once, when the tracker did not keep the markers. Run it only from the
+  jobs of .github/workflows/triage.yml, in the persona environment, with the default branch's mroom.toml.
+inputs:
+  mode:
+    description: triage | alarm | switch-off
+    default: triage
+  config:
+    description: The app's mroom.toml, checked out from the default branch
+    default: mroom.toml
+  live:
+    description: "'1' to write; anything else is a dry run, which prints what it would file and ping"
+    default: ""
+  window-minutes:
+    description: How far back triage looks, in minutes (1 to 1440)
+    default: "40"
+  tracker-token:
+    description: The tracker's token (the persona's own, D23)
+    default: ""
+  errors-token:
+    description: The error tracker's token, read-only
+    default: ""
+  chat-token:
+    description: The chat bot's token, for the alarm and the switch-off
+    default: ""
+  markers-lost:
+    description: For switch-off, the issue whose markers the tracker did not keep
+    default: ""
+  github-token:
+    description: A token that reads Actions (alarm), or writes them (switch-off)
+    default: ${{ github.token }}
+outputs:
+  new:
+    description: How many alerts the window held (triage)
+    value: ${{ steps.triage.outputs.new }}
+  filed:
+    description: How many issues it filed (triage)
+    value: ${{ steps.triage.outputs.filed }}
+  markers-lost:
+    description: The issue whose hidden markers the tracker did not keep, if any (triage, alarm)
+    value: ${{ steps.triage.outputs.markers_lost || steps.alarm.outputs.markers_lost }}
+runs:
+  using: composite
+  steps:
+    - id: triage
+      if: inputs.mode == 'triage'
+      name: File one issue per new alert
+      shell: bash
+      env:
+        MROOM_CONFIG: ${{ inputs.config }}
+        MROOM_PERSONA_LIVE: ${{ inputs.live }}
+        MROOM_PERSONA_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        MROOM_TRIAGE_WINDOW: ${{ inputs.window-minutes }}
+        MROOM_TRIAGE_TRACKER_TOKEN: ${{ inputs.tracker-token }}
+        MROOM_TRIAGE_ERRORS_TOKEN: ${{ inputs.errors-token }}
+      # Its own limit, inside the step's: the EXIT trap still writes the summary and the outputs.
+      run: 'timeout --preserve-status --signal=TERM --kill-after=30s 11m "$GITHUB_ACTION_PATH/triage.sh"'
+    - id: alarm
+      if: inputs.mode == 'alarm'
+      name: Ping when triage could not run
+      shell: bash
+      env:
+        MROOM_CONFIG: ${{ inputs.config }}
+        MROOM_PERSONA_LIVE: ${{ inputs.live }}
+        MROOM_PERSONA_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        MROOM_TRIAGE_TRACKER_TOKEN: ${{ inputs.tracker-token }}
+        SLACK_BOT_TOKEN: ${{ inputs.chat-token }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: '"$GITHUB_ACTION_PATH/alarm.sh"'
+    - if: inputs.mode == 'switch-off'
+      name: Turn triage off and ask a person
+      shell: bash
+      env:
+        MROOM_CONFIG: ${{ inputs.config }}
+        MROOM_PERSONA_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        MROOM_MARKERS_LOST: ${{ inputs.markers-lost }}
+        SLACK_BOT_TOKEN: ${{ inputs.chat-token }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: '"$GITHUB_ACTION_PATH/switch-off.sh" "$MROOM_MARKERS_LOST"'
+    - if: inputs.mode != 'triage' && inputs.mode != 'alarm' && inputs.mode != 'switch-off'
+      name: Unknown mode
+      shell: bash
+      run: echo "::error::mode is triage, alarm or switch-off" && exit 1

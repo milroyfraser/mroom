@@ -107,7 +107,7 @@ starts the host's deploy and checks that the new release is live; the host (Forg
 | D15 | Every client of the box's Redis signs in as an ACL user, and the default user is off. A QA environment's user reaches only keys and channels under its own prefix, and no command that acts on the whole server | Forge site isolation keeps a PR's code out of other users' files, but not out of a Redis with no password: there it could read every environment's data and push jobs onto a queue whose workers run as `forge`. A key pattern limits only the keys a command declares, so the user gets only Redis's own types and functions, none of a module's commands (which may declare fewer keys than they read), and loses the commands among them that flush, watch, list or debug the whole server, or reset its scripts (section 8.9). Agent sessions, worktrees and the dev site run as the box's OS user and share one Redis user, since they can read each other's files anyway. That user still must not flush the QA environments' keys, so it is denied `@dangerous` too, or the QA environments use a Redis database it cannot select |
 | D16 | mroom runs one Reverb host for the QA environments, with an app provider that reads its apps from a file | Reverb's default provider reads its apps from config once, when the server starts, so adding an app means a restart. Reverb picks its provider through a Laravel manager, so a provider registered with `ApplicationManager::extend` that reads a file on each lookup adds and removes an environment's app without one, and no environment runs a Reverb process of its own. Built on Reverb 1.12.0, the host proves it: `tests/reverb/gate-real-test.sh` adds, replaces and removes apps while it runs, and it never restarts. It listens on a Unix socket in a folder only the box user can open, so no site user can take its place, and its unit binds its apps' folder rather than the file, since a file bound on its own stays the one found at start. Its Pusher server sets the channel manager to each message's app, since Reverb 1.12.0 looks a client event's channel up in whichever app it served last (fixed upstream after 1.12.0), and closes a socket refused for its origin or the app's connection limit, which Reverb leaves open. An environment's public app key comes from its PR number, so qa-plan can build the frontend without secrets, and its secret is random. An app id belongs to one PR only, because a removed app's open sockets stay open until they close |
 | D17 | Each QA environment's sites are Forge isolated sites in the home of one Unix user of its own, `<app>_qa_<N>`: the Laravel app at `api.<N>.<zone>` and a frontend of its own at `<N>.<zone>`, with the session and XSRF cookies set for `.<N>.<zone>` (an app without one keeps them on its one host), and its Reverb app (D16) taking sockets from those two hosts alone. The gate puts the PR's code into them as data, so no git credential is on the site, and its nginx config sets `disable_symlinks if_not_owner` | Under `.<N>.<zone>` are the environment's own two hosts and no other: not another environment's, and not the zone's shared Garage and Reverb hosts, so no environment's cookie reaches them (before 0.5.0 the sites were `go-<N>` and `api-<N>`, and the cookies were set for the whole zone). The same two names are its Reverb app's allowed origins, so a page on any other host, another environment's included, cannot open a socket with the app's key, which is public: qa-plan builds the frontend with it, and with the host's name, port and scheme, from `mroom.toml` and the PR's number, with no secret. The app's secret goes only into the environment's `.env`, which qa-up writes through `env-put` like every other value, and the gate keeps it while the app exists, so a deploy breaks no open socket's private channels. Isolation runs the site's PHP and its queue worker as that user, and an ACL keeps the user out of `forge`'s home; deleting the site removes the user. The spike created the worker with the site user through the API, though Forge's API spec lists only `root` and `forge`, so qa-up reads the new process back and keeps it only when Forge's record of it names the site user; the worker's command and the deploy script also exit unless they run as that user, and qa-up deletes any daemon of the environment that runs as another before code goes in. A deploy key on the site would let any code there, a dependency's install script included, read the whole repository until someone revoked it, against D6. So qa-up fetches the PR's tree by commit, as data, and the gate unpacks it as the site user, the way `dist/` already arrives. `code-put` replaces the whole tree except `.env` and `storage/`, skips any `.env` in the tarball, and refuses links at `.env`, `storage` and `bootstrap/cache`. QA sites use Forge's standard deployments, because its zero-downtime script clones the repository. nginx runs as `forge` and follows symlinks; without the setting, a PR could link a file in its site to a secret in `forge`'s home and download it |
-| D18 | Each QA environment has its own Postgres role, which owns only that environment's database, and no environment's role can connect to any other database | Isolation and D15 do not cover Postgres either: with one shared login, a PR's code could read, change or drop every QA database, the template and the dev site's database. Postgres lets every role connect to every database by default (`CONNECT` for `PUBLIC`), and every new database gets that grant again, since database-level grants are not copied from the template. So `pg_hba.conf` lets a QA role connect only to the database named after it (`sameuser`, for the group of QA roles), with the gate's own role on a line above, since it belongs to the group too, and `db-create` revokes the grant as well. mroom requires 16 or later: before 16, a role that may create roles may also grant itself any role, the administrator ones included, and from 15 `PUBLIC` can no longer create objects in the `public` schema (doctor checks it, since an upgrade or a restore keeps the old permissions). A cloned database's objects keep the template owner, so the template's objects belong to a role that owns nothing else, and `REASSIGN OWNED` hands them to the environment's role. It also moves databases and tablespaces, so the gate refuses to run while that role owns one |
+| D18 | Each QA environment has its own Postgres role, which owns only that environment's database, and no environment's role can connect to any other database | Isolation and D15 do not cover Postgres either: with one shared login, a PR's code could read, change or drop every QA database, the template and the dev site's database. Postgres lets every role connect to every database by default (`CONNECT` for `PUBLIC`), and every new database gets that grant again, since database-level grants are not copied from the template. So `pg_hba.conf` lets a QA role connect only to the database named after it (`sameuser`, for the group of QA roles), with the gate's own role on a line above, since it belongs to the group too, and `db-create` revokes the grant as well. mroom requires 16 or later: before 16, a role that may create roles may also grant itself any role, the administrator ones included, and from 15 `PUBLIC` can no longer create objects in the `public` schema (doctor checks it, since an upgrade or a restore keeps the old permissions). A cloned database's objects keep the template owner, so the template's objects belong to a role that owns nothing else, and `REASSIGN OWNED` hands them to the environment's role. It also moves databases and tablespaces, so the gate refuses to run while that role owns one. Each environment also has a read-only role, `<app>_qa_<N>_read`, for browser QA's `db-read`: no app holds its password, it has `CONNECT` on its own environment's database alone and `SELECT` there (granted on the template's tables when the database is made, and on the environment's later tables by default privileges, both set before any PR code has touched it), its sessions are read-only, and `pg_hba.conf` lets its group reach only QA databases (a regular expression, which needs 16 too). It is no member of the environment's role, which owns everything there and so could change anything |
 | D19 | Mail is caught by Mailpit. Each environment sends with its own SMTP login, `mail-read` matches mail on the login that sent it, and the gate restarts Mailpit when it adds or removes a login | Tested on the box: Mailpit reads its login file only when it starts, so a new login needs a restart: the gate stops Mailpit, which runs as the box user, and systemd starts it again. Stored mail survives, and a queued mail that fails during the restart is retried when its job allows more than one try (`mroom doctor --app` checks). Tags can be forged: a mail with an `X-Tags` header or a plus address gets the tag it names, so those sources are turned off, and `mail-read` matches the `Username` field, which only a login sets: SMTP, or the API login only the gate holds. A port is free while its server restarts, and any user on the box may take a free port, with the logins apps send to it, so Mailpit listens only on Unix sockets in the box user's own folder, and mroom's mail relay pipes apps' TCP mail to it. systemd holds the relay's port from boot, as root (a socket unit), so it stays held while the relay restarts too; the gate gives a login only while that socket is active on the port, or the relay itself holds it (found in three reviews, 26 Oct). Mailpit and the relay are systemd services that start again however often they stop, each Mailpit running a second before the next restart (3 under a supervisor such as Forge's daemons, which gives up after three quick stops), confined to their own files. A person installs the units as root from a script that holds their text, so root reads no file the box user can write |
 | D20 | A Forge token that can add SSH keys, run commands or recipes, read the sudo or database password, edit nginx or deploy scripts, or create daemons or scheduled jobs reaches `forge` or root. Only the `qa` environment holds such a token. The box's token has none of those scopes except nginx, which gives nothing beyond what its users already have as `forge` | Forge's API spec lets a daemon run as `root`; a scheduled job, a recipe and an SSH key take a user of the caller's choice; a deploy script runs as its site's user, which for the dev site is `forge`; and scopes cover the whole account, not one site. qa-up creates workers, so its token reaches root and is guarded by who holds it (sections 8.1, 8.8). Every developer on the box can read the box's token and every agent can use it through `forge-api`, so it keeps reads and site settings, and a person sets up daemons and scheduled jobs with a short-lived token |
 | D21 | What root installs comes from a release, never from the box: mroom's root recipe, saved in Forge and run as root, downloads `lib/root-setup` at a release tag, checks it against the SHA-256 that release's README names, and runs it with the box's values. `mroom baseline` only says whether the installed units are that release's | The box user runs agents that may be compromised (8.1), so whatever the box prints may have been changed, and a checklist of unit lines to refuse always misses one that grants root (`AmbientCapabilities=`, `LoadCredential=`, `StandardOutput=file:`, `RuntimeDirectory=`). A Forge recipe runs as root over Forge's own SSH connection, outside the box user's shell, and the box's token holds no recipe scope (D20; even `recipe:view` runs saved recipes). A tag, never a commit, because GitHub serves a fork's commits under the repository's address; the SHA-256 pins the file. `root-setup` reads no file the box user can write and checks `site-op` against the SHA-256 it holds; CI runs it as root in the mail, files and site jobs, and `tests/root-test.sh` checks every unit line against an allowlist. What it trusts is this repository's tags and README, so nothing on the box may write to the repository. systemd, as root, resolves each folder a unit binds, links and all, whenever a service starts, so no part of that path may be one the box user can change (open question 8): the services live in `/var/lib/mroom/services`, which `root-setup` makes, root's as is each service's folder in it (mode 755), with only the folders the units bind, one level down, the box user's (mode 700). It stops before writing a unit at a link, a file or a folder others than root may change on that path, or a folder it would give the box user that is someone else's, and changes nothing of the box user's. Each unit mounts an empty tmpfs on `/var/lib/mroom/services` and binds its own folders into it, so a service sees no other's. `tests/root-test.sh` checks every bind source, and the mail, files and Reverb jobs look into the services' mount namespaces |
@@ -118,9 +118,10 @@ starts the host's deploy and checks that the new release is live; the host (Forg
 
 - Box: Linux with `/proc`, GNU coreutils (`stat -c`, `date -d`, `sha1sum`, `base64 -w0`, `timeout`), bash 5, git, jq, curl, python3
   ≥ 3.11 (`tomllib`), tmux, flock, supervisord (Forge's), Postgres ≥ 16 (D18) with a role for the gate that has
-  `CREATEDB` and `CREATEROLE`, belongs to the role that owns the QA template's objects (and nothing else), and can
-  `SET ROLE` to each environment's role, plus a `pg_hba.conf` rule that lets QA roles reach only their own
-  database; Redis ≥ 7 with phpredis, its ACL users in an `aclfile` and the default user off (D15); PHP and
+  `CREATEDB` and `CREATEROLE`, holds the role that owns the QA template's objects (and nothing else) and the
+  group of read-only roles, both with `ADMIN OPTION`, and can `SET ROLE` to each environment's role, plus
+  `pg_hba.conf` rules that let QA roles reach only their own database, read-only roles only QA databases, and the
+  objects role only the database the template is built in, and `pg_restore` of the server's version; Redis ≥ 7 with phpredis, its ACL users in an `aclfile` and the default user off (D15); PHP and
   composer, Node and npm or pnpm, `gh`, and `fs.protected_hardlinks = 1` (Ubuntu's default). Root once, for
   `mroom baseline`.
   Phase 0 needs only Linux, bash 5, python3 ≥ 3.11, jq and git; `install.sh` checks these and names what is missing.
@@ -183,7 +184,8 @@ mroom/
                                 job, watchdog, guard (the PreToolUse command parser, 8.3),
                                 gate (the forced command CI reaches the box through, 8.2),
                                 site-op (the gate's work inside a QA site, as its user, D17), mail-relay (holds
-                                the SMTP port for Mailpit, D19), tracker and errors (the adapters' command lines)
+                                the SMTP port for Mailpit, D19), tracker and errors (the adapters' command lines),
+                                persona (the guard: the persona's only way to write to the tracker, D23)
   lib/core/                     config reader, forge client, chat adapter (Slack), tracker/errors adapters, job
                                 records, the watchdog's probes, the guard's tokeniser, util, the QA services'
                                 pinned builds (pins.txt)
@@ -302,7 +304,10 @@ files = "same"                     # same (a bucket per environment and file dis
 
 [persona]
 name = "Agent"                     # the name people see on notes and pings
-channel = "C0123456789"            # the chat channel the persona pings (a Slack channel id)
+label = "found-by-agent"           # on every issue alert triage files (it must exist)
+state = "Triage"                   # the state alert triage files issues in (default: the team's)
+environment = "production"         # the error tracker's environment alert triage reads
+channel = "C0123456789"            # where the persona pings: PR status, and triage when it cannot run
 chat_users = ".github/chat-users.json"   # GitHub logins and commit emails to chat user ids, on the default branch
 
 [github]
@@ -328,7 +333,7 @@ agrees; `mroom config keys` shows it.
 | `errors.*` | none (phase 3) | none: without the table there is no error tracker; `errors.region`: us; `errors.token_env`: `SENTRY_AUTH_TOKEN`; `errors.org` has no default, and every call needs it |
 | `release.*` | none (phase 3) | `release.tag_prefix`: none; without `release.production_url`, `/release` skips its version check |
 | `pr.required_checks` | phase 4 decides | phase 4 decides |
-| `persona.*`, `github.agent_login` | none (phase 5) | `persona.name`: Agent; `persona.chat_users`: `.github/chat-users.json`; without `persona.channel` no pings go out; without `github.agent_login` an agent's pull request pings that account's developer only |
+| `persona.*`, `github.agent_login` | none (phase 5) | `persona.name`: Agent; `persona.environment`: production; `persona.chat_users`: `.github/chat-users.json`; `persona.label`, `persona.state` and `persona.channel`: none (no label, the team's default state, no ping); without `github.agent_login` an agent's pull request pings that account's developer only |
 
 **Validation** (`mroom config validate`, and before every `get`):
 
@@ -403,9 +408,9 @@ Shell function interfaces in `lib/core/`, chosen by config. v1 implements the fi
 
 | Adapter | Functions | v1 | Later |
 |---|---|---|---|
-| tracker | `issue_get`, `issue_list` (`--mine` or `--label`), `issue_comment`, `issue_set_state`, `issue_create` (only with `--allow-create`); with the skills that need them: `issue_comment_upsert`, `issue_find_by_marker`, `issue_owned_by_bot`, `attach_image` | Linear; `none` (notes on the PR, images as artifact links) | GitHub Issues (search over hidden markers must be verified first) |
+| tracker | `issue_get`, `issue_list` (`--mine` or `--label`), `issue_comment`, `issue_set_state`, `issue_create` (only with `--allow-create`), `issue_find_by_marker`, `issue_owned_by_bot`; with the skills that need them: `issue_comment_upsert`, `attach_image` | Linear; `none` (notes on the PR, images as artifact links) | GitHub Issues (search over hidden markers must be verified first) |
 | chat | `chat_post`, `chat_update`, `chat_mention <github-login or commit email>` | Slack (bot token, `chat:write`) | Discord or Teams webhooks |
-| errors | `errors_issue_get`, `errors_search`, `errors_issue_resolve`; with the persona (phase 5): `errors_new_since`, `errors_count_for_release`, `errors_crons_failing` | Sentry (org, region from config), optional | |
+| errors | `errors_issue_get`, `errors_search`, `errors_issue_resolve`, `errors_new_since` (alert triage); with the persona's later work (phase 5): `errors_count_for_release`, `errors_crons_failing` | Sentry (org, region from config), optional | |
 | host | `host_sites`, `host_site_create`, `host_daemon_*`, `host_jobs_*`, `host_cert_*`, `host_deploy` | Forge v2 (one client: retries, 429, pagination) | |
 
 The tracker and errors adapters are `lib/core/tracker.sh` and `lib/core/errors.sh`, on the command line as
@@ -425,12 +430,25 @@ contract.
 
 `issue_find_by_marker` (`mroom tracker find <key>`) lists the issues whose description holds the
 persona's hidden marker for an alert, `<!-- mroom-alert key=<provider>:<numeric id> -->`, with
-`:<kind>:...` after the id for a later alert (phase 5 writes it). The tracker's search is a substring
-match, so the adapter checks each description again and keeps an issue only when the marker ends there
-or goes on with `:`. It reads archived issues too. Phase 5 must check that the tracker keeps the marker
-in a description it stores, the way GitHub Issues must be checked first. `/fix-issue` reads it, and
-makes no tracker write beyond the state and comments of that issue. `issue_comment_upsert`,
-`issue_owned_by_bot` and `attach_image` wait for the persona (phase 5) and browser QA (phase 2b).
+`:<kind>:...` after the id for a later alert (alert triage writes `:regressed:<day>` and
+`:escalating:<day>`). The tracker's search is a substring match, so the adapter checks each description
+again and keeps an issue only when the marker ends there or goes on with `:`, and lists each issue's
+keys of that error. It reads archived issues too. `/fix-issue` reads it, and makes no tracker write
+beyond the state and comments of that issue. `issue_owned_by_bot` (`mroom tracker owned`) says
+whether the token's user filed an issue: with the persona's token, which issues are its own (D23).
+`issue_comment_upsert` and `attach_image` wait for the PR notes (phase 5) and browser QA (phase 2b).
+
+Whether the tracker keeps an HTML-comment marker in a description it stores is not taken on trust:
+the persona's guard (`mroom persona`, the only way alert triage writes) reads every issue it files
+back, and when a marker is missing it writes nothing more in that run, and the triage workflow's
+switch-off job turns the workflow off and asks a person once. Without that stop, every run would file
+the same alerts again. The guard also writes only what D23 allows: it files an issue only for an
+alert key of the run, assigns no one, comments only on issues the persona filed, and has no command
+to edit, close, label or delete; it escapes every HTML comment's opening in the text it is given, so
+no alert text can forge a marker, refuses text shaped like a token and defangs links to other hosts. Triage redacts the error's data before it reaches an
+issue (tokens, email addresses, phone numbers, IBANs). Its alarm pings at most once a UTC day when a
+live run fails, keyed `triage:<yyyymmdd>` on an issue it files before the ping, so a ping it could not
+record is never sent.
 The tracker's own SCM integration may read a `Fixes` line too, so an error tracker's project prefix
 should not be a tracker team's key.
 
@@ -479,7 +497,19 @@ Invariants, each with a test:
      `bucket-drop`, `reverb-app-add`, `reverb-app-remove`, `mail-user-add`, `mail-user-remove`, `mail-read`,
      `mail-clear` and `template-load`, and `memory`, the box's RAM, what is available and the box's reserve, which
      qa-up sizes its slots from. No CI key gets a shell on the box. The gate is installed from a release by a
-     person.
+     person. Each key is forced to one role, which runs its own operations alone: `provision` (qa-up and qa-down)
+     the ones that make and remove an environment; `browser` (browser QA) only `db-read`, `signin-code`,
+     `mail-read` and `env-sha`, none of which changes anything; `template` (the job that builds the template)
+     only `template-load`.
+   - `template-load` restores a `pg_dump -Fc` archive into a new database as the objects role, signed in with a
+     password made for that restore and a login that lapses by itself, so the archive runs with that role's
+     rights, never the gate's, and `pg_hba.conf` lets that role reach only that database. Then, while no clone
+     runs, the new database takes the template's name and the old one is dropped.
+   - `db-read` signs in as the environment's read-only role (D18), never as the gate, since the PR owns the
+     database and a view or function it planted runs as whoever reads it. The client names a table, columns,
+     equality filters and an order, all from `MROOM_QA_DB_READ` (8.6); the gate builds the one `SELECT`, quoting
+     every name and value, with the catalog first on the search path, in a read-only transaction, at most 100
+     rows, and an error names only its SQLSTATE. It takes no SQL from the client.
    - Gate operations that touch a site's files or run its code (unpacking in `code-put` and `dist-put`, hashing
      `.env` in `env-sha`, the link `probe-link` makes, `signin-code` and `user-clean`) run as that site's user. The
      gate calls `site-op`, a root-owned copy of its release's own, through one sudoers rule that lets `forge` run it
@@ -513,13 +543,15 @@ Invariants, each with a test:
    default branch's code (only for a pull request based on it), reads the diff as data, and may only read
    files outside what holds a token, read issues and pull requests, and comment on its own pull request.
 6. **The read-only data boundary is explicit.** `qa.db_read_allowlist` has no default; browser QA refuses to start
-   without it, and a test runs the allowlist against the app's schema.
+   without it, and a test runs the allowlist against the app's schema. The gate holds its own copy, set by a
+   person on the box (`MROOM_QA_DB_READ`), since it never reads the app's repository; `db-read` refuses every
+   column outside it, to read, filter or order by, and with none set refuses to run.
 7. **Shared-box isolation is checked.** `mroom doctor --app` verifies the app honours `DB_DATABASE`, `DB_USERNAME`,
    `REDIS_USERNAME`, `REDIS_PREFIX`, `HORIZON_PREFIX`, `CACHE_PREFIX`, `SESSION_COOKIE`, `SESSION_DOMAIN` and the
    XSRF cookie name, since environments share one box. `HORIZON_PREFIX` must start with the environment's Redis
    prefix, because Horizon replaces the connection's prefix with its own.
 8. **Secrets per GitHub environment.** `qa` (default branch only) holds the box and Forge credentials, which reach root (D20); `persona` (default branch only)
-   holds the tracker and chat tokens; `production` (release tags only, each deploy approved by a person other
+   holds the tracker and chat tokens, and alert triage's read-only error-tracker token; `production` (release tags only, each deploy approved by a person other
    than the one who started it) holds the deploy credential, since Write can tag any commit (D22). None is
    readable from a `pull_request` job.
 9. **Each QA environment's services are its own.** Its database and the role that owns it (D18), its app key, its
@@ -632,8 +664,11 @@ What a Laravel app must have or add, documented in `docs/app-contract.md` and ch
   (question 7).
 - Migrations are expand/contract across two releases, so the previous release can run on the new schema. This is
   what makes a rollback by tag safe (section 10).
-- A Postgres template database. By default (`database = "seeded"`) the app's factories and seeders fill it. A masked
-  snapshot (`database = "snapshot"`) is opt-in, and follows these rules:
+- A Postgres template database, which each environment's database is cloned from, so a deploy migrates only what
+  its PR adds. By default (`database = "seeded"`) the app's migrations, factories and seeders fill a database of
+  its own where PR code never runs (the default branch's code, in a job of its own), and its `pg_dump -Fc` archive
+  goes to the gate's `template-load`, as the snapshot's does. A masked snapshot (`database = "snapshot"`) is
+  opt-in, and follows these rules:
   - Masking and filtering run in production, as views, and the pull uses a role that can read only those views.
   - Customer rows are left out, so companies and users come from factories. Free text is masked unless it is
     declared public.
@@ -725,6 +760,14 @@ the tag. The deploy template adds three patterns instead:
 10. **Roll back by tag.** A rollback deploys the previous tag through the same step, started by a person. It is
     safe because migrations are expand/contract (section 9); the old code must also run jobs that the new code
     queued, and the deploy restarts workers and clears caches.
+
+The deploy template (`templates/github/workflows/deploy-production.yml`) runs these as two jobs under one
+concurrency group that never cancels a deploy. `release`, in `production`, checks out the run's own tag with the
+deploy key and runs `release-branch.sh`, which also stops when the branch is at a commit off the default branch or
+neither before nor after the tag, since then someone else moved it; that job runs no action but `actions/checkout`
+beside the key. `verify` holds no secret and runs `deploy-verify` on the commit `release` pushed; a poll counts only
+when the app's `/up` answers 200 too, and a release name other than the tag, for the right commit, is a warning. The
+run takes no input: a rollback is a dispatch from the older tag.
 
 **Sharded jobs.** The frontend unit tests came next: four vitest shards, the slowest shard's job 254 s, and a
 count the ruleset held in place, because it required each shard by name. With six shards the slowest shard's job
