@@ -407,6 +407,39 @@ if fix:
         and re.search(r"^Stop\. No merge, no deploy, no change in the error tracker\.$", last, flags=re.M) is not None,
         "fix-issue ends at a PR in review and stops")
 
+# --- A secret body never on a command line ----------------------------------------------------------------
+# Every user on the box, a QA site's too, can read every running program's arguments, and the text of a command
+# an agent runs is passed to its shell as one. So a body for a path that needs --secret reaches forge-api's
+# --data - through a pipe or from a private file: never from jq -n holding the value, --arg, a here-document,
+# echo, printf or an inline --data (which forge-api refuses there).
+ARGV_RULE = "Never put a secret on a command line."
+ARGV_BODY = (r"\s--(?:arg|argjson|args|jsonargs)\b|<<|\becho\b|\bprintf\b|--data\s+(?!-(?:\s|$))"
+             r"|\bjq\s+(?:-[A-Za-z]*n[A-Za-z]*|--null-input)\b(?![^|]*\s--(?:rawfile|slurpfile)\b)")
+SECRET_WRITE = r"forge-api\s+--secret\s+(?:POST|PUT|PATCH|DELETE)\b"
+for label, (name, kind, meta, body, text) in sorted(docs.items()):
+    # code() keeps inline code on one line; an example here may wrap, so inline spans are joined first.
+    fenced = re.findall(r"^ *```[a-z]*\n(.*?)^ *```$", body, flags=re.S | re.M)
+    rest = re.sub(r"^ *```[a-z]*\n.*?^ *```$", "", body, flags=re.S | re.M)
+    lines = [ln for block in fenced for ln in re.sub(r"\\\n\s*", " ", block).split("\n")]
+    spans = [one_line(s).strip() for s in lines + re.findall(r"`([^`]+)`", rest)]
+    writes = [s for s in spans if re.search(SECRET_WRITE, s)]
+    leaky = [s for s in writes if re.search(ARGV_BODY, s)]
+    say(not leaky, f"{label} builds no body for a --secret path on a command line ({leaky[:2]})")
+    if name == "forge":
+        say(len(writes) >= 2, f"forge shows a body for a --secret path built from a read and from a private file ({writes})")
+        say(ARGV_RULE in one_line(body), f"forge keeps the rule: {ARGV_RULE}")
+# The check itself: each way of putting the value on a command line is caught, and the two safe ways are not.
+for bad in ("jq -n '{environment: \"A=1\"}' | forge-api --secret PUT sites/1/environment --write --data -",
+            "jq -n --arg e x '{environment: $e}' | forge-api --secret PUT sites/1/environment --write --data -",
+            "forge-api --secret PUT sites/1/environment --write --data - <<'EOF'",
+            "echo x | forge-api --secret PUT sites/1/environment --write --data -",
+            "forge-api --secret PUT sites/1/environment --write --data '{\"environment\":\"A=1\"}'"):
+    say(re.search(ARGV_BODY, bad) is not None, f"the check catches a body on a command line ({bad[:48]})")
+for good in ("forge-api --secret GET sites/1/environment | jq '<the change>' | forge-api --secret PUT sites/1/environment --write --data -",
+             "forge-api --secret GET sites/1/environment | jq --rawfile v <file> '<the change>' | forge-api --secret PUT sites/1/environment --write --data -",
+             "jq -n --rawfile e <file> '{environment: $e}' | forge-api --secret PUT sites/1/environment --write --data -"):
+    say(re.search(ARGV_BODY, good) is None, f"the check passes a body from a pipe or a file ({good[-60:]})")
+
 # --- The implement skill's Session Room -----------------------------------------------------------------
 room_dir = os.path.join(skills_dir, "implement", "room")
 room_files = sorted(os.listdir(room_dir)) if os.path.isdir(room_dir) else []
