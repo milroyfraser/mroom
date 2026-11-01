@@ -525,6 +525,36 @@ EOF"
 echo hello
 EOF"
   allow 'bash tests/run.sh'
+  # A pipe from printf is read as printf reads its words: `--` ends its options (bash, zsh, dash and coreutils
+  # alike), so the word after it is the format. Handed on with a `--` of the hook's own in front, the `--`
+  # was taken as the format and the pipe read as "--", so what really flowed was never checked.
+  refuse_for "secret file" "printf -- 'cat .env\\n' | bash"
+  refuse "printf -- '%s\\n' 'gh pr merge 1' | sh"
+  refuse "printf -- 'import os; os.system(\"gh pr merge 1\")' | python3"
+  allow "printf -- '%s\\n' 'ls -la' | bash"
+  # printf can write far more than the command holds (a width or precision, a float of a huge value, a format
+  # reused for every argument), and what it writes into a pipe is read and checked inside one simple command's
+  # check, which the wall-clock deadline cannot interrupt. Over the command's own cap it is refused unrun;
+  # within it, it is read as before.
+  refuse_for "too much to check" "printf '%0300000d' 0 | bash"
+  refuse_for "too much to check" "printf '%.300000f' 1 | sort"
+  refuse_for "too much to check" "printf '%*s' 300000 x | bash"
+  refuse_for "too much to check" "printf '$(head -c 4000 /dev/zero | tr '\0' a)%s\\n' $(seq 1 100 | tr '\n' ' ')| cat"
+  refuse_for "too much to check" "printf '%f\\n' $(printf '1e4932 %.0s' $(seq 1 60))| sort"
+  refuse "printf '%5s\\n' 'cat .env' | bash"
+  refuse "printf '%s %s %s\\n' gh pr merge | bash"
+  allow "printf '%-20s %s\\n' a b | sort"
+  allow "printf '%05d\\n' 7 | cat"
+  allow "printf '%.2f\\n' 1.5 2.25 | sort -n"
+  allow "printf '%s\\n' $(seq 1 1990 | tr '\n' ' ')| sort"
+  allow "printf 'done: 100%%\\n' | cat"
+  # A string handed on to be checked is held to the command's own cap, whatever builds it, so one simple
+  # command's check stays bounded: here a git alias, whose arguments are quoted again when it is expanded (each
+  # `'` becomes `\'`), which doubles them past the cap.
+  local quotes alias_cmd="git -c alias.x=status x"
+  quotes=$(printf "'%.0s" $(seq 1 100))
+  for _ in $(seq 1 1990); do alias_cmd+=" \"$quotes\""; done
+  refuse_for "too long to check" "$alias_cmd"
 
   # Heredocs and pipes into interpreters.
   refuse "python3 <<'EOF'
@@ -893,6 +923,11 @@ timing() {
   # hook timeout, and a refused command after it ran. The budget refuses it after a bound, far inside the limit.
   uc=""; for _ in $(seq 1 2000); do uc+="python -c 'Aa=1'; "; done
   fast 15 2 "$uc"
+  # A few bytes of printf that write megabytes into a pipe: what it writes was read and checked inside one
+  # simple command's check, past the deadline's reach, so before the bound this one command kept the hook
+  # deciding for many seconds here and past the 60s timeout on a slower host, and the merge after it ran. It is
+  # refused unrun.
+  fast 4 2 "printf '%08000000d' 0 | bash; gh pr merge 1"
 }
 
 awks=()
