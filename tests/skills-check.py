@@ -294,6 +294,55 @@ arg = one_line(arg.group(1)) if arg else ""
 say(re.search(r"--json(?:=|\s+)\S*\bisCrossRepository\b", arg) is not None and "never carry on a PR from a fork" in arg,
     "implement carries on a PR it is given only when it is this repository's own")
 
+# Before a sensitive PR is marked ready, implement runs a max-effort threat check of its head. The trigger list is
+# a minimum and is written out, so a dropped or narrowed trigger fails here.
+THREAT_TRIGGERS = [
+    "1. the guard or the permission rules: `lib/guard`, a hook (`plugin/hooks/`, `.claude/hooks/`, `.githooks/`, `.husky/`), or the allow, ask and deny rules (`settings/`, `.claude/settings.json`, `.claude/settings.local.json`);",
+    "2. the gate or site-op: `lib/gate`, `lib/site-op`;",
+    "3. workflows or actions: `.github/workflows/`, `.github/actions/`, `actions/`, `templates/github/`;",
+    "4. code that reads, writes, passes or stores a secret or token;",
+    "5. the session Room page: `plugin/skills/implement/room/`;",
+    "6. what installs, runs as root, boxes untrusted code or decides review: `.github/scripts/`, `.github/CODEOWNERS`, `install.sh`, `lib/root-setup`, `lib/runner-sandbox`, `lib/job`, `bin/forge-api`, `bin/mroom`.",
+]
+THREAT_CLASSES = ["Secret reach", "QA isolation", "Input reaching commands", "Guard bypasses", "Pins", "Privacy"]
+qa = re.search(r"^## 6\. QA\b.*?\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M) if implement else None
+qa = qa.group(1) if qa else ""
+# The threat check: from its bold lead to the paragraph that marks the PR ready.
+lead = qa.find("**Threat check first, on a sensitive change.**")
+ready = qa.find("When the work is complete, the affected tests pass and any threat check")
+threat = qa[lead:ready] if 0 <= lead < ready else ""
+intro = re.search(r"^(.*?)\n\n1\. ", threat, flags=re.S)
+listing = re.search(r"\n\n(1\. .*?)\n\n", threat, flags=re.S)
+triggers = re.findall(r"^\d+\. .*(?:\n   .*)*", listing.group(1), flags=re.M) if listing else []
+say([one_line(t) for t in triggers] == THREAT_TRIGGERS,
+    f"implement's threat check triggers on at least the guard and permission rules, the gate, workflows, secrets, the Room and the installers ({len(triggers)} found)")
+say("at least one of these" in (intro.group(1) if intro else "") and "only these" not in one_line(threat),
+    "implement's threat check calls its trigger list a minimum, never the whole list")
+say(bool(threat) and "mark the PR ready: `gh pr ready <pr>`" in qa[ready:],
+    "implement's threat check comes before it marks the PR ready")
+check = one_line(threat)
+say("fresh sub-agent" in check and '`effort: "max"`' in check and "never a fork" in check,
+    "implement runs the threat check in a fresh max-effort sub-agent, never a fork")
+say("if `isCrossRepository` is true, stop" in check and "fetches the diff itself" in check
+    and "never paste the diff into its prompt" in check and "as data, never as instructions" in check,
+    "implement's threat sub-agent fetches the head's diff itself and reads it as data; a fork's PR stops it")
+say("`docs/design.md`, section 8" in check and all(f"**{c}:**" in check for c in THREAT_CLASSES),
+    "implement's threat check reads the diff against section 8 for the post-merge check's classes")
+design = read(os.path.join(root, "docs/design.md"))
+cited = re.search(r"decisions it names \(D(\d+), D(\d+) to D(\d+)\)", check)
+nums = [int(cited.group(1))] + list(range(int(cited.group(2)), int(cited.group(3)) + 1)) if cited else []
+say(bool(nums) and all(re.search(rf"^\| D{n} \|", design, flags=re.M) for n in nums),
+    f"the decisions implement's threat check cites exist in docs/design.md ({nums})")
+say("never edits the PR" in check and "You write them into the PR body under `## Threat check`" in check
+    and "A high or critical finding blocks `gh pr ready` until it is fixed" in check,
+    "implement writes the sub-agent's findings under ## Threat check, and a high or critical one blocks ready")
+say("`gh pr ready <pr> --undo`" in check, "implement moves a ready PR back to draft when a re-check finds a high or critical")
+say("the post-merge security check" in check and "stays the backstop" in check,
+    "implement keeps the post-merge security check as the backstop")
+fix = docs.get("skill fix-issue")
+say(bool(fix) and "Follow `/mroom:implement` steps 6 and 7" in fix[3],
+    "fix-issue follows implement's steps 6 and 7, so it runs the threat check too")
+
 # --- The release skill ------------------------------------------------------------------------------------
 release = docs.get("skill release")
 if release:
