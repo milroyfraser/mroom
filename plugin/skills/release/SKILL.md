@@ -80,16 +80,17 @@ notes, plus an "Also fixed" section for step 2's hidden fixes). Ask with `AskUse
 ## 4. Draft it; the person publishes
 
 ```
-notes="$(mktemp)" && cat > "$notes" <<'EOF'
-<extra notes>
-EOF
-gh release create <tag> --draft --target <sha> --title "<version>" \
+gh release create <tag> --draft --target <sha> --title '<version>' \
   --generate-notes --notes-start-tag <last release tag> --notes-file "$notes"
 ```
 
+`"$notes"` is the extra notes, written with the Write tool to a new file in a fresh folder that
+`mktemp -d` makes in your scratchpad, never through the shell: they quote PR titles and commit
+messages, and a line of them could end a heredoc (`/mroom:implement`, Rules).
+
 If a draft for this tag already exists (`gh release view <tag> --json isDraft`), create no second
 one. Use that draft, and update its notes with `gh release edit <tag> --notes-file "$notes"` if
-they changed, in one Bash call with a fresh file as above. Never drop `--draft` from these commands.
+they changed, from a new file made the same way. Never drop `--draft` from these commands.
 
 The command prompts the person. A draft creates no tag and starts nothing. Give the person its
 link (`gh release view <tag> --json url --jq .url`) and the version's commit. Ask them to check
