@@ -25,8 +25,9 @@ The full design, including how each requirement is measured, is in [docs/design.
 part of phase 1: the [box watchdog](#box-watchdog) with its job records, the
 [regression label](#regression-label) check with its measures, and the
 [guard, the plugin's skeleton and the settings fragments](#guard-and-settings); from phase 3, the
-[tracker and error-tracker adapters](#tracker-and-error-tracker); and, ahead of its phase, part of phase 4: the
-[Claude review](#claude-review) and its [review findings](#review-findings) check. Every other command prints
+[tracker and error-tracker adapters](#tracker-and-error-tracker) and the [workflow skills](#workflow-skills);
+and, ahead of its phase, part of phase 4: the [Claude review](#claude-review) and its
+[review findings](#review-findings) check. Every other command prints
 `not yet: phase N`. The phases and what each delivers are in
 [section 11 of the design](docs/design.md#11-phases). Expect breaking changes in every `0.x` release.
 
@@ -327,9 +328,9 @@ will merge them into the app's settings:
 
 | Fragment | For |
 |---|---|
-| `base.json` | every app: git and gh reads, pushes and releases ask, merges, approvals, force-pushes and secret reads denied |
+| `base.json` | every app: git, gh and tracker reads allowed; pushes, releases, filing an issue and resolving an error ask; merges, approvals, force-pushes and secret reads denied |
 | `laravel-vite.json` | Laravel and Vite: tests, linters and builds allowed; migrations, seeds and tinker ask |
-| `forge.json` | Forge: `forge-api GET` allowed; the Forge CLI and its tokens denied |
+| `forge.json` | Forge: `forge-api GET` allowed, `forge-api --secret` asks; the Forge CLI and its tokens denied |
 | `tracker-linear.json` | a Linear tracker: GitHub issue writes denied |
 
 The merge joins every list. Claude Code checks deny first, then ask, then allow, so an `allow` rule
@@ -342,7 +343,9 @@ The workflow skills of phase 3 reach the issue tracker and the error tracker thr
 (design section 7). Each picks its backend from `mroom.toml` and prints JSON.
 
 ```bash
-mroom tracker get SHOP-12                    # title, state, labels, description, every comment
+mroom tracker get SHOP-12                    # title, state, labels, branch, description, every comment
+mroom tracker list --mine --open             # my 50 latest open issues, by priority; or --label lesson
+mroom tracker find sentry:1001               # the issues whose description holds the marker for an alert
 mroom tracker comment SHOP-12 < note.md      # adds a comment; the body comes on stdin
 mroom tracker state SHOP-12 "In Review"      # the team's state of that name, in any case
 mroom tracker create --allow-create --title "Checkout fails" --state Triage --label bug < body.md
@@ -373,6 +376,16 @@ token_env = "SENTRY_AUTH_TOKEN"    # the default
   command line, and an answer that echoes it has it cut out of the message.
 - **Hosts are fixed**: `api.linear.app`, and `<region>.sentry.io` for the organisation in `errors.org`.
   No URL comes from config, so a changed `mroom.toml` cannot send a token elsewhere.
+- **Listing** needs `--mine` or `--label`, so it never reads a whole backlog. It takes the `--limit`
+  (50, at most 250) most recently updated issues, in `issues.team` when that is set, then sorts
+  them by priority. `get` says whether the issue is assigned to the token's user (`assigned_to_me`).
+- **Finding** an error's issue reads the hidden marker the persona puts in each issue it files,
+  one per alert: `<!-- mroom-alert key=sentry:1001 -->`, where the key is the error tracker and the
+  error issue's numeric id, and a later alert adds `:<kind>:...` after the id. Linear's search is a
+  substring match, so `find` checks each description again and keeps an issue only when the marker
+  ends there or goes on with `:`; the marker for `sentry:100` never finds `sentry:1001`'s issue. It
+  reads every page, in `issues.team` when that is set, and lists the issues in every state,
+  archived ones too, the first filed at the top.
 - **Creating an issue** needs `--allow-create`; without it, nothing is sent. It files in `issues.team`
   and uses labels that already exist, of that team or the whole workspace (not a parent team's); mroom
   never creates a label.
@@ -395,6 +408,59 @@ token_env = "SENTRY_AUTH_TOKEN"    # the default
 Sentry needs a user or internal integration token; an organisation auth token cannot read issues. It
 needs Issue & Event: read, and Organization: read for `search`, which first checks that the token sees
 a project. `resolve` also needs Issue & Event: write.
+
+## Workflow skills
+
+The plugin carries the agent workflow as skills and commands. Each is a Markdown file in `plugin/`
+that Claude Code reads; in a session they are `/mroom:<name>`.
+
+| Skill or command | What it does |
+|---|---|
+| `/mroom:refine` | lists my open issues, tags each with a Design value, and runs `/mroom:implement` on the ones I confirm |
+| `/mroom:deliver <id>` | a design gate when the issue needs one (a canvas, approved in a comment), then `/mroom:implement`; resumes stopped work |
+| `/mroom:implement <id>` | one issue to a PR in review: a worktree, the change, the affected tests, a draft PR, CI and QA on the PR's environment, then stop |
+| `/mroom:fix-issue <error id>` | one error issue to a fix in review: reads the error and its latest event, finds the issue the persona filed (`mroom tracker find`), works on a branch that names both ids, reproduces the error with a failing test before it fixes it, and links the error issue only through `Fixes <error id>` lines, on the fixing commit and in the PR body; never resolves it |
+| `/mroom:release` | only when a person asks: what ships, what to watch, the notes, one question, then a **draft** release that the person publishes; then a read-only watch of the deploy |
+| `/mroom:correct` | finds a mistake agents repeat, and adds the highest check that stops it (adapted from pstack, MIT) |
+| `/mroom:forge` | Forge through `forge-api` only: reads free, writes asked first, secrets never printed |
+| `/mroom:clean-review` | a clean-code review by a fresh sub-agent, with a verdict; never commits |
+| `/mroom:crap` | CRAP triage of the backend methods you changed, with the app's `bin/crap` |
+
+- **The tracker** is reached only through `mroom tracker` and `mroom errors`. When either exits 3
+  (no tracker), the skill puts its note on the pull request instead.
+- **Rules in every skill:** an agent never merges, approves, deploys or releases; a person does.
+  Tracker writes are only the state of the issue being worked and comments on it. A skill asks
+  before it files an issue or a label, never touches production, and never reads a secret.
+- **Release asks twice:** once in the session, and again through the `ask` rule on
+  `gh release create` in `settings/base.json`. It only ever drafts; publishing is a person's click.
+- **From `mroom.toml`:** the issue id and link (`issues.id_pattern`, `issues.url`), the started and
+  review states (`issues.state_started`, `issues.state_review`; `In Progress` and `In Review` by
+  default), the test command and database (`tests.*`), the required checks (`pr.required_checks`),
+  the QA zone (`qa.zone`), and, for a release, the tag's prefix and the production origin whose
+  `app.version_path` it reads (`release.tag_prefix`, `release.production_url`).
+
+```toml
+[issues]
+state_started = "In Progress"
+state_review = "In Review"
+
+[release]
+production_url = "https://app.example.dev"   # an https origin, no path
+tag_prefix = ""                              # "release-" gives release-v1.2.3
+```
+
+The settings fragment `base.json` allows the adapters' reads (`mroom tracker get`, `list`,
+`find`, `backend`; `mroom errors get`, `search`, `backend`) and asks before `mroom tracker create` and
+`mroom errors resolve`. `tests/skills-test.sh` checks the skills as a contract: their frontmatter,
+that every `mroom` command, skill and key they name exists, the rules above, the release's draft and
+question, that no skill resolves an error issue, and that none names a host, an IP address, an id or
+an email address. For `fix-issue` it also checks that the branch names both ids, that a failing test
+comes before the fix, that the only links are the `Fixes` lines, and that it stops at a PR in review.
+Names of people and projects come from `$MROOM_PRIVATE_WORDS`, a file of patterns kept outside the
+repository.
+
+Not here yet: `blast-radius` (later in phase 3), the principle skills (named in the
+skills, read when installed), and `verify-app` with `qa-engineer` (phase 2b).
 
 ## QA gate
 
