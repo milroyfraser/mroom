@@ -978,9 +978,12 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     return d;
   }
   /* The final verdict, always last (step.verdict: {go: true|false, call, why}), with a Go / No-go pill. */
-  /* Each tab's verdict answers that tab's question: Review is the merge verdict, QA the QA verdict, and so on. */
-  function verdictLabel(v) {
+  /* Each tab's verdict answers that tab's question: Review is the merge verdict, QA the QA verdict, and so on.
+     A draft PR (it.draft) can't be merged yet, so its Review tab gives the Open verdict instead: should it
+     be marked ready for review. */
+  function verdictLabel(v, it) {
     const t = String((v && v.step) || "").toLowerCase();
+    if (t === "review" && it && it.draft === true) return "Open verdict";
     return ({ review: "Merge verdict", qa: "QA verdict", release: "Release verdict", rollout: "Rollout verdict", dod: "Definition of done" })[t] || "Claude's verdict";
   }
   function stepVerdict(v, pr, it) {
@@ -988,7 +991,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (isStale(v, it)) {
       const box0 = el("div", "fverdict");
       const head0 = el("div", "fvhead");
-      head0.append(el("span", "flabel", verdictLabel(v)), el("span", "fgo recalc", "Recalculating…"));
+      head0.append(el("span", "flabel", verdictLabel(v, it)), el("span", "fgo recalc", "Recalculating…"));
       box0.append(head0, el("p", "fevnote", "Checks are running on the latest push. Claude rewrites this when they finish."));
       return box0;
     }
@@ -997,7 +1000,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (behind && v.go === true) v = { go: false, step: v.step, call: "No-go: behind main.", why: "The branch is " + pr.behindBy + (pr.behindBy === 1 ? " commit" : " commits") + " behind main, so its checks did not run on today's main. Update the branch and let CI pass first. Otherwise: " + String(v.why || v.call) };
     const box = el("div", "fverdict");
     const head = el("div", "fvhead");
-    head.append(el("span", "flabel", verdictLabel(v)));
+    head.append(el("span", "flabel", verdictLabel(v, it)));
     if (typeof v.go === "boolean") head.append(el("span", "fgo " + (v.go ? "go" : "nogo"), String(v.step || "").toLowerCase() === "dod" ? (v.go ? "Live" : "Not yet") : v.go ? "Go" : "No-go"));
     box.append(head);
     const p = el("p");
@@ -1356,14 +1359,19 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (safeUrl(pr.session)) { const a = anchor("session", safeUrl(pr.session)); a.className = "fsess"; head.append(a); }
     card.append(head);
     const part = (label, node) => { const d = el("div"); d.append(el("div", "flabel", label), node); card.append(d); };
-    if (b.problem) part("Problem", el("p", null, String(b.problem)));
+    /* An Issue card (kind "issue", no PR yet) shows the problem as the issue states it and the solution as a
+       draft for the developer to review; a PR card shows the agreed solution. */
+    const isIssue = it.kind === "issue";
+    if (b.problem) part(isIssue ? "Problem (from the issue)" : "Problem", el("p", null, String(b.problem)));
     const sol = Array.isArray(b.solution) ? b.solution.filter(Boolean) : [];
-    if (sol.length) { const ol = el("ol"); for (const s of sol) ol.append(el("li", null, String(s))); part("Solution", ol); }
+    if (sol.length) { const ol = el("ol"); for (const s of sol) ol.append(el("li", null, String(s))); part(isIssue ? "Proposed solution (draft, for your review)" : "Solution", ol); }
     const steps = Array.isArray(b.steps) ? b.steps.filter((s) => s && s.text) : [];
     let cur = Number(b.current) || 0;
     /* A merge can't be Go while something blocks it: the branch is behind main or conflicts (checks
        "behind"), a check is red or still running, or the card names a blocker (it.blockers). The page shows
        the Review verdict as No-go with the reason, whatever was written. */
+    /* The same blocks hold for the Open verdict of a draft (it.draft): being a draft is not itself a blocker,
+       it's what that verdict decides, so don't list it in it.blockers. */
     {
       const why = it.checks === "behind" ? "behind main or conflicting; update the branch first"
         : it.checks === "red" ? "a check failed"
@@ -1377,7 +1385,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     }
     /* Every PR card shows a QA tab. When a card has none yet, a placeholder sits after Review (or first),
        saying QA is missing, so a card can't look finished without it. */
-    if (steps.length && !steps.some((s) => s.title === "QA")) {
+    if (it.kind !== "issue" && steps.length && !steps.some((s) => s.title === "QA")) {
       const at = Math.max(0, steps.findIndex((s) => s.title === "Review") + 1);
       steps.splice(at, 0, { title: "QA", who: "Claude", text: "No QA recorded for this PR yet.", evidenceNote: "Claude adds the test cases, the tests that prove each one, and browser screenshots when the change has a screen.", verdict: { go: false, call: "No QA yet", why: "QA cases and their tests are missing." } });
       if (cur >= at) cur += 1;
@@ -1553,6 +1561,12 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     box.style.borderLeftColor = "";
     box.removeAttribute("title");
     let n = nextMeta && nextMeta.title ? nextMeta : null;
+    /* A next step that names a card which is done or gone is stale (the step it named has happened):
+       ignore it and fall back to the first ready card, so the box never freezes on finished work. Only once the cards have loaded, so the box doesn't flicker. */
+    if (n && loaded.todos) {
+      const named = [].concat(n.cardId ? n.cardId : [], Array.isArray(n.cardIds) ? n.cardIds : []).map(String);
+      if (named.length && !named.some((id) => todos.some((t) => String(t.id) === id && t.status !== "done"))) n = null;
+    }
     if (!n) {
       /* Anything waiting on the developer counts: the first open to-do by rank that is a decision or a "now",
          unless a PR card whose current step is theirs comes first. */
@@ -1596,7 +1610,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (n.text) box.append(el("p", "nstext", String(n.text)));
     const row = el("div", "nsrow");
     const url = safeUrl(n.url);
-    if (url) row.append(anchor(n.cardId ? "Open the PR on GitHub ↗" : "Open ↗", url));
+    if (url) row.append(anchor(n.cardId ? ((todos.find((t) => String(t.id) === String(n.cardId)) || {}).kind === "issue" ? "Open the issue ↗" : "Open the PR on GitHub ↗") : "Open ↗", url));
     if (n.at && !isNaN(Date.parse(n.at))) { box.dataset.waitSince = n.at; }
     if (row.childNodes.length) box.append(row);
     setTimeout(paintWaiting, 0);
