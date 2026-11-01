@@ -708,6 +708,92 @@ EOF
 echo done"
   allow 'echo $((1+2)) $(( 16#ff )); (( i++ )); echo $[1+2]'
   allow 'echo ${x:-a} ${#x} ${x#y} ${x%%.*} ${x:-$(pwd)} ${x//a/b}'
+  # Bash runs $(...) and `...` in the text of an unquoted heredoc, also when a $ ends a joined line.
+  refuse 'cat <<EOF
+$(gh pr merge 1)
+EOF'
+  refuse 'cat <<EOF
+`cat .env`
+EOF'
+  refuse 'git commit --allow-empty -F - <<EOF
+msg $(gh pr merge 1)
+EOF'
+  refuse $'cat <<EOF\nx $\\\n(gh pr merge 1)\nEOF'
+  # A heredoc inside a substitution: bash 4 to 5 end it, and the substitution, at a line such as `EOF)`, and
+  # one whose text reaches the end of input is read differently by bash 3.2 and 5. Inside `...`, a heredoc
+  # ends at the first backquote.
+  refuse 'x=$(cat <<EOF
+EOF); gh pr merge 1'
+  refuse 'x=$( (cat <<EOF
+EOF) ; gh pr merge 1
+EOF
+)'
+  refuse $'x=$(cat <<\'EOF\'\ngh pr merge 1'
+  refuse 'x=`cat <<EOF
+`
+gh pr merge 1
+EOF
+`'
+  # Inside `...`, a quote or a comment ends at the backquote too.
+  refuse 'echo `#`; gh pr merge 1'
+  refuse "echo \`'\`
+gh pr merge 1
+#'"
+  # A quote or a backslash inside \${...} or \$[...], which bash reads as nested.
+  refuse "echo \${x:-\"}\"<<a }
+gh pr merge 1
+a"
+  refuse "echo \"\${x:-'\"'}\"
+gh pr merge 1
+#'"
+  refuse 'echo "${x:-\}"<<a "}"
+gh pr merge 1
+a'
+  refuse 'echo $[ "]" <<a ]
+gh pr merge 1
+a'
+  # A backslash-newline after $, ( or <, which bash removes before it reads $(, ((, ${ or <<.
+  refuse $'(\\\n(1<<2))\ngh pr merge 1\n2'
+  refuse $'echo $\\\n{x//<<a /b}\ngh pr merge 1\na'
+  refuse $'cat <\\\n<EOF\n\'\nEOF\ngh pr merge 1\n#\''
+  refuse $'echo "$\\\n(gh pr merge 1)"'
+  # A << or a # in a subscript, in [[ ... ]], in an extglob pattern or in <((...)).
+  refuse 'a[1<<X ]=1
+gh pr merge 1
+X'
+  refuse '[[ x =~ (a<<b) ]]
+gh pr merge 1
+b'
+  refuse '[[ x =~ ( #) ]] ; gh pr merge 1'
+  refuse 'shopt -s extglob
+echo @(a<<b )
+gh pr merge 1
+b'
+  refuse 'cat <((1<<2
+)
+)
+gh pr merge 1
+2'
+  # The tokeniser's own marker bytes: \035 is its newline.
+  refuse_for 'control byte' $'cat <<EOF\nEOF\x1d\n\'\nEOF\ngh pr merge 1\n#\''
+  # Everyday forms that still pass.
+  allow "git commit -m \"\$(cat <<'EOF'
+fix(guard): it's done (and tested)
+
+Co-Authored-By: Someone <someone@example.com>
+EOF
+)\""
+  allow 'cat <<EOF
+Hello $USER, the day is ${DAY:-Monday}.
+EOF'
+  allow "cat <(cat <<'EOF'
+text
+EOF
+)"
+  allow '[[ $x =~ ^[0-9]+$ ]] && echo ok; [ -f a ] && cat <<EOF
+text
+EOF'
+  allow 'echo `date` "${x//\//-}" ${x//\//-}; ls !(*.txt)'
 
   # gh flags that shift the positional slots.
   agree 'gh workflow run --ref main deploy-production.yml'
@@ -987,6 +1073,14 @@ timing() {
   measure_load
   while [ "${#flat}" -lt 65536 ]; do body+="$line"$'\n'; flat+="$plain"$'\n'; done
   fast 4 0 "gh pr create --draft --title x --body \"$body\""
+  # Thousands of heredocs waiting, then thousands of substitutions closing: each close is one lookup, not a
+  # walk over every waiting heredoc (which once made this quadratic, past the hook timeout).
+  local pend ticks substs
+  pend=$(printf '<<A%.0s' $(seq 1 16000))
+  ticks=$(printf '``%.0s' $(seq 1 16000))
+  substs=$(printf '$()%.0s' $(seq 1 16000))
+  fast 4 2 "gh pr merge 1; :$pend $ticks"
+  fast 4 2 "gh pr merge 1; :$pend $substs"
   fast 4 0 "gh pr create --draft --title x --body '$flat'"
   fast 4 2 "gh pr create --draft --title x --body \"$body\"; gh pr merge 1"
   fast 4 2 "gh pr edit 1 --body '$flat' && cat backend/.env"
