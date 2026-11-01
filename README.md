@@ -119,6 +119,8 @@ JSON. `--default` takes the key's type: a number for a number, JSON for a list o
 (`--default '[]'`). `--optional` prints nothing (`null` with `--json`) and exits 0 for a key that is
 not set. A missing required key fails with its name and an example line; a wrong type fails
 with the key's name (`get` reports only errors that concern the key it reads, `validate` reports all).
+A key or table written as one quoted name with a dot (`"issues.token_env" = ...`) fails too, since the file
+could then hold a second value for it under `[issues]`.
 An unknown key is ignored, and `validate` warns about it, with a suggestion when it looks like a typo.
 Exit codes: `0` success, `1` a config error or a key that is not set, `2` a usage error.
 
