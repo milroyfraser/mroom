@@ -24,9 +24,10 @@ A production console (a shell on a server, a REPL in the app) is level 3, whatev
 A session or an agent never holds a production role, a key or a token, and never reads production. The
 most it gets is an aggregate, non-personal figure that a person pulled for it, through the check below.
 
-Personal data that reaches an AI provider makes that provider a sub-processor of the app. That needs a
-data processing agreement, the provider on the app's published sub-processor list, and notice to
-customers, all before the first byte is sent.
+Personal data that reaches an AI provider makes that provider a processor of it (a sub-processor when
+the app processes the data for its customers). That usually needs a data processing agreement and,
+where the app's contracts promise it, the provider on its sub-processor list and notice to customers,
+all before the first byte is sent.
 
 ## A read-only check a session hands to a person
 
@@ -35,13 +36,17 @@ writes a check and a person runs it. Before handing it over, the session confirm
 so; a check that fails one is rewritten.
 
 1. **Read-only by construction.** For a SQL database, the whole check runs in one transaction that
-   starts with the database's read-only mode (Postgres: `SET TRANSACTION READ ONLY` and
-   `SET LOCAL statement_timeout = '30s'`; MySQL: `START TRANSACTION READ ONLY`), so any write is refused
-   and a slow query stops. No app methods that save, queue jobs, send mail or call an API.
+   starts with the database's read-only mode, so any write is refused and a slow query stops.
+   Postgres: `BEGIN; SET TRANSACTION READ ONLY; SET LOCAL statement_timeout = '30s';` … `ROLLBACK;`,
+   or `BEGIN READ ONLY;`. Outside a transaction block both SETs only warn and do nothing, so the
+   check would run unguarded. MySQL: `START TRANSACTION READ ONLY`; its `max_execution_time` bounds
+   SELECTs only, and there is no general statement timeout. In an app console, wrap the check in the
+   framework's transaction helper. No app methods that save, queue jobs, send mail or call an API.
 2. **Aggregate, non-personal output.** Counts, yes or no, sums, distributions, and the names or domains
-   of organisations when the decision needs them. Never a person's name, email, phone or IP address, and
-   never free text (titles, notes, descriptions, messages). The query may filter on free text, as long
-   as only a count comes out. Ids only when the next step needs them, and never a user's.
+   of organisations when the decision needs them (not when the organisation is one person, such as a
+   sole trader). Never a person's name, email, phone or IP address, and never free text (titles,
+   notes, descriptions, messages). The query may filter on free text, as long as only a count comes
+   out. Ids only when the next step needs them, and never a user's.
 3. **Bounded.** Indexed filters or a time window. Name any scan of a large table before handing the
    check over.
 4. **Tested first** on a local database or a masked QA copy. Say the result came from there.

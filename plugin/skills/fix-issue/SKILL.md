@@ -46,11 +46,16 @@ runs it, as mroom's `docs/production-access.md` sets out (its access levels, and
 Before handing the check over, confirm each point below and say so; rewrite a check that fails one.
 
 1. **Read-only by construction:** one transaction that starts read-only, with a statement timeout
-   (Postgres: `SET TRANSACTION READ ONLY` and `SET LOCAL statement_timeout = '30s'`), so any write
-   is refused and a slow query stops. No app methods that save, queue jobs, send mail or call an API.
+   (Postgres: `BEGIN; SET TRANSACTION READ ONLY; SET LOCAL statement_timeout = '30s';` … `ROLLBACK;`,
+   or `BEGIN READ ONLY;`; outside a transaction block both SETs only warn and do nothing; MySQL:
+   `START TRANSACTION READ ONLY`, and its `max_execution_time` bounds SELECTs only; in an app
+   console, wrap the check in the framework's transaction helper), so any write is refused and a
+   slow query stops. No app methods that save, queue jobs, send mail or call an API.
 2. **Aggregate, non-personal output:** counts, yes or no, sums, distributions, and organisations'
-   names or domains when the decision needs them. Never a person's name, email, phone or IP address,
-   never free text (filtering on it is fine when only a count comes out), and never a user's id.
+   names or domains when the decision needs them (not when the organisation is one person, such as
+   a sole trader). Never a person's name, email, phone or IP address, and never free text
+   (filtering on it is fine when only a count comes out). Ids only when the next step needs them,
+   and never a user's.
 3. **Bounded:** indexed filters or a time window; name any scan of a large table.
 4. **Tested first** on a local database or a masked QA copy; say the result came from there.
 5. **Explained:** what each number means, and which decision each outcome leads to.
