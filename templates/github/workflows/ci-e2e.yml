@@ -125,8 +125,9 @@ jobs:
       # Chromium's system libraries come from apt, about 19 MB of .deb files. The runner's Ubuntu mirror
       # sometimes serves them at ~27 kB/s, which made this step 2.5 to 12 minutes in some runs. apt's
       # download folder points at a cached folder, so the files are fetched once a week (the key's ISO
-      # week) and only changed packages after that. apt still checks every cached file against the
-      # signed package index before it installs it (pattern 2).
+      # week) and only changed packages after that. apt checks each file it downloads against the signed
+      # package index, but takes a file already in the folder on its size alone, so this cache is only as
+      # sound as the default branch's runs, the only ones that save it (pattern 2).
       - name: Point apt at the cached package folder
         if: steps.areas.outputs.e2e == 'true'
         id: apt-cache
