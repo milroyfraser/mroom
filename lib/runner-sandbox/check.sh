@@ -8,7 +8,9 @@
 # file in the runner's home holding it. Then it runs probe.sh through mroom-step, as the job's code would run, and
 # reads the report: every check must be denied (or ok, for the evidence the step writes), every check must be there,
 # and the planted value must appear nowhere. Writes it tries: the copies, the inputs, the sandbox's /etc, the pinned
-# host keys, the sandbox's scripts, every folder on the runner's PATH, the runner's home and the workspace. Sockets: Docker's and containerd's when present,
+# host keys, the sandbox's scripts, every folder on the runner's PATH, the runner's home and the workspace, and then
+# anything at all on the local disks but the step's home, its evidence and the sticky folders. Reads it tries, beside
+# the planted file: git's config in the workspace and RUNNER_TEMP. MROOM_SANDBOX_SCAN narrows the disk scan, for tests. Sockets: Docker's and containerd's when present,
 # and each --socket. MROOM_SANDBOX_STEP names another mroom-step, for the tests.
 # Exits 0 when the sandbox holds, 1 when it does not (each failure an ::error:: line), 2 for a bad call.
 set -euo pipefail
@@ -85,18 +87,25 @@ main() {
     args+=(--write "$w")
   done
   for s in ${sockets[@]+"${sockets[@]}"}; do args+=(--socket "$s"); done
+  # git's credentials (actions/checkout's persisted token) and the runner's temp files, where actions keep theirs.
+  if [ -n "${GITHUB_WORKSPACE:-}" ]; then args+=(--read "$GITHUB_WORKSPACE/.git/config"); fi
+  if [ -n "${RUNNER_TEMP:-}" ]; then args+=(--read "$RUNNER_TEMP"); fi
+  # Where to look for anything the step may write: every local disk, but for the tests.
+  if [ -n "${MROOM_SANDBOX_SCAN:-}" ]; then args+=(--scan "$MROOM_SANDBOX_SCAN"); fi
 
-  MROOM_PROBE_TOKEN="$value" "$step" -- bash "$HERE/probe.sh" "${args[@]}" >"$report" 2>&1 || rc=$?
+  MROOM_PROBE_TOKEN="$value" "$step" -- /bin/bash "$HERE/probe.sh" "${args[@]}" >"$report" 2>&1 || rc=$?
   if [ "$rc" != 0 ]; then
     echo "::error::runner-sandbox: the probe did not run through mroom-step (exit $rc): $(grep -m1 . "$report" | cut -c1-160)"
     exit 1
   fi
 
-  local wants=(env-names env-value secret holder-dir runner-file runner-home runner-environ sudo-root sudo-holder evidence)
+  local wants=(env-names env-value secret holder-dir runner-file runner-home runner-environ sudo-root sudo-holder writable
+    evidence)
   for ((i = 0; i < ${#args[@]}; i++)); do
     case "${args[i]}" in
       --write) wants+=("write:${args[i + 1]}") ;;
       --socket) wants+=("socket:${args[i + 1]}") ;;
+      --read) wants+=("read:${args[i + 1]}") ;;
     esac
   done
   if ! sandbox_verdict "$report" "$value" "${wants[@]}"; then

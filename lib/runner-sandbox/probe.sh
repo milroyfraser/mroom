@@ -3,14 +3,18 @@
 # mroom-step, as the code a job runs would be; it tries what such code would try, and reports what it reached:
 #
 #   probe.sh --value <planted> --secret <file> --holder-dir <dir> --runner-file <file> --runner-home <dir> --pid <pid>
-#            [--write <path>]... [--socket <path>]...
+#            [--read <path>]... [--write <path>]... [--socket <path>]... [--scan <folder>]...
+#
+# --read: a file the step must not read, or a folder it must not list. --scan: where to look for anything the step
+# may write (default: every local disk); it may write only its home, its evidence and the sticky folders (/tmp's
+# kind), and anything else it can write counts as reached, since the runner or root may run it next.
 #
 # One line per check, `denied <check>`, `ok <check>` (something the step must be able to do, and can) or
 # `reached <check>: <what>` / `broken <check>: <what>`. It names what it saw, never prints a value it read, and
 # exits 0 whatever it found: check.sh decides. A check line missing from its report counts as reached there.
 set -uo pipefail
 
-value="" secret="" holder_dir="" runner_file="" runner_home="" pid="" writes=() sockets=()
+value="" secret="" holder_dir="" runner_file="" runner_home="" pid="" reads=() writes=() sockets=() scans=()
 while [ "$#" -ge 2 ]; do
   case "$1" in
     --value) value="$2" ;;
@@ -19,7 +23,9 @@ while [ "$#" -ge 2 ]; do
     --runner-file) runner_file="$2" ;;
     --runner-home) runner_home="$2" ;;
     --pid) pid="$2" ;;
+    --read) reads+=("$2") ;;
     --write) writes+=("$2") ;;
+    --scan) scans+=("$2") ;;
     --socket) sockets+=("$2") ;;
     *) echo "probe: unknown option $1" >&2; exit 2 ;;
   esac
@@ -58,6 +64,10 @@ listable runner-home "$runner_home"
 # A runner process's environment holds what the job's steps hold (tokens included).
 readable runner-environ "${pid:+/proc/$pid/environ}"
 
+for path in ${reads[@]+"${reads[@]}"}; do
+  if [ -d "$path" ]; then listable "read:$path" "$path"; else readable "read:$path" "$path"; fi
+done
+
 # No root, and the holder only through its wrapper.
 if sudo -n true >/dev/null 2>&1; then report reached sudo-root "sudo -n true"; else report denied sudo-root; fi
 if [ -n "$secret" ] && sudo -n -u mroom-holder cat -- "$secret" >/dev/null 2>&1; then
@@ -80,6 +90,23 @@ done
 for path in ${sockets[@]+"${sockets[@]}"}; do
   if [ -S "$path" ] && [ -w "$path" ]; then report reached "socket:$path" "may connect"; else report denied "socket:$path"; fi
 done
+
+# Anything on the disks the step may write: a tool the runner runs next (node, git), a library it loads, a script
+# root runs (debconf's Perl, under apt).
+if [ "${#scans[@]}" = 0 ]; then
+  while IFS= read -r disk; do scans+=("$disk"); done < <(findmnt -rn -o TARGET -t ext2,ext3,ext4,xfs,btrfs,f2fs,vfat 2>/dev/null)
+  [ "${#scans[@]}" -gt 0 ] || scans=(/)
+fi
+own=()
+[ "$(id -un)" != mroom-step ] || own=(! -user mroom-step)
+found="$(for dir in "${scans[@]}"; do
+  find "$dir" -xdev \( -path /proc -o -path /sys -o -path /dev -o -path /run -o -path /tmp -o -path /var/tmp \
+    -o -path "${HOME:-/nonexistent}" -o -path "${MROOM_EVIDENCE:-/nonexistent}" \) -prune \
+    -o -writable ! -type l ! \( -type d -perm -1000 \) ${own[@]+"${own[@]}"} -print 2>/dev/null
+done)"
+if [ -n "$found" ]; then
+  report reached writable "may write $(wc -l <<<"$found" | tr -d ' ') paths, such as $(head -n 3 <<<"$found" | tr '\n' ' ')"
+else report denied writable; fi
 
 # What the step must be able to do: write its evidence.
 if [ -n "${MROOM_EVIDENCE:-}" ] && probe_file="$(mktemp "$MROOM_EVIDENCE/.mroom-probe.XXXXXX" 2>/dev/null)"; then

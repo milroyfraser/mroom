@@ -547,16 +547,26 @@ Invariants, each with a test:
      never a name that reads like a credential); the runner's home, and so the workspace and its git credentials,
      is closed to it; a secret is readable only by `mroom-holder`, through one root-owned copy of a trusted wrapper,
      which `mroom-step` alone may run as that user; what the step loads is a root-owned copy in
-     `/usr/lib/mroom-sandbox/copies`, never copied through a link. No folder on the runner's `PATH` stays writable by other
-     users (GitHub's images leave `/usr/local/bin` open to all, so a step could plant a `git` the runner's next step
-     runs), and every folder the sandbox trusts, up to `/`, is one only root or the runner can change. It refuses a
+     `/usr/lib/mroom-sandbox/copies`, never copied through a link. Nothing on the box's local disks stays writable by every
+     user but sticky folders such as `/tmp` (GitHub's images run `chmod -R 777` on `/usr/local/bin`,
+     `/usr/local/lib/node_modules`, `/opt` and `/usr/share`, so a step could change `node`, `git` or debconf's Perl,
+     which the runner or apt, as root, runs next). Every folder on the runner's and the step's `PATH` (or, for one
+     not made yet, the nearest above it) and every folder the sandbox trusts, up to `/`, is one only root or the runner
+     can change. The holder's wrapper runs with no arguments unless the job allows them, for a wrapper that keeps the
+     secret out of argv, calls its tools by absolute path, ignores its working folder and checks each argument against
+     an allowlist. Every process the step user has is killed before and after each step, and the runner takes the
+     step's evidence only through `mroom-step --collect`, which reads it as the step and so never follows a link to
+     the runner's own files. It refuses a
      self-hosted runner that outlives the job.
    - Before any untrusted code runs, a hostile probe runs through `mroom-step` and tries the secret, the runner's
-     files and a runner process's environment, sudo, writes outside the step's own folders, and Docker's socket;
+     files, git's config in the workspace, `RUNNER_TEMP` and a runner process's environment, sudo, Docker's socket,
+     and writes anywhere on the local disks but its home, its evidence and the sticky folders;
      the job fails if any succeeds, if a check goes unreported, or if a value planted in the runner shows up.
    - bubblewrap is not one of the walls: Claude Code's env scrub would run each command in `bwrap
-     --unshare-user`, whose `no_new_privs` refuses the sudo hop the sandbox is built on, so the scrub stays off and
-     the users keep the step from the job's secrets. `bwrap-probe` shows the hop is refused inside bubblewrap,
+     --unshare-user`, where sudo refuses the hop the sandbox is built on. On GitHub's runner it stops at the user
+     namespace's uid mapping (root's files show as uid 65534, so sudo will not start), and `no_new_privs`, which bwrap
+     always sets, would stop a setuid sudo after that. So the scrub stays off and the users keep the step from the
+     job's secrets. `bwrap-probe` shows the hop is refused inside bubblewrap,
      and warns when it no longer is. The network stays open to the step (a browser step needs the QA site).
 6. **The read-only data boundary is explicit.** `qa.db_read_allowlist` has no default; browser QA refuses to start
    without it, and a test runs the allowlist against the app's schema. The gate holds its own copy, set by a

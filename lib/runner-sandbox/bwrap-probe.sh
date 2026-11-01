@@ -7,8 +7,10 @@
 #                                      the sandbox's sudo hop, such as `mroom-step -- true`
 #
 # Why it exists: Claude Code's subprocess env scrub (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1) needs bubblewrap, and with it
-# runs every Bash command inside `bwrap --unshare-user …`. bwrap always sets no_new_privs, so a setuid sudo inside it
-# cannot change user, and the runner sandbox reaches its users through exactly such a hop (mroom-step, mroom-holder).
+# runs every Bash command inside `bwrap --unshare-user …`. Inside that user namespace only the caller's own uid is
+# mapped, so root's files show as owned by the overflow uid (65534) and sudo refuses to start ("/etc/sudo.conf is
+# owned by uid 65534", as GitHub's runner shows); and bwrap sets no_new_privs, so a setuid sudo could not change user
+# even then. The runner sandbox reaches its users through exactly such a hop (mroom-step, mroom-holder).
 # So on a sandboxed runner the scrub stays off, and the sandbox, not bwrap, keeps the step from the job's secrets.
 # `check` shows it on a real runner: bubblewrap works for the runner's user, and the hop is refused inside it. If the
 # hop ever works there, it warns, and the scrub could be switched on.

@@ -15,10 +15,15 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 RS="$ROOT/lib/runner-sandbox"
 # The runner's real home: test_case gives each test a temp HOME, but the sandbox closes, and the probe tries, this one.
 RUNNER_HOME="$HOME"
+# A tool the image leaves writable by every user (GitHub's runs chmod -R 777 on /usr/local/bin), which the runner runs.
+TOOL="$(readlink -f /usr/local/bin/node 2>/dev/null || true)"
+[ -f "$TOOL" ] || TOOL="$(readlink -f "$(command -v node)")"
 SECRET="secret-$RANDOM$RANDOM$RANDOM"
 APP="$(mktemp -d)"
-cleanup() { sudo rm -f /etc/sudoers.d/zz-weakened; chmod 0700 "$RUNNER_HOME"; rm -rf "$APP" "$TOP"; }
+cleanup() { sudo rm -f /etc/sudoers.d/zz-weakened; sudo chmod o-w "$TOOL"; chmod 0700 "$RUNNER_HOME"; rm -rf "$APP" "$TOP"; }
 trap cleanup EXIT
+
+no_leak() { ! grep -rqs -e "$SECRET" -e 'root:' "$1"; }
 
 t_it_sets_up_and_holds() {
   export HOME="$RUNNER_HOME"
@@ -31,6 +36,7 @@ t_it_sets_up_and_holds() {
 set -euo pipefail
 [ "$(id -un)" = mroom-holder ] && [ -s /etc/mroom-sandbox/holder/secret ] && echo holder-ok
 EOF
+  echo "before the sandbox: $(stat -c '%A %U' "$TOOL") $TOOL"
   cd "$APP"
   run sudo -E env MROOM_SANDBOX_RUNNER_PATH="$PATH" MROOM_SANDBOX_SECRET="$SECRET" MROOM_SANDBOX_HOLDER=holder.sh MROOM_SANDBOX_COPY=harness \
     MROOM_SANDBOX_PATH="$(dirname "$(command -v node)")" MROOM_SANDBOX_ENV='QA_DB=qa_1' \
@@ -69,6 +75,31 @@ EOF
   run mroom-step -- cat /usr/lib/mroom-sandbox/copies/harness/lib/shadow
   expect_true "the step cannot read through it" [ "$rc" != 0 ]
 
+  # The tool the runner runs next: the step cannot change it, whatever the image left.
+  run mroom-step -- /bin/sh -c ': >>"$1"' _ "$TOOL"
+  expect_true "the step cannot append to $TOOL" [ "$rc" != 0 ]
+  expect_true "$TOOL is no longer writable by every user" [ -z "$(find "$TOOL" -perm -o+w)" ]
+
+  # The holder's wrapper takes no arguments unless the job says so.
+  run mroom-step -- /bin/sh -c 'sudo -n -u mroom-holder "$MROOM_HOLDER" --extra'
+  expect_true "the wrapper refuses arguments by default" [ "$rc" != 0 ]
+
+  # Nothing the step starts outlives it.
+  run mroom-step -- /bin/sh -c 'nohup sleep 300 >/dev/null 2>&1 &'
+  expect_rc 0
+  expect_true "the step's background process was killed" [ -z "$(pgrep -u mroom-step || true)" ]
+
+  # --collect: a link the step left gives only what the step itself could read.
+  printf 'runner-only-%s\n' "$SECRET" >"$HOME/runner-only"
+  run mroom-step -- /bin/sh -c 'ln -s "$1" "$MROOM_EVIDENCE/leak"; ln -s /etc/shadow "$MROOM_EVIDENCE/shadow"' _ "$HOME/runner-only"
+  mkdir -p "$TOP/collected"
+  run mroom-step --collect "$TOP/collected"
+  expect_rc 0
+  expect_true "the evidence came" [ "$(cat "$TOP/collected/result.txt")" = found ]
+  expect_true "no link came" [ -z "$(find "$TOP/collected" -type l)" ]
+  expect_true "nothing of the runner's or root's came" no_leak "$TOP/collected"
+  rm -f "$HOME/runner-only"
+
   run sudo -E "$RS/sandbox.sh"
   expect_rc 1; expect_err_has "already set up"
 }
@@ -89,6 +120,14 @@ t_a_weakened_sandbox_fails_the_check() {
   expect_rc 1
   expect_out_has "(sudo-root)"
   expect_out_has "(sudo-holder)"
+
+  # A tool left writable by every user again: the probe's disk scan finds it.
+  sudo chmod o+w "$TOOL"
+  run /usr/lib/mroom-sandbox/check.sh
+  sudo chmod o-w "$TOOL"
+  expect_rc 1
+  expect_out_has "(writable)"
+  expect_out_has "$TOOL"
 
   run /usr/lib/mroom-sandbox/check.sh
   expect_rc 0

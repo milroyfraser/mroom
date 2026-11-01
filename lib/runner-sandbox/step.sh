@@ -3,6 +3,7 @@
 # sandbox.sh installs it as /usr/local/bin/mroom-step; the runner's user runs it:
 #
 #   mroom-step [--input <file>]... -- <command> [<arg>...]
+#   mroom-step --collect <empty folder>
 #
 # Each --input file is copied into /var/lib/mroom-sandbox/inputs first, so the step never needs the runner's files.
 # The command runs from /var/lib/mroom-sandbox through `sudo -u mroom-step env -i`, with only:
@@ -11,6 +12,12 @@
 #   MROOM_SANDBOX=1, MROOM_INPUTS, MROOM_EVIDENCE (the folder the step writes for the runner to read)
 #   MROOM_HOLDER    /usr/lib/mroom-sandbox/holder, when the sandbox has a holder: run it with `sudo -n -u mroom-holder`
 #   the NAME=value lines of MROOM_SANDBOX_ENV, read as data and never sourced
+# Every process the step user has is killed before the command and after it, so nothing the step started outlives
+# it to watch the next one; so run one step at a time.
+#
+# --collect copies the evidence into a folder of the runner's: read as mroom-step (`tar -h`, so a link the step left
+# gives only what the step itself could read), unpacked by the runner as plain files. Read evidence only this way:
+# reading the folder in place, the runner would follow such a link to its own files.
 # It exits with the command's status, or 2 for a bad call.
 set -euo pipefail
 
@@ -19,7 +26,21 @@ SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 . "$(dirname "$SELF")/common.sh"
 
 die() { echo "mroom-step: $*" >&2; exit 2; }
-usage="usage: mroom-step [--input <file>]... -- <command> [<arg>...]"
+usage="usage: mroom-step [--input <file>]... -- <command> [<arg>...] | --collect <empty folder>"
+
+# stop_all: kill every process the step user has (pkill spares itself).
+stop_all() { sudo -n -u "$SANDBOX_STEP_USER" -- /usr/bin/pkill -KILL -u "$SANDBOX_STEP_USER" >/dev/null 2>&1 || true; }
+
+if [ "${1:-}" = --collect ]; then
+  [[ "$#" = 2 && -d "$2" && ! -L "$2" && -O "$2" ]] || die "--collect takes an empty folder of yours"
+  [ -z "$(ls -A "$2")" ] || die "--collect takes an empty folder: $2"
+  [ -d "$SANDBOX_VAR/evidence" ] || die "the runner sandbox is not set up (run the runner-sandbox action first)"
+  stop_all
+  cd "$SANDBOX_VAR/evidence"
+  sudo -n -u "$SANDBOX_STEP_USER" -- /usr/bin/tar -chf - --hard-dereference --ignore-failed-read . \
+    | tar -xf - -C "$2" --no-same-owner --no-same-permissions
+  exit 0
+fi
 
 inputs=()
 while [ "$#" -gt 0 ]; do
@@ -58,7 +79,11 @@ if [ -x "$SANDBOX_HOLDER_BIN" ]; then vars+=("MROOM_HOLDER=$SANDBOX_HOLDER_BIN")
 
 home="$(getent passwd "$SANDBOX_STEP_USER" 2>/dev/null | cut -d: -f6)" || true
 cd "$SANDBOX_VAR"
-exec sudo -n -u "$SANDBOX_STEP_USER" -- env -i \
+stop_all
+rc=0
+sudo -n -u "$SANDBOX_STEP_USER" -- /usr/bin/env -i \
   PATH="$path" HOME="${home:-/home/$SANDBOX_STEP_USER}" LANG=C.UTF-8 MROOM_SANDBOX=1 \
   MROOM_INPUTS="$SANDBOX_VAR/inputs" MROOM_EVIDENCE="$SANDBOX_VAR/evidence" ${vars[@]+"${vars[@]}"} \
-  "$@"
+  "$@" || rc=$?
+stop_all
+exit "$rc"

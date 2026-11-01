@@ -10,6 +10,9 @@ inputs:
   holder:
     description: The trusted wrapper (a path in the default branch's checkout) that uses the secret, run as mroom-holder; empty for none
     default: ""
+  holder-args:
+    description: none (sudo runs the wrapper with no arguments at all) or any (for a wrapper that checks each argument against its own allowlist)
+    default: none
   known-hosts:
     description: Pinned SSH host key lines ("<host> <type> <key>") for the holder's wrapper, root-owned
     default: ""
@@ -35,6 +38,7 @@ runs:
       shell: bash
       env:
         MROOM_SANDBOX_HOLDER: ${{ inputs.holder }}
+        MROOM_SANDBOX_HOLDER_ARGS: ${{ inputs.holder-args }}
         MROOM_SANDBOX_KNOWN_HOSTS: ${{ inputs.known-hosts }}
         MROOM_SANDBOX_COPY: ${{ inputs.copy }}
         MROOM_SANDBOX_PATH: ${{ inputs.path }}

@@ -89,10 +89,15 @@ t_setup_needs_root_through_sudo() {
 
 # --- step.sh (mroom-step) ---
 
-# argv_sudo: a fake sudo that writes each argument on a line of $T/argv, then runs what follows `env -i …` as is.
+# argv_sudo: a fake sudo. A pkill call adds a line to $T/kills; any other writes each argument on a line of $T/argv.
 argv_sudo() {
-  fake_bin sudo 'printf "%s\n" "$@" >"'"$T"'/argv"; pwd >"'"$T"'/cwd"'
+  fake_bin sudo 'case " $* " in *" /usr/bin/pkill "*) echo "$*" >>"'"$T"'/kills"; exit 1 ;; esac
+printf "%s\n" "$@" >"'"$T"'/argv"; pwd >"'"$T"'/cwd"'
 }
+
+# has_gnu_find / has_gnu_tar: the probe's disk scan needs find -writable, and --collect GNU tar; a Mac has neither.
+has_gnu_find() { find /dev/null -maxdepth 0 -writable >/dev/null 2>&1; }
+has_gnu_tar() { tar --version 2>/dev/null | grep -q 'GNU tar'; }
 
 t_step_runs_as_the_step_user_with_a_clean_environment() {
   world
@@ -104,7 +109,9 @@ t_step_runs_as_the_step_user_with_a_clean_environment() {
   expect_rc 0
   local argv
   argv="$(cat "$T/argv")"
-  expect_true "sudo -n -u mroom-step -- env -i" [ "$(head -n 6 "$T/argv" | tr '\n' ' ')" = "-n -u mroom-step -- env -i " ]
+  expect_true "sudo -n -u mroom-step -- /usr/bin/env -i" [ "$(head -n 6 "$T/argv" | tr '\n' ' ')" = "-n -u mroom-step -- /usr/bin/env -i " ]
+  expect_true "the step user's processes are killed before and after" \
+    [ "$(cat "$T/kills")" = "-n -u mroom-step -- /usr/bin/pkill -KILL -u mroom-step"$'\n'"-n -u mroom-step -- /usr/bin/pkill -KILL -u mroom-step" ]
   expect_true "PATH from the sandbox's folders" grep -qx 'PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin' "$T/argv"
   expect_true "the step's variables" grep -qx 'QA_DB=qa_12' "$T/argv"
   expect_true "the sandbox's own" grep -qx "MROOM_INPUTS=$T/var/inputs" "$T/argv"
@@ -135,9 +142,29 @@ t_step_refuses_bad_calls() {
 
 t_step_passes_the_commands_status() {
   world
-  fake_bin sudo 'exit 7'
+  fake_bin sudo 'case " $* " in *" /usr/bin/pkill "*) echo kill >>"'"$T"'/kills"; exit 0 ;; esac; exit 7'
   run "$RS/step.sh" -- true
   expect_rc 7
+  expect_true "and still kills what the step left" [ "$(wc -l <"$T/kills" | tr -d ' ')" = 2 ]
+}
+
+t_collect_copies_the_evidence_as_plain_files() {
+  world
+  has_gnu_tar || { ok; return; }
+  # A fake sudo that runs the command after -- as the test's user (the real one runs it as mroom-step).
+  fake_bin sudo 'while [ "$1" != -- ]; do shift; done; shift; case "$1" in */pkill) exit 1 ;; esac; exec "$@"'
+  echo found >"$T/var/evidence/result.txt"
+  echo runner-only >"$T/elsewhere"
+  ln -s "$T/elsewhere" "$T/var/evidence/leak"
+  mkdir -p "$T/out" "$T/full"
+  echo x >"$T/full/x"
+  run "$RS/step.sh" --collect "$T/out"
+  expect_rc 0
+  expect_true "the evidence copied" [ "$(cat "$T/out/result.txt")" = found ]
+  expect_true "a link arrives as a plain file, read as the step" [ -f "$T/out/leak" ] && [ ! -L "$T/out/leak" ]
+  run "$RS/step.sh" --collect "$T/full"; expect_rc 2; expect_err_has "empty folder"
+  run "$RS/step.sh" --collect "$T/missing"; expect_rc 2
+  run "$RS/step.sh" --collect "$T/out" extra; expect_rc 2
 }
 
 # --- probe.sh, as the test's own user: it reaches what that user can, and says so ---
@@ -148,13 +175,22 @@ has_prefix() { grep -q -- "^$1" <<<"$out"; }
 
 t_probe_reports_what_it_reaches() {
   fake_bin sudo 'exit 0'
-  mkdir -p "$T/home" "$T/holder" "$T/open" "$T/evidence"
+  mkdir -p "$T/home" "$T/holder" "$T/open" "$T/evidence" "$T/scan/sticky" "$T/scan/closed"
+  echo tool >"$T/scan/tool"
+  chmod 1777 "$T/scan/sticky"
+  chmod 555 "$T/scan" "$T/scan/closed"
   echo planted-v4lue >"$T/home/planted"
   echo key >"$T/holder/secret"
   echo pinned >"$T/known_hosts"
   probe --value planted-v4lue --secret "$T/holder/secret" --holder-dir "$T/holder" --runner-file "$T/home/planted" \
-    --runner-home "$T/home" --pid $$ --write "$T/open" --write "$T/known_hosts"
+    --runner-home "$T/home" --pid $$ --write "$T/open" --write "$T/known_hosts" --read "$T/known_hosts" --read "$T/home" \
+    --scan "$T/scan"
   expect_rc 0
+  expect_true "read a file" has_prefix "reached read:$T/known_hosts: "
+  expect_true "list a folder" has_prefix "reached read:$T/home: "
+  if has_gnu_find; then
+    expect_true "the disk scan finds what it may write" has_prefix "reached writable: may write 1 paths, such as $T/scan/tool"
+  fi
   expect_true "env-names" has_prefix 'reached env-names: '
   expect_true "secret" has_prefix 'reached secret: '
   expect_true "holder-dir" has_prefix 'reached holder-dir: '
@@ -167,9 +203,10 @@ t_probe_reports_what_it_reaches() {
   expect_true "evidence unset" has_prefix 'broken evidence: '
   expect_true "the write probe left nothing behind" [ -z "$(ls -A "$T/open")" ]
   expect_true "known_hosts unchanged" [ "$(cat "$T/known_hosts")" = pinned ]
+  chmod 755 "$T/scan"
   case "$out" in *planted-v4lue* | *key*pinned*) fail "the probe printed a value it read" ;; *) ok ;; esac
   # The planted value in its environment.
-  run env MROOM_PROBE=planted-v4lue bash "$RS/probe.sh" --value planted-v4lue
+  run env MROOM_PROBE=planted-v4lue bash "$RS/probe.sh" --value planted-v4lue --scan "$T/home"
   expect_true "env-value" has_prefix 'reached env-value: '
   case "$out" in *planted-v4lue*) fail "the probe printed the planted value" ;; *) ok ;; esac
 }
@@ -184,12 +221,12 @@ t_probe_reports_denied_when_it_cannot() {
   chmod 555 "$T/ro"
   run env -i PATH="$T/bin:/usr/bin:/bin" MROOM_EVIDENCE="$T/evidence" bash "$RS/probe.sh" --value planted \
     --secret "$T/holder/secret" --holder-dir "$T/holder" --runner-file "$T/home/planted" --runner-home "$T/home" \
-    --pid 999999999 --write "$T/ro" --write "$T/nowhere"
+    --pid 999999999 --write "$T/ro" --write "$T/nowhere" --read "$T/home/planted" --read "$T/holder" --scan "$T/ro"
   chmod 700 "$T/holder" "$T/home"
   expect_rc 0
   local check
   for check in env-names env-value secret holder-dir runner-file runner-home runner-environ sudo-root sudo-holder \
-    "write:$T/ro" "write:$T/nowhere"; do
+    "write:$T/ro" "write:$T/nowhere" "read:$T/home/planted" "read:$T/holder" writable; do
     expect_true "denied $check" has_line "denied $check"
   done
   expect_true "ok evidence" has_line 'ok evidence'
@@ -202,7 +239,7 @@ t_probe_tries_sockets() {
   python3 -c 'import socket, sys; s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "$T/closed.sock"
   chmod 666 "$T/open.sock"
   chmod 444 "$T/closed.sock"
-  probe --socket "$T/open.sock" --socket "$T/closed.sock" --socket "$T/missing.sock"
+  probe --socket "$T/open.sock" --socket "$T/closed.sock" --socket "$T/missing.sock" --scan "$T/missing"
   expect_true "an open socket" has_prefix "reached socket:$T/open.sock: "
   if [ "$(id -u)" != 0 ]; then expect_true "a closed socket" has_line "denied socket:$T/closed.sock"; fi
   expect_true "a missing socket" has_line "denied socket:$T/missing.sock"
@@ -215,7 +252,7 @@ t_probe_refuses_a_bad_call() {
 
 # --- check.sh: its verdict, and a broken sandbox failing it loudly ---
 
-ALL=(env-names env-value secret holder-dir runner-file runner-home runner-environ sudo-root sudo-holder evidence)
+ALL=(env-names env-value secret holder-dir runner-file runner-home runner-environ sudo-root sudo-holder writable evidence)
 
 verdict() {
   printf '%s\n' "$1" >"$T/report"
@@ -251,14 +288,20 @@ t_a_broken_sandbox_fails_the_check_loudly() {
   world
   # A "sandbox" that runs the step as the runner's own user, environment and all.
   fake_bin fake-step 'shift; exec "$@"'
+  mkdir -p "$T/ws/.git"
+  echo '[http] extraheader = AUTHORIZATION: basic x' >"$T/ws/.git/config"
   fake_bin sudo 'exit 1'
-  run env MROOM_SANDBOX_STEP="$T/bin/fake-step" bash "$RS/check.sh"
+  mkdir -p "$T/scan"
+  echo tool >"$T/scan/node"
+  run env MROOM_SANDBOX_STEP="$T/bin/fake-step" MROOM_SANDBOX_SCAN="$T/scan" GITHUB_WORKSPACE="$T/ws" bash "$RS/check.sh"
   expect_rc 1
   expect_out_has "::error::runner-sandbox: the sandbox does not hold"
+  if has_gnu_find; then expect_out_has "(writable)"; fi
   expect_out_has "(env-names)"
   expect_out_has "(runner-file)"
   expect_out_has "(runner-home)"
   expect_out_has "(write:$HOME)"
+  expect_out_has "(read:$T/ws/.git/config)"
   expect_err_has "no untrusted code may run on this runner"
   expect_no_file "$HOME/.mroom-sandbox-probe"
 }
@@ -332,6 +375,7 @@ test_case setup-root t_setup_needs_root_through_sudo
 test_case step t_step_runs_as_the_step_user_with_a_clean_environment
 test_case step-bad t_step_refuses_bad_calls
 test_case step-status t_step_passes_the_commands_status
+test_case collect t_collect_copies_the_evidence_as_plain_files
 test_case probe-reaches t_probe_reports_what_it_reaches
 test_case probe-denied t_probe_reports_denied_when_it_cannot
 test_case probe-sockets t_probe_tries_sockets

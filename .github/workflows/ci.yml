@@ -170,7 +170,7 @@ jobs:
     # off. It runs on every pull request, so a Claude Code bump in a workflow that uses the sandbox runs it too.
     name: runner sandbox on a real runner
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:

@@ -1464,20 +1464,35 @@ a self-hosted runner unless `MROOM_SANDBOX_EPHEMERAL=1` says the runner is throw
     MROOM_SANDBOX_SECRET: ${{ secrets.QA_GATE_KEY }}   # an env, never an input
   with:
     holder: .mroom/qa-box.sh           # the trusted wrapper that uses the secret
+    holder-args: any                   # it checks each argument itself ("The holder", below)
     known-hosts: ${{ vars.QA_SSH_KNOWN_HOSTS }}
     copy: harness                      # root-owned, read-only in /usr/lib/mroom-sandbox/copies/harness
     path: /opt/node/bin                # node's folder, outside the runner's home
     step-env: |
       QA_SITE=https://12.qa.example.dev
 - run: mroom-step --input recipe.mjs -- node /usr/lib/mroom-sandbox/copies/harness/drive.mjs inputs/recipe.mjs
+- run: mkdir evidence && mroom-step --collect evidence
 ```
 
 What the step (user `mroom-step`, run through `mroom-step`) gets and does not:
 
 | | |
 |---|---|
-| **Gets** | `env -i` with only `PATH` (`path`, then `/usr/local/bin:/usr/bin:/bin`), `HOME`, `LANG`, `MROOM_SANDBOX`, `MROOM_INPUTS`, `MROOM_EVIDENCE`, `MROOM_HOLDER` and the `step-env` lines; read access to the copies and its inputs; write access to `/var/lib/mroom-sandbox/evidence` (the runner reads it afterwards) and its own home; the holder's wrapper, through `sudo -n -u mroom-holder "$MROOM_HOLDER"`; the network |
-| **Never** | the job's environment (no `GITHUB_TOKEN`, Claude token or secret); the runner's home (closed to `0700`: the workspace, git's credentials in it, `RUNNER_TEMP`); a runner process's environment; the secret, which only `mroom-holder` reads; sudo to root or to anything but the wrapper; writing the copies, the inputs, `/etc/mroom-sandbox`, the pinned host keys, the sandbox's scripts or any folder on the runner's `PATH` (GitHub's images leave `/usr/local/bin` writable by all; the action closes it, so a step cannot plant a `git` the runner's next step runs); Docker's or containerd's socket |
+| **Gets** | `env -i` with only `PATH` (`path`, then `/usr/local/bin:/usr/bin:/bin`), `HOME`, `LANG`, `MROOM_SANDBOX`, `MROOM_INPUTS`, `MROOM_EVIDENCE`, `MROOM_HOLDER` and the `step-env` lines; read access to the copies and its inputs; write access to `/var/lib/mroom-sandbox/evidence` and its own home, and to `/tmp`, `/var/tmp` and other sticky folders; the holder's wrapper, through `sudo -n -u mroom-holder "$MROOM_HOLDER"`; the network |
+| **Never** | the job's environment (no `GITHUB_TOKEN`, Claude token or secret); the runner's home (closed to `0700`: the workspace, git's credentials in it, `RUNNER_TEMP`); a runner process's environment; the secret, which only `mroom-holder` reads; sudo to root or to anything but the wrapper; writing anything else on the local disks: the copies, the inputs, `/etc/mroom-sandbox`, the pinned host keys, the sandbox's scripts, any tool, library or folder (GitHub's images run `chmod -R 777` on `/usr/local/bin`, `/usr/local/lib/node_modules`, `/opt` and `/usr/share`; the action closes every such path, so a step cannot change `node`, `git` or debconf's Perl, which the runner or apt, as root, runs next); Docker's or containerd's socket; outliving its step (every process the step user has is killed before and after each one, so run one step at a time) |
+
+`/tmp` stays shared: put nothing the step must not see there. The runner's own temporary files live in its home.
+
+**Evidence.** Take what the step wrote with `mroom-step --collect <empty folder>`, never by reading
+`/var/lib/mroom-sandbox/evidence` in place: the step may leave a link there to the runner's own files.
+`--collect` reads the folder as `mroom-step` (`tar -h`), so a link gives only what the step itself could read, and
+unpacks plain files.
+
+**The holder.** sudo runs the wrapper with no arguments at all unless `holder-args: any`. With arguments
+allowed, the wrapper is the boundary: it checks each argument against its own allowlist (fixed commands, a strict
+pattern for each value), keeps the secret out of argv (environment, a file descriptor or a file only it reads),
+calls each tool by absolute path, sets its own `PATH` and ignores the folder it is started from. sudo resets its
+environment.
 
 `step-env` refuses a name that reads like a credential (`*_TOKEN`, `*_KEY`, `*_SECRET`, `*_PASSWORD`, `*_DSN`
 and the like) or a runner's (`GITHUB_*`, `ACTIONS_*`, `RUNNER_*`, `CLAUDE*`), and `copy` refuses a path that
@@ -1487,12 +1502,14 @@ leaves the working directory or goes through a link, since a copied tree may be 
 long-lived process's and in a file in the runner's home, and runs a hostile probe
 (`lib/runner-sandbox/probe.sh`) through `mroom-step`. It tries every "Never" above and reports each; the job
 fails, with one `::error::` per hole, if any succeeds, if any check is missing from its report, or if the
-planted value shows up. Run it again yourself with `/usr/lib/mroom-sandbox/check.sh [--socket <path>]`.
+planted value shows up. It also scans the local disks, as the step, for anything the step may write outside its
+home, its evidence and the sticky folders. Run it again yourself with `/usr/lib/mroom-sandbox/check.sh [--socket <path>]`.
 
 **Claude Code's own sandbox stays off.** Its subprocess env scrub (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`) runs
-each Bash command in `bwrap --unshare-user`, which sets `no_new_privs`, so the sudo hop to `mroom-holder` is
-refused inside it. `lib/runner-sandbox/bwrap-probe.sh` shows that on a real runner, and warns if it ever
-changes. mroom's CI runs it, the probe and two weakened sandboxes (`tests/sandbox/real-test.sh`) on every pull
+each Bash command in `bwrap --unshare-user`, where sudo refuses the hop to `mroom-step` and `mroom-holder`: inside
+the user namespace root's files show as uid 65534, so sudo will not start, and bwrap's `no_new_privs` would stop it
+after that. `lib/runner-sandbox/bwrap-probe.sh` shows that on a real runner, and warns if it ever
+changes. mroom's CI runs it, the probe and three weakened sandboxes (`tests/sandbox/real-test.sh`) on every pull
 request.
 
 ## CI templates
