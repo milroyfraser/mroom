@@ -1145,8 +1145,11 @@ scratch_probe() {
   scratch_inside "$root" "$p" >/dev/null || return 1
   if [ -e "$p.git" ] || [ -L "$p.git" ]; then return 1; fi
   if [ -L "$p/.git" ] || [ -f "$p/.git" ]; then return 1; fi
-  # No link anywhere in it (refs/tags, objects/pack, hooks, ...): git would follow one out of the root.
-  [ -z "$(find -P "$p" -type l -print -quit 2>/dev/null)" ] || return 1
+  # No link anywhere in it (refs/tags, objects/pack, hooks, ...): git would follow one out of the root. A
+  # folder the owner cannot read could hide one, so it is refused too, as is any error from find.
+  local found
+  found=$(find -P "$p" \( -type l -o -type d ! -perm -u+r \) -print -quit 2>/dev/null) || return 1
+  [ -z "$found" ] || return 1
   repo=$p
   if [ -e "$p/.git" ]; then
     repo=$p/.git

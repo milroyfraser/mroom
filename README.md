@@ -258,11 +258,10 @@ mroom scratch prune --older-than 24
 ```
 
 `rm` and `prune` remove only whole folders directly inside the root. They resolve the real path and
-refuse an entry that is a link, a path that reaches the root through a link, `..`, and anything that
-resolves outside the root. They delete with `find -P`, which never follows a link: a link inside a folder is
-removed as a link, and what it points at stays. The root itself must be a folder you own, and neither
-it nor its `mroom` folder may be a link; the `mroom` folder must be yours and not writable by others. `base.json` allows every `mroom scratch` command, while
-`rm -rf` stays denied.
+refuse anything that resolves outside the root. They delete with `find -P`, which never follows a
+link: a link inside a folder is removed as a link, and what it points at stays. The root itself must be
+a folder you own, and neither it nor its `mroom` folder may be a link; the `mroom` folder must be yours
+and not world-writable. `base.json` allows every `mroom scratch` command, while `rm -rf` stays denied.
 
 **Offline tag and release tests.** `mroom guard` lets a `git push` of tags, or of any branch, through
 when its remote is a repository inside the root, named by the literal absolute path (or `file:///` URL)

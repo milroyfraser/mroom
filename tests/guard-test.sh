@@ -1083,6 +1083,7 @@ sc_linkhead=$(sc "$mroom" scratch new --bare)
 sc_nested=$(sc "$mroom" scratch new --bare)
 sc_badhead=$(sc "$mroom" scratch new --bare)
 sc_front=$(sc "$mroom" scratch new)
+sc_hidden=$(sc "$mroom" scratch new --bare)
 sc_root=${sc_bare%/*}
 git init -q --bare "$TOP/sc-outside.git"
 ln -s "$TOP/sc-outside.git" "$sc_root/evil"
@@ -1099,6 +1100,10 @@ echo 'not a ref' >"$sc_badhead/HEAD"
 git init -q --bare "$sc_front"
 echo "$TOP/sc-outside.git" >"$sc_front/commondir"
 mkdir -p "$sc_front/.git/objects" "$sc_front/.git/refs"
+# A link in a folder the owner cannot list (mode 0300): the scan must not miss it.
+mkdir "$sc_hidden/refs/tags/locked"
+ln -s "$TOP/sc-outside.git/refs/tags" "$sc_hidden/refs/tags/locked/out"
+chmod 0300 "$sc_hidden/refs/tags/locked"
 echo 'junk' >"$sc_front/.git/HEAD"
 # sc_hook COMMAND: the guard's exit status in hook mode, as Claude Code runs it.
 sc_hook() {
@@ -1135,6 +1140,7 @@ sc_cases() {
   sc_refuse "git push $sc_badhead v1.2.3"
   sc_refuse "git push $sc_front v1.2.3"
   sc_refuse "git push $sc_front HEAD:main"
+  sc_refuse "git push $sc_hidden v1.2.3"
   # Any word that changes how git picks the remote rules the exception out, whatever the spelling.
   sc_refuse "git push --repo=$sc_bare --tags"
   sc_refuse "git push --repo $sc_bare --tags"
@@ -1169,6 +1175,7 @@ sc_cases() {
   sc_refuse "git config --global url.https://github.com/acme/shop.insteadOf $sc_root"
 }
 for AWK_UNDER_TEST in "${awks[@]}"; do sc_cases; done
+chmod 0700 "$sc_hidden/refs/tags/locked" # so the test's own clean-up can list it
 AWK_UNDER_TEST=$(command -v awk)
 # Without a working folder from the hook (or one that cannot be entered), the remote is not scratch.
 sc_hook_cwd() {
