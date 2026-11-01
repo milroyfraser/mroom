@@ -5,10 +5,11 @@
 # on each site by a link to a root-owned file whose content must not come back; certificates that fail deleted, waited
 # for and asked for again once, and one not enabled enabled; daemons and scheduled jobs of another user gone before
 # the code; the code and the frontend as data through the gate; the environment's own services, kept secrets and
-# .env, the template read entry by entry; a deploy script and a worker that refuse any user but the site user; /up
-# asked again after a 502, and the commit said to be deployed only after it; slots, two first deploys at once
-# included; and secrets never in the log. Offline: Forge, GitHub and the gate are fakes that answer as the real ones
-# do.
+# .env, the template read entry by entry; a Reverb app of its own, whose public settings are the ones qa-plan built
+# the frontend with and whose secret stays the same from deploy to deploy; a deploy script and a worker that refuse
+# any user but the site user; /up asked again after a 502, and the commit said to be deployed only after it; slots,
+# two first deploys at once included; and secrets never in the log. Offline: Forge, GitHub and the gate are fakes
+# that answer as the real ones do.
 set -euo pipefail
 SUITE=qa-up
 # shellcheck source=tests/lib.sh
@@ -21,7 +22,7 @@ skip_unless has_tomllib "python3 has no tomllib (needs 3.11+)"
 UP="$ROOT/actions/qa-up/up.sh"
 SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 APP_KEY="base64:$(printf 'app-key-of-environment-%09d' 7 | base64 -w0)"
-SECRETS=(db-pw-7 redis-pw-7 mail-pw-7 bucket-pw-files bucket-pw-media "$APP_KEY")
+SECRETS=(db-pw-7 redis-pw-7 mail-pw-7 bucket-pw-files bucket-pw-media reverb-pw-7-1 "$APP_KEY")
 WORKER="bash -c 'test \"\$(id -un)\" = shop_qa_7 || exit 78; exec php8.4 artisan queue:work --queue=default,mail --tries=3 --max-time=3600'"
 TWO='[app]
 name = "shop"
@@ -38,10 +39,7 @@ queues = ["default", "mail"]
 zone = "qa.example.dev"
 max_envs = 3
 disks = { files = "AWS_", media = "MEDIA_" }
-public_disks = ["media"]
-
-[qa.parity]
-broadcast = "log"'
+public_disks = ["media"]'
 
 # app <toml> [<path=content>...]: the app's mroom.toml, GitHub's tarball of $SHA with those files, a frontend
 # build in $T/dist, the shared .env template and /up answering 200.
@@ -58,7 +56,8 @@ app() {
   export MROOM_QA_DIST="$T/dist" FORGE_UP="$T/up-codes" LABEL=qa
   # A runner sets GITHUB_ACTIONS, with which up.sh masks its secrets; the test that wants that sets it itself.
   unset GITHUB_ACTIONS
-  export MROOM_QA_ENV_TEMPLATE=$'APP_NAME=Shop\nAPP_KEY=base64:from-the-template\nDB_PASSWORD=from-the-template\nMAPS_KEY=test-maps-key\nMAIL_ENCRYPTION=tls\nAPP_ENV=production'
+  # Its Reverb lines as Reverb's installer writes them, the Vite ones reading the others.
+  export MROOM_QA_ENV_TEMPLATE=$'APP_NAME=Shop\nAPP_KEY=base64:from-the-template\nDB_PASSWORD=from-the-template\nMAPS_KEY=test-maps-key\nMAIL_ENCRYPTION=tls\nAPP_ENV=production\nBROADCAST_CONNECTION=pusher\nREVERB_APP_SECRET=template-reverb-secret\nREVERB_HOST="localhost"\nVITE_REVERB_HOST="${REVERB_HOST}"'
   echo 200 >"$FORGE_UP"
 }
 up() { run "$UP" 7 "$SHA"; }
@@ -66,6 +65,9 @@ state() { jq -r "$1" "$FORGE_STATE"; }
 env_sent() { cat "$GATE/env-put.in"; }
 has_line() { grep -qxF -- "$2" <<<"$1"; }
 has_text() { case "$1" in *"$2"*) return 0 ;; esac; return 1; }
+# gets_cookie <host> <cookie domain>: whether a cookie set for that domain goes to the host: the domain itself, or a
+# host whose name ends in . and the domain (RFC 6265; a leading dot of the domain is ignored).
+gets_cookie() { local d="${2#.}"; [ "$1" = "$d" ] || [[ "$1" == *".$d" ]]; }
 members() { tar -tzf "$1" | sort; }
 API="$(api_host 7)" WEB="$(web_host 7)"
 
@@ -88,7 +90,7 @@ t_a_new_environment_comes_up() {
 forge POST /sites\nforge POST /sites/103/domains/1030/certificates\nforge PUT /sites/103/nginx
 gate probe-link 7 api\ngate probe-link 7 web
 gate code-put 7 '"$SHA"$'\ngate dist-put 7\ngate db-create 7\ngate redis-user-add 7\ngate mail-user-add 7
-gate bucket-create 7 files\ngate bucket-create 7 media public\ngate app-key 7\ngate env-put 7
+gate bucket-create 7 files\ngate bucket-create 7 media public\ngate reverb-app-add 7\ngate app-key 7\ngate env-put 7
 forge PUT /sites/101/deployments/script\nforge POST /sites/101/deployments\nforge POST /background-processes'
   # The code is GitHub's tarball, as it came; the frontend, the build's files.
   expect_true "the code put is not GitHub's tarball" cmp -s "$GATE/code-put.in" "$GH_FAKE/tarball.tgz"
@@ -96,8 +98,8 @@ forge PUT /sites/101/deployments/script\nforge POST /sites/101/deployments\nforg
   # The commit is said to be deployed only now, at the end.
   run cat "$GITHUB_OUTPUT"; expect_out "sha=$SHA"$'\n'"app_url=https://$WEB"$'\n'"api_url=https://$API"
   run cat "$FORGE_UP.log"; expect_out 200
-  # The link to the box's site-op, put before any code: not served. The api site's app answers 404, and the go site's
-  # single-page fallback 200 with its index.html: neither is the linked file.
+  # The link to the box's site-op, put before any code: not served. The api site's app answers 404, and the
+  # frontend's site's single-page fallback 200 with its index.html: neither is the linked file.
   run cat "$FORGE_UP.probe"; expect_out $'404\n200'
 }
 
@@ -164,7 +166,7 @@ t_a_link_nginx_still_serves_stops_the_deploy() {
   expect_err_has "https://$API served a link to a root-owned file, so nginx follows links it must not (D17), and no code goes in"
   run gate_log; expect_out "probe-link 7 api"
   run gh_log; expect_out_has "mroom-qa: failed"
-  # The go site is proved too.
+  # The frontend's site is proved too.
   app "$TWO" api/artisan=php
   forge_set ".probe_follows = \"$WEB\""
   up
@@ -212,17 +214,42 @@ t_the_env_holds_the_environments_own_values() {
     MAIL_ENCRYPTION=null AWS_BUCKET=shop-qa-7-files AWS_ACCESS_KEY_ID=GKfiles \
     AWS_SECRET_ACCESS_KEY=bucket-pw-files AWS_DEFAULT_REGION=garage AWS_ENDPOINT=https://s3.qa.example.dev \
     AWS_USE_PATH_STYLE_ENDPOINT=true MEDIA_BUCKET=shop-qa-7-media MEDIA_URL=https://files.qa.example.dev/shop-qa-7-media \
-    BROADCAST_CONNECTION=log APP_ENV=qa APP_DEBUG=false SESSION_SECURE_COOKIE=true "APP_KEY=$APP_KEY" \
-    "APP_URL=https://$API" "CLIENT_URL=https://$WEB" SESSION_DOMAIN=.qa.example.dev SESSION_COOKIE=shop_qa_7_session \
-    XSRF_COOKIE_NAME=shop_qa_7_xsrf "CORS_ALLOWED_ORIGINS=https://$WEB" "SANCTUM_STATEFUL_DOMAINS=$WEB,$API" \
+    BROADCAST_CONNECTION=reverb BROADCAST_DRIVER=reverb "REVERB_APP_ID=$(reverb_app 7)" "REVERB_APP_KEY=$(reverb_app 7)" \
+    REVERB_APP_SECRET=reverb-pw-7-1 REVERB_HOST=ws.qa.example.dev REVERB_PORT=443 REVERB_SCHEME=https \
+    "VITE_REVERB_APP_KEY=$(reverb_app 7)" VITE_REVERB_HOST=ws.qa.example.dev VITE_REVERB_PORT=443 VITE_REVERB_SCHEME=https \
+    APP_ENV=qa APP_DEBUG=false SESSION_SECURE_COOKIE=true "APP_KEY=$APP_KEY" \
+    "APP_URL=https://$API" "CLIENT_URL=https://$WEB" "SESSION_DOMAIN=.$WEB" SESSION_COOKIE=shop_qa_7_sid \
+    XSRF_COOKIE_NAME=shop_qa_7_csrf "CORS_ALLOWED_ORIGINS=https://$WEB" "SANCTUM_STATEFUL_DOMAINS=$WEB,$API" \
     CACHE_PREFIX=shop_qa_7_cache_; do
     expect_true ".env lacks $line" has_line "$sent" "$line"
   done
+  # The session and XSRF cookies are for .7.qa.example.dev, the environment's two hosts: not for the zone, whose other
+  # environments' hosts and shared Garage and Reverb hosts would get them. Their names are not those of before mroom
+  # 0.5.0, whose cookies a browser may still hold for the whole zone.
+  local host domain
+  domain="$(sed -n 's/^SESSION_DOMAIN=//p' <<<"$sent")"
+  for host in "$(web_host 17)" "$(api_host 17)" "$(web_host 70)" "$(api_host 1)" s3.qa.example.dev files.qa.example.dev \
+    ws.qa.example.dev qa.example.dev; do
+    expect_true "the cookies of environment 7 reach $host" eval '! gets_cookie "$host" "$domain"'
+  done
+  expect_true "the cookies of environment 7 miss its own hosts" gets_cookie "$API" "$domain"
+  expect_true "the cookies of environment 7 miss its own hosts" gets_cookie "$WEB" "$domain"
+  expect_true "the cookies have the names of before 0.5.0" lacks "$sent" "_session"
+  expect_true "the cookies have the names of before 0.5.0" lacks "$sent" "_xsrf"
   # The template's own key, password, TLS and environment are replaced, never kept beside mroom's; a private disk
   # has no URL.
   run grep -c -e '^APP_KEY=' -e '^DB_PASSWORD=' -e '^MAIL_ENCRYPTION=' -e '^APP_ENV=' <<<"$sent"; expect_out 4
   expect_true "the template's app key was kept" lacks "$sent" "from-the-template"
   expect_true "a private disk got a URL" lacks "$sent" "AWS_URL="
+  # So are its Reverb lines, the Vite one that reads another too.
+  run grep -c -e '^BROADCAST_CONNECTION=' -e '^REVERB_APP_SECRET=' -e '^REVERB_HOST=' -e '^VITE_REVERB_HOST=' <<<"$sent"
+  expect_out 4
+  expect_true "the template's Reverb secret was kept" lacks "$sent" "template-reverb-secret"
+  expect_true "a Vite value of the template's that reads another was kept" lacks "$sent" '${REVERB_HOST}'
+  # No key comes twice, whoever wrote it. This template's values are one line each.
+  local twice
+  twice="$(cut -d= -f1 <<<"$sent" | sort | uniq -d | paste -sd' ' -)"
+  expect_true "the .env has these keys more than once: $twice" [ -z "$twice" ]
   # The app key is the gate's, the same each deploy, so the environment's users stay signed in.
   up
   run grep -c "^APP_KEY=$APP_KEY\$" "$GATE/env-put.in"; expect_out 1
@@ -360,7 +387,7 @@ t_an_existing_environment_is_refreshed() {
   # code, the services, the .env and a deploy.
   run order
   expect_out $'gate env-sha 7\ngate probe-link 7 api\ngate probe-link 7 web\ngate code-put 7 '"$SHA"$'\ngate dist-put 7\ngate db-create 7\ngate redis-user-add 7\ngate mail-user-add 7
-gate bucket-create 7 files\ngate bucket-create 7 media public\ngate app-key 7\ngate env-put 7
+gate bucket-create 7 files\ngate bucket-create 7 media public\ngate reverb-app-add 7\ngate app-key 7\ngate env-put 7
 forge PUT /sites/101/deployments/script\nforge POST /sites/101/deployments'
   run state '.sites | length'; expect_out 2
   run state '.processes | length'; expect_out 1
@@ -389,6 +416,9 @@ t_a_site_made_with_another_php_is_refused() {
   expect_rc 1
   expect_err_has "$API runs PHP 8.3, and app.php is 8.4. A site's PHP version is set when it is made: tear the environment down (gh workflow run qa-down.yml -f pr_number=7)"
   run gate_log; expect_out "env-sha 7"
+  # Only a teardown fixes it, so the comment does not say that the next push tries again.
+  run gh_log; expect_out_has "mroom-qa: failed"; expect_out_has "runs PHP 8.3"
+  expect_true "the comment says the next push tries again" lacks "$out" "The next push tries again"
 }
 
 t_a_site_whose_web_root_is_elsewhere_is_refused() {
@@ -417,7 +447,7 @@ t_a_new_environment_waits_for_a_slot() {
   up
   expect_rc 0
   run gate_log; expect_out_has $'env-sha 7\nprobe-link 7 api\nprobe-link 7 web\ncode-put 7 '"$SHA"
-  # One whose code never went in, such as the site a first deploy that stopped left, is new still: past qa.max_envs,
+  # One whose code never went in, such as the site a first deploy that stopped left, is new still: past the slots,
   # it gives way, its site deleted and waited for until Forge has it gone.
   app "$TWO" api/artisan=php
   site 1 "$(api_host 1)" installed
@@ -425,7 +455,7 @@ t_a_new_environment_waits_for_a_slot() {
   site 3 "$(web_host 3)" installed
   made_site 5 7 api /api/public 8.4
   up
-  expect_rc 0; expect_out_has "site 5 gave way, past qa.max_envs"
+  expect_rc 0; expect_out_has "site 5 gave way, past the slots"
   expect_out_has "::warning::All 3 QA environments are in use, so this pull request waits for a slot."
   run gate_log; expect_out "env-sha 7"
   run forge_writes; expect_out "DELETE /sites/5"
@@ -442,7 +472,8 @@ t_a_new_environment_waits_for_a_slot() {
 t_a_site_forge_is_still_making_is_new() {
   app "$TWO" api/artisan=php
   made_site 5 7 api /api/public 8.4
-  forge_set '.sites[-1] += {status: "installing", install_reads: 5}'
+  # Installing for the run's first reads of Forge, up to its look at whether the environment is new.
+  forge_set '.sites[-1] += {status: "installing", install_reads: 8}'
   up
   expect_rc 0; expect_out_has "environment 7: up at https://$WEB"
   # Nothing is asked of the gate about it: before Forge has made a site, the gate may know no site user.
@@ -463,19 +494,19 @@ t_a_site_that_could_not_give_way_gives_way_on_the_next_run() {
   forge_set ".sites_made_first = [$(other_site 8)] | .fail[\"DELETE /sites/102\"] = 500"
   up
   expect_rc 1
-  expect_err_has "Forge did not remove site 102, made past qa.max_envs, though its delete went twice; the next run gives way again"
+  expect_err_has "Forge did not remove site 102, made past the slots, though its delete went twice; the next run gives way again"
   run grep -c '^DELETE /sites/102$' "$FORGE_LOG"; expect_out 2
   run gate_log; expect_out ""
   # The next run finds site 102, but its code never went in, so it is new still, and gives way again: it never comes
   # up beside three others.
   up
   expect_rc 1; expect_err_has "Forge did not remove site 102"
-  expect_true "a fourth environment came up past qa.max_envs" lacks "$out" "environment 7: up"
+  expect_true "a fourth environment came up past the slots" lacks "$out" "environment 7: up"
   run gate_log; expect_out "env-sha 7"
   # Once Forge takes the delete, the run waits for a slot, and three environments are left.
   forge_set 'del(.fail)'
   up
-  expect_rc 0; expect_out_has "site 102 gave way, past qa.max_envs"
+  expect_rc 0; expect_out_has "site 102 gave way, past the slots"
   expect_out_has "::warning::All 3 QA environments are in use, so this pull request waits for a slot."
   run state '[.sites[] | select(.status != "removing") | .name] | length'; expect_out 3
   run state '[.sites[].id] | map(tostring) | join(",")'; expect_out "1,2,101"
@@ -491,7 +522,7 @@ t_giving_way_outlasts_a_delete_forge_drops() {
   up
   expect_rc 0
   expect_out_has "site 102 is still there; its delete goes again"
-  expect_out_has "site 102 gave way, past qa.max_envs"
+  expect_out_has "site 102 gave way, past the slots"
   run grep -c '^DELETE /sites/102$' "$FORGE_LOG"; expect_out 2
   run state '[.sites[].id] | map(tostring) | join(",")'; expect_out "1,2,101"
   # A delete sent while Forge is still making the site may never run, so it is sent once Forge has made it.
@@ -500,7 +531,7 @@ t_giving_way_outlasts_a_delete_forge_drops() {
   site 2 "$(api_host 2)" installed
   forge_set ".sites_made_first = [$(other_site 8)] | .installing_delete_dropped = true | .install_reads = 3"
   up
-  expect_rc 0; expect_out_has "site 102 gave way, past qa.max_envs"
+  expect_rc 0; expect_out_has "site 102 gave way, past the slots"
   run grep -c '^DELETE /sites/102$' "$FORGE_LOG"; expect_out 1
   # A site that never goes fails the run.
   app "$TWO" api/artisan=php
@@ -508,8 +539,68 @@ t_giving_way_outlasts_a_delete_forge_drops() {
   site 2 "$(api_host 2)" installed
   forge_set ".sites_made_first = [$(other_site 8)] | .site_deletes_dropped = 2"
   up
-  expect_rc 1; expect_err_has "Forge did not remove site 102, made past qa.max_envs, though its delete went twice"
+  expect_rc 1; expect_err_has "Forge did not remove site 102, made past the slots, though its delete went twice"
   run gate_log; expect_out ""
+}
+
+t_an_environment_of_the_old_names_is_torn_down_not_refreshed() {
+  # Brought up before mroom 0.5.0, as api-7: no site goes up beside it under the new names, and its teardown says how.
+  app "$TWO" api/artisan=php
+  made_site 50 7 api /api/public 8.4
+  forge_set ".sites[-1].name = \"$(old_api_host 7)\""
+  up
+  expect_rc 1
+  expect_err_has "environment 7 was brought up as $(old_api_host 7), a name mroom gave QA sites before 0.5.0. Tear it down (gh workflow run qa-down.yml -f pr_number=7), and the next deploy brings it up as $WEB and $API"
+  run forge_writes; expect_out ""
+  run gate_log; expect_out ""
+  # The comment says why and how, and not that the next push tries again: it would be refused as well.
+  run gh_log; expect_out_has "mroom-qa: failed"; expect_out_has "was brought up as $(old_api_host 7)"
+  expect_true "the comment says the next push tries again" lacks "$out" "The next push tries again"
+  # Its frontend's site alone is enough.
+  app "$TWO" api/artisan=php
+  site 51 "$(old_web_host 7)" installed
+  up
+  expect_rc 1; expect_err_has "environment 7 was brought up as $(old_web_host 7)"
+  # It is refused first, before a site of the new names that Forge is removing is waited for or deleted again.
+  app "$TWO" api/artisan=php
+  site 54 "$API" removing "$(ago 86400)" "$(ago 7200)"
+  site 55 "$(old_web_host 7)" installed
+  forge_set '.sites[0].remove_reads = -1'
+  up
+  expect_rc 1; expect_err_has "environment 7 was brought up as $(old_web_host 7)"
+  expect_true "the run waited before it refused" lacks "$out" "waiting for it to go"
+  run forge_writes; expect_out ""
+  # An app with no frontend of its own comes up at its one host.
+  app $'[app]\nname = "shop"\n\n[qa]\nzone = "qa.example.dev"\n\n[qa.parity]\nbroadcast = "log"\nmail = "log"\nfiles = "local"' artisan=php
+  site 53 "$(old_api_host 7)" installed
+  up
+  expect_rc 1; expect_err_has "and the next deploy brings it up as $API"
+  # One Forge is still removing, as a teardown leaves it, is waited for, and the environment comes up under the new
+  # names.
+  app "$TWO" api/artisan=php
+  site 52 "$(old_api_host 7)" removing "$(ago 86400)" "$(ago 60)"
+  forge_set '.sites[-1].remove_reads = 5'
+  up
+  expect_rc 0; expect_out_has "$(old_api_host 7) is still being removed; waiting for it to go"
+  expect_out_has "environment 7: up at https://$WEB"
+  run state '[.sites[].name] | join(",")'; expect_out "$API,$WEB"
+  # A look at the environment's sites that fails stops the run, before anything is made.
+  app "$TWO" api/artisan=php
+  forge_set '.fail["GET /sites"] = 500'
+  up
+  expect_rc 1; expect_err_has "Forge's site $API could not be read"
+  run forge_writes; expect_out ""
+  run gate_log; expect_out ""
+}
+
+t_an_environment_of_the_old_names_holds_a_slot() {
+  app "$TWO" api/artisan=php
+  site 1 "$(api_host 1)" installed
+  site 2 "$(web_host 2)" installed
+  site 3 "$(old_api_host 3)" installed
+  up
+  expect_rc 0; expect_out_has "::warning::All 3 QA environments are in use, so this pull request waits for a slot."
+  run forge_writes; expect_out ""
 }
 
 t_a_site_that_is_not_isolated_or_of_another_user_is_refused() {
@@ -527,12 +618,88 @@ t_a_site_that_is_not_isolated_or_of_another_user_is_refused() {
   run gate_log; expect_out ""
 }
 
-t_broadcast_same_is_not_yet() {
-  app "${TWO/broadcast = \"log\"/broadcast = \"same\"}" api/artisan=php
+t_the_reverb_app_keeps_its_secret_from_deploy_to_deploy() {
+  app "$TWO" api/artisan=php
   up
-  expect_rc 1; expect_err_has "not yet: qa.parity.broadcast = \"same\" needs mroom's Reverb host, which exists but is not wired into QA environments yet"
-  run forge_writes; expect_out ""
-  run gate_log; expect_out ""
+  expect_rc 0; expect_out_has "==> Reverb app"
+  run grep -c -x "REVERB_APP_SECRET=reverb-pw-7-1" "$GATE/env-put.in"; expect_out 1
+  # Each deploy asks for the app again, and gets the same secret, so open sockets keep their private channels.
+  up
+  expect_rc 0
+  run grep -c -x "REVERB_APP_SECRET=reverb-pw-7-1" "$GATE/env-put.in"; expect_out 1
+  run grep -c -x "reverb-app-add 7" "$GATE/gate.log"; expect_out 2
+  # Nothing removes it first, which would give it a new secret, and the .env goes through the gate alone.
+  run gate_log; expect_true "a deploy removed the Reverb app" lacks "$out" "reverb-app-remove"
+  run forge_writes; expect_true "a deploy wrote the .env through Forge" lacks "$out" "/environment"
+}
+
+t_the_gates_reverb_app_is_the_one_the_frontend_was_built_for() {
+  local right pair
+  right="REVERB_APP_ID=$(reverb_app 7)
+REVERB_APP_KEY=$(reverb_app 7)
+REVERB_APP_SECRET=reverb-pw-x
+REVERB_HOST=ws.qa.example.dev
+REVERB_PORT=443
+REVERB_SCHEME=https"
+  app "$TWO" api/artisan=php
+  printf '%s\n' "$right" >"$GATE/reverb-app-add.out"
+  up
+  expect_rc 0
+  # box.env names the app or the zone otherwise than mroom.toml, or the gate gives another host: the frontend would
+  # open its sockets for another app, or on another host. Nothing is written.
+  for pair in "REVERB_APP_ID=$(reverb_app 8)" "REVERB_APP_KEY=$(reverb_app 8)" REVERB_HOST=ws.qa.other.example.dev \
+    REVERB_PORT=8080 REVERB_SCHEME=http; do
+    app "$TWO" api/artisan=php
+    awk -F= -v pair="$pair" '$1 == substr(pair, 1, index(pair, "=") - 1) { print pair; next } { print }' <<<"$right" \
+      >"$GATE/reverb-app-add.out"
+    up
+    expect_rc 1
+    expect_err_has "the gate's Reverb app has another ${pair%%=*} than"
+    expect_no_file "$GATE/env-put.in"
+  done
+  expect_err_has "than https, which mroom.toml gives for the frontend: box.env's MROOM_APP_NAME and MROOM_QA_ZONE must be mroom.toml's app.name and qa.zone, and the box must run the mroom release the workflows pin"
+  # One the gate cannot give fails the deploy too, and one with no secret.
+  app "$TWO" api/artisan=php
+  echo 1 >"$GATE/reverb-app-add.rc"
+  up
+  expect_rc 1; expect_err_has "the gate could not give the environment its Reverb app (reverb-app-add)"
+  expect_no_file "$GATE/env-put.in"
+  app "$TWO" api/artisan=php
+  grep -v '^REVERB_APP_SECRET=' <<<"$right" >"$GATE/reverb-app-add.out"
+  up
+  expect_rc 1; expect_err_has "the gate gave no REVERB_APP_SECRET"
+}
+
+t_broadcast_log_asks_for_no_reverb_app() {
+  app "$TWO"$'\n\n[qa.parity]\nbroadcast = "log"' api/artisan=php
+  up
+  expect_rc 0
+  run gate_log; expect_true "a Reverb app was asked for" lacks "$out" "reverb-app"
+  local sent
+  sent="$(env_sent)"
+  expect_true ".env lacks BROADCAST_CONNECTION=log" has_line "$sent" BROADCAST_CONNECTION=log
+  expect_true ".env lacks BROADCAST_DRIVER=log" has_line "$sent" BROADCAST_DRIVER=log
+  run grep -c -e '^REVERB_APP_KEY=' -e '^REVERB_APP_ID=' -e '^VITE_REVERB_APP_KEY=' <<<"$sent"; expect_out 0
+}
+
+t_vite_gets_the_reverb_values_only_with_a_frontend() {
+  local sent
+  # Vite inside the Laravel app: the values it was built with.
+  app $'[app]\nname = "shop"\n\n[qa]\nzone = "qa.example.dev"\n\n[qa.parity]\nmail = "log"\nfiles = "local"' artisan=php
+  up
+  expect_rc 0
+  sent="$(env_sent)"
+  expect_true ".env lacks REVERB_APP_KEY" has_line "$sent" "REVERB_APP_KEY=$(reverb_app 7)"
+  expect_true ".env lacks VITE_REVERB_APP_KEY" has_line "$sent" "VITE_REVERB_APP_KEY=$(reverb_app 7)"
+  expect_true ".env lacks VITE_REVERB_HOST" has_line "$sent" VITE_REVERB_HOST=ws.qa.example.dev
+  # No frontend: no Vite values of mroom's, and the template's line stays as it was.
+  app $'[app]\nname = "shop"\nfrontend_dir = ""\n\n[qa]\nzone = "qa.example.dev"\n\n[qa.parity]\nmail = "log"\nfiles = "local"' artisan=php
+  up
+  expect_rc 0
+  sent="$(env_sent)"
+  expect_true ".env lacks REVERB_APP_KEY" has_line "$sent" "REVERB_APP_KEY=$(reverb_app 7)"
+  run grep -c -e '^VITE_REVERB_APP_KEY=' -e '^VITE_REVERB_PORT=' -e '^VITE_REVERB_SCHEME=' <<<"$sent"; expect_out 0
+  expect_true "the template's Vite line changed" has_line "$sent" 'VITE_REVERB_HOST="${REVERB_HOST}"'
 }
 
 t_a_build_with_a_link_is_refused_before_anything_is_made() {
@@ -633,6 +800,129 @@ t_a_daemon_that_turns_up_during_the_deploy_keeps_the_worker_out() {
   run gh_log; expect_out_has "mroom-qa: failed"
 }
 
+# memory <total> <available> <swap free> [<reserve>]: what the box's gate says of its memory, in MB.
+memory() { printf 'total_mb=%s\navailable_mb=%s\nswap_free_mb=%s\nreserve_mb=%s\n' "$1" "$2" "$3" "${4:-4096}" >"$GATE/memory.out"; }
+
+t_slots_are_sized_from_the_box_memory() {
+  # 6144 MB less the box's 4096 hold two environments of 1024 MB, fewer than qa.max_envs (3).
+  app "$TWO" api/artisan=php
+  memory 6144 3000 0
+  site 1 "$(api_host 1)" installed
+  up
+  expect_rc 0; expect_out_has "environment 7: up at https://$WEB"
+  expect_out_has "==> The box's memory holds 2 QA environments (6144 MB, 4096 MB kept for the box, 1024 MB each; qa.max_envs is 3)"
+  run grep -v '^forge GET' "$ORDER_LOG"; expect_out_has $'gate memory\nforge POST /sites'
+  # Two others fill them: the new one waits, and says why there are two.
+  app "$TWO" api/artisan=php
+  memory 6144 3000 0
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  up
+  expect_rc 0
+  expect_out_has "::warning::All 2 QA environments the box's memory holds (qa.max_envs is 3) are in use, so this pull request waits for a slot."
+  run forge_writes; expect_out ""
+  run gate_asked; expect_out "memory"
+  run gh_log; expect_out_has 'mroom-qa: waiting since=2026-10-27T12:00:00Z'
+  # With more memory, qa.max_envs is the limit: the third comes up, and a fourth waits without asking the box.
+  app "$TWO" api/artisan=php
+  memory 16384 12000 0
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  up
+  expect_rc 0; expect_out_has "==> The box's memory holds 3 QA environments"
+  expect_out_has "environment 7: up"
+  app "$TWO" api/artisan=php
+  memory 16384 12000 0
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  site 3 "$(api_host 3)" installed
+  up
+  expect_rc 0; expect_out_has "::warning::All 3 QA environments are in use, so this pull request waits for a slot."
+  run gate_asked; expect_out ""
+  # A bigger environment, a bigger reserve: 8192 MB less 2048 hold three of 2048 MB, so the third waits.
+  app "${TWO/max_envs = 3/max_envs = 5
+env_memory_mb = 2048}" api/artisan=php
+  memory 8192 6000 0 2048
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  site 3 "$(api_host 3)" installed
+  up
+  expect_rc 0
+  expect_out_has "::warning::All 3 QA environments the box's memory holds (qa.max_envs is 5) are in use"
+  # An environment whose code went in is refreshed, whatever the memory, and the box is not asked.
+  made_site 5 7 api /api/public 8.4
+  code_went_in 7
+  memory 1024 10 0
+  : >"$GATE/gate.log"
+  up
+  expect_rc 0; expect_out_has "environment 7: up"
+  run gate_asked; expect_true "the box's memory was asked for a refresh" lacks "$out" "memory"
+}
+
+t_a_new_environment_the_memory_cannot_hold_waits() {
+  app "$TWO" api/artisan=php
+  memory 65536 500 200
+  up
+  expect_rc 0
+  expect_out_has "::warning::The box has 500 MB of RAM available and 200 MB of free swap, less than the 1024 MB a QA environment needs (qa.env_memory_mb), so this pull request waits until the box has the memory."
+  run sed -n 's/^refused=//p' "$GITHUB_OUTPUT"; expect_out_has "less than the 1024 MB a QA environment needs"
+  run forge_writes; expect_out ""
+  run gate_asked; expect_out "memory"
+  run gh_log; expect_out_has 'mroom-qa: waiting since=2026-10-27T12:00:00Z'
+  run output_of sha; expect_out ""
+  # A site a first deploy left before its code went in gives way, as past the slots.
+  app "$TWO" api/artisan=php
+  memory 65536 500 200
+  made_site 5 7 api /api/public 8.4
+  up
+  expect_rc 0; expect_out_has "site 5 gave way, past the slots"; expect_out_has "less than the 1024 MB"
+  run forge_writes; expect_out "DELETE /sites/5"
+  # Exactly enough, swap counted, is enough.
+  app "$TWO" api/artisan=php
+  memory 65536 900 124
+  up
+  expect_rc 0; expect_out_has "environment 7: up"
+}
+
+t_a_box_whose_memory_holds_none_fails() {
+  app "$TWO" api/artisan=php
+  memory 5000 4000 0
+  up
+  expect_rc 1
+  expect_err_has "the box's memory holds no QA environment: it has 5000 MB, keeps 4096 MB for itself (MROOM_QA_RESERVE_MB in its box.env), and qa.env_memory_mb is 1024"
+  run forge_writes; expect_out ""
+  run gh_log; expect_out_has "mroom-qa: failed"
+  # A gate that cannot say, or says something else, stops the run before anything is made.
+  app "$TWO" api/artisan=php
+  echo 1 >"$GATE/memory.rc"
+  up
+  expect_rc 1; expect_err_has "the gate could not say how much memory the box has (memory); a box whose mroom is older than this one's has no memory operation, so upgrade the box first"
+  run forge_writes; expect_out ""
+  app "$TWO" api/artisan=php
+  printf 'total_mb=8192\navailable_mb=lots\nswap_free_mb=0\nreserve_mb=4096\n' >"$GATE/memory.out"
+  up
+  expect_rc 1; expect_err_has "the gate's memory gave no available_mb"
+  app "${TWO/max_envs = 3/max_envs = 3
+env_memory_mb = 99999999}" api/artisan=php
+  up
+  expect_rc 1; expect_err_has "qa.env_memory_mb must be a whole number of MB, of at most 7 digits"
+}
+
+t_two_first_deploys_count_again_under_the_memory() {
+  local other
+  other="{name: \"$(api_host 8)\", type: \"php\", is_isolated: true, isolated_user: \"$(site_user 8)\",
+    web_directory: \"/api/public\", php_version: \"php84\"}"
+  # Two slots by memory; environment 8 made its site first, beside environment 1: this one gives way.
+  app "$TWO" api/artisan=php
+  memory 6144 3000 0
+  site 1 "$(api_host 1)" installed
+  forge_set ".sites_made_first = [$other]"
+  up
+  expect_rc 0
+  expect_out_has "site 102 gave way, past the slots"
+  expect_out_has "::warning::All 2 QA environments the box's memory holds (qa.max_envs is 3) are in use"
+}
+
 t_two_first_deploys_at_once_never_pass_max_envs() {
   local other
   other="{name: \"$(api_host 8)\", type: \"php\", is_isolated: true, isolated_user: \"$(site_user 8)\",
@@ -644,7 +934,7 @@ t_two_first_deploys_at_once_never_pass_max_envs() {
   forge_set ".sites_made_first = [$other]"
   up
   expect_rc 0
-  expect_out_has "site 102 gave way, past qa.max_envs"
+  expect_out_has "site 102 gave way, past the slots"
   expect_out_has "::warning::All 3 QA environments are in use, so this pull request waits for a slot."
   run forge_writes; expect_out_has $'\nDELETE /sites/102'
   # Its site is gone, waited for until Forge had it gone.
@@ -652,7 +942,7 @@ t_two_first_deploys_at_once_never_pass_max_envs() {
   run gate_log; expect_out ""
   run output_of sha; expect_out ""
   run gh_log; expect_out_has 'mroom-qa: waiting since=2026-10-27T12:00:00Z'
-  # Made just after this one's, environment 8 is the one past qa.max_envs: this one goes on.
+  # Made just after this one's, environment 8 is the one past the slots: this one goes on.
   app "$TWO" api/artisan=php
   site 1 "$(api_host 1)" installed
   site 2 "$(api_host 2)" installed
@@ -721,12 +1011,15 @@ t_up_is_asked_again_after_a_502_and_fails_when_it_stays_down() {
 
 t_certificates_are_asked_for_and_a_failed_one_again_once() {
   app "$TWO" api/artisan=php
-  # A wildcard certificate to clone, which Forge enables only when asked to.
+  # A wildcard certificate to clone, which Forge enables only when asked to: onto the frontend's site, which it
+  # names. The API's site is a level below it, so asks Let's Encrypt.
   export MROOM_QA_CERTIFICATE=55
   up
   expect_rc 0
-  run grep -c '^POST /sites/101/domains/1010/certificates {"type":"clone","enable":true,"clone":{"certificate_id":55}}$' "$FORGE_LOG"
+  run grep -c '^POST /sites/103/domains/1030/certificates {"type":"clone","enable":true,"clone":{"certificate_id":55}}$' "$FORGE_LOG"
   expect_out 1
+  run grep -c '^POST /sites/101/domains/1010/certificates {"type":"letsencrypt",' "$FORGE_LOG"; expect_out 1
+  run grep -c '^POST /sites/[0-9]*/domains/[0-9]*/certificates {"type":"clone"' "$FORGE_LOG"; expect_out 1
   # From Let's Encrypt: one that fails is deleted and asked for again.
   unset MROOM_QA_CERTIFICATE
   app "$TWO" api/artisan=php
@@ -759,16 +1052,16 @@ t_certificates_are_asked_for_and_a_failed_one_again_once() {
   export MROOM_QA_CERTIFICATE=55
   forge_set '.clone_enable_ignored = true'
   up
-  expect_rc 0; expect_out_has "enabled certificate 102"
-  run grep -c '^POST /sites/101/domains/1010/certificates/102/actions {"action":"enable"}$' "$FORGE_LOG"; expect_out 1
+  expect_rc 0; expect_out_has "enabled certificate 104"
+  run grep -c '^POST /sites/103/domains/1030/certificates/104/actions {"action":"enable"}$' "$FORGE_LOG"; expect_out 1
   # One whose enable Forge ignores is waited for, neither enabled again nor asked for anew, until the wait ends.
   app "$TWO" api/artisan=php
   forge_set '.clone_enable_ignored = true | .enable_ignored = true'
   export MROOM_QA_CERT_WAIT=30
   up
-  expect_rc 1; expect_err_has "site 101 had no active certificate after 30s"
-  run grep -c '^POST /sites/101/domains/1010/certificates/102/actions ' "$FORGE_LOG"; expect_out 1
-  run grep -c '^POST /sites/101/domains/1010/certificates ' "$FORGE_LOG"; expect_out 1
+  expect_rc 1; expect_err_has "site 103 had no active certificate after 30s"
+  run grep -c '^POST /sites/103/domains/1030/certificates/104/actions ' "$FORGE_LOG"; expect_out 1
+  run grep -c '^POST /sites/103/domains/1030/certificates ' "$FORGE_LOG"; expect_out 1
 }
 
 t_a_site_forge_is_removing_is_waited_for() {
@@ -838,13 +1131,22 @@ test_case worker-made-again t_a_worker_whose_command_changed_is_made_again
 test_case php-mismatch t_a_site_made_with_another_php_is_refused
 test_case web-root-elsewhere t_a_site_whose_web_root_is_elsewhere_is_refused
 test_case waits-for-a-slot t_a_new_environment_waits_for_a_slot
+test_case old-names-up t_an_environment_of_the_old_names_is_torn_down_not_refreshed
+test_case old-names-slot t_an_environment_of_the_old_names_holds_a_slot
 test_case not-isolated t_a_site_that_is_not_isolated_or_of_another_user_is_refused
-test_case broadcast-not-yet t_broadcast_same_is_not_yet
+test_case reverb-secret-kept t_the_reverb_app_keeps_its_secret_from_deploy_to_deploy
+test_case reverb-as-built t_the_gates_reverb_app_is_the_one_the_frontend_was_built_for
+test_case broadcast-log t_broadcast_log_asks_for_no_reverb_app
+test_case vite-reverb t_vite_gets_the_reverb_values_only_with_a_frontend
 test_case build-with-a-link t_a_build_with_a_link_is_refused_before_anything_is_made
 test_case daemons-before-code t_daemons_of_another_user_go_before_the_code
 test_case jobs-by-command t_daemons_and_scheduled_jobs_found_by_their_command_go_too
 test_case daemon-during-deploy t_a_daemon_that_turns_up_during_the_deploy_keeps_the_worker_out
 test_case slots-at-once t_two_first_deploys_at_once_never_pass_max_envs
+test_case slots-from-memory t_slots_are_sized_from_the_box_memory
+test_case memory-short t_a_new_environment_the_memory_cannot_hold_waits
+test_case memory-holds-none t_a_box_whose_memory_holds_none_fails
+test_case slots-at-once-memory t_two_first_deploys_count_again_under_the_memory
 test_case give-way-next-run t_a_site_that_could_not_give_way_gives_way_on_the_next_run
 test_case give-way-dropped t_giving_way_outlasts_a_delete_forge_drops
 test_case still-making t_a_site_forge_is_still_making_is_new
