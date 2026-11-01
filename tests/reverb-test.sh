@@ -77,13 +77,34 @@ PY
 
 apps() { jq -c "${1:-.}" "$(apps_file)"; }
 
+# argv_shim <program>: the program, first on PATH, logs its arguments to $T/argv.log, then runs the real one.
+# Every user on the box can read a running program's arguments (/proc/<pid>/cmdline), so no secret may be
+# among them.
+argv_shim() {
+  local real
+  real="$(command -v "$1")"
+  mkdir -p "$T/bin"
+  cat >"$T/bin/$1" <<SHIM
+#!/bin/sh
+printf '%s\n' "\$*" >>"$T/argv.log"
+exec "$real" "\$@"
+SHIM
+  chmod +x "$T/bin/$1"
+  export PATH="$T/bin:$PATH"
+}
+argv_text() { cat "$T/argv.log" 2>/dev/null || true; }
+
 t_add_gives_an_environment_an_app_of_its_own() {
-  world; host_up
+  world; host_up; argv_shim jq
   local secret
   gate "reverb-app-add 12"
   expect_rc 0
   secret="$(field REVERB_APP_SECRET "$out")"
   expect_true "the secret is not 48 hex characters: $secret" eval '[[ "$secret" =~ ^[0-9a-f]{48}$ ]]'
+  # Before this test's own jq calls, which take the secret as an argument.
+  expect_true "the secret was on jq's command line, which every user on the box can read" \
+    eval '[[ "$(argv_text)" != *"$secret"* ]]'
+  expect_true "jq never ran" eval '[ -s "$T/argv.log" ]'
   expect_out "REVERB_APP_ID=shop-qa-12
 REVERB_APP_KEY=shop-qa-12
 REVERB_APP_SECRET=$secret
