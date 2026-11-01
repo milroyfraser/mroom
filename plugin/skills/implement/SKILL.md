@@ -43,6 +43,11 @@ on without it.
   code never runs on this box, not even in a QA environment.
 - When the project runs its agents from an agreed host, commits for agent PRs go only from that
   host, as the agent account.
+- **Keep the context small.** Every step re-reads the whole conversation, so its length is the
+  price of each one. Send exploration that reads many files or long logs to a helper and keep its
+  summary. Read a large file by range or search it rather than whole. Trim command output you
+  won't use (`--jq`, `tail`). Keep the Room with `mroom room watch` (`room/README.md`, "Keep it
+  current"), never with a timer that wakes the session.
 - **Room first.** Right after `mroom tracker get`, publish the Session Room and share its link
   (§0, step 2) before any other step: no code reading, no `gh` or `git` commands. If the tracker
   is not connected yet, publish the Room with just the id before you sign in, and fill it in
@@ -57,10 +62,20 @@ tracker step and put its note on the pull request instead: in the body, or with 
    `state_type` is `completed` or `canceled`, or if `assigned_to_me` is false (it is not yours),
    unless the person asked you to work it.
 2. **Session Room (required, now).** Before any other step:
-   1. Copy `room/room.html` (next to this `SKILL.md`) to your scratchpad, set its `<title>` to
-      `<id> · mroom`, and publish it as a **new** artifact (icon `checklist`, capabilities
+   1. Publish it as a **new** artifact (icon `checklist`, capabilities
       `{comments:{}, db:{rules:[{path:"", write:"admin"}]}, user:{scopes:["profile"]}, assets:{}}`,
       so only its owner and Editors write its data). Never reuse another session's page.
+      - `mroom room build <a new scratch folder>` splits `room/room.html` (next to this `SKILL.md`)
+        into a small page, `index.html`, and its code, and prints the source's stamp. Set the
+        page's `<title>` to `<id> · mroom`.
+      - **With a template** (`mroom config box MROOM_ROOM_TEMPLATE` prints its link), read the
+        template's `room-version.txt` (Artifact `read` with `path`). When it holds the stamp,
+        publish `index.html` with `files` mapping `room.css` and each `room-N.js` to
+        `{artifact: <the template>, path: <the same name>}`. The server copies the code, so you
+        read only the small page. When the stamp differs, publish the build to the template first
+        (`url` the template; `index.html` with every file the build made, from disk) if you may
+        edit it, or carry on without it.
+      - **Without one**, copy `room/room.html` to the folder, set its `<title>`, and publish it.
    2. Send the person this line: "Your session room: <link>. Open it side by side with this
       terminal; it follows our conversation live."
    3. Then seed it and keep it current through the run, as `room/README.md` says: one full PR card

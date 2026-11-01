@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# room — keeps the session Room cheap to run: a gate that wakes the session only when a pull request changes,
+# and a build that lets each Room copy the page's code instead of reading it.
+#
+#   mroom room snapshot [--repo <owner/repo>] <pr>...
+#                              one line of JSON per pull request with the facts the Room shows: state, draft,
+#                              head, checks (green, running, red or behind, as the Room's `checks` field takes
+#                              them), the failing checks' names, merge state, review decision and how many
+#                              comments and reviews it has
+#   mroom room watch [--repo <owner/repo>] [--every <seconds>] [--max <seconds>] [--state <file>] <pr>...
+#                              takes a snapshot every --every seconds (120) and exits as soon as one differs
+#                              from the last it reported, printing "changed <json>" for each pull request that
+#                              did. With nothing changed after --max seconds (3600) it prints "heartbeat" and
+#                              exits. Run it in the background so the session sleeps, at no cost, until a
+#                              change. The first run of a state file only records it. After three failed
+#                              snapshots in a row it prints "unreachable" and exits 1. Exit 2 is a usage error.
+#   mroom room build <out-dir> [--from <room.html>]
+#                              splits the Room page into a small page (index.html) and its code (room.css,
+#                              room-1.js, room-2.js ...), plus room-version.txt, the source's stamp, so a Room
+#                              can copy the code from a template artifact on the server instead of reading it.
+#                              It writes only to a new or empty folder, or one an earlier build made
+#
+# watch keeps its state in ~/.local/state/mroom/room/ (or $XDG_STATE_HOME/mroom/room/), one file per repository
+# and set of pull requests, unless --state names one.
+set -euo pipefail
+umask 077
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+MROOM_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+
+die() { echo "mroom room: $1" >&2; exit "${2:-1}"; }
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; }
+
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-64; else shasum -a 256 | cut -c1-64; fi
+}
+
+# The facts of one pull request, from `gh pr view --json`, as the Room names them. A check counts as failing
+# the way `gh pr checks` buckets it: cancelled and skipped runs (a newer push cancels the older run) do not.
+# shellcheck disable=SC2016  # a jq program
+FACTS='
+  def result: if .__typename == "StatusContext" then (.state // "")
+              elif (.status // "COMPLETED") != "COMPLETED" then "PENDING"
+              else (.conclusion // "") end;
+  def bad: . as $r | ["FAILURE", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"] | index($r) != null;
+  def pending: . as $r | ["PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""] | index($r) != null;
+  (.statusCheckRollup // []) as $runs
+  | ($runs | map(select(result | bad) | (.name // .context // "?")) | unique) as $failing
+  | (.mergeStateStatus // "UNKNOWN" | ascii_downcase) as $merge
+  | {pr: .number,
+     state: (.state // "" | ascii_downcase),
+     draft: (.isDraft // false),
+     head: (.headRefOid // "" | .[0:12]),
+     checks: (if (.state // "") != "OPEN" then null
+              elif $merge == "behind" or $merge == "dirty" then "behind"
+              elif ($failing | length) > 0 then "red"
+              elif ($runs | length) == 0 or ($runs | any(result | pending)) then "running"
+              else "green" end),
+     failing: $failing,
+     merge: $merge,
+     review: (.reviewDecision // "" | ascii_downcase),
+     comments: (.comments // [] | length),
+     reviews: (.reviews // [] | length)}'
+
+FIELDS=number,state,isDraft,headRefOid,mergeStateStatus,reviewDecision,statusCheckRollup,comments,reviews
+
+repo="" every=120 max=3600 state="" prs=()
+
+parse() {
+  local flags="$1"
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --repo)
+        [ -n "${2:-}" ] || die "--repo takes <owner/repo>" 2
+        [[ "$2" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "--repo is <owner/repo> (got '$2')" 2
+        repo="$2"; shift 2 ;;
+      --every | --max)
+        [[ " $flags " == *" $1 "* ]] || die "$1 is a watch option" 2
+        [[ "${2:-}" =~ ^[1-9][0-9]{0,5}$ ]] || die "$1 takes whole seconds (got '${2:-}')" 2
+        if [ "$1" = --every ]; then every="$2"; else max="$2"; fi
+        shift 2 ;;
+      --state)
+        [[ " $flags " == *" --state "* ]] || die "--state is a watch option" 2
+        [ -n "${2:-}" ] || die "--state takes a file" 2
+        state="$2"; shift 2 ;;
+      -*) die "unknown option '$1' (mroom room help)" 2 ;;
+      *)
+        [[ "$1" =~ ^[1-9][0-9]{0,6}$ ]] || die "a pull request is its number (got '$1')" 2
+        prs+=("$1"); shift ;;
+    esac
+  done
+  [ "${#prs[@]}" -gt 0 ] || die "name at least one pull request" 2
+}
+
+# snapshot: every pull request's facts, one line each, in the order given. Fails if any read fails.
+snapshot() {
+  local pr json
+  for pr in "${prs[@]}"; do
+    if [ -n "$repo" ]; then json="$(gh pr view "$pr" --repo "$repo" --json "$FIELDS")" || return 1
+    else json="$(gh pr view "$pr" --json "$FIELDS")" || return 1; fi
+    jq -c "$FACTS" <<<"$json" || return 1
+  done
+}
+
+cmd_snapshot() {
+  parse "" "$@"
+  snapshot || die "could not read the pull requests from GitHub"
+}
+
+cmd_watch() {
+  parse "--every --max --state" "$@"
+  if [ -z "$state" ]; then
+    local dir="${XDG_STATE_HOME:-$HOME/.local/state}/mroom/room"
+    mkdir -p "$dir"
+    state="$dir/watch-$(printf '%s %s' "$repo" "${prs[*]}" | sha256 | cut -c1-16).txt"
+  fi
+  local start now new old="" fails=0 line
+  start="$(date +%s)"
+  [ -f "$state" ] && old="$(cat "$state")"
+  while :; do
+    if new="$(snapshot 2>"$state.err")"; then
+      fails=0
+      if [ -z "$old" ]; then
+        printf '%s\n' "$new" >"$state"; old="$new"
+      elif [ "$new" != "$old" ]; then
+        while IFS= read -r line; do
+          grep -qxF -- "$line" <<<"$old" || printf 'changed %s\n' "$line"
+        done <<<"$new"
+        printf '%s\n' "$new" >"$state"
+        exit 0
+      fi
+    else
+      fails=$((fails + 1))
+      if [ "$fails" -ge 3 ]; then
+        printf 'unreachable: %s\n' "$(tail -n 1 "$state.err" 2>/dev/null)"
+        exit 1
+      fi
+    fi
+    now="$(date +%s)"
+    if [ $((now - start)) -ge "$max" ]; then
+      echo "heartbeat: no change in ${max}s"
+      exit 0
+    fi
+    sleep "$every"
+  done
+}
+
+cmd_build() {
+  local out="" from="$MROOM_ROOT/plugin/skills/implement/room/room.html"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --from) [ -n "${2:-}" ] || die "--from takes a file" 2; from="$2"; shift 2 ;;
+      -*) die "unknown option '$1' (mroom room help)" 2 ;;
+      *) [ -z "$out" ] || die "build takes one folder" 2; out="$1"; shift ;;
+    esac
+  done
+  [ -n "$out" ] || die "build needs a folder to write to" 2
+  [ -f "$from" ] || die "no Room page at $from"
+  # Only a new or empty folder, or one an earlier build made, so a build never overwrites anything else.
+  if [ -d "$out" ]; then
+    local entry
+    for entry in "$out"/* "$out"/.[!.]*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      [[ "$(basename "$entry")" =~ ^(index\.html|room\.css|room-[0-9]+\.js|room-version\.txt)$ ]] \
+        || die "$out holds other files; build into a new folder"
+    done
+    if [ -f "$out/index.html" ] && ! grep -q '^<meta name="mroom-room" ' "$out/index.html"; then
+      die "$out holds other files; build into a new folder"
+    fi
+  fi
+  mkdir -p "$out"
+  rm -f "$out"/index.html "$out"/room.css "$out"/room-*.js "$out"/room-version.txt
+  local stamp
+  stamp="$(sha256 <"$from" | cut -c1-16)"
+  # Blocks whose tags sit alone on their lines move to files; the page keeps a link to each, in place.
+  awk -v out="$out" -v stamp="$stamp" '
+    BEGIN { page = out "/index.html"; n = 0; mode = "" }
+    mode == "" && /^<style>$/ { mode = "css"; if (!css++) print "<link rel=\"stylesheet\" href=\"room.css\">" > page; next }
+    mode == "" && /^<script>$/ { mode = "js"; n++; print "<script src=\"room-" n ".js\"></script>" > page; next }
+    mode == "css" && /^<\/style>$/ { mode = ""; next }
+    mode == "js" && /^<\/script>$/ { mode = ""; next }
+    mode == "css" { print > (out "/room.css"); next }
+    mode == "js" { print > (out "/room-" n ".js"); next }
+    { print > page }
+    NR == 1 { print "<meta name=\"mroom-room\" content=\"" stamp "\">" > page }
+    END { if (mode != "") exit 3 }
+  ' "$from" || die "$from has a <style> or <script> block that never closes"
+  if grep -qE '<style|<script>|<script[^>]*>[^<]' "$out/index.html"; then
+    die "$from has a <style> or <script> block whose tags are not alone on their lines; the build cannot move it"
+  fi
+  printf '%s\n' "$stamp" >"$out/room-version.txt"
+  local f size
+  echo "stamp $stamp"
+  for f in index.html room.css "$out"/room-*.js room-version.txt; do
+    f="$(basename "$f")"
+    size="$(wc -c <"$out/$f" | tr -d ' ')"
+    echo "$f $size bytes"
+  done
+}
+
+cmd="${1:-help}"
+[ "$#" -gt 0 ] && shift
+case "$cmd" in
+  snapshot) cmd_snapshot "$@" ;;
+  watch) cmd_watch "$@" ;;
+  build) cmd_build "$@" ;;
+  help | -h | --help) usage ;;
+  *) die "unknown subcommand '$cmd' (mroom room help)" 2 ;;
+esac

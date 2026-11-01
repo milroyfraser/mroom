@@ -38,6 +38,9 @@
 #   mroom persona find|owned|create|comment
 #                              the guard: the persona's only way to write to the tracker (D23): it files
 #                              an issue per alert key, assigns no one and comments only on its own issues
+#   mroom room snapshot|watch|build
+#                              the session Room's gate and page build: watch waits, at no token cost, until a
+#                              pull request changes; build splits the page so a Room copies its code (lib/room)
 #   mroom memory-preflight <MB> [<what>]
 #                              exit 1, saying why, when the box's RAM available and free swap hold less than
 #                              <MB> more (2 for a usage error): run it before work the kernel would end half
@@ -89,6 +92,7 @@ case "$cmd" in
   tracker) exec "$ROOT/lib/tracker" "$@" ;;
   errors) exec "$ROOT/lib/errors" "$@" ;;
   persona) exec "$ROOT/lib/persona" "$@" ;;
+  room) exec "$ROOT/lib/room" "$@" ;;
   memory-preflight)
     if ! [[ "${1:-}" =~ ^[1-9][0-9]{0,6}$ ]] || [ "$#" -gt 2 ]; then die "usage: mroom memory-preflight <MB> [<what>]" 2; fi
     # shellcheck source=lib/memory-preflight

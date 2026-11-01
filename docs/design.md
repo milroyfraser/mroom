@@ -367,7 +367,8 @@ agrees; `mroom config keys` shows it.
 - `box.env`: `MROOM_BOX_NAME`, `MROOM_FORGE_ORG`, `MROOM_FORGE_SERVER`, `MROOM_REPO_URL`, `MROOM_SITE_API`,
   `MROOM_SITE_WEB`, `MROOM_SLACK_LOG_CHANNEL`, `MROOM_ENV` (local | devbox | review | debug | custom),
   `MROOM_WATCH_MCP` (the MCP servers the watchdog checks: `name=URL` items, each URL with no query, fragment or
-  credentials). Box jobs keep their schedule in the host's scheduler (a Forge scheduled job runs
+  credentials), `MROOM_ROOM_TEMPLATE` (the claude.ai link of the Room template artifact that each session Room
+  copies its code from, `mroom room build`). Box jobs keep their schedule in the host's scheduler (a Forge scheduled job runs
   `mroom job run <name> --every <duration> -- <command>`), so `box.env` holds no job times.
   **Parsed, never sourced**: each file has its own allowed keys.
   Read with `mroom config box [<KEY>]`; `$MROOM_BOX_ENV` overrides the path.
