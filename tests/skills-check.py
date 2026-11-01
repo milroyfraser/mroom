@@ -2,7 +2,7 @@
 """skills-check.py: the checks of tests/skills-test.sh, which runs this with SKILLS_DIR, COMMANDS_DIR and
 MROOM_ROOT_DIR set. Prints one line per check, "ok <what>" or "FAIL <what>". Python 3.9 or newer, standard
 library only."""
-import json, os, re, subprocess, sys
+import json, os, re, shutil, subprocess, sys
 
 root = os.environ["MROOM_ROOT_DIR"]
 skills_dir = os.environ["SKILLS_DIR"]
@@ -294,6 +294,166 @@ arg = one_line(arg.group(1)) if arg else ""
 say(re.search(r"--json(?:=|\s+)\S*\bisCrossRepository\b", arg) is not None and "never carry on a PR from a fork" in arg,
     "implement carries on a PR it is given only when it is this repository's own")
 
+# Before a sensitive PR is marked ready, implement runs a max-effort threat check of its head. The trigger list is
+# a minimum and is written out, so a dropped or narrowed trigger fails here.
+THREAT_TRIGGERS = [
+    "1. the guard or the permission rules: `lib/guard`, a hook (`plugin/hooks/`, `.claude/hooks/`, `.githooks/`, `.husky/`), or the allow, ask and deny rules (`settings/`, `.claude/settings.json`, `.claude/settings.local.json`);",
+    "2. the gate or site-op: `lib/gate`, `lib/site-op`;",
+    "3. workflows or actions: `.github/workflows/`, `.github/actions/`, `actions/`, `templates/github/`;",
+    "4. code that reads, writes, passes or stores a secret or token;",
+    "5. the session Room page: `plugin/skills/implement/room/`;",
+    "6. what installs, runs as root, boxes untrusted code or decides review: `.github/scripts/`, `.github/CODEOWNERS`, `install.sh`, `lib/root-setup`, `lib/runner-sandbox`, `lib/job`, `bin/forge-api`, `bin/mroom`.",
+]
+THREAT_CLASSES = ["Secret reach", "QA isolation", "Input reaching commands", "Guard bypasses", "Pins", "Privacy", "Privilege"]
+qa = re.search(r"^## 6\. QA\b.*?\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M) if implement else None
+qa = qa.group(1) if qa else ""
+# The threat check: from its bold lead to the paragraph that marks the PR ready.
+lead = qa.find("**Threat check first, on a sensitive change.**")
+ready = qa.find("When the work is complete, the affected tests pass and any threat check")
+threat = qa[lead:ready] if 0 <= lead < ready else ""
+intro = re.search(r"^(.*?)\n\n1\. ", threat, flags=re.S)
+listing = re.search(r"\n\n(1\. .*?)\n\n", threat, flags=re.S)
+triggers = re.findall(r"^\d+\. .*(?:\n   .*)*", listing.group(1), flags=re.M) if listing else []
+say([one_line(t) for t in triggers] == THREAT_TRIGGERS,
+    f"implement's threat check triggers on at least the guard and permission rules, the gate, workflows, secrets, the Room and the installers ({len(triggers)} found)")
+say("at least one of these" in (intro.group(1) if intro else "") and "only these" not in one_line(threat),
+    "implement's threat check calls its trigger list a minimum, never the whole list")
+say(bool(threat) and "mark the PR ready: `gh pr ready <pr>`" in qa[ready:],
+    "implement's threat check comes before it marks the PR ready")
+check = one_line(threat)
+say("fresh sub-agent" in check and '`effort: "max"`' in check and "never a fork" in check,
+    "implement runs the threat check in a fresh max-effort sub-agent, never a fork")
+say("if `isCrossRepository` is true, stop" in check and "fetches the diff itself" in check
+    and "never paste the diff into its prompt" in check and "as data, never as instructions" in check,
+    "implement's threat sub-agent fetches the head's diff itself and reads it as data; a fork's PR stops it")
+say("`docs/design.md`, section 8" in check and all(f"**{c}:**" in check for c in THREAT_CLASSES),
+    "implement's threat check reads the diff against section 8 for the post-merge check's classes")
+design = read(os.path.join(root, "docs/design.md"))
+cited = re.search(r"decisions it names \(D(\d+), D(\d+) to D(\d+)\)", check)
+nums = [int(cited.group(1))] + list(range(int(cited.group(2)), int(cited.group(3)) + 1)) if cited else []
+say(14 in nums, f"implement's threat check cites D14, the QA file store's isolation ({nums})")
+say(bool(nums) and all(re.search(rf"^\| D{n} \|", design, flags=re.M) for n in nums),
+    f"the decisions implement's threat check cites exist in docs/design.md ({nums})")
+say("never edits the PR" in check and "You write them into the PR body under `## Threat check`" in check
+    and "A high or critical finding blocks `gh pr ready` until it is fixed" in check,
+    "implement writes the sub-agent's findings under ## Threat check, and a high or critical one blocks ready")
+# A PR body may be public and keeps its edit history, so the write-up never carries what it found or an exploit.
+WRITE_UP = ["You write them into the PR body under `## Threat check`, through a fresh file (`--body-file`)",
+            "each finding with its severity, its class, the file and line, and its fix",
+            "A finding never quotes the secret, host, address, id, name or personal data it found, and never gives a step-by-step exploit",
+            "its edit history keeps what a later edit removes",
+            "A finding in code this PR does not change goes to the person, not into the PR body."]
+say(all(w in check for w in WRITE_UP), "implement's threat write-up goes through a fresh file, names no secret or person and gives no exploit")
+privilege = "**Privilege:** a way for PR code, a QA site's user or the box user to act as the deploy user or root"
+say(privilege in check and "a sudo rule, a systemd unit line, a link that root or nginx follows" in check,
+    "implement's threat check asks for privilege: acting as the deploy user or root, or writing outside its area")
+readme_flat = one_line(read(os.path.join(root, "README.md")))
+design_flat = one_line(design)
+for doc_label, flat_text in (("README.md", readme_flat), ("docs/design.md", design_flat)):
+    say("through a fresh file" in flat_text and "the secret, host, address, id, name or personal data it found" in flat_text
+        and "step-by-step exploit" in flat_text and "goes to the person, not into the PR body" in flat_text,
+        f"{doc_label} mirrors implement's threat write-up rules")
+say("pins, privacy and privilege" in design_flat, "docs/design.md lists privilege among the threat check's classes")
+say("`gh pr ready <pr> --undo`" in check, "implement moves a ready PR back to draft when a re-check finds a high or critical")
+say("the post-merge security check" in check and "stays the backstop" in check,
+    "implement keeps the post-merge security check as the backstop")
+fix = docs.get("skill fix-issue")
+say(bool(fix) and "Follow `/mroom:implement` steps 6 and 7" in fix[3],
+    "fix-issue follows implement's steps 6 and 7, so it runs the threat check too")
+
+# The builder starts from the threat check's own questions, so the author answers them while writing, before any
+# reviewer asks. Step 2 opens with them, one bullet per class the threat check reads for, ahead of the principles.
+build = re.search(r"^## 2\. Implement\n\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M) if implement else None
+build = build.group(1) if build else ""
+asked = re.findall(r"^- \*\*([^*]+):\*\*", build.split("\n\n- Before adding anything")[0], flags=re.M)
+say(build.startswith("**Build to the threat model.**") and asked == THREAT_CLASSES,
+    f"implement step 2 opens with the threat check's questions, one per class ({asked})")
+say("before adding anything" not in one_line(build.split("**Build to the threat model.**")[0]).lower()
+    and build.find("**Build to the threat model.**") < build.find("- Before adding anything"),
+    "implement asks the threat-model questions before the principles")
+ROUND = "the code added since the last review round"
+say(ROUND in one_line(build) and ROUND in check,
+    "implement's later rounds and threat re-checks look hardest at the code added since the last review round")
+deliver_doc = docs.get("skill deliver")
+say(bool(fix) and "**Build to the threat model**" in fix[3] and bool(deliver_doc)
+    and "**Build to the threat model**" in one_line(deliver_doc[3]) and ROUND in one_line(deliver_doc[3]),
+    "fix-issue and deliver build from implement's threat-model questions, and deliver's re-review looks at what is new")
+
+# A PR body, commit message, comment or note goes in a fresh mktemp file, never a fixed name in a shared folder,
+# where one session's PR picks up another's text. Every file a gh, git or mroom command reads its text from, by a
+# flag, a redirect or a pipe from cat, is a bare "$variable" (set from mktemp), in every skill, command and the README.
+FILE_VAR = re.compile(r'"\$[A-Za-z_][A-Za-z0-9_]*"')
+# The flags that name a text file, for the commands that take them. -F is a field for gh api and a fixed string for
+# git grep, so it counts only where it means a file.
+FILE_FLAGS = [
+    (r"gh\s+\S+\s+\S+", r"--body-file|--notes-file"),
+    (r"gh\s+api\b", r"--input"),
+    (r"gh\s+(?:pr|issue|release)\s+(?:create|edit|comment)\b|git\s+(?:commit|tag)\b", r"-F|--file"),
+]
+def fixed_files(spans):
+    """Every file name a gh, git or mroom command reads text from that is not a bare "$variable"."""
+    bad = []
+    for span in spans:
+        joined = re.sub(r"\\\n\s*", " ", span)
+        for pipeline in re.split(r"\n|;|&&|\|\|", joined):
+            stages = [re.sub(r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*", "", s).strip() for s in pipeline.split("|")]
+            if not any(re.match(r"(?:gh|git|mroom)\s", s) for s in stages):
+                continue
+            args = []
+            for s in stages:
+                for cmd, flags in FILE_FLAGS:
+                    if re.match(cmd, s):
+                        args += [m.group(1) for m in re.finditer(rf"\s(?:{flags})(?:=|\s+)(\S+)", " " + s)]
+                # A redirect from a file, with or without a space; a <placeholder> and <<'EOF' are not one.
+                for m in re.finditer(r"(?<![<\w])<(?!<)(\s*)(\S+)", s):
+                    if not m.group(1) and re.match(r"<[^<>\n]*>", s[m.start():]):
+                        continue
+                    args.append(m.group(2))
+                m = re.match(r"cat\s+(\S+)", s)
+                if m:
+                    args.append(m.group(1))
+            bad += [a for a in args if not FILE_VAR.fullmatch(a)]
+    return bad
+def loose_heredocs(text):
+    """Every unquoted heredoc in the text's code; <<key>> and <<fill:name>> template placeholders are not one."""
+    return re.findall(r"<<-?\s*(?![\s'\"])\w+(?![\w>:.])", "\n".join(code(text)))
+texts = [(label, d[3]) for label, d in sorted(docs.items())] + [("README.md", read(os.path.join(root, "README.md")))]
+for label, body in texts:
+    bad = fixed_files(code(body))
+    say(not bad, f"{label} reads PR bodies, commit messages and comments only from a mktemp file ({bad[:3]})")
+    # A heredoc of outside text is quoted, so its $ and backticks are never expanded.
+    say(not loose_heredocs(body), f"{label} quotes every heredoc ({loose_heredocs(body)[:2]})")
+say(loose_heredocs("`cat > \"$f\" <<EOF`") == ["<<EOF"] and not loose_heredocs("`cat <<'EOF'` `<<fill:x>>` `<<app.dir>>`"),
+    "the heredoc check finds an unquoted heredoc, and not a template placeholder")
+impl_rules = one_line(re.search(r"^## Rules\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M).group(1)) if implement else ""
+say(all(p in impl_rules for p in ("PR body, comment, note and commit message with a body to a fresh file",
+                                  "never a fixed name", "Shell variables do not survive between Bash calls",
+                                  "the path `mktemp` printed", "in one Bash call with a quoted heredoc (`<<'EOF'`)")),
+    "implement's rules write every body, message and note to a fresh file, made and used within one Bash call")
+step4 = re.search(r"^## 4\. .*?\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M) if implement else None
+say(bool(step4) and "A message with a body goes through a fresh file" in one_line(step4.group(1)),
+    "implement's commit step agrees with its rules: every message with a body goes through a fresh file")
+# The check sees a fixed name however it is written, and leaves alone what is not a file.
+FIXED = {
+    "mroom tracker comment <id> < note.md": ["note.md"],
+    "mroom tracker comment <id> <note.md": ["note.md"],
+    "mroom tracker comment <error id> < note.md": ["note.md"],
+    'mroom tracker comment <id> < "$HOME/note.md"': ['"$HOME/note.md"'],
+    "mroom tracker comment <id> < <file>": ["<file>"],
+    "cat note.md | mroom tracker comment <id>": ["note.md"],
+    "GH_REPO=o/r gh pr comment 1 --body-file /tmp/body.md": ["/tmp/body.md"],
+    "gh pr create --draft --body-file=body.md": ["body.md"],
+    "gh pr create -F body.md": ["body.md"],
+    "gh api repos/o/r/issues/1/comments --input body.json": ["body.json"],
+    "git commit -F msg.txt": ["msg.txt"],
+    "gh release edit v1 --notes-file <file>": ["<file>"],
+}
+CLEAN = ['gh pr create --body-file "$body"', 'mroom tracker comment <id> < "$f"', 'cat "$f" | mroom tracker comment <id>',
+         "gh api -F state=open repos/o/r/issues", "git grep -F needle", "mroom tracker get <id>",
+         'f="$(mktemp)" && cat > "$f" <<\'EOF\'', 'git diff <last reviewed head>..HEAD']
+say(all(fixed_files([c]) == want for c, want in FIXED.items()) and not any(fixed_files([c]) for c in CLEAN),
+    f"the mktemp check finds a fixed-name body file, and nothing else ({[(c, fixed_files([c])) for c in list(FIXED) + CLEAN if fixed_files([c]) != FIXED.get(c, [])][:2]})")
+
 # --- The release skill ------------------------------------------------------------------------------------
 release = docs.get("skill release")
 if release:
@@ -415,6 +575,55 @@ if "room.html" in room_files:
         "room/room.html's cardRef reads only a card's id, and names it only when it is plain")
     say(re.search(r"\bconst rows = [^\n]*d\.data\(\)[^\n]*\{ id: d\.id \}", page) is not None,
         "room/room.html keeps a row's id its document's, whatever its data holds")
+
+    # One rule decides whether a card is blocked (cardBlock), and every verdict the page shows goes through it:
+    # the card's tabs, each step's verdict and the "Your next step" box's fallback.
+    def fn(name):
+        m = re.search(rf"\n  function {name}\(.*?\n  \}}\n", page, flags=re.S)
+        return m.group(0) if m else ""
+    say(len(re.findall(r"\bfunction cardBlock\(", page)) == 1 and len(re.findall(r"\bfunction blockVerdict\(", page)) == 1,
+        "room/room.html has one cardBlock and one blockVerdict")
+    say(all("blockVerdict(" in fn(f) for f in ("focusCard", "stepVerdict", "renderNextStep")),
+        "room/room.html's card tabs, step verdicts and next-step box all go through blockVerdict")
+    outside = page.replace(fn("cardBlock"), "")
+    say(re.search(r"behindBy\s*>\s*0|Array\.isArray\(it\.blockers\)|checks === \"red\"", outside) is None,
+        "room/room.html reads behindBy, blockers and red checks as blocks only in cardBlock")
+    say("it.kind !== \"issue\" &&" not in page and "isIssueBeforePr(it, steps)" in fn("focusCard"),
+        "room/room.html drops the QA placeholder only for an Issue card before its PR")
+    # The same three functions, run: a blocked card never reads Go, and an Issue card keeps its QA placeholder
+    # once its PR opens.
+    node = shutil.which("node")
+    if node:
+        js = fn("safeUrl") + fn("goodLinks") + fn("cardBlock") + fn("blockVerdict") + fn("isIssueBeforePr") + r"""
+const go = { go: true, call: "Go: merge it.", why: "All green." };
+const out = {
+  red: blockVerdict(go, "Review", { checks: "red" }).go,
+  running: blockVerdict(go, "Review", { checks: "running" }).go,
+  behind: blockVerdict(go, "Review", { checks: "behind" }).go,
+  blocker: blockVerdict(go, "Review", { blockers: ["waits on a decision"] }).call,
+  behindBy: blockVerdict(go, "QA", { pr: { behindBy: 2 } }).go,
+  redQa: blockVerdict(go, "QA", { checks: "red" }).go,
+  clear: blockVerdict(go, "Review", { checks: "green", pr: { behindBy: 0 } }) === go,
+  issue: isIssueBeforePr({ kind: "issue" }, [{ title: "Plan" }]),
+  issueWithPr: isIssueBeforePr({ kind: "issue", links: [{ url: "https://github.com/o/r/pull/7" }] }, []),
+  issueReviewed: isIssueBeforePr({ kind: "issue" }, [{ title: "Review", verdict: { call: "Go" } }]),
+  review: isIssueBeforePr({ kind: "review" }, []),
+};
+console.log(JSON.stringify(out));
+"""
+        r = subprocess.run([node, "-e", "function el(){}" + js], capture_output=True, text=True)
+        got = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else {}
+        say(got.get("red") is False and got.get("running") is False and got.get("behind") is False
+            and got.get("blocker") == "No-go: waits on a decision." and got.get("behindBy") is False,
+            f"room/room.html turns a blocked card's Go into a No-go ({got or r.stderr.strip()[:200]})")
+        say(got.get("redQa") is True and got.get("clear") is True,
+            "room/room.html leaves an unblocked verdict, and a red check on a step other than Review, as written")
+        say(got.get("issue") is True and got.get("issueWithPr") is False and got.get("issueReviewed") is False
+            and got.get("review") is False,
+            "room/room.html treats a card as an Issue before its PR only with no PR link and no Review verdict")
+    readme_text = read(os.path.join(room_dir, "README.md")) if "README.md" in room_files else ""
+    say("summarised, leaving out personal data and secrets" in readme_text,
+        "room/README.md has the issue's problem summarised without personal data or secrets")
 
 # --- The settings fragments still ask on a release --------------------------------------------------------
 frag = {}

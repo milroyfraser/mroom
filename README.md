@@ -421,9 +421,11 @@ mroom tracker get SHOP-12                    # title, state, labels, branch, des
 mroom tracker list --mine --open             # my 50 latest open issues, by priority; or --label lesson
 mroom tracker find sentry:1001               # the issues whose description holds the marker for an alert
 mroom tracker owned SHOP-12                  # whether the token's user filed the issue
-mroom tracker comment SHOP-12 < note.md      # adds a comment; the body comes on stdin
+note="$(mktemp)"                             # a fresh file per comment, never a fixed name; fill it in the
+mroom tracker comment SHOP-12 < "$note"      # same shell. Adds a comment; the body comes on stdin
 mroom tracker state SHOP-12 "In Review"      # the team's state of that name, in any case
-mroom tracker create --allow-create --title "Checkout fails" --state Triage --label bug < body.md
+body="$(mktemp)"                             # and another fresh file for the new issue's body
+mroom tracker create --allow-create --title "Checkout fails" --state Triage --label bug < "$body"
 mroom errors get SHOP-1A2                    # the error issue and its latest event
 mroom errors search 'is:unresolved' --environment production --period 24h --limit 50
 mroom errors new 40 --environment production # new, regressed and escalating issues of the last 40 minutes
@@ -604,7 +606,7 @@ that Claude Code reads; in a session they are `/mroom:<name>`.
 |---|---|
 | `/mroom:refine` | lists my open issues, tags each with a Design value, and runs `/mroom:implement` on the ones I confirm |
 | `/mroom:deliver <id>` | a design gate when the issue needs one (a canvas, approved in a comment), then `/mroom:implement`; resumes stopped work |
-| `/mroom:implement <id>` | one issue to a PR in review: a worktree, the change, the affected tests, a draft PR, CI and QA on the PR's environment, then stop |
+| `/mroom:implement <id>` | one issue to a PR in review: a worktree, the change, the affected tests, a draft PR, a threat check when the change is sensitive, CI and QA on the PR's environment, then stop |
 | `/mroom:fix-issue <error id>` | one error issue to a fix in review: reads the error and its latest event, finds the issue the persona filed (`mroom tracker find`), works on a branch that names both ids, reproduces the error with a failing test before it fixes it, and links the error issue only through `Fixes <error id>` lines, on the fixing commit and in the PR body; never resolves it |
 | `/mroom:release` | only when a person asks: what ships, what to watch, the notes, one question, then a **draft** release that the person publishes; then a read-only watch of the deploy |
 | `/mroom:correct` | finds a mistake agents repeat, and adds the highest check that stops it (adapted from pstack, MIT) |
@@ -621,6 +623,20 @@ that Claude Code reads; in a session they are `/mroom:<name>`.
   request whose branch is in the app's repository, `implement` stacks a new branch only on such a
   pull request, and no workflow skill checks out or runs a fork's pull request on the box, just as
   the QA workflows refuse it. That is the skills' rule: the guard does not refuse such a checkout.
+- **A threat check before ready:** when a PR touches at least one of the guard or the permission
+  rules (`lib/guard`, hooks, `settings/`, `.claude/settings*.json`), the gate or `site-op`,
+  workflows or actions, code that handles a secret or token, the session Room page, or what
+  installs, runs as root or decides review (`.github/scripts/`, `.github/CODEOWNERS`,
+  `install.sh`, `lib/root-setup`, `lib/runner-sandbox`, `lib/job`, `bin/forge-api`, `bin/mroom`),
+  `implement` (and `fix-issue`, which follows its step 6) has a fresh max-effort sub-agent check the
+  PR head against the security model (section 8 of `docs/design.md`) before marking it ready. The
+  session writes the findings under `## Threat check` in the PR body, through a fresh file: each
+  with its severity, its class, the file and line, and its fix, never quoting the secret, host,
+  address, id, name or personal data it found, nor a step-by-step exploit (a PR body may be public,
+  and its edit history keeps what a later edit removes). A finding in code the PR does not change
+  goes to the person, not into the PR body. A high or critical one
+  blocks ready, or sends a ready PR back to draft, until it is fixed. The post-merge security check
+  stays the backstop.
 - **Release asks twice:** once in the session, and again through the `ask` rule on
   `gh release create` in `settings/base.json`. It only ever drafts; publishing is a person's click.
 - **From `mroom.toml`:** the issue id and link (`issues.id_pattern`, `issues.url`), the started and
