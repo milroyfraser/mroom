@@ -26,10 +26,14 @@ world() {
 # databases, the names that exist, one per line), objects-owns, busy (how many CREATE DATABASE calls are refused
 # as in use first), noise (a WARNING on stderr for every call), fail-<word> (a statement holding <word> fails,
 # with the word's SQLSTATE in a verbose message), rows (what a db-read's SELECT returns) and read-error (the
-# error it fails with instead). Its arguments go to $T/argv.log, and a password it was given in its environment
-# to $T/psql.password.
+# error it fails with instead). Its arguments go to $T/argv.log, a password it was given in its environment
+# to $T/psql.password, and, signed in as another role (PGUSER), where it connects to $T/psql.conn.
 printf '%s\n' "$*" >>"$T/argv.log"
 if [ -n "${PGPASSWORD:-}" ]; then printf '%s\n' "$PGPASSWORD" >"$T/psql.password"; fi
+if [ -n "${PGUSER:-}" ]; then
+  printf 'host=%s port=%s timeout=%s service=%s servicefile=%s passfile=%s\n' "${PGHOST:-}" "${PGPORT:-}" \
+    "${PGCONNECT_TIMEOUT:-}" "${PGSERVICE:-}" "${PGSERVICEFILE:-}" "${PGPASSFILE:-}" >"$T/psql.conn"
+fi
 db="" x=0 stop=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -82,8 +86,13 @@ FAKE
 #!/usr/bin/env bash
 # Logs "user=<PGUSER> db=<PGDATABASE> password=<set|none> service=<PGSERVICE> <arguments>" to $T/pg_restore.log,
 # and the password it was given to $T/pg_restore.password. -l lists an archive (fails with bad-archive); a
-# restore fails with fail-restore, quoting a value as Postgres does. Its arguments also go to $T/argv.log.
+# restore fails with fail-restore, quoting a value as Postgres does. Its arguments also go to $T/argv.log, and
+# where a restore connects to $T/pg_restore.conn.
 printf '%s\n' "$*" >>"$T/argv.log"
+if [ -n "${PGUSER:-}" ]; then
+  printf 'host=%s port=%s timeout=%s service=%s servicefile=%s passfile=%s\n' "${PGHOST:-}" "${PGPORT:-}" \
+    "${PGCONNECT_TIMEOUT:-}" "${PGSERVICE:-}" "${PGSERVICEFILE:-}" "${PGPASSFILE:-}" >"$T/pg_restore.conn"
+fi
 printf 'user=%s db=%s password=%s service=%s %s\n' "${PGUSER:-}" "${PGDATABASE:-}" "${PGPASSWORD:+set}" \
   "${PGSERVICE:-}" "$*" >>"$T/pg_restore.log"
 printf '%s\n' "${PGPASSWORD:-}" >"$T/pg_restore.password"
@@ -847,6 +856,16 @@ t_db_read_reads_listed_columns_as_the_read_only_role() {
     lacks "$(argv_text)" "$reader"
   expect_true "psql was not given the read-only role's password in its environment" \
     [ "$(cat "$T/psql.password" 2>/dev/null)" = "$reader" ]
+  local conn="host=127.0.0.1 port=5432 timeout=10 service= servicefile= passfile="
+  expect_true "the read-only role did not connect to the gate's host and port, with a timeout and no service file" \
+    [ "$(cat "$T/psql.conn" 2>/dev/null)" = "$conn" ]
+  # A service or password file in the gate's own environment never reaches the read-only role's psql.
+  rm -f "$T/psql.conn"
+  run env PGSERVICE=mroom-gate PGSERVICEFILE="$HOME/.config/mroom/secrets/pg_service.conf" PGPASSFILE="$T/pgpass" \
+    SSH_ORIGINAL_COMMAND="db-read 12 users id" "$MROOM" gate browser
+  expect_rc 0
+  expect_true "the read-only role's psql was given the gate's service or a password file" \
+    [ "$(cat "$T/psql.conn" 2>/dev/null)" = "$conn" ]
   expect_true "a filter's value reached the gate log" lacks "$(gate_log_text)" "ada@shop.test"
   run grep -c "browser db-read 12: users, 2 column(s), 1 filter(s)" "$HOME/.local/state/mroom/gate.log"; expect_out 1
   # No row: an empty list. No filter, no order: the most rows.
@@ -931,6 +950,8 @@ t_template_load_restores_as_the_objects_role_then_swaps_the_template() {
   expect_true "the restore's password was printed" lacks "$out$err" "$secret"
   expect_true "the restore's password was on a command line, which every user on the box can read" \
     lacks "$(argv_text)" "$secret"
+  expect_true "the restore did not connect to the gate's host and port, with a timeout and no service file" \
+    [ "$(cat "$T/pg_restore.conn" 2>/dev/null)" = "host=127.0.0.1 port=5432 timeout=10 service= servicefile= passfile=" ]
   expect_true "the restore's password is kept" lacks "$(cat "$HOME"/.local/state/mroom/qa/* 2>/dev/null || true)" "$secret"
   expect_true "the archive stays behind" eval '! ls -d "$HOME"/.local/state/mroom/gate-tmp.* >/dev/null 2>&1'
 }
