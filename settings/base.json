@@ -62,6 +62,7 @@
       "Bash(mroom guard check:*)",
       "Bash(mroom tracker get:*)",
       "Bash(mroom tracker list:*)",
+      "Bash(mroom tracker find:*)",
       "Bash(mroom tracker backend:*)",
       "Bash(mroom errors get:*)",
       "Bash(mroom errors search:*)",

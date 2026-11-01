@@ -1,7 +1,7 @@
 {
   "name": "mroom",
   "version": "0.4.0",
-  "description": "mroom's Claude Code plugin: the workflow skills (refine, deliver, implement, release, correct, forge), the clean-review and crap commands, and the PreToolUse guard on Bash (mroom guard). More skills and hooks come in later phases.",
+  "description": "mroom's Claude Code plugin: the workflow skills (refine, deliver, implement, fix-issue, release, correct, forge), the clean-review and crap commands, and the PreToolUse guard on Bash (mroom guard). More skills and hooks come in later phases.",
   "author": {
     "name": "mroom contributors"
   },
