@@ -213,6 +213,30 @@ for label, (name, kind, meta, body, text) in sorted(docs.items()):
         for word in [w.strip() for w in read(words).split("\n") if w.strip()]:
             say(re.search(word, text, flags=re.I) is None, f"{label} names none of the private words (one of them)")
 
+# --- Earlier work is this repository's own ----------------------------------------------------------------
+# A search for an issue's id, or a list by its branch's name, finds pull requests from forks too, and anyone
+# who can open a pull request can name one after an issue. A fork's code never runs on the box (the QA
+# workflows refuse it, design 8.1), so a skill that resumes earlier work never checks one out either.
+FORK_RULE = ("- Never check out, run or push to a pull request from a fork (`isCrossRepository` true). A fork's "
+             "code never runs on this box, not even in a QA environment.")
+FORK_SKIP = "from a fork (`isCrossRepository` true) is never earlier work"
+one_line = lambda t: re.sub(r"\s+", " ", t)
+for label, (name, kind, meta, body, text) in sorted(docs.items()):
+    for c in split_commands(code(body)):
+        if re.match(r"gh\s+pr\s+list\b", c) and re.search(r"\s(--head|-H)\s|\s--search\s+\S*<id>", c):
+            say(re.search(r"\s--json\s+\S*\bisCrossRepository\b", c) is not None,
+                f"{label}: a lookup of an issue's pull request asks whether it is from a fork ({c[:90]})")
+    if kind == "skill" and re.search(r"(?i)\bresum", body):
+        rules = re.search(r"^## Rules\n(.*?)(?=^## |\Z)", body, flags=re.S | re.M)
+        say(bool(rules) and FORK_RULE in one_line(rules.group(1)),
+            f"{label} resumes earlier work, so it keeps the rule against a fork's pull request under ## Rules")
+deliver = docs.get("skill deliver")
+resume = re.search(r"^## Resume\b(.*?)(?=^## |\Z)", deliver[3], flags=re.S | re.M) if deliver else None
+say(bool(resume) and FORK_SKIP in one_line(resume.group(1)), "deliver's Resume never takes a fork's pull request for earlier work")
+implement = docs.get("skill implement")
+first = re.search(r"\*\*Resume first\.\*\*(.*?)(?:\n\n|\Z)", implement[3], flags=re.S) if implement else None
+say(bool(first) and FORK_SKIP in one_line(first.group(1)), "implement's Resume first never takes a fork's pull request for earlier work")
+
 # --- The release skill ------------------------------------------------------------------------------------
 release = docs.get("skill release")
 if release:
