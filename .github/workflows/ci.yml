@@ -43,8 +43,8 @@ jobs:
   test:
     name: tests
     runs-on: ubuntu-latest
-    # The offline suites, but qa-up's, which has a job of its own below: together they took over 6 minutes.
-    timeout-minutes: 10
+    # The offline suites, but qa-up's, which has a job of its own below. With pr-status they take about 10.5 minutes.
+    timeout-minutes: 15
     steps:
       # With the tags: tests/root-test.sh checks the README's root recipe against lib/root-setup at its tag.
       - uses: actions/checkout@v4

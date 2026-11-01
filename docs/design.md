@@ -307,7 +307,8 @@ name = "Agent"                     # the name people see on notes and pings
 label = "found-by-agent"           # on every issue alert triage files (it must exist)
 state = "Triage"                   # the state alert triage files issues in (default: the team's)
 environment = "production"         # the error tracker's environment alert triage reads
-channel = "C0123456789"            # where the persona pings when triage cannot run (a Slack channel id)
+channel = "C0123456789"            # where the persona pings: PR status, and triage when it cannot run
+chat_users = ".github/chat-users.json"   # GitHub logins and commit emails to chat user ids, on the default branch
 
 [github]
 agent_login = "<agents-account>"   # the box's one GitHub account (D22); `mroom user setup` refuses any other
@@ -332,7 +333,7 @@ agrees; `mroom config keys` shows it.
 | `errors.*` | none (phase 3) | none: without the table there is no error tracker; `errors.region`: us; `errors.token_env`: `SENTRY_AUTH_TOKEN`; `errors.org` has no default, and every call needs it |
 | `release.*` | none (phase 3) | `release.tag_prefix`: none; without `release.production_url`, `/release` skips its version check |
 | `pr.required_checks` | phase 4 decides | phase 4 decides |
-| `persona.*` | none (phase 5) | `persona.name`: Agent; `persona.environment`: production; `persona.label`, `persona.state` and `persona.channel`: none (no label, the team's default state, no ping) |
+| `persona.*`, `github.agent_login` | none (phase 5) | `persona.name`: Agent; `persona.environment`: production; `persona.chat_users`: `.github/chat-users.json`; `persona.label`, `persona.state` and `persona.channel`: none (no label, the team's default state, no ping); without `github.agent_login` an agent's pull request pings that account's developer only |
 
 **Validation** (`mroom config validate`, and before every `get`):
 
@@ -892,6 +893,17 @@ What the pilot's scripts learned after this table was drawn, which their ports k
   map has it, else by its email. Later commits, such as a reviewer's committed suggestion or a bot's fix, never
   count. A first commit the map knows by neither, such as the agents' own or a bot's, pings the developer the map
   names for the agents' account.
+- **One note per pull request (`actions/pr-status`, phase 5).** The note is found by a hidden line under it that
+  also holds the pings already sent, and should a person's edit lose that line, by its footer, so it is edited
+  in place and never posted again. A ping is recorded in the note before it goes out, so a note that cannot be
+  written sends none, and a lost line records that run's pings and the once-per-PR "ready" unsent, so only a
+  failure that goes away and comes back on the same commit could ping twice. Only the repository's own people's
+  pull requests ping anyone. A qa-up run counts for a pull request only when its deploy job names it, since a
+  fork's QA plan sets the run-name qa-up's falls back to. A closed
+  pull request's note is final only once GitHub took that edit, and later runs retry the ones that are not. In
+  v1 the note lives on the pull request (the tracker `none` of section 7) whatever the tracker; on the issue,
+  it comes with the tracker adapter's `issue_comment_upsert`, and the QA environment's error count with the
+  errors adapter.
 - **Forge logs (`mroom user`, phase 1).** The box's Forge token holds no scope for reading a background process's
   log, and Forge answers 403. Setup says the log is unreadable and goes on, instead of stopping under `set -e`
   before the profile clean-up above; the port tests that clean-up with an unreadable log.
