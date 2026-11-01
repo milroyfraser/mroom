@@ -27,8 +27,9 @@ part of phase 1: the [box watchdog](#box-watchdog) with its job records, the
 [guard, the plugin's skeleton and the settings fragments](#guard-and-settings); from phase 3, the
 [tracker and error-tracker adapters](#tracker-and-error-tracker) and the [workflow skills](#workflow-skills);
 ahead of its phase, part of phase 4: the [Claude review](#claude-review) and its
-[review findings](#review-findings) check; and, from phase 5, [alert triage](#alert-triage) with its alarm and
-its guard, and ahead of it the persona's [PR status](#pr-status) notes and pings. Every other command prints
+[review findings](#review-findings) check; from phase 2b, the [runner sandbox](#runner-sandbox) with its probe;
+and, from phase 5, [alert triage](#alert-triage) with its alarm and its guard, and ahead of it the persona's
+[PR status](#pr-status) notes and pings. Every other command prints
 `not yet: phase N`. The phases and what each delivers are in
 [section 11 of the design](docs/design.md#11-phases). Expect breaking changes in every `0.x` release.
 
@@ -1459,6 +1460,78 @@ the default branch, the one that started it included: a pull request's own copy 
 branch's, runs on events of its own and names its runs and jobs as it likes, and its runs start a
 `workflow_run` too. qa-up goes by the run's first starter here too, so a person's re-run of a dispatched qa-up
 starts it again; should that re-run also end with a `workflow_run`, it runs twice for one commit.
+
+## Runner sandbox
+
+`actions/runner-sandbox` boxes untrusted code on a throwaway GitHub runner (design 8.5): a PR's harness, a
+browser recipe an agent wrote, or the commands Claude runs on a runner. Run it from the default branch's
+checkout, before any untrusted code runs; it changes the runner for good (users, sudoers, `/etc`), so it refuses
+a self-hosted runner unless `MROOM_SANDBOX_EPHEMERAL=1` says the runner is thrown away after the job.
+
+```yaml
+- uses: actions/checkout@v4            # the default branch's
+  with: { persist-credentials: false }
+- uses: milroyfraser/mroom/actions/runner-sandbox@vX.Y.Z   # the first release with it
+  env:
+    MROOM_SANDBOX_SECRET: ${{ secrets.SECRET_KEY }}    # an env, never an input
+  with:
+    holder: .mroom/holder.sh           # the trusted wrapper that uses the secret
+    holder-args: any                   # it checks each argument itself ("The holder", below)
+    known-hosts: ${{ vars.SSH_KNOWN_HOSTS }}
+    copy: harness                      # root-owned, read-only in /usr/lib/mroom-sandbox/copies/harness
+    path: /opt/node/bin                # node's folder, outside the runner's home
+    step-env: |
+      SITE_URL=https://12.qa.example.dev
+- run: mroom-step --input recipe.mjs -- node /usr/lib/mroom-sandbox/copies/harness/drive.mjs inputs/recipe.mjs
+- run: mkdir "$RUNNER_TEMP/evidence" && mroom-step --collect "$RUNNER_TEMP/evidence"
+```
+
+What the step (user `mroom-step`, run through `mroom-step`) gets and does not:
+
+| | |
+|---|---|
+| **Gets** | `env -i` with only `PATH` (`path`, then `/usr/local/bin:/usr/bin:/bin`), `HOME`, `LANG`, `MROOM_SANDBOX`, `MROOM_INPUTS`, `MROOM_EVIDENCE`, `MROOM_HOLDER` and the `step-env` lines; read access to the copies and its inputs; write access to `/var/lib/mroom-sandbox/evidence` and its own home, and to `/tmp`, `/var/tmp` and other sticky folders; the holder's wrapper, through `sudo -n -u mroom-holder "$MROOM_HOLDER"`; the network |
+| **Never** | the job's environment (no `GITHUB_TOKEN`, Claude token or secret); the runner's home (closed to `0700`: the workspace, git's credentials in it, `RUNNER_TEMP`); a runner process's environment; the secret, which only `mroom-holder` reads; sudo to root or to anything but the wrapper; writing anything else on the local disks: the copies, the inputs, `/etc/mroom-sandbox`, the pinned host keys, the sandbox's scripts, any tool, library or folder (GitHub's images run `chmod -R 777` on `/usr/local/bin`, `/usr/local/lib/node_modules`, `/opt` and `/usr/share`; the action closes every such path, so a step cannot change `node`, `git` or debconf's Perl, which the runner or apt, as root, runs next); Docker's or containerd's socket; outliving its step (every process the step user and the holder have is killed before and after each one, so run one step at a time); giving the runner a workflow command |
+
+The sweep that closes what every user may write runs once, when the sandbox is set up: install every tool and
+package the job needs before it, or run `/usr/lib/mroom-sandbox/check.sh` again after installing one, since an
+installer may leave its files writable by all.
+
+`/tmp` stays shared: put nothing the step must not see there. The runner's own temporary files live in its home.
+
+**Evidence.** Take what the step wrote with `mroom-step --collect <empty folder>`, never by reading
+`/var/lib/mroom-sandbox/evidence` in place: the step may leave a link there to the runner's own files.
+`--collect` reads the folder as `mroom-step` (`tar -h`), so a link gives only what the step itself could read, and
+unpacks plain files into the folder named, resolved to an absolute path first.
+
+In a GitHub job, `mroom-step` puts the step's output (its stderr joined to its stdout) between
+`::stop-commands::<random token>` and `::<token>::`, so nothing the step prints is a workflow command to the
+runner (`::add-mask::`, `::error::`, `::set-output::` and the like). Every process `mroom-step` and `mroom-holder`
+have is killed (`kill -KILL -1` as each user, until none is left) before and after each step.
+
+**The holder.** sudo runs the wrapper with no arguments at all unless `holder-args: any`. With arguments
+allowed, the wrapper is the boundary: it checks each argument against its own allowlist (fixed commands, a strict
+pattern for each value), keeps the secret out of argv (environment, a file descriptor or a file only it reads),
+calls each tool by absolute path, sets its own `PATH` and ignores the folder it is started from. sudo resets its
+environment.
+
+`step-env` refuses a name that reads like a credential (`*_TOKEN`, `*_KEY`, `*_SECRET`, `*_PASSWORD`, `*_DSN`
+and the like) or a runner's (`GITHUB_*`, `ACTIONS_*`, `RUNNER_*`, `CLAUDE*`), and `copy` refuses a path that
+leaves the working directory or goes through a link, since a copied tree may be the PR's.
+
+**The probe.** Unless `check: false`, the action then plants a value in the runner's environment, in a
+long-lived process's and in a file in the runner's home, and runs a hostile probe
+(`lib/runner-sandbox/probe.sh`) through `mroom-step`. It tries every "Never" above and reports each; the job
+fails, with one `::error::` per hole, if any succeeds, if any check is missing from its report, or if the
+planted value shows up. It also scans the local disks, as the step, for anything the step may write outside its
+home, its evidence and the sticky folders. Run it again yourself with `/usr/lib/mroom-sandbox/check.sh [--socket <path>]`.
+
+**Claude Code's own sandbox stays off.** Its subprocess env scrub (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`) runs
+each Bash command in `bwrap --unshare-user`, where sudo refuses the hop to `mroom-step` and `mroom-holder`: inside
+the user namespace root's files show as uid 65534, so sudo will not start, and bwrap's `no_new_privs` would stop it
+after that. `lib/runner-sandbox/bwrap-probe.sh` shows that on a real runner, and warns if it ever
+changes. mroom's CI runs it, the probe and three weakened sandboxes (`tests/sandbox/real-test.sh`) on every pull
+request.
 
 ## CI templates
 
