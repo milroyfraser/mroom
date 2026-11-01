@@ -80,10 +80,10 @@ tracker step and put its note on the pull request instead: in the body, or with 
       terminal; it follows our conversation live."
    3. Then seed it and keep it current through the run, as `room/README.md` says: one full PR card
       per PR (Review, QA, Release, Rollout, DoD, with a Build tab first until the PR exists), open
-      until DoD is complete. Plans go on `boards/plans`, in the PR cards' priority order. Every
-      Rollout step gets a timeline of what the platform should do, with live numbers; an unknown
+      until DoD is complete. Live shows only the next step and its cards; every other card sits in
+      Plans, in its `group`. Every Rollout step gets a timeline of what the platform should do, with live numbers; an unknown
       number carries a read-only query, never a guessed figure. A data investigation that feeds
-      decisions gets its own one-screen card on top (`kind: "investigation"` with `inv`, never the
+      decisions gets its own one-screen card (`kind: "investigation"` with `inv`, never the
       PR card's tabs); it closes once every decision is made. When the person gives their own
       conditions, frame it around them as gates.
 3. **Design gate.** If the issue is a new screen or a changed flow (see `/mroom:refine`, Design), it

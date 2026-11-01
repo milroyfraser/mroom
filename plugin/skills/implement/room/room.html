@@ -98,7 +98,7 @@ section.group,section.sec{display:grid;gap:10px}
 .ghead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
 h2{margin:0;font:700 13px/1.2 var(--body);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .ghead .hint{font-size:13px;color:var(--muted)}
-#focusCard{display:grid;gap:16px}
+#focusCard,.plancards{display:grid;gap:16px}
 /* An investigation card: a data investigation that feeds decisions, on one screen, on top of the PR stack. */
 .invcard{display:grid;gap:14px;padding:16px 18px;background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:10px;min-width:0}
 .invcard .ftitle{font:700 20px/1.25 var(--display);text-wrap:balance}
@@ -518,7 +518,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
   <section class="panel" id="panel-current" role="tabpanel" aria-labelledby="tab-current">
     <section class="nextstep" id="nextStep" hidden aria-live="polite"></section>
     <section class="sec" id="secFocus">
-      <div class="ghead"><h2>Issue and PR cards · top priority first</h2></div>
+      <div class="ghead" id="focusHead"><h2>For this step</h2></div>
       <div id="focusCard"></div>
     </section>
   </section>
@@ -529,7 +529,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
       <div class="btitle"><b>Plans</b><span class="meta" id="sessUpdated">Not filled in yet</span></div>
     </div>
     <div id="sessSections"></div>
-    <div class="empty" id="sessEmpty"><b>No open plan.</b><span>Claude writes each plan here as the conversation settles it; finished steps leave the list.</span></div>
+    <div class="empty" id="sessEmpty"><b>Nothing open in Plans.</b><span>Every open card that isn't part of your next step shows here, grouped with the cards it belongs with.</span></div>
     <p class="legend" id="plansLegend" aria-label="What the marks mean"><span><span class="mark you">!</span> Waiting on you</span><span><span class="mark doing">●</span> In progress</span><span><span class="mark partly">◐</span> Partly done</span><span><span class="mark todo">○</span> Not started</span><span><span class="mark warn">▲</span> Needs a look</span><span><span class="mark bad">✕</span> Blocked</span></p>
   </section>
 
@@ -1608,13 +1608,9 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     for (const d of deps) if (act.includes(d)) place(d);
     return out;
   }
-  function renderNextStep(focused) {
-    const box = $("nextStep");
-    box.replaceChildren();
-    delete box.dataset.waitSince;
-    delete box.dataset.waitLevel;
-    box.style.borderLeftColor = "";
-    box.removeAttribute("title");
+  /* The developer's next step: meta/next while a card it names is open (or it names none), else the first
+     ready to-do or PR card. Live shows the step and only the cards it names. */
+  function resolveNext(focused) {
     let n = nextMeta && nextMeta.title ? nextMeta : null;
     /* A next step that names a card which is done or gone is stale (the step it named has happened):
        ignore it and fall back to the first ready card, so the box never freezes on finished work. Only once the cards have loaded, so the box doesn't flicker. */
@@ -1628,7 +1624,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
       const firstTodo = todos.filter((i) => i.status !== "done" && i.kind !== "review" && !i.brief && (i.when === "decide" || i.when === "now")).sort(byRank)[0];
       if (firstTodo && (!focused.length || prio(firstTodo) < prio(focused[0]))) {
         const link = goodLinks(firstTodo.links)[0];
-        n = { title: String(firstTodo.title || "Untitled"), text: firstTodo.detail || (firstTodo.decision && firstTodo.decision.question) || "", url: link && link.url, at: firstTodo.addedAt };
+        n = { title: String(firstTodo.title || "Untitled"), text: firstTodo.detail || (firstTodo.decision && firstTodo.decision.question) || "", cardId: firstTodo.id, url: link && link.url, at: firstTodo.addedAt };
       }
     }
     if (!n) {
@@ -1645,6 +1641,15 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
         break;
       }
     }
+    return n;
+  }
+  function renderNextStep(n) {
+    const box = $("nextStep");
+    box.replaceChildren();
+    delete box.dataset.waitSince;
+    delete box.dataset.waitLevel;
+    box.style.borderLeftColor = "";
+    box.removeAttribute("title");
     box.hidden = !n;
     if (!n) return;
     /* The title scrolls to the card, which flashes an accent outline when reached. */
@@ -1671,48 +1676,44 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (row.childNodes.length) box.append(row);
     setTimeout(paintWaiting, 0);
   }
-  function renderWork() {
+  /* What each view holds: Live the next step's cards, Plans every other open card. */
+  const isInv = (i) => i.kind === "investigation";
+  const isPr = (i) => !isInv(i) && (i.kind === "review" || !!i.brief);
+  function selection() {
     const open = todos.filter((i) => i.status !== "done").sort(byRank);
-    /* Investigation cards (kind "investigation", with `inv`) sit on top of the PR stack, newest first. */
-    const isInv = (i) => i.kind === "investigation";
     const invs = open.filter((i) => isInv(i) && i.inv).sort((a, b) => String(b.addedAt || "").localeCompare(String(a.addedAt || "")));
-    const isPr = (i) => !isInv(i) && (i.kind === "review" || !!i.brief);
-    let stack = [...invs, ...ordered(open, actionable()).filter(isPr)];
-    /* The card(s) the developer's next step is about (meta/next.cardId and cardIds) always sit on top of the
-       stack, right under the box, whatever their priority. */
-    {
-      const nextIds = new Set([].concat(nextMeta && nextMeta.cardId ? nextMeta.cardId : [], (nextMeta && Array.isArray(nextMeta.cardIds) && nextMeta.cardIds) || []).map(String));
-      nextCardIds = nextIds;
-      if (nextIds.size) {
-        const pinned = [];
-        for (const id of nextIds) {
-          /* Any open card the step names joins the stack, even one with no rank or that is not a PR card. */
-          const hit = stack.find((i) => String(i.id) === id) || open.find((i) => String(i.id) === id);
-          if (hit && !pinned.includes(hit)) pinned.push(hit);
-        }
-        stack = [...pinned, ...stack.filter((i) => !pinned.includes(i))];
-      }
-    }
-    renderNextStep(stack);
+    const n = resolveNext([...invs, ...ordered(open, actionable()).filter(isPr)]);
+    const ids = n ? [].concat(n.cardId ? n.cardId : [], Array.isArray(n.cardIds) ? n.cardIds : []).map(String) : [];
+    const live = [];
+    for (const id of ids) { const hit = open.find((i) => String(i.id) === id); if (hit && !live.includes(hit)) live.push(hit); }
+    return { n, live, rest: open.filter((i) => !live.includes(i)) };
+  }
+  function cardNode(it) {
+    if (isInv(it) && it.inv) return investigationCard(it);
+    if (it.brief) return focusCard(it);
+    const ul = el("ul", "items");
+    ul.append(todoCard(it, ""));
+    return ul;
+  }
+  function renderWork() {
+    const { n, live } = selection();
+    nextCardIds = new Set(live.map((i) => String(i.id)));
+    renderNextStep(n);
     const fc = $("focusCard");
     fc.replaceChildren();
-    for (const it of stack) {
-      if (isInv(it) && it.inv) { fc.append(investigationCard(it)); continue; }
-      if (it.brief) { fc.append(focusCard(it)); continue; }
-      const ul = el("ul", "items");
-      ul.append(todoCard(it, ""));
-      fc.append(ul);
-    }
+    for (const it of live) fc.append(cardNode(it));
+    $("focusHead").hidden = !live.length;
     /* One legend sits once under the last card. */
-    if (stack.length) fc.append(reviewLegend());
-    else {
+    if (live.length) fc.append(reviewLegend());
+    else if (!n) {
       const e = el("div", "empty");
-      e.append(el("b", null, "No PR needs you right now."), el("span", null, "Other to-dos are in Plans."));
+      e.append(el("b", null, "Nothing needs you right now."), el("span", null, "Every open card is in Plans."));
       fc.append(e);
     }
     const cnt = $("countCurrent");
-    cnt.textContent = stack.length ? String(stack.length) : "";
-    cnt.classList.toggle("hot", stack.length > 0);
+    cnt.textContent = live.length ? String(live.length) : "";
+    cnt.classList.toggle("hot", live.some(waitsOnYou));    /* A card that leaves Live lands in Plans in the same redraw, so it never drops out of both. */
+    renderPlan();
   }
 
   /* The session strip under the title: issue, title, branch and start (meta/session). */
@@ -1797,13 +1798,43 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
       .map((sec) => Object.assign({}, sec, { items: (Array.isArray(sec.items) ? sec.items : []).filter((i) => i && i.state !== "done") }))
       .filter((sec) => sec.items.length);
   }
+  /* Plans: every open card not in Live, grouped by its `group`. A boards/plans section titled like a group shows
+     its open steps above that group's cards; a section with no cards still shows its steps. Groups follow the
+     boards/plans order, then their best priority; cards with no group go under "Other", last. */
   function renderPlan() {
     $("sessUpdated").textContent = updated(boards.plans && boards.plans.updatedAt ? boards.plans : null);
-    const plans = openPlans();
-    const n = renderSections("sessSections", plans);
-    $("sessEmpty").hidden = !!n;
-    const left = plans.reduce((k, sec) => k + sec.items.length, 0);
-    $("countSession").textContent = left ? String(left) : "";
+    const { rest } = selection();
+    const steps = new Map(openPlans().map((sec) => [String(sec.title || ""), sec]));
+    const groups = new Map();
+    for (const it of rest) {
+      const g = String(it.group || "").trim() || "Other";
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(it);
+    }
+    const best = (g) => Math.min(Infinity, ...(groups.get(g) || []).map(prio));
+    const later = [...groups.keys()].filter((g) => !steps.has(g))
+      .sort((a, b) => (a === "Other") - (b === "Other") || best(a) - best(b) || a.localeCompare(b));
+    const main = $("sessSections");
+    main.replaceChildren();
+    let cards = 0, left = 0;
+    for (const g of [...steps.keys(), ...later]) {
+      const sec = steps.get(g), list = groups.get(g) || [];
+      const items = sec ? sec.items : [];
+      if (!items.length && !list.length) continue;
+      const box = el("section", "sec plangroup");
+      const head = el("div", "ghead");
+      head.append(el("h2", null, g));
+      if (sec && sec.hint) head.append(el("span", "hint", String(sec.hint)));
+      box.append(head);
+      if (items.length) { const ul = el("ul", "rows"); for (const it of items) ul.append(boardRow(it)); box.append(ul); }
+      if (list.length) { const stack = el("div", "plancards"); for (const it of ordered(list, list)) stack.append(cardNode(it)); box.append(stack); }
+      main.append(box);
+      cards += list.length;
+      left += items.length;
+    }
+    if (cards) main.append(reviewLegend());
+    $("sessEmpty").hidden = !!(cards || left);
+    $("countSession").textContent = cards ? String(cards) : "";
   }
   function renderBox() {
     const b = boards.box;

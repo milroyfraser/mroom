@@ -583,7 +583,8 @@ if "room.html" in room_files:
         return m.group(0) if m else ""
     say(len(re.findall(r"\bfunction cardBlock\(", page)) == 1 and len(re.findall(r"\bfunction blockVerdict\(", page)) == 1,
         "room/room.html has one cardBlock and one blockVerdict")
-    say(all("blockVerdict(" in fn(f) for f in ("focusCard", "stepVerdict", "renderNextStep")),
+    # resolveNext picks the "Your next step" box's fallback; renderNextStep only draws it.
+    say(all("blockVerdict(" in fn(f) for f in ("focusCard", "stepVerdict", "resolveNext")),
         "room/room.html's card tabs, step verdicts and next-step box all go through blockVerdict")
     outside = page.replace(fn("cardBlock"), "")
     say(re.search(r"behindBy\s*>\s*0|Array\.isArray\(it\.blockers\)|checks === \"red\"", outside) is None,
