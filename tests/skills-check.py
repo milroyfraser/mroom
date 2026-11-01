@@ -361,6 +361,35 @@ for f in room_files:
         rest = plain.replace(COPYRIGHT, "")
         for word in [w.strip() for w in read(words).split("\n") if w.strip()]:
             say(re.search(word, rest, flags=re.I) is None, f"{label} names none of the private words (one of them)")
+# The Room's rows are data. Only the owner and Editors write them: by default anyone the page is shared with as a
+# Contributor could, and the page shows every card, copy command and next step as Claude's. And the page's
+# comments to Claude, which go out as the viewer's own words, name the card that changed and never quote a row.
+ROOM_CAPS = '{comments:{}, db:{rules:[{path:"", write:"admin"}]}, user:{scopes:["profile"]}, assets:{}}'
+say(bool(impl) and ROOM_CAPS in impl[3] and "db:{}" not in impl[3],
+    f"implement publishes the Room with {ROOM_CAPS}, and never with db:{{}}")
+if "README.md" in room_files:
+    readme = read(os.path.join(room_dir, "README.md"))
+    say(ROOM_CAPS in readme and "db:{}" not in readme, f"room/README.md publishes the Room with {ROOM_CAPS}, and never with db:{{}}")
+if "room.html" in room_files:
+    page = read(os.path.join(room_dir, "room.html"))
+    # Only tellClaude reaches sendToClaude, and every call of it is found.
+    say(len(re.findall(r"\bsendToClaude\(", page)) == 1
+        and re.search(r"\bfunction tellClaude\([^)]*\)\s*\{[^}]*\bsendToClaude\(", page) is not None,
+        "room/room.html sends to Claude only through tellClaude")
+    calls = len(re.findall(r"\btellClaude\(", page)) - len(re.findall(r"\bfunction tellClaude\(", page))
+    sends = re.findall(r"\btellClaude\(\w+,\s*(.*?)\);", page)
+    # A send's text is string literals and cardRef(it) alone: nothing read off a row, no text built elsewhere.
+    lit = r'"(?:[^"\\\n]|\\.)*"'
+    part = rf"(?:{lit}|cardRef\(it\))"
+    loose = [s for s in sends if not re.fullmatch(rf"\s*{part}(?:\s*\+\s*{part})*\s*", s)]
+    say(calls > 0 and len(sends) == calls and not loose,
+        f"room/room.html tells Claude only string literals and cardRef(it) ({calls} sends, {len(sends)} read: {loose[:1]})")
+    # cardRef names a card by its plain id alone, and a row's id is always its document's.
+    ref = re.search(r"\bfunction cardRef\(it\)\s*\{(.*?)\n  \}", page, flags=re.S)
+    say(bool(ref) and re.search(r"\bit\.(?!id\b)", ref.group(1)) is None and "/^[A-Za-z0-9._-]{1,64}$/" in ref.group(1),
+        "room/room.html's cardRef reads only a card's id, and names it only when it is plain")
+    say(re.search(r"\bconst rows = [^\n]*d\.data\(\)[^\n]*\{ id: d\.id \}", page) is not None,
+        "room/room.html keeps a row's id its document's, whatever its data holds")
 
 # --- The settings fragments still ask on a release --------------------------------------------------------
 frag = {}

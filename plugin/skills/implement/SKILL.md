@@ -45,8 +45,8 @@ tracker step and put its note on the pull request instead: in the body, or with 
 2. **Session Room (required, now).** Before any other step:
    1. Copy `room/room.html` (next to this `SKILL.md`) to your scratchpad, set its `<title>` to
       `<id> · mroom`, and publish it as a **new** artifact (icon `checklist`, capabilities
-      `{comments:{}, db:{}, user:{scopes:["profile"]}, assets:{}}`). Never reuse another
-      session's page.
+      `{comments:{}, db:{rules:[{path:"", write:"admin"}]}, user:{scopes:["profile"]}, assets:{}}`,
+      so only its owner and Editors write its data). Never reuse another session's page.
    2. Send the person this line: "Your session room: <link>. Open it side by side with this
       terminal; it follows our conversation live."
    3. Then seed it and keep it current through the run, as `room/README.md` says: one full PR card
