@@ -81,7 +81,9 @@ Record the retrospective where the project is managed: one report issue in the t
 or titled as a retrospective with its date. It lists each learning, its observation, and per action
 item the developer's decision (confirmed, declined, or not read yet), and later what was done with a
 link. Put its link in `meta/winddown.report`; the page shows it. When the tracker write needs the
-developer (a refused command, or a rule that asks first), give them the ready command and the text.
+developer (a refused command, or a rule that asks first), give them the ready command and the text. When
+`mroom tracker` exits 3, there is no tracker: keep the report as a Markdown file the developer can
+file where they manage the project, and link it in the chat.
 
 Decisions arrive after this skill ends, so every regular check and every restart looks at
 `learnings`: for each confirmed action item without `acted[i]`, act on it as its `rec` says (start a
