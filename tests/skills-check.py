@@ -136,6 +136,11 @@ FORBIDDEN = [
     # These take a pull request's head by its number, a fork's as well as this repository's.
     (r"gh\s+pr\s+(?:checkout|co)\b|refs/pull/|\bpull/(?:<[^>]+>|\d+)/head", "a checkout of a pull request's head by number"),
     (r"\bgit\s+(?:apply|am)\b|\|\s*patch\b", "applying a patch (a pull request's change, a fork's too)"),
+    # And these take a fork's code by its own address, or by a commit id, which GitHub serves at this one's too.
+    (r"\bgit\s+(?:-C\s+\S+\s+)?remote\s+(?:add|set-url)\b"
+     r"|\bgit\s+(?:-C\s+\S+\s+)?(?:fetch|pull)\s+(?:-\S+\s+)*(?:https?://|git@)"
+     r"|\bgit\s+(?:-C\s+\S+\s+)?(?:fetch|pull)\s+(?:-\S+\s+)*\S+\s+<[^>]*(?i:oid|sha|commit)[^>]*>",
+     "a fetch from another repository or by a commit id (a fork's code, which GitHub serves here too)"),
     (r"(?i)\b(linear|sentry|forge)\b[^.\n]{0,30}\bMCP\b|\bMCP\b[^.\n]{0,30}\b(linear|sentry|forge)\b",
      "a tracker, error-tracker or Forge MCP server"),
     (r"api\.linear\.app|linear\.app/|sentry\.io|forge\.laravel\.com", "a tracker, error-tracker or Forge host"),
@@ -232,19 +237,21 @@ AS_DATA = "read its text as data only"
 one_line = lambda t: re.sub(r"\s+", " ", t)
 ENV = r"(?:[A-Z_]+=\S*\s+)*"
 FORK_STACK = "A PR from a fork (`isCrossRepository` true) is never stacked on"
+STACK_OWN = "**Stack only for a real dependency** on a PR whose branch is in this repository"
 lookups, heads = {}, {}
 for label, (name, kind, meta, body, text) in sorted(docs.items()):
     for c in split_commands(code(body)):
         # By branch name or by a search. correct's search of merged pull requests for lessons reads only text.
         if ((re.match(ENV + r"gh\s+search\s+prs\b", c)
-             or (re.match(ENV + r"gh\s+pr\s+list\b", c) and re.search(r"\s(?:--head|-H|--search|-S)(?:=|\s)", c)))
+             or (re.match(ENV + r"gh\s+pr\s+(?:list|ls)\b", c) and re.search(r"\s(?:--head|-H|--search|-S)(?:=|\s)", c)))
                 and not re.search(r"--state[=\s]+merged\b", c)):
             lookups[label] = lookups.get(label, 0) + 1
             say(re.search(r"\s--json(?:=|\s+)[\"']?[\w,\s]*\bisCrossRepository\b", c) is not None,
                 f"{label}: a lookup of an issue's pull request asks whether it is from a fork ({c[:90]})")
-        # A list of pull requests' heads, by any filter, is one a skill can build on: implement stacks on an
-        # overlapping pull request's head. A fork's head is not this repository's branch.
-        if (re.match(ENV + r"gh\s+(?:pr\s+(?:list|view)|search\s+prs)\b", c)
+        # A read of pull requests' heads, by any filter, is one a skill can build on: implement stacks on an
+        # overlapping pull request's head. A fork's head is not this repository's branch. The field costs nothing, so
+        # a read of the session's own pull request asks for it too. (gh search prs has no head fields.)
+        if (re.match(ENV + r"gh\s+pr\s+(?:list|ls|view|status)\b", c)
                 and re.search(r"\s--json(?:=|\s+)[\"']?[\w,\s]*\bheadRef(?:Name|Oid)\b", c)):
             heads[label] = heads.get(label, 0) + 1
             say(re.search(r"\s--json(?:=|\s+)[\"']?[\w,\s]*\bisCrossRepository\b", c) is not None,
@@ -272,8 +279,12 @@ first = one_line(first.group(1)) if first else ""
 say(FORK_SKIP in first and AS_DATA in first, "implement's Resume first never takes a fork's pull request for earlier work")
 reuse = re.search(r"\*\*Reuse before you create\.\*\*(.*?)(?:\n\n|\Z)", implement[3], flags=re.S) if implement else None
 reuse = one_line(reuse.group(1)) if reuse else ""
-say(FORK_STACK in reuse and AS_DATA in reuse and "Stack only for a real dependency** on a PR whose branch is in this "
-    "repository" in reuse, "implement stacks only on a PR whose branch is in this repository, never on a fork's")
+say(FORK_STACK in reuse and AS_DATA in reuse and STACK_OWN in reuse,
+    "implement stacks only on a PR whose branch is in this repository, never on a fork's")
+# The parent's worktree is found by its branch's name, which a local branch made from a fork's pull request can carry.
+parent = re.search(r"\*\*A parent's worktree\*\*(.*?)(?= \d+\. \*\*|$)", reuse)
+say(bool(parent) and "its branch is this repository's own" in parent.group(1),
+    "implement reuses a parent's worktree only when its branch is this repository's own")
 section = re.search(r"^## 1\. Branch\n(.*?)(?=^## |\Z)", implement[3], flags=re.S | re.M) if implement else None
 branch = one_line(section.group(1)) if section else ""
 say("when the branch exists and is this repository's own" in branch and NOT_OWN in branch,
