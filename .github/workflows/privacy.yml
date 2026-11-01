@@ -6,14 +6,18 @@ name: privacy
 # regular expression per line. A hit names its place and the entry's number, never the word.
 #
 # The job holds the secret, so it never runs the pull request's code. pull_request_target runs the default
-# branch's copy of this file; the job runs only for a pull request based on the default branch, so that copy is
-# the one the environment admits. The script comes from this file's own commit (base/), run with python3 -I. The
-# pull request is fetched by its two commits into a bare repository (pr.git): git reads it as data, and no working
-# tree, hook or attribute of it is used. The script masks each entry before it prints anything, and nothing here
-# traces commands (no set -x). With no secret the check passes with a notice.
+# branch's copy of this file, whatever the pull request's base (GitHub's rule since December 2025), and the
+# privacy environment admits only a run from the default branch. The job also skips a pull request based on
+# another branch, so a pull request is only ever checked against the default branch. The script comes from this
+# file's own commit (base/), run with python3 -I. The pull request is fetched by its two commits into a bare
+# repository (pr.git): git reads it as data, and no working tree, hook or attribute of it is used. The script
+# masks each entry before it prints anything, and nothing here traces commands (no set -x). With no secret the
+# check passes with a notice.
 #
-# A fork's pull request is not checked: its annotations are public, so anyone could test guesses against the list.
-# The owner runs tools/privacy_check.py on it before merging (README). Dependabot's runs get no secrets.
+# A fork's pull request is not checked, nor one whose author is not the repository's owner, a member or a
+# collaborator (OWNER, MEMBER or COLLABORATOR): its annotations are public, so anyone could test guesses against
+# the list. The owner runs tools/privacy_check.py on it before merging (README). Dependabot's runs get no
+# secrets.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
@@ -31,6 +35,7 @@ jobs:
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.base.ref == github.event.repository.default_branch &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) &&
       github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 5

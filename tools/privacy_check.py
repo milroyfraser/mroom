@@ -4,7 +4,7 @@ that must never reach this public repository).
 
     tools/privacy_check.py [--base <ref>] [--head <ref>]
 
-It runs in a git repository (a bare one too) and reads, for <base>...<head>:
+It runs in a git repository (a bare one too) and reads, from the merge base of <base> and <head> to <head>:
   - every path the change adds or changes (empty files too; a deleted path is not the change's text);
   - every line the change adds, as text whatever the repository's attributes say, NUL bytes dropped;
   - each commit in <base>..<head>: its author and committer ("name <email>") and its message;
@@ -85,15 +85,20 @@ def text(raw):
 DIFF = ["--no-renames", "--no-ext-diff", "--no-textconv", "--text", "--ignore-submodules=none", "--no-relative"]
 
 
-def changed_paths(base, head):
-    """Every path the change adds or changes, as git's own bytes."""
-    names = git("diff", "--name-only", "-z", "--diff-filter=d", *DIFF, f"{base}...{head}")
+def merge_base(base, head):
+    """The commit the change starts from, found once: base...head means the diff from it to head."""
+    return text(git("merge-base", base, head)).strip()
+
+
+def changed_paths(start, head):
+    """Every path the change adds or changes since start, as git's own bytes."""
+    names = git("diff", "--name-only", "-z", "--diff-filter=d", *DIFF, start, head)
     return [p for p in names.split(b"\0") if p]
 
 
-def added_lines(base, head, path):
-    """(line number, text) for every line the change adds to path."""
-    raw = git("diff", "--no-color", "-U0", "--src-prefix=a/", "--dst-prefix=b/", *DIFF, f"{base}...{head}",
+def added_lines(start, head, path):
+    """(line number, text) for every line the change adds to path since start."""
+    raw = git("diff", "--no-color", "-U0", "--src-prefix=a/", "--dst-prefix=b/", *DIFF, start, head,
               "--", b":(top,literal)" + path)
     out, in_hunk, line = [], False, 0
     for row in raw.split(b"\n"):
@@ -170,7 +175,8 @@ def main():
             if pattern.search(s):
                 hits.append((where, file, line, n))
 
-    paths = changed_paths(opts.base, opts.head)
+    start = merge_base(opts.base, opts.head)
+    paths = changed_paths(start, opts.head)
     added = 0
     for k, raw in enumerate(paths, 1):
         path = text(raw)
@@ -178,7 +184,7 @@ def main():
         check(path, f"the path of changed file {k}")
         # A path that matches is never printed: it is named by its place among the change's files.
         shown = path if len(hits) == before else f"changed file {k}"
-        for line, s in added_lines(opts.base, opts.head, raw):
+        for line, s in added_lines(start, opts.head, raw):
             added += 1
             check(s, f"{shown}:{line}", file=shown if shown == path else None, line=line)
     for short, author, committer, message in commits(opts.base, opts.head):
@@ -188,6 +194,7 @@ def main():
             check(s, f"commit {short} message line {i}")
     for name, var in (("PR title", "PR_TITLE"), ("PR body", "PR_BODY")):
         for i, s in enumerate(os.environ.get(var, "").split("\n"), 1):
+            s = s.rstrip("\r")
             check(s, f"{name} line {i}" if name == "PR body" else name)
     branch = os.environ.get("PR_HEAD_REF")
     if branch is None and not actions:

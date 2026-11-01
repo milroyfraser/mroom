@@ -297,6 +297,28 @@ t_actions_masks_first_and_escapes() {
   expect_no_words
 }
 
+# A body written on Windows ends its lines with CR: an anchored entry still matches the line.
+t_title_and_body_lose_a_trailing_cr() {
+  repo
+  change notes.txt 'plain' 'docs: plain'
+  export MROOM_PRIVATE_WORDS=$'^zebrafjord$' PR_TITLE=$'zebrafjord\r' PR_BODY=$'first\r\nzebrafjord\r\n'
+  check
+  expect_rc 1
+  expect_out_has 'PR title: matches entry 1 of the private list'
+  expect_out_has 'PR body line 2: matches entry 1 of the private list'
+  expect_no_words
+}
+
+# The change runs from the merge base: a word the base branch gained after the change began is not the change's.
+t_the_base_moving_on_is_no_hit() {
+  repo
+  change notes.txt 'plain' 'docs: plain'
+  g checkout -q base && change other.txt 'zebrafjord' 'docs: base moves on' && g checkout -q work
+  export MROOM_PRIVATE_WORDS="$WORDS"
+  check
+  expect_rc 0
+}
+
 # --- The workflow ---------------------------------------------------------------------------------------------
 # has <what> <fixed line>: the workflow holds the line, whole, after its indentation.
 has() { if grep -qxE " *$(printf '%s' "$2" | sed 's/[][\.*^$+?(){}|/]/\\&/g')" "$WF"; then ok; else fail "privacy.yml: $1 ($2)"; fi; }
@@ -305,17 +327,24 @@ t_workflow_shape() {
   has "runs on pull_request_target, so its own copy is the default branch's" 'pull_request_target:'
   has "re-runs when the title or body is edited" 'types: [opened, synchronize, reopened, edited]'
   if grep -qE '^  (pull_request|push|workflow_run|workflow_dispatch):' "$WF"; then fail "privacy.yml has another trigger"; else ok; fi
-  # Same-repository pull requests on the default branch only: a fork's annotations would be public.
-  has "skips a fork's pull request" "github.event.pull_request.head.repo.full_name == github.repository &&"
-  has "only for a pull request on the default branch" 'github.event.pull_request.base.ref == github.event.repository.default_branch &&'
-  has "skips Dependabot" "github.actor != 'dependabot[bot]'"
-  expect_true "the condition is the job's" grep -qzE 'name: privacy
+  # The job's own condition, exactly: same-repository pull requests on the default branch, by its owner, a member or
+  # a collaborator, never Dependabot. A fork's annotations would be public. A condition on a step instead would fail here.
+  local want
+  want="  privacy:
+    name: privacy
     if: >-
-' "$WF"
-  # The secret lives in an environment that admits the default branch alone.
-  expect_true "the privacy environment, no deployment" grep -qE '^    environment:$' "$WF"
-  has "the environment is privacy" 'name: privacy'
-  has "no deployment" 'deployment: false'
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
+      contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), github.event.pull_request.author_association) &&
+      github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest"
+  expect_true "the job's condition is exactly the one wanted" [ "$(grep -B2 -A5 -xF '    if: >-' "$WF")" = "$want" ]
+  expect_true "the job has one condition and no step has one" [ "$(grep -cE '^ +if:' "$WF")" = 1 ]
+  # The secret lives in an environment that admits the default branch alone; exactly this block.
+  want="    environment:
+      name: privacy
+      deployment: false"
+  expect_true "the job's environment is privacy, with no deployment" [ "$(grep -A2 -xF '    environment:' "$WF")" = "$want" ]
   # Read-only.
   has "contents: read" 'contents: read'
   if grep -vE '^ *#' "$WF" | grep -qE ': *write\b|write-all'; then fail "privacy.yml asks for a write permission"; else ok; fi
@@ -402,6 +431,8 @@ test_case hidden-plus-plus t_hidden_plus_plus_line
 test_case hidden-record-separator t_hidden_record_separator
 test_case hidden-utf16 t_hidden_utf16
 test_case hidden-noprefix t_hidden_noprefix
+test_case cr-lines t_title_and_body_lose_a_trailing_cr
+test_case base-moves-on t_the_base_moving_on_is_no_hit
 test_case no-list t_no_list_passes_with_a_notice
 test_case list-from-a-file t_list_from_a_file
 test_case list-from-gitignored-file t_list_from_the_gitignored_file

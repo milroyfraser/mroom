@@ -2083,16 +2083,18 @@ With no list, the check passes with a notice.
 The check is a backstop, not a gate. CI runs once a pull request is open, and by then its text is already public.
 
 - **CI** (`.github/workflows/privacy.yml`): the owner sets it up in two steps.
-  1. Create a GitHub environment named `privacy` (Settings → Environments). Under "Deployment branches and
-     tags", choose "Selected branches and tags" and add only the default branch.
+  1. Create a GitHub environment named `privacy` (Settings → Environments) **before the workflow first runs**.
+     Under "Deployment branches and tags", choose "Selected branches and tags" and add only the default branch.
+     If the workflow runs first, GitHub creates the environment itself, with no branch rule.
   2. Add the environment secret `MROOM_PRIVATE_WORDS`, with one entry per line. Paste it in the environment's
      page, or pipe the list into `gh secret set MROOM_PRIVATE_WORDS --env privacy` from a file kept outside the
      repository.
 
   Until the secret is set, the job passes with a notice. The job holds the secret, so it never runs the pull
   request's code:
-  - it runs on `pull_request_target`, which uses the default branch's copy of the workflow;
-  - it runs only for a pull request on the default branch;
+  - it runs on `pull_request_target`, which uses the default branch's copy of the workflow whatever the pull
+    request's base;
+  - it runs only for a pull request based on the default branch;
   - it takes the script from that workflow's own commit;
   - it fetches the pull request's two commits into a bare repository, which it reads as data;
   - it masks each entry before it prints anything.
@@ -2100,11 +2102,17 @@ The check is a backstop, not a gate. CI runs once a pull request is open, and by
   A change to the script or the workflow takes effect once it is merged. Editing the title or body runs the job
   again.
 
-  A fork's pull request is **not** checked, and neither is Dependabot's: a fork's annotations are public, so
-  anyone could test guesses against the list. Before you merge a fork's pull request, run the check yourself:
+  The job checks a pull request only when it comes from this repository, its author is the repository's owner, a member
+  or a collaborator (`OWNER`, `MEMBER` or `COLLABORATOR`), and it is not Dependabot's. A fork's annotations are public, so anyone could test
+  guesses against the list. For any other pull request, run the check yourself before you merge it, with its
+  title, body and branch name:
 
   ```bash
-  git fetch origin pull/<n>/head
+  n=<number>
+  git fetch origin "pull/$n/head"
+  PR_TITLE="$(gh pr view "$n" --json title --jq .title)" \
+  PR_BODY="$(gh pr view "$n" --json body --jq .body)" \
+  PR_HEAD_REF="$(gh pr view "$n" --json headRefName --jq .headRefName)" \
   MROOM_PRIVATE_WORDS_FILE=~/words.txt tools/privacy_check.py --base origin/main --head FETCH_HEAD
   ```
 
