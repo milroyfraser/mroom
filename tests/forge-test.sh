@@ -238,6 +238,17 @@ t_a_body_can_come_from_stdin() {
   run cat "$T/curl.log"; expect_out_has 'body={"environment":"SECRET=1"}'
 }
 
+t_an_inline_body_on_a_secret_path_is_refused() {
+  fake_tools; box; answer 200 '{}'
+  run "$FORGE_API" --secret PUT sites/1/environment --write --data '{"environment":"SECRET=1"}'
+  expect_rc 2; expect_err_has "--data -"
+  run "$FORGE_API" --secret POST sites/1/deployments/deploy-hook --write --data '{}'
+  expect_rc 2; expect_err_has "--data -"
+  expect_true "Forge was called" [ "$(calls)" = 0 ]
+  run bash -c "printf '%s' '{\"environment\":\"SECRET=1\"}' | '$FORGE_API' --secret PUT sites/1/environment --write --data -"
+  expect_rc 0
+}
+
 t_invalid_json_and_a_get_with_a_body_are_refused() {
   fake_tools; box; answer 200 '{}'
   run "$FORGE_API" POST sites --write --data '{bad'; expect_rc 2; expect_err_has "--data is not valid JSON"
@@ -351,6 +362,7 @@ test_case query-with-brackets t_a_query_with_brackets_is_a_plain_path
 test_case secret-paths-need-secret t_paths_that_return_secrets_need_secret_however_they_are_spelled
 test_case body-through-file t_a_body_reaches_curl_through_a_file
 test_case body-from-stdin t_a_body_can_come_from_stdin
+test_case secret-inline-body-refused t_an_inline_body_on_a_secret_path_is_refused
 test_case bad-input-refused t_invalid_json_and_a_get_with_a_body_are_refused
 test_case token-file-private t_the_token_file_must_be_private
 test_case runner-environment t_a_runner_passes_everything_in_the_environment

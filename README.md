@@ -332,7 +332,8 @@ forge-api --secret GET sites/123/environment
   asks first.
 - The token reaches curl on stdin, never a command line or a file, and is not printed even under `bash -x`.
   `--data -` reads the body from stdin; use it for a body with secrets in it, since an inline `--data`
-  shows in the process list.
+  shows in the process list. A path that needs `--secret` takes its body only from stdin: an inline
+  `--data` is refused there.
 - A 503 is retried, and so is a 502 for GET, PUT and DELETE. A 429 waits for Forge's `Retry-After` (up to
   120 seconds, else 20). A read that timed out is retried; a write never is, since it may have run.
 

@@ -238,7 +238,7 @@ t_an_invalid_mroom_toml_fails_and_stops_the_app_checks() {
   doctor_app
   expect_rc 0
   expect_out_has "warn  config: "
-  expect_out_has "unknown key persona.nmae"
+  expect_out_has "unknown key \"persona.nmae\""
 }
 
 t_qa_off_skips_the_qa_checks() {

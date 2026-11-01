@@ -15,7 +15,8 @@
 # --secret. The two flags mark a call so that a permission rule allowing plain reads never matches it and
 # the call asks first. The token comes from ~/.config/mroom/secrets/forge-token (mode 600) and is never
 # printed. --data - reads the body from stdin: use it for a body with secrets in it, since an inline --data
-# shows in the process list.
+# shows in the process list. A path that needs --secret takes its body only that way: an inline --data is
+# refused there.
 #
 # Exit codes: 0 done, 1 Forge or the client failed, 2 refused before calling Forge.
 set -euo pipefail
@@ -40,13 +41,13 @@ method="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
 path="$2"
 shift 2
 
-write=0 data="" has_data=0
+write=0 data="" has_data=0 inline=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --write) write=1; shift ;;
     --data)
       [ "$#" -ge 2 ] || refuse "--data needs JSON, or - to read it from stdin"
-      if [ "$2" = - ]; then data="$(cat)"; else data="$2"; fi
+      if [ "$2" = - ]; then data="$(cat)"; else data="$2" inline=1; fi
       has_data=1
       shift 2
       ;;
@@ -78,7 +79,9 @@ lower="$(printf '%s' "$part" | tr '[:upper:]' '[:lower:]')"
 case "$lower" in
   env | */env | env/* | */env/* | *environment* | *credentials* | *deploy-hook* | *webhooks* | *heartbeats* \
     | */output | */output/*)
-    [ "$secret" = 1 ] || refuse "$path returns secrets; run it as: forge-api --secret $method $path" ;;
+    [ "$secret" = 1 ] || refuse "$path returns secrets; run it as: forge-api --secret $method $path"
+    # A body sent to a secret path likely holds secrets, and an inline --data shows in the process list.
+    [ "$inline" = 0 ] || refuse "a body for $path goes on stdin, not inline: ... | forge-api --secret $method $path --write --data -" ;;
 esac
 
 need curl jq
