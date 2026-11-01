@@ -6,9 +6,12 @@
 #   - every skill keeps the safety rules, and none runs a merge, an approval, a release, a deploy, a secret
 #     read or a tracker call except through `mroom tracker` and `mroom errors`;
 #   - a skill that calls `mroom tracker` or `mroom errors` says what to do when it exits 3 (no tracker);
-#   - every lookup of an issue's pull request asks whether it is from a fork, a skill that resumes earlier
-#     work never takes a fork's pull request or someone else's branch for it, and none checks a pull
-#     request's head out by its number or applies its change as a patch;
+#   - every lookup of an issue's pull request, and every `gh pr list`, `view` or `status` that reads pull
+#     requests' heads, asks whether each is from a fork; a skill that resumes earlier work never takes a
+#     fork's pull request or someone else's branch for it; implement stacks only on a pull request whose
+#     branch is in the repository, in a parent's worktree only on the repository's own branch; and none
+#     checks a pull request's head out by its number, fetches from another repository or by a commit id,
+#     or applies a pull request's change as a patch;
 #   - the release skill asks before it drafts, only drafts, and the settings fragments still ask on a release;
 #   - implement publishes its Session Room first, and room/ holds the page and its README, each keeping the
 #     footer copyright and naming no host but github.com and Google Fonts;
