@@ -73,7 +73,8 @@
 #
 # A broken guard must not brick every session: without jq or awk it allows and warns. A command it cannot
 # check (over 256 KB, over 3000 simple commands, over 2000 words in a simple command or 20,000 in all, over
-# 200 commands inside other commands, more than 128 interpreter or inline-code commands, or one the tokeniser
+# 200 commands inside other commands, more than 128 interpreter or inline-code commands, a command inside it
+# over 256 KB, a printf piped into another command that could write more than that, or one the tokeniser
 # fails on) is refused instead.
 #
 # Time is part of the contract: a hook that runs past its timeout is non-blocking, so the command runs. The
@@ -82,7 +83,10 @@
 # `tr` per simple command at most, see lower_all) and the caps above bound each kind of work, but several of
 # them at their cap, or a path super-linear in the command's size, can still add up; so check_segment also
 # stops at a wall-clock DEADLINE (see DEADLINE), failing closed, so checking lasts at most DEADLINE plus one
-# simple command. A fork per argument once let `cat x x x ...` with 100k words, then a merge, run past it.
+# simple command. One simple command's check is bounded too: every string it hands on to be checked is held to
+# 256 KB, and a printf piped into it is bounded before it is run (see PRINTF_BOUND), since a few bytes of
+# printf can write gigabytes. A fork per argument once let `cat x x x ...` with 100k words, then a merge, run
+# past it.
 #
 # Bash 3.2 compatible (macOS). Tests: tests/guard-test.sh. No `set -u`: bash 3.2 treats an empty
 # "${array[@]}" as unbound, and any exit other than 0 or 2 lets the command through.
@@ -140,8 +144,9 @@ PARSES=0
 # timeout, after which the hook is non-blocking and the command runs unchecked. So check_segment, the one
 # entry every simple command (and every find -exec group) goes through, stops and fails closed once checking
 # has run this many seconds ($SECONDS is a bash builtin, no fork). The guarantee is then DEADLINE plus the
-# work of one more simple command (a single scan: well under a second on a fast host, a few seconds on a much
-# slower one), kept under hooks.json's 60s and far above any real command (which decides in under a second).
+# work of one more simple command (a single scan of at most MAX_BYTES, whatever that command builds: well under
+# a second on a fast host, a few seconds on a much slower one), kept under hooks.json's 60s and far above any
+# real command (which decides in under a second).
 # Overridable for tests and for an operator who sets a lower hook timeout; see the sanitiser below.
 DEADLINE=${MROOM_GUARD_DEADLINE:-30}
 # A plain one- or two-digit count of seconds, no leading zero (so never 0), and at most 45, which leaves room
@@ -383,8 +388,64 @@ check_code() {
   fi
 }
 
+# PRINTF_BOUND: an awk program that reads printf's format and arguments (on stdin, each ended by \037) and
+# prints an upper bound on the bytes bash's printf builtin writes for them; "over" past -v limit, or when a `*`
+# takes a width or precision from an argument; or "bad" for a conversion printf refuses (it then stops with an
+# error). It reads the format as builtins/printf.def does (bash 5.3): a backslash escape never takes in a `%`
+# (an unknown one prints the backslash and reads on), and a conversion is `%`, the flags #'-+ 0, a width, `.`
+# and a precision (an optional `-`, then digits), the length modifiers hjlLtz and one of cCsSbqQn(diouxXeEfFgGaA.
+# Per pass over the format it allows the format itself (escapes only shrink), plus each conversion's width and
+# precision, plus 64 bytes for a number or 128 for a %(...)T time (bash's own buffer); each argument adds four
+# times its length and 8 (%q at most quadruples it), and 5000 more when it is a float in an exponent or hex
+# form and the format has %f (a long double's integer part has under 5000 digits). The format is reused while
+# arguments remain, so it runs ceil(arguments / conversions) passes. A %( without its ) and T prints the `%`
+# and reads on, as bash does; parentheses are matched in one pass, so no format makes this quadratic.
+# shellcheck disable=SC2016 # $0 and the rest are awk's, not the shell's
+PRINTF_BOUND='
+BEGIN { RS = "\037" }
+NR == 1 { f = $0; next }
+{ n++; ab += length($0); if ($0 ~ /[eEpP][-+]?[0-9]|0[xX]/) ae++ }
+END {
+  m = split(f, C, "")
+  for (i = 1; i <= m; i++) {
+    if (C[i] == "(") ST[++sp] = i
+    else if (C[i] == ")" && sp > 0) PM[ST[sp--]] = i
+  }
+  for (i = 1; i <= m; i++) {
+    if (C[i] != "%") continue
+    j = i + 1
+    if (C[j] == "%") { i = j; continue }
+    while (C[j] != "" && index("#\047-+ 0", C[j])) j++
+    if (C[j] == "*") { print "over"; exit }
+    w = 0; d = 0
+    while (C[j] ~ /^[0-9]$/) { w = w * 10 + C[j]; j++; if (++d > 9) { print "over"; exit } }
+    p = 0
+    if (C[j] == ".") {
+      j++
+      if (C[j] == "*") { print "over"; exit }
+      if (C[j] == "-") j++
+      d = 0
+      while (C[j] ~ /^[0-9]$/) { p = p * 10 + C[j]; j++; if (++d > 9) { print "over"; exit } }
+    }
+    while (C[j] != "" && index("hjlLtz", C[j])) j++
+    c = C[j]
+    if (c == "(") {
+      if (!(j in PM) || C[PM[j] + 1] != "T") continue
+      v = 128; j = PM[j] + 1
+    } else if (c == "f" || c == "F") { v = 64; fl = 1 }
+    else if (c != "" && index("diouxXeEgGaA", c)) v = 64
+    else if (c != "" && index("cCsSbqQn", c)) v = 3
+    else { print "bad"; exit }
+    s++; fx += w + p + v; i = j
+  }
+  ps = (s > 0 && n > s) ? int((n + s - 1) / s) : 1
+  b = ps * (m + fx) + 4 * ab + 8 * n + (fl ? 5000 * ae : 0)
+  if (b > limit) print "over"; else printf "%d\n", b
+}'
+
 # static_output RECORD: what a pipeline stage writes when that is knowable without running it
-# (echo or printf arguments, cat of a heredoc or here-string). Fails when it is not.
+# (echo or printf arguments, cat of a heredoc or here-string). Fails when it is not (status 1), and refuses to
+# work it out (status 3) when a printf could write more than MAX_BYTES (see PRINTF_BOUND).
 static_output() {
   local -a f w=()
   local meta k a cmd out="" doc="" has_doc=0 from_file=0
@@ -408,9 +469,22 @@ static_output() {
       out=$(builtin echo "${w[@]:1}") || return 1
       ;;
     printf)
-      [ "${#w[@]}" -gt 1 ] || return 1
+      local -a pa=("${w[@]:1}")
+      local bound
+      # `--` ends printf's options (bash, zsh, dash and coreutils alike), so the word after it is the format.
+      # Handed on behind the hook's own `--`, it was itself taken as the format and the pipe read as "--".
+      [ "${pa[0]:-}" = "--" ] && pa=("${pa[@]:1}")
+      [ "${#pa[@]}" -gt 0 ] || return 1
+      # Bounded before it runs: a width or precision, a float of a huge value or a format reused for every
+      # argument writes far more than the command holds (gigabytes from a few bytes), and what it writes is
+      # read and checked inside this one simple command's check, which the DEADLINE cannot interrupt.
+      bound=$(printf '%s\037' "${pa[@]}" | "$AWK" -v limit="$MAX_BYTES" "$PRINTF_BOUND") || return 1
+      case "$bound" in
+        over) return 3 ;;
+        '' | *[!0-9]*) return 1 ;; # a conversion printf refuses: it would fail, so it is not run
+      esac
       # shellcheck disable=SC2059 # the format is the command's own, on purpose
-      out=$(builtin printf -- "${w[@]:1}" 2>/dev/null) || return 1
+      out=$(builtin printf -- "${pa[@]}" 2>/dev/null) || return 1
       ;;
     cat)
       [ "${#w[@]}" = 1 ] && [ "$has_doc" = 1 ] && [ "$from_file" = 0 ] && [ "${meta:0:1}" != p ] || return 1
@@ -1199,7 +1273,16 @@ check_segment() {
     return
   fi
   if [ -z "$stdin_kind" ] && [ "${meta:0:1}" = p ]; then
-    if stdin=$(static_output "$prev"); then stdin_kind=static; else stdin_kind=pipe; fi
+    local so=0
+    stdin=$(static_output "$prev") || so=$?
+    case "$so" in
+      0) stdin_kind=static ;;
+      3)
+        block "a printf piped into it could write more than $MAX_BYTES bytes, too much to check in time"
+        return
+        ;;
+      *) stdin_kind=pipe ;;
+    esac
   fi
   # For the checks below that read stdin (gh api --input -).
   SEG_STDIN_KIND=$stdin_kind
@@ -1739,6 +1822,10 @@ analyze() {
   # after a block — the deadline's included — forks nothing more.
   [ -n "$BLOCKED" ] && return
   [ "$depth" -le 8 ] || { block "the command nests shells too deeply to check"; return; }
+  # A string handed on to be checked (what a pipe feeds a shell, a git alias with its arguments quoted again) is
+  # held to the command's own cap, whatever builds it: it is tokenised and read inside one simple command's
+  # check, which the DEADLINE cannot interrupt, so its size bounds that check.
+  [ "${#s}" -le "$MAX_BYTES" ] || { block "a command it hands on is over $MAX_BYTES bytes, too long to check in time"; return; }
   PARSES=$((PARSES + 1))
   [ "$PARSES" -le "$MAX_PARSES" ] || { block "the command holds more than $MAX_PARSES commands to check inside it, too many to check in time"; return; }
   out=$(printf '%s' "$s" | "$AWK" -f "$TOKENIZER") || status=$?
