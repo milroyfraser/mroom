@@ -3,9 +3,9 @@
 # (actions/qa-reap; design 8.2). Someone always forgets to close a pull request, and environments come up without
 # the label too.
 #
-# An environment's age is its oldest site's, api or go, from Forge (lib/core/qa.sh); a list Forge cannot give fails
-# the run instead of reaping nothing, and an environment whose created_at Forge does not give counts as past its
-# time, with a warning. Each one past its time gets its own teardown: the app's qa-down workflow
+# An environment's age is its oldest site's, the API's or the frontend's, from Forge (lib/core/qa.sh); a list Forge
+# cannot give fails the run instead of reaping nothing, and an environment whose created_at Forge does not give
+# counts as past its time, with a warning. Each one past its time gets its own teardown: the app's qa-down workflow
 # (MROOM_QA_DOWN_WORKFLOW, qa-down.yml), started on the default branch with the reason ttl, which takes the pull
 # request's concurrency group, wakes a waiting pull request when it frees a slot, and can be re-run on its own when a
 # step fails. An environment Forge is already removing is skipped; a site of it removing for half an hour gets the
@@ -45,7 +45,7 @@ while read -r n state created; do
   qa_names "$n"
   if [ "$state" = removing ]; then
     echo "environment $n: Forge is already removing it; skipped"
-    for domain in "$QA_API" "$QA_WEB"; do
+    for domain in "$QA_API" "$QA_WEB" "$QA_OLD_API" "$QA_OLD_WEB"; do
       site="$(forge_site "$domain" </dev/null)"
       minutes="$(qa_redelete_stuck "${site:-null}" </dev/null)" || minutes=""
       if [ -n "$minutes" ]; then

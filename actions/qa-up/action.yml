@@ -65,7 +65,7 @@ inputs:
     description: The shared .env every environment starts from (third-party test-mode keys only)
     default: ""
   certificate:
-    description: A wildcard certificate in Forge to clone onto each site; empty asks Let's Encrypt for each
+    description: A certificate in Forge to clone onto a frontend's site, <N>.<zone>, such as one for *.<zone>; the API's site, api.<N>.<zone>, and every site when this is empty, ask Let's Encrypt
     default: ""
   nginx-template:
     description: An nginx template in Forge for new sites; qa-up checks each site's config either way
