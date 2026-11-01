@@ -447,7 +447,7 @@ t_a_new_environment_waits_for_a_slot() {
   up
   expect_rc 0
   run gate_log; expect_out_has $'env-sha 7\nprobe-link 7 api\nprobe-link 7 web\ncode-put 7 '"$SHA"
-  # One whose code never went in, such as the site a first deploy that stopped left, is new still: past qa.max_envs,
+  # One whose code never went in, such as the site a first deploy that stopped left, is new still: past the slots,
   # it gives way, its site deleted and waited for until Forge has it gone.
   app "$TWO" api/artisan=php
   site 1 "$(api_host 1)" installed
@@ -455,7 +455,7 @@ t_a_new_environment_waits_for_a_slot() {
   site 3 "$(web_host 3)" installed
   made_site 5 7 api /api/public 8.4
   up
-  expect_rc 0; expect_out_has "site 5 gave way, past qa.max_envs"
+  expect_rc 0; expect_out_has "site 5 gave way, past the slots"
   expect_out_has "::warning::All 3 QA environments are in use, so this pull request waits for a slot."
   run gate_log; expect_out "env-sha 7"
   run forge_writes; expect_out "DELETE /sites/5"
@@ -494,19 +494,19 @@ t_a_site_that_could_not_give_way_gives_way_on_the_next_run() {
   forge_set ".sites_made_first = [$(other_site 8)] | .fail[\"DELETE /sites/102\"] = 500"
   up
   expect_rc 1
-  expect_err_has "Forge did not remove site 102, made past qa.max_envs, though its delete went twice; the next run gives way again"
+  expect_err_has "Forge did not remove site 102, made past the slots, though its delete went twice; the next run gives way again"
   run grep -c '^DELETE /sites/102$' "$FORGE_LOG"; expect_out 2
   run gate_log; expect_out ""
   # The next run finds site 102, but its code never went in, so it is new still, and gives way again: it never comes
   # up beside three others.
   up
   expect_rc 1; expect_err_has "Forge did not remove site 102"
-  expect_true "a fourth environment came up past qa.max_envs" lacks "$out" "environment 7: up"
+  expect_true "a fourth environment came up past the slots" lacks "$out" "environment 7: up"
   run gate_log; expect_out "env-sha 7"
   # Once Forge takes the delete, the run waits for a slot, and three environments are left.
   forge_set 'del(.fail)'
   up
-  expect_rc 0; expect_out_has "site 102 gave way, past qa.max_envs"
+  expect_rc 0; expect_out_has "site 102 gave way, past the slots"
   expect_out_has "::warning::All 3 QA environments are in use, so this pull request waits for a slot."
   run state '[.sites[] | select(.status != "removing") | .name] | length'; expect_out 3
   run state '[.sites[].id] | map(tostring) | join(",")'; expect_out "1,2,101"
@@ -522,7 +522,7 @@ t_giving_way_outlasts_a_delete_forge_drops() {
   up
   expect_rc 0
   expect_out_has "site 102 is still there; its delete goes again"
-  expect_out_has "site 102 gave way, past qa.max_envs"
+  expect_out_has "site 102 gave way, past the slots"
   run grep -c '^DELETE /sites/102$' "$FORGE_LOG"; expect_out 2
   run state '[.sites[].id] | map(tostring) | join(",")'; expect_out "1,2,101"
   # A delete sent while Forge is still making the site may never run, so it is sent once Forge has made it.
@@ -531,7 +531,7 @@ t_giving_way_outlasts_a_delete_forge_drops() {
   site 2 "$(api_host 2)" installed
   forge_set ".sites_made_first = [$(other_site 8)] | .installing_delete_dropped = true | .install_reads = 3"
   up
-  expect_rc 0; expect_out_has "site 102 gave way, past qa.max_envs"
+  expect_rc 0; expect_out_has "site 102 gave way, past the slots"
   run grep -c '^DELETE /sites/102$' "$FORGE_LOG"; expect_out 1
   # A site that never goes fails the run.
   app "$TWO" api/artisan=php
@@ -539,7 +539,7 @@ t_giving_way_outlasts_a_delete_forge_drops() {
   site 2 "$(api_host 2)" installed
   forge_set ".sites_made_first = [$(other_site 8)] | .site_deletes_dropped = 2"
   up
-  expect_rc 1; expect_err_has "Forge did not remove site 102, made past qa.max_envs, though its delete went twice"
+  expect_rc 1; expect_err_has "Forge did not remove site 102, made past the slots, though its delete went twice"
   run gate_log; expect_out ""
 }
 
@@ -800,6 +800,129 @@ t_a_daemon_that_turns_up_during_the_deploy_keeps_the_worker_out() {
   run gh_log; expect_out_has "mroom-qa: failed"
 }
 
+# memory <total> <available> <swap free> [<reserve>]: what the box's gate says of its memory, in MB.
+memory() { printf 'total_mb=%s\navailable_mb=%s\nswap_free_mb=%s\nreserve_mb=%s\n' "$1" "$2" "$3" "${4:-4096}" >"$GATE/memory.out"; }
+
+t_slots_are_sized_from_the_box_memory() {
+  # 6144 MB less the box's 4096 hold two environments of 1024 MB, fewer than qa.max_envs (3).
+  app "$TWO" api/artisan=php
+  memory 6144 3000 0
+  site 1 "$(api_host 1)" installed
+  up
+  expect_rc 0; expect_out_has "environment 7: up at https://$WEB"
+  expect_out_has "==> The box's memory holds 2 QA environments (6144 MB, 4096 MB kept for the box, 1024 MB each; qa.max_envs is 3)"
+  run grep -v '^forge GET' "$ORDER_LOG"; expect_out_has $'gate memory\nforge POST /sites'
+  # Two others fill them: the new one waits, and says why there are two.
+  app "$TWO" api/artisan=php
+  memory 6144 3000 0
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  up
+  expect_rc 0
+  expect_out_has "::warning::All 2 QA environments the box's memory holds (qa.max_envs is 3) are in use, so this pull request waits for a slot."
+  run forge_writes; expect_out ""
+  run gate_asked; expect_out "memory"
+  run gh_log; expect_out_has 'mroom-qa: waiting since=2026-10-27T12:00:00Z'
+  # With more memory, qa.max_envs is the limit: the third comes up, and a fourth waits without asking the box.
+  app "$TWO" api/artisan=php
+  memory 16384 12000 0
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  up
+  expect_rc 0; expect_out_has "==> The box's memory holds 3 QA environments"
+  expect_out_has "environment 7: up"
+  app "$TWO" api/artisan=php
+  memory 16384 12000 0
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  site 3 "$(api_host 3)" installed
+  up
+  expect_rc 0; expect_out_has "::warning::All 3 QA environments are in use, so this pull request waits for a slot."
+  run gate_asked; expect_out ""
+  # A bigger environment, a bigger reserve: 8192 MB less 2048 hold three of 2048 MB, so the third waits.
+  app "${TWO/max_envs = 3/max_envs = 5
+env_memory_mb = 2048}" api/artisan=php
+  memory 8192 6000 0 2048
+  site 1 "$(api_host 1)" installed
+  site 2 "$(api_host 2)" installed
+  site 3 "$(api_host 3)" installed
+  up
+  expect_rc 0
+  expect_out_has "::warning::All 3 QA environments the box's memory holds (qa.max_envs is 5) are in use"
+  # An environment whose code went in is refreshed, whatever the memory, and the box is not asked.
+  made_site 5 7 api /api/public 8.4
+  code_went_in 7
+  memory 1024 10 0
+  : >"$GATE/gate.log"
+  up
+  expect_rc 0; expect_out_has "environment 7: up"
+  run gate_asked; expect_true "the box's memory was asked for a refresh" lacks "$out" "memory"
+}
+
+t_a_new_environment_the_memory_cannot_hold_waits() {
+  app "$TWO" api/artisan=php
+  memory 65536 500 200
+  up
+  expect_rc 0
+  expect_out_has "::warning::The box has 500 MB of RAM available and 200 MB of free swap, less than the 1024 MB a QA environment needs (qa.env_memory_mb), so this pull request waits until the box has the memory."
+  run sed -n 's/^refused=//p' "$GITHUB_OUTPUT"; expect_out_has "less than the 1024 MB a QA environment needs"
+  run forge_writes; expect_out ""
+  run gate_asked; expect_out "memory"
+  run gh_log; expect_out_has 'mroom-qa: waiting since=2026-10-27T12:00:00Z'
+  run output_of sha; expect_out ""
+  # A site a first deploy left before its code went in gives way, as past the slots.
+  app "$TWO" api/artisan=php
+  memory 65536 500 200
+  made_site 5 7 api /api/public 8.4
+  up
+  expect_rc 0; expect_out_has "site 5 gave way, past the slots"; expect_out_has "less than the 1024 MB"
+  run forge_writes; expect_out "DELETE /sites/5"
+  # Exactly enough, swap counted, is enough.
+  app "$TWO" api/artisan=php
+  memory 65536 900 124
+  up
+  expect_rc 0; expect_out_has "environment 7: up"
+}
+
+t_a_box_whose_memory_holds_none_fails() {
+  app "$TWO" api/artisan=php
+  memory 5000 4000 0
+  up
+  expect_rc 1
+  expect_err_has "the box's memory holds no QA environment: it has 5000 MB, keeps 4096 MB for itself (MROOM_QA_RESERVE_MB in its box.env), and qa.env_memory_mb is 1024"
+  run forge_writes; expect_out ""
+  run gh_log; expect_out_has "mroom-qa: failed"
+  # A gate that cannot say, or says something else, stops the run before anything is made.
+  app "$TWO" api/artisan=php
+  echo 1 >"$GATE/memory.rc"
+  up
+  expect_rc 1; expect_err_has "the gate could not say how much memory the box has (memory); a box whose mroom is older than this one's has no memory operation, so upgrade the box first"
+  run forge_writes; expect_out ""
+  app "$TWO" api/artisan=php
+  printf 'total_mb=8192\navailable_mb=lots\nswap_free_mb=0\nreserve_mb=4096\n' >"$GATE/memory.out"
+  up
+  expect_rc 1; expect_err_has "the gate's memory gave no available_mb"
+  app "${TWO/max_envs = 3/max_envs = 3
+env_memory_mb = 99999999}" api/artisan=php
+  up
+  expect_rc 1; expect_err_has "qa.env_memory_mb must be a whole number of MB, of at most 7 digits"
+}
+
+t_two_first_deploys_count_again_under_the_memory() {
+  local other
+  other="{name: \"$(api_host 8)\", type: \"php\", is_isolated: true, isolated_user: \"$(site_user 8)\",
+    web_directory: \"/api/public\", php_version: \"php84\"}"
+  # Two slots by memory; environment 8 made its site first, beside environment 1: this one gives way.
+  app "$TWO" api/artisan=php
+  memory 6144 3000 0
+  site 1 "$(api_host 1)" installed
+  forge_set ".sites_made_first = [$other]"
+  up
+  expect_rc 0
+  expect_out_has "site 102 gave way, past the slots"
+  expect_out_has "::warning::All 2 QA environments the box's memory holds (qa.max_envs is 3) are in use"
+}
+
 t_two_first_deploys_at_once_never_pass_max_envs() {
   local other
   other="{name: \"$(api_host 8)\", type: \"php\", is_isolated: true, isolated_user: \"$(site_user 8)\",
@@ -811,7 +934,7 @@ t_two_first_deploys_at_once_never_pass_max_envs() {
   forge_set ".sites_made_first = [$other]"
   up
   expect_rc 0
-  expect_out_has "site 102 gave way, past qa.max_envs"
+  expect_out_has "site 102 gave way, past the slots"
   expect_out_has "::warning::All 3 QA environments are in use, so this pull request waits for a slot."
   run forge_writes; expect_out_has $'\nDELETE /sites/102'
   # Its site is gone, waited for until Forge had it gone.
@@ -819,7 +942,7 @@ t_two_first_deploys_at_once_never_pass_max_envs() {
   run gate_log; expect_out ""
   run output_of sha; expect_out ""
   run gh_log; expect_out_has 'mroom-qa: waiting since=2026-10-27T12:00:00Z'
-  # Made just after this one's, environment 8 is the one past qa.max_envs: this one goes on.
+  # Made just after this one's, environment 8 is the one past the slots: this one goes on.
   app "$TWO" api/artisan=php
   site 1 "$(api_host 1)" installed
   site 2 "$(api_host 2)" installed
@@ -1020,6 +1143,10 @@ test_case daemons-before-code t_daemons_of_another_user_go_before_the_code
 test_case jobs-by-command t_daemons_and_scheduled_jobs_found_by_their_command_go_too
 test_case daemon-during-deploy t_a_daemon_that_turns_up_during_the_deploy_keeps_the_worker_out
 test_case slots-at-once t_two_first_deploys_at_once_never_pass_max_envs
+test_case slots-from-memory t_slots_are_sized_from_the_box_memory
+test_case memory-short t_a_new_environment_the_memory_cannot_hold_waits
+test_case memory-holds-none t_a_box_whose_memory_holds_none_fails
+test_case slots-at-once-memory t_two_first_deploys_count_again_under_the_memory
 test_case give-way-next-run t_a_site_that_could_not_give_way_gives_way_on_the_next_run
 test_case give-way-dropped t_giving_way_outlasts_a_delete_forge_drops
 test_case still-making t_a_site_forge_is_still_making_is_new

@@ -92,7 +92,9 @@ name = "shop"
 
 Only `app.name` is required in phase 0. Later phases make more keys required as the commands that read
 them arrive (for example `qa.zone` and `qa.db_read_allowlist` with QA environments in phase 2).
-`mroom config keys` lists every key, its type, and whether it is required.
+`mroom config keys` lists every key, its type, whether it is required, and mroom's default where it has one:
+`app.version_path` (`/version`), `qa.max_envs` (5) and `qa.env_memory_mb` (1024). `get` gives that default when
+the file leaves the key out, whatever `--default` says, so every reader agrees.
 
 ```bash
 mroom config get app.name                  # shop
@@ -100,6 +102,7 @@ mroom config get app.build.daemons         # one item per line
 mroom config get app.build.daemons --json  # ["horizon", "reverb"]
 mroom config get app.build --json          # a whole table, as JSON
 mroom config get app.php --default 8.4     # a fallback when the key is not set
+mroom config get app.version_path          # /version, mroom's default, when the file has none
 mroom config validate                      # check the whole file
 mroom config path                          # which mroom.toml was found
 mroom config keys                          # every key the schema knows
@@ -219,6 +222,18 @@ readable only by the box user: `watchdog.json`, and `watchdog.log` with one JSON
 start and end and each event. Its MCP check sends no login, so it finds servers that fail or vanish, not
 an expired login.
 
+## Memory preflight
+
+`mroom memory-preflight <MB> [<what>]` stops work the box cannot hold before it starts, since the kernel ends a
+build that runs out of memory half way, with whatever it had done left as it was. It exits 1, saying why, when
+the box's RAM available and free swap (`/proc/meminfo`) hold less than `<MB>` more, 0 otherwise, and 2 for a
+usage error;
+`MROOM_SKIP_MEMORY_CHECK=1` skips it, and a host without a readable `/proc/meminfo` skips it with a note.
+
+```bash
+mroom memory-preflight 4096 "the frontend build" && pnpm build
+```
+
 ## Forge API
 
 `forge-api` calls the Laravel Forge v2 API of this box, for agents and people. Every call goes to the box's
@@ -288,6 +303,7 @@ own environment. Phase 2a adds operations one PR at a time; today the `provision
 | `bucket-drop <N>` | every bucket the environment has, whatever its disks: their keys deleted, and each bucket emptied and deleted |
 | `reverb-app-add <N>` | an app of its own on mroom's Reverb host (D16), which reads its apps from a file on every lookup, so nothing restarts; prints `REVERB_APP_ID`, `REVERB_APP_KEY`, `REVERB_APP_SECRET` (new for a new app, the same while it has one), `REVERB_HOST`, `REVERB_PORT` and `REVERB_SCHEME` |
 | `reverb-app-remove <N>` | the environment's app; its sockets already open stay until they close |
+| `memory` | the box's memory, in MB: `total_mb`, `available_mb` and `swap_free_mb` from `/proc/meminfo`, and `reserve_mb`, what the box keeps for all but QA (`MROOM_QA_RESERVE_MB`, 4096 unless set); qa-up sizes its slots from them |
 
 The client sends only N, and the few words some operations also take, each of a fixed form. The
 database, role and Redis user are `<MROOM_APP_NAME>_qa_<N>`, and the database is cloned from
@@ -333,7 +349,9 @@ site's user, and only on that environment's own two sites:
   named after the commit, a cut-off upload fails on gzip's checksum, and the tree replaces the site's whole
   tree except the backend's `.env` and `storage/`. Any `.env` in the tarball is skipped, a link at `.env`,
   `storage` or `bootstrap/cache` refuses the tarball, and the gate writes `version.json`
-  (`{"release": null, "commit": "<sha>"}`) into the backend, since a tarball has no git history.
+  (`{"release": null, "commit": "<sha>"}`) into the backend, since a tarball has no git history, in place of
+  any the tree holds. The app's `app.version_path` endpoint reports it; checks ask the gate instead
+  (`env-sha`), since the PR's code could write the file afterwards. `lib/core/version.sh` is the one reader they share.
 - **The swap** builds the new tree beside the live one, then exchanges the two entry by entry, each in one
   atomic step (`renameat2`), so the site never lacks an entry, even while its own code writes. A failed step
   undoes the steps done. A killed put's kept items go back live with the next put; if the site made its own
@@ -606,9 +624,10 @@ bash "$f" --user "$user" --smtp-port "$smtp_port" --release "$v" "${parts[@]}"
 
 11. In `box.env`: `MROOM_APP_NAME=shop`, `MROOM_QA_TEMPLATE=shop_qa_template` and
     `MROOM_QA_ZONE=qa.example.dev`, and when they differ from the defaults, `MROOM_QA_BACKEND_DIR` (the
-    Laravel app's folder in the repository, `.`), `MROOM_QA_PHP` (`php`) and `MROOM_QA_PERSONA_DOMAIN`
-    (`.test`). A site user's name is at most 32 characters, so an app name of 19 characters or fewer always
-    fits.
+    Laravel app's folder in the repository, `.`), `MROOM_QA_PHP` (`php`), `MROOM_QA_PERSONA_DOMAIN`
+    (`.test`) and `MROOM_QA_RESERVE_MB` (`4096`: the memory, in MB, the box keeps for the dev site, sessions
+    and builds, which no QA environment may count on). A site user's name is at most 32 characters, so an app
+    name of 19 characters or fewer always fits.
 
 12. The mail catcher, when `qa.parity.mail` is `catcher` (the default): `mroom baseline mailpit`, then,
     *as root*, the root recipe with `mailpit` in its parts, then `mroom baseline mailpit` again. Baseline
@@ -680,7 +699,7 @@ differently):
   teardown; one started by hand or by the reaper skips it. The second job runs every step, each skipping what is
   already gone, whether or not Forge still has a site: daemons first, since supervisor starts again what is
   stopped, then `user-clean`, then the sites right after (design 8.9), then the box's side. A `user-clean` that
-  fails keeps the sites. Once the sites are gone, the environment no longer counts against `qa.max_envs`, so its
+  fails keeps the sites. Once the sites are gone, the environment no longer takes a slot, so its
   slot is given on then, whatever the box's side comes to. When a step fails, the comment names it, and "Re-run
   failed jobs" or "Re-run all jobs" on that run finishes the teardown: the comment's hidden line keeps the state
   the teardown started from, which the check takes when Forge has no site left, as a teardown by hand or by the
@@ -740,14 +759,22 @@ differently):
   or not at all, kept only when Forge's record of it names the site user, and made again when its command changed
   (other queues, another PHP). Then `/up`, asked up to 6 times 5 seconds apart, since a new site, or any site
   while PHP-FPM or nginx reloads, answers 502 for a moment; only once it answers 200 is the commit said to be
-  deployed. Each step checks its own resource, so the next run repairs one that stopped halfway. From
-  `qa.max_envs` (5) environments on, a new one waits for a slot; one whose code went in, by the gate's record
-  (`env-sha`), is always refreshed. Two first deploys at once each count the others inside their own pull
-  request's turn, so a new environment counts again once its site is made, by the order Forge made the
-  environments' first sites in, and one past `qa.max_envs` gives way: its sites are deleted once Forge has made
-  them, waited for until Forge has them gone, and deleted again once if they stay, since Forge can refuse a
-  delete, or take one and never run it. One that will not go fails the run, and the next gives way again, since
-  the environment's code never went in.
+  deployed. Each step checks its own resource, so the next run repairs one that stopped halfway.
+- **Slots.** The box holds as many environments as its memory does: its RAM, less `MROOM_QA_RESERVE_MB` (4096),
+  in environments of `qa.env_memory_mb` (1024) each, and never more than `qa.max_envs` (5). qa-up asks the gate
+  (`memory`) for a new environment, and the run's log says how many fit. Once they are all in use, a new one
+  waits for a slot. While the box has less RAM available and free swap than one environment needs, it waits for
+  the memory, and is tried again when an environment goes down or on a later push; the comment says which. A box
+  whose memory holds none fails the deploy, saying so. Linux reports a little less RAM than the box was sold
+  with, so an 8 GB box holds 3 environments by default, not `qa.max_envs` (5), and a 4 GB one none: on a small
+  box, lower `MROOM_QA_RESERVE_MB` or `qa.env_memory_mb`. Upgrade the box before the app's workflow pins, since
+  a gate older than qa-up has no `memory` and every new environment fails until it does. One whose code went
+  in, by the gate's record (`env-sha`), is always refreshed. Two first deploys at once each count the others
+  inside their own pull request's turn, so a new environment counts again once its site is made, by the order
+  Forge made the environments' first sites in, and one past the slots gives way: its sites are deleted once
+  Forge has made them, waited for until Forge has them gone, and deleted again once if they stay, since Forge
+  can refuse a delete, or take one and never run it. One that will not go fails the run, and the next gives way
+  again, since the environment's code never went in.
 - **No required checks.** None of the QA workflows' checks can be a required one: the plan's build job is
   named after the commit it builds (`QA build <sha>`), so its name changes with every push, and a required
   check is matched by its name. The QA environment comment says how each deploy went; require the app's own

@@ -127,11 +127,13 @@ qa_body() {
   printf '### QA environment\n<!-- mroom-qa: %s -->\n\nSomething.\n' "$marker"
 }
 
-# Logs and what the fakes saw.
-gate_log() { cat "$GATE/gate.log" 2>/dev/null || true; }
+# Logs and what the fakes saw. gate_log and order leave out the gate's memory, a question that changes nothing, as
+# forge_writes leaves out Forge's reads; gate_asked is every request.
+gate_log() { grep -vx memory "$GATE/gate.log" 2>/dev/null || true; }
+gate_asked() { cat "$GATE/gate.log" 2>/dev/null || true; }
 forge_writes() { grep -v '^GET ' "$FORGE_LOG" 2>/dev/null || true; }
 gh_log() { cat "$GH_FAKE/gh.log" 2>/dev/null || true; }
-order() { grep -v '^forge GET' "$ORDER_LOG" 2>/dev/null || true; }
+order() { grep -v -e '^forge GET' -e '^gate memory$' "$ORDER_LOG" 2>/dev/null || true; }
 output_of() { sed -n "s/^$1=//p" "$GITHUB_OUTPUT" 2>/dev/null || true; }
 tmp_empty() { [ -z "$(find "$T/tmp" -mindepth 1 -print -quit)" ]; }
 lacks() { case "$1" in *"$2"*) return 1 ;; esac; }
