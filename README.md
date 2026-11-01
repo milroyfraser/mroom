@@ -241,6 +241,70 @@ usage error;
 mroom memory-preflight 4096 "the frontend build" && pnpm build
 ```
 
+## Doctor
+
+`mroom doctor` says whether the box is as mroom needs it, and `mroom doctor --app [<dir>]` also whether an app's
+mroom setup fits the box (design 8.7, 8.9 and 9). Run it as the box user, on the box: after setting the box up,
+after an upgrade, and whenever the app's `mroom.toml` or its workflow pins change. Each check prints a line,
+`ok`, `warn` or `fail`, and under a `warn` or a `fail` the fix. It exits 1 when a check fails (a `warn` passes),
+2 for a usage error. It changes nothing and prints no secret: it reads the gate's secret files only to see that
+they are there, mode 600 and complete, and signs in to Postgres and Redis as the gate to read settings, never data.
+
+```bash
+mroom doctor                     # the box
+cd ~/shop && mroom doctor --app  # the app whose mroom.toml is found from here, and the box against it
+```
+
+With `--app`, the app's checks:
+
+- **config**: `mroom.toml` validates (`mroom config validate`); an unknown key warns. The rest of the app's checks
+  wait until it does. Without `qa.zone` the app has no QA environments, and the QA checks are skipped.
+- **workflow qa-plan, qa-up, qa-down, qa-reap**: a workflow in `.github/workflows` calls each of mroom's QA
+  workflows, pinned to the release tag the box runs, and passes by name the secrets it takes. A pin newer than the
+  box says to upgrade the box first, since the box goes before the pins; one older, or a branch or a commit, says
+  to pin the box's tag. **pins**: any other use of mroom's workflows or actions is pinned to that tag too.
+- **parity**: each `[qa.parity]` value that is not production's service, a swap, warns as a known gap.
+- **sockets**: with `broadcast = "same"` and a frontend, `app.build.frontend_env` maps the four `VITE_REVERB_*`
+  values Laravel Echo reads (a warn: a frontend may open no sockets).
+- **redis-commands**: no `app.build.after_deploy` command, `.mroom/hooks/qa-deploy` line or scheduled command
+  (`routes/console.php`, `app/Console/Kernel.php`, `bootstrap/app.php`) runs `cache:clear`, `optimize:clear`,
+  `cache:prune-stale-tags` or `horizon:clear-metrics`, which the environment's Redis user is refused and phpredis
+  reports as done.
+- **isolation**: the backend reads every setting qa-up sets to keep environments apart: `DB_DATABASE`,
+  `DB_USERNAME`, `REDIS_USERNAME`, `REDIS_PREFIX`, `CACHE_PREFIX`, `SESSION_COOKIE`, `SESSION_DOMAIN`,
+  `XSRF_COOKIE_NAME`, `HORIZON_PREFIX` when the app has Horizon, and with a frontend of its own `CLIENT_URL`,
+  `CORS_ALLOWED_ORIGINS` and `SANCTUM_STATEFUL_DOMAINS`. A config file the app has not published leaves Laravel's
+  (or the package's) own, which reads its keys; one it has published must read them itself.
+- **health**: the backend has `/up` and `app.version_path` among its routes (a warn: a search can miss a route).
+
+The box's checks, for what the app's `mroom.toml` needs with `--app`, or for the box as it is without:
+
+- **box.env** reads; **names**: `MROOM_APP_NAME`, `MROOM_QA_ZONE`, `MROOM_QA_BACKEND_DIR` and
+  `MROOM_QA_PERSONA_DOMAIN` are `mroom.toml`'s `app.name`, `qa.zone`, `app.backend_dir` and `qa.persona_domain`,
+  `MROOM_QA_TEMPLATE` is set (and is `qa.template_database` when the file has one), and `MROOM_QA_PHP` runs
+  `app.php`. A box with no `MROOM_APP_NAME` has no QA gate, and its checks are skipped.
+- **db-read**: `MROOM_QA_DB_READ` holds the same entries as `qa.db_read_allowlist`, in any order; it names those
+  only in one or the other. With no `qa.db_read_allowlist`, an `MROOM_QA_DB_READ` warns.
+- **gate-keys**: a key in `~/.ssh/authorized_keys` is forced to `mroom gate provision`, each gate key is
+  `restrict`-ed and forced to an mroom that runs, with one role alone; a missing `template` key warns, and a missing
+  `browser` key warns once the app or the box has an allowlist.
+- **secrets**: `pg_service.conf` (with its `[mroom-gate]` service) and `redis-gate.env` are there, mode 600, and
+  set their login.
+- **postgres**: 16 or later, reached as the gate's role; the gate holds `<app>_qa_objects`, `<app>_qa_envs` and
+  `<app>_qa_readers` with `ADMIN OPTION`; the objects role owns no database or tablespace; and `PUBLIC` may connect
+  to neither the template nor an environment's database (any other database `PUBLIC` may connect to warns).
+  **template**: the template database is loaded, and no load was cut short (a `_next` or `_old` left warns).
+- **redis**: 7 or later, reached as the gate's user, with an `aclfile`, and the default user off.
+- **site-op**: installed, root's, out of the box user's reach, and this release's.
+- **mailpit**, **garage**, **reverb**: each service `[qa.parity]` needs (`mail = "catcher"`, `files = "same"`,
+  `broadcast = "same"`) is set up, its login file mode 600, and answers on its socket. Without `--app`, a service
+  the box has not set up is left out.
+- **memory**: the box's RAM, less `MROOM_QA_RESERVE_MB`, holds `qa.max_envs` environments of `qa.env_memory_mb`;
+  fewer warns, none fails.
+- **kernel**: `fs.protected_hardlinks` is 1. **sshd**: `DenyGroups isolated` and `AllowAgentForwarding no`,
+  read from `sshd_config` and `sshd_config.d/*.conf` outside `Match` blocks (a hint; `sshd -T` as root is the
+  answer).
+
 ## Forge API
 
 `forge-api` calls the Laravel Forge v2 API of this box, for agents and people. Every call goes to the box's
