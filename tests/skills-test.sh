@@ -3,6 +3,8 @@
 # contract:
 #   - each has valid frontmatter, a unique name and a description, and the set is the one mroom ships;
 #   - every `mroom` command, `/mroom:` skill and mroom.toml key a skill names exists;
+#   - implement, fix-issue and deliver hand a person a read-only, aggregate, non-personal production check,
+#     never read production themselves, and the Room's Rollout query follows the same rule;
 #   - every skill keeps the safety rules, and none runs a merge, an approval, a release, a deploy, a secret
 #     read or a tracker call except through `mroom tracker` and `mroom errors`;
 #   - a skill that calls `mroom tracker` or `mroom errors` says what to do when it exits 3 (no tracker);
