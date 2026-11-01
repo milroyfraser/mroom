@@ -23,9 +23,9 @@ TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef
 REAL_CURL="$(command -v curl)"
 
 world() {
-  local run="$HOME/.local/share/mroom-services/garage/run" secrets="$HOME/.config/mroom/secrets"
-  mkdir -p "$run" "$secrets" "$T/bin"
-  chmod 700 "$run"
+  local secrets="$T/services/garage/etc"
+  services_tree garage/run garage/etc
+  mkdir -p "$T/bin" "$HOME/.config/mroom"
   printf 'MROOM_APP_NAME=shop\nMROOM_QA_ZONE=qa.example.dev\n' >"$HOME/.config/mroom/box.env"
   printf '%s\n' "$TOKEN" >"$secrets/garage-admin-token"
   chmod 600 "$secrets/garage-admin-token"
@@ -38,8 +38,8 @@ world() {
 }
 
 garage_up() {
-  local run="$HOME/.local/share/mroom-services/garage/run"
-  python3 -I "$ROOT/tests/fakes/garage.py" "$run/admin.sock" "$run/s3.sock" "$HOME/.config/mroom/secrets/garage-admin-token" \
+  local run="$T/services/garage/run"
+  python3 -I "$ROOT/tests/fakes/garage.py" "$run/admin.sock" "$run/s3.sock" "$T/services/garage/etc/garage-admin-token" \
     "$T/garage.log" >"$T/garage.out" 2>&1 &
   echo $! >"$T/garage.pid"
   for _ in $(seq 1 50); do grep -q up "$T/garage.out" 2>/dev/null && return 0; sleep 0.1; done
@@ -51,7 +51,7 @@ garage_down() { kill "$(cat "$T/garage.pid")" 2>/dev/null || true; sleep 0.2; }
 gate() { run env SSH_ORIGINAL_COMMAND="$1" "$MROOM" gate provision; }
 # admin <path> [<json>]: the test's own call to the stand-in's admin API.
 admin() {
-  local args=(-q -s --unix-socket "$HOME/.local/share/mroom-services/garage/run/admin.sock" --header @-)
+  local args=(-q -s --unix-socket "$T/services/garage/run/admin.sock" --header @-)
   if [ -n "${2-}" ]; then args+=(--request POST --data-binary "$2"); fi
   printf 'Authorization: Bearer %s\n' "$TOKEN" | "$REAL_CURL" "${args[@]}" "http://localhost$1"
 }
@@ -178,7 +178,7 @@ t_what_the_gate_refuses() {
     gate "$words"; expect_rc 1; expect_err_has "refused"
   done
   run state; run jq -c '.buckets' <<<"$out"; expect_out '{}'
-  local secrets="$HOME/.config/mroom/secrets"
+  local secrets="$T/services/garage/etc"
   chmod 644 "$secrets/garage-admin-token"
   gate "bucket-create 12 files"; expect_rc 1; expect_err_has "garage-admin-token must be yours and mode 600"
   chmod 600 "$secrets/garage-admin-token"
