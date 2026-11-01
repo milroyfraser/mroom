@@ -431,14 +431,18 @@ writes to the tracker only the state of the issue it works and comments on it, a
 it files an issue. A design waiting for approval is a comment (`Design for review: <link>`, then
 `Design approved by <name>: <link>`), not a label. A skill that resumes earlier work, or stacks a branch on
 another pull request, takes only a pull request whose branch is in the app's repository, never a fork's (8.1).
-Before `implement` marks a PR ready (step 6, which `fix-issue` follows), a change that touches at least one of
-the guard, a hook or the permission rules, the gate or `site-op`, workflows or actions, code that handles a secret
-or token, the session Room page, or what installs, runs as root or decides review gets a threat check: a fresh
+Before `implement` marks a PR ready (step 6, which `fix-issue` follows), a change that touches at least one of the
+guard, a hook or the permission rules, the gate or `site-op`, workflows or actions, code that handles a secret or
+token, the session Room page, or what installs, runs as root or decides review gets a threat check: a fresh
 max-effort sub-agent (never a fork) fetches the head's diff itself and reads it as data against section 8 and its
-decisions, for secret reach, QA isolation, input reaching commands, guard bypasses, pins and privacy. It returns
-its findings, and the session writes them under `## Threat check` in the PR body. A high or critical finding
-blocks ready, or sends a ready PR back to draft, until it is fixed. It comes before
-review; the post-merge security check stays the backstop.
+decisions, for secret reach, QA isolation, input reaching commands, guard bypasses, pins, privacy and privilege (a
+way to act as the deploy user or root, or write outside its area). It returns its findings, and the session writes
+them under `## Threat check` in the PR body, through a fresh file: each with its severity, its class, the file and
+line, and its fix. A finding never quotes the secret, host, address, id, name or personal data it found, and never
+gives a step-by-step exploit: a PR body may be public, and its edit history keeps what a later edit removes. A
+finding in code the PR does not change goes to the person, not into the PR body. A high or critical finding blocks
+ready, or sends a ready PR back to draft, until it is fixed. It comes before review; the post-merge security check
+stays the backstop.
 `tests/skills-test.sh` checks each skill against this contract.
 
 `issue_find_by_marker` (`mroom tracker find <key>`) lists the issues whose description holds the
