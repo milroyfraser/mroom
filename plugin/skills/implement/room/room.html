@@ -1343,6 +1343,20 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     if (sol.length) { const ol = el("ol"); for (const s of sol) ol.append(el("li", null, String(s))); part("Solution", ol); }
     const steps = Array.isArray(b.steps) ? b.steps.filter((s) => s && s.text) : [];
     let cur = Number(b.current) || 0;
+    /* A merge can't be Go while something blocks it: the branch is behind main or conflicts (checks
+       "behind"), a check is red or still running, or the card names a blocker (it.blockers). The page shows
+       the Review verdict as No-go with the reason, whatever was written. */
+    {
+      const why = it.checks === "behind" ? "behind main or conflicting; update the branch first"
+        : it.checks === "red" ? "a check failed"
+        : it.checks === "running" ? "checks still running"
+        : Array.isArray(it.blockers) && it.blockers.length ? String(it.blockers[0]) : "";
+      const rv = why && steps.find((s) => s.title === "Review" && s.verdict && s.verdict.go);
+      if (rv) {
+        const i = steps.indexOf(rv);
+        steps[i] = Object.assign({}, rv, { verdict: Object.assign({}, rv.verdict, { go: false, call: "No-go: " + why + ".", why: "Was: " + (rv.verdict.call || "Go") + " " + (rv.verdict.why || "") }) });
+      }
+    }
     /* Every PR card shows a QA tab. When a card has none yet, a placeholder sits after Review (or first),
        saying QA is missing, so a card can't look finished without it. */
     if (steps.length && !steps.some((s) => s.title === "QA")) {
