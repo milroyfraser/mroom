@@ -194,7 +194,37 @@ div.invopt{cursor:default}
 .nextstep .nsrec{margin:0;padding:8px 10px;background:var(--ok-soft);border-radius:6px;color:var(--ink);max-width:70ch}
 .nextstep .nshow{margin:0;padding:8px 10px;background:var(--accent-soft);border-radius:6px;color:var(--ink);max-width:70ch}
 .nextstep .nsrow{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;color:var(--muted);font-size:13px}
+.nextstep .nsdraft{display:grid;gap:6px;margin:0;padding:10px 12px;border-radius:6px;background:color-mix(in srgb,var(--ink) 4%,var(--surface));max-width:70ch}
+.nextstep .nsdraft .nsdto{font-size:12px;color:var(--muted)}
+.nextstep .nsdraft blockquote{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink)}
 .nextstep a.nstitle{color:var(--ink);text-decoration:none}.nextstep a.nstitle:hover{text-decoration:underline}
+.prodcheck{display:grid;gap:10px;background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:10px;padding:14px 16px;margin-block:0 14px;min-width:0;max-width:100%;box-sizing:border-box}
+.prodcheck>*{min-width:0}
+.prodcheck .pchead{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px;font:600 11px/1.2 var(--body);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.prodcheck .pctitle{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 10px}
+.prodcheck h3{margin:0;font:600 17px/1.3 var(--display);text-wrap:balance}
+.prodcheck .pcgo{font:700 12px/1 var(--body);padding:4px 8px;border-radius:999px;white-space:nowrap}
+.prodcheck .pcgo.go{color:var(--ok);background:var(--ok-soft)}
+.prodcheck .pcgo.nogo{color:var(--alarm);background:color-mix(in srgb,var(--alarm) 14%,var(--surface))}
+.prodcheck p{margin:0;max-width:70ch}
+.prodcheck ol.pchuman{margin:0;padding-left:20px;display:grid;gap:2px;max-width:70ch}
+.prodcheck .pcbadges{display:flex;flex-wrap:wrap;gap:6px}
+.prodcheck .pcbadge{font:500 12px/1 var(--body);padding:5px 8px;border-radius:999px;border:1px solid var(--line);white-space:nowrap;cursor:default}
+.prodcheck .pcbadge.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,var(--line))}
+.prodcheck .pcbadge.bad{color:var(--alarm);border-color:color-mix(in srgb,var(--alarm) 50%,var(--line));font-weight:700}
+.prodcheck details.pcmore summary{cursor:pointer;color:var(--accent);font-size:13.5px}
+.prodcheck details.pcmore[open]{display:grid;gap:8px}
+.prodcheck pre.pccode{margin:8px 0 0;padding:10px 12px;border-radius:8px;background:color-mix(in srgb,var(--ink) 6%,var(--surface));font:12.5px/1.5 var(--mono);overflow-x:auto;white-space:pre;max-width:100%;box-sizing:border-box}
+.pccode .k{color:var(--accent);font-weight:600} .pccode .s{color:var(--ok)} .pccode .v{color:var(--warn)} .pccode .n{color:var(--warn)} .pccode .c{color:var(--muted);font-style:italic} .pccode .f{color:var(--ink);font-weight:600}
+.prodcheck dl.pcread{margin:0;display:grid;gap:6px}
+.prodcheck dl.pcread div{display:grid;gap:1px}
+.prodcheck dl.pcread dt{font:500 12.5px/1.4 var(--mono)}
+.prodcheck dl.pcread dd{margin:0;color:var(--muted);font-size:13px}
+.prodcheck .pcsub{color:var(--muted);font-size:13px}
+.prodcheck .pcacts{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.prodcheck .pcacts button{font:600 13px var(--body);padding:7px 12px;border-radius:7px;border:1px solid var(--accent);background:var(--accent);color:var(--surface);cursor:pointer}
+.prodcheck .pcacts button:disabled{opacity:.45;cursor:not-allowed}
+.prodcheck .pcacts .pcnote{color:var(--muted);font-size:13px}
 .focus.flash{animation:cardflash 1.6s ease-out}
 @keyframes cardflash{0%{box-shadow:0 0 0 3px var(--accent)}100%{box-shadow:0 0 0 0 transparent}}
 .relnotes,.relafter{display:grid;gap:6px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;min-width:0}
@@ -491,6 +521,70 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
 .focus[data-checks="running"]{animation:cardpulse 1.6s ease-in-out infinite}
 .focus[data-checks="behind"]{animation:cardbehind 1.6s ease-in-out infinite}
 @media (prefers-reduced-motion:reduce){.focus[data-checks]{animation:none;border-left-style:dashed}}
+
+/* Wind-down: meta/winddown {on:true} turns the page to dusk while work is paused; learning cards
+   (collection learnings) show one at a time above the next step until each is read. */
+:root{--wd-bg:#d9cfe6;--wd-surface:#f3eef8;--wd-accent:#6b4fa3;--wd-glow1:#8a6cc9;--wd-glow2:#e0965a;--wd-glow3:#4b5fb0}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--wd-bg:#0b0a18;--wd-surface:#16132a;--wd-accent:#b39ae6;--wd-glow1:#5a3f9e;--wd-glow2:#a8603a;--wd-glow3:#26357a}}
+:root[data-theme="dark"]{--wd-bg:#0b0a18;--wd-surface:#16132a;--wd-accent:#b39ae6;--wd-glow1:#5a3f9e;--wd-glow2:#a8603a;--wd-glow3:#26357a}
+/* The mood is set on the root element, so the page background (painted on html), the cards and the
+   aurora all turn to dusk together: indigo and plum overhead, a low amber glow like a sunset. */
+html[data-winddown]:root{--bg:var(--wd-bg);--surface:var(--wd-surface)}
+html[data-winddown]:root,html[data-winddown] body{background:var(--bg);transition:background .8s}
+html[data-winddown] body::before{background:
+  radial-gradient(46vmax 30vmax at 25% 15%,color-mix(in srgb,var(--wd-glow1) 45%,transparent),transparent 70%),
+  radial-gradient(40vmax 26vmax at 80% 20%,color-mix(in srgb,var(--wd-glow3) 40%,transparent),transparent 70%),
+  radial-gradient(60vmax 24vmax at 50% 105%,color-mix(in srgb,var(--wd-glow2) 45%,transparent),transparent 70%);
+  filter:blur(40px);opacity:1}
+
+/* Wind-down sky: a crescent moon with a soft halo and a few twinkling stars, fixed behind the page.
+   It floats slowly; under reduced motion it stays still. */
+:root{--wd-moon:#f3e7c4;--wd-moonglow:rgba(243,231,196,.45);--wd-star:#6b4fa3}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--wd-moon:#f6edd2;--wd-moonglow:rgba(246,237,210,.35);--wd-star:#e9e2ff}}
+:root[data-theme="dark"]{--wd-moon:#f6edd2;--wd-moonglow:rgba(246,237,210,.35);--wd-star:#e9e2ff}
+.wdsky{position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden;transition:opacity .4s}
+.wdsky[hidden]{display:none}
+.wdsky .moon{position:absolute;top:clamp(56px,9vh,96px);right:clamp(20px,8vw,120px);width:clamp(64px,9vmin,104px);aspect-ratio:1;border-radius:50%;
+  box-shadow:inset calc(-1 * clamp(14px,2vmin,24px)) calc(clamp(6px,.9vmin,10px)) 0 0 var(--wd-moon);
+  filter:drop-shadow(0 0 18px var(--wd-moonglow)) drop-shadow(0 0 42px var(--wd-moonglow));transform:rotate(-18deg)}
+.wdsky .halo{position:absolute;top:clamp(26px,6vh,66px);right:clamp(-10px,5vw,90px);width:clamp(124px,17vmin,164px);aspect-ratio:1;border-radius:50%;
+  background:radial-gradient(circle,var(--wd-moonglow) 0%,transparent 65%);opacity:.6}
+.wdsky .star{position:absolute;width:3px;height:3px;border-radius:50%;background:var(--wd-star);opacity:.5;box-shadow:0 0 6px var(--wd-star)}
+@media (prefers-reduced-motion:no-preference){
+  @keyframes moonfloat{0%,100%{transform:translateY(0) rotate(-18deg)}50%{transform:translateY(-10px) rotate(-14deg)}}
+  @keyframes halopulse{0%,100%{opacity:.45;transform:scale(1)}50%{opacity:.75;transform:scale(1.06)}}
+  @keyframes twinkle{0%,100%{opacity:.15;transform:scale(.7)}50%{opacity:.9;transform:scale(1.2)}}
+  .wdsky .moon{animation:moonfloat 9s ease-in-out infinite}
+  .wdsky .halo{animation:halopulse 7s ease-in-out infinite}
+  .wdsky .star{animation:twinkle 3.6s ease-in-out infinite}
+}
+
+/* Welcome back: meta/wave {at} shows a waving hand where the moon sits, for a few seconds, when the
+   developer writes again after a break of more than 5 minutes. */
+.wavehand{position:fixed;top:clamp(56px,9vh,96px);right:clamp(20px,8vw,120px);z-index:1;pointer-events:none;font-size:clamp(48px,7vmin,76px);line-height:1;
+  transform-origin:70% 80%;opacity:0;transition:opacity .4s;filter:drop-shadow(0 4px 14px rgba(0,0,0,.18))}
+.wavehand.on{opacity:1}
+@media (prefers-reduced-motion:no-preference){
+  @keyframes handwave{0%,60%,100%{transform:rotate(0)}10%,30%{transform:rotate(16deg)}20%,40%{transform:rotate(-10deg)}50%{transform:rotate(10deg)}}
+  .wavehand.on{animation:handwave 1.6s ease-in-out 3}
+}
+.learncard{display:grid;gap:10px;border:1px solid var(--line);border-left:3px solid var(--wd-accent);border-radius:10px;background:var(--surface);padding:14px 16px;margin-block:0 14px}
+.learncard .lchead{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px;font-size:12px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}
+.learncard h3{margin:0;font-size:17px;text-wrap:balance}
+.learncard .lcpart{display:grid;gap:4px}
+.learncard .lcpart b{font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.learncard .lcpart p,.learncard .lcpart li{margin:0;line-height:1.45}
+.learncard .lcpart ul{margin:0;padding-left:18px;display:grid;gap:6px}
+.learncard .lcrec{font-size:13px;color:var(--wd-accent)}
+.learncard .lcrow{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px}
+.learncard button{font:inherit;border:1px solid var(--wd-accent);background:transparent;color:var(--wd-accent);border-radius:999px;padding:6px 14px;cursor:pointer}
+.learncard button:focus-visible{outline:2px solid var(--wd-accent);outline-offset:2px}
+.learncard .lcacts{list-style:none;padding-left:0}
+.learncard .lcact{display:flex;gap:10px;align-items:flex-start;cursor:pointer}
+.learncard .lcact input{margin-top:3px;accent-color:var(--wd-accent);flex:none;width:16px;height:16px}
+.learncard .lcnav{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.learncard .lcback{border-color:var(--line);color:var(--muted)}
+.learncard .wdnote{font-size:13px;color:var(--muted);margin:0}
 </style>
 
 <div class="wrap">
@@ -518,6 +612,8 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
   </header>
 
   <section class="panel" id="panel-current" role="tabpanel" aria-labelledby="tab-current">
+    <section class="prodcheck" id="prodCheck" hidden aria-live="polite"></section>
+    <section class="learncard" id="learnCard" hidden aria-live="polite"></section>
     <section class="nextstep" id="nextStep" hidden aria-live="polite"></section>
     <section class="sec" id="secFocus">
       <div class="ghead"><h2>Issue and PR cards · top priority first</h2></div>
@@ -655,6 +751,238 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     return fmtDay.format(new Date(t)) === fmtDay.format(new Date()) ? fmtTime.format(new Date(t)) : fmt.format(new Date(t)).replace(",", "");
   }
   function updated(b) { return b && b.updatedAt ? "Updated " + ago(Date.now() - (Date.parse(b.updatedAt) || Date.now())) + " · " + when(b.updatedAt) : "Not filled in yet"; }
+
+  /* Wind-down and the retrospective. meta/winddown {on, note, paused:[...]} puts the page in its dusk mood;
+     each learnings doc {order, title, observation, actions:[{text,rec}], status} is one card: what was seen,
+     then the recommended action items, each with Claude's recommendation and a check box. Ticking items
+     and pressing the button twice saves them as `confirmed` (indexes into actions) and moves to the next card.
+     "Back" opens the previous card with its saved ticks, to change them. The first one not "done" (by order) shows above the next step; "Next learning"
+     marks it done. Rows are data: every field lands as text. */
+  let learnings = [], windDown = null, learnPick = { id: null, picked: new Set(), armed: false }, learnView = null, learnLocal = {}, learnErr = null;
+
+  /* The wind-down sky, built once and shown while the mood is on. Fixed star spots, staggered twinkles. */
+  function windSky(on) {
+    let sky = document.getElementById("wdSky");
+    if (!sky) {
+      sky = el("div", "wdsky"); sky.id = "wdSky"; sky.setAttribute("aria-hidden", "true"); sky.hidden = true;
+      sky.append(el("span", "halo"), el("span", "moon"));
+      [[12, 18], [22, 62], [8, 44], [30, 30], [16, 80], [40, 12], [26, 90], [6, 70], [36, 52], [44, 74]].forEach(([t, l], i) => {
+        const st = el("span", "star"); st.style.top = t + "vh"; st.style.left = l + "vw"; st.style.animationDelay = (i * 0.37).toFixed(2) + "s"; sky.append(st);
+      });
+      document.body.append(sky);
+    }
+    sky.hidden = !on;
+  }
+
+  /* Waving hand: shown once per meta/wave.at, only while that moment is fresh (under 30 s old). */
+  let waveSeen = null;
+  function showWave(w) {
+    const at = w && w.at ? Date.parse(w.at) : NaN;
+    if (!at || waveSeen === w.at || Date.now() - at > 30000) return;
+    waveSeen = w.at;
+    let h = document.getElementById("waveHand");
+    if (!h) { h = el("div", "wavehand", "\u{1F44B}"); h.id = "waveHand"; h.setAttribute("aria-hidden", "true"); document.body.append(h); }
+    if (document.documentElement.dataset.winddown) { const sky = document.getElementById("wdSky"); if (sky) sky.style.opacity = "0"; }
+    h.classList.remove("on"); void h.offsetWidth; h.classList.add("on");
+    setTimeout(() => { h.classList.remove("on"); const sky = document.getElementById("wdSky"); if (sky) sky.style.opacity = ""; }, 5200);
+  }
+  /* Production check: a read-only command Claude asks the developer to run. One card on top of the
+     stack while any check waits; it leaves when Claude records the answer (status "answered"). */
+  let prodChecks = [], pcLoaded = false;
+  const PC_KEYWORDS = /^(select|from|where|and|or|not|in|is|null|as|on|join|left|right|inner|group|by|order|limit|count|distinct|begin|rollback|commit|set|transaction|read|only|local|true|false|function|fn|use|return|echo|new|foreach|if|else|ilike|like|desc|asc)$/i;
+  function pcHighlight(code) {
+    const out = document.createElement("code");
+    const re = /(\/\/[^\n]*|#[^\n]*|--[^\n]*|\/\*[\s\S]*?\*\/)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|(\$[A-Za-z_]\w*)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_]\w*)(?=\s*\()|([A-Za-z_]\w*)/g;
+    let last = 0, m;
+    const push = (cls, text) => { if (!text) return; if (!cls) { out.append(document.createTextNode(text)); return; } const sp = document.createElement("span"); sp.className = cls; sp.textContent = text; out.append(sp); };
+    while ((m = re.exec(code))) {
+      push(null, code.slice(last, m.index));
+      if (m[1]) push("c", m[1]);
+      else if (m[2]) push("s", m[2]);
+      else if (m[3]) push("v", m[3]);
+      else if (m[4]) push("n", m[4]);
+      else if (m[5]) push(PC_KEYWORDS.test(m[5]) ? "k" : "f", m[5]);
+      else push(PC_KEYWORDS.test(m[6]) ? "k" : null, m[6]);
+      last = re.lastIndex;
+    }
+    push(null, code.slice(last));
+    return out;
+  }
+  function renderProdCheck() {
+    const box = document.getElementById("prodCheck");
+    if (!box) return;
+    box.replaceChildren();
+    const open = prodChecks.filter((c) => c && c.status !== "answered" && c.status !== "dropped" && typeof c.query === "string" && c.query.trim())
+      .sort((a, b) => String(a.askedAt || "").localeCompare(String(b.askedAt || "")));
+    if (!open.length) { box.hidden = true; return; }
+    const c = open[0];
+    const v = c.verdict && typeof c.verdict === "object" ? c.verdict : null;
+    const comp = Array.isArray(c.compliance) ? c.compliance.filter((x) => x && typeof x === "object") : [];
+    const allOk = comp.length > 0 && comp.every((x) => x.ok === true);
+    const go = !!(v && v.go === true && allOk);
+    const head = el("div", "pchead");
+    head.append(el("span", null, "Production check" + (c.where ? " · " + String(c.where) : "")), el("span", null, open.length > 1 ? "1 of " + open.length : (c.askedAt ? "asked " + ago(Date.parse(c.askedAt)) : "")));
+    const tl = el("div", "pctitle");
+    tl.append(el("h3", null, String(c.title || "A read-only production check")), el("span", "pcgo " + (go ? "go" : "nogo"), go ? "Go · safe to run" : "No-go · " + String((v && v.call) || "don't run it yet")));
+    box.append(head, tl);
+    if (c.why) box.append(el("p", null, String(c.why)));
+    if (Array.isArray(c.human) && c.human.length) { const ol = el("ol", "pchuman"); c.human.forEach((h) => ol.append(el("li", null, String(h)))); box.append(ol); }
+    if (comp.length) {
+      const bs = el("div", "pcbadges"); bs.setAttribute("role", "list"); bs.setAttribute("aria-label", "Read-only and GDPR checks");
+      comp.forEach((x) => { const b = el("span", "pcbadge " + (x.ok === true ? "ok" : "bad"), (x.ok === true ? "✓ " : "✕ ") + String(x.label || "")); b.setAttribute("role", "listitem"); if (x.note) b.title = String(x.note); bs.append(b); });
+      box.append(bs);
+    }
+    const det = el("details", "pcmore"); det.append(el("summary", null, "Command and how to read the output"));
+    const pre = el("pre", "pccode"); pre.append(pcHighlight(String(c.query))); det.append(pre);
+    if (Array.isArray(c.read) && c.read.length) {
+      const dl = el("dl", "pcread");
+      c.read.forEach((r) => { if (!r || typeof r !== "object") return; const d = el("div"); d.append(el("dt", null, String(r.result || "")), el("dd", null, String(r.means || ""))); dl.append(d); });
+      det.append(dl);
+    }
+    box.append(det);
+    const acts = el("div", "pcacts");
+    const btn = el("button", null, "Copy command"); btn.type = "button"; btn.disabled = !go;
+    btn.addEventListener("click", async () => { try { await navigator.clipboard.writeText(String(c.query)); btn.textContent = "Copied"; } catch { det.open = true; const r = document.createRange(); r.selectNodeContents(pre); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); btn.textContent = "Select and copy"; } setTimeout(() => { btn.textContent = "Copy command"; }, 1800); });
+    acts.append(btn, el("span", "pcnote", go ? "Paste the output in the chat." : (v && v.why ? String(v.why) : "A check point is not met; Claude fixes it first.")));
+    box.append(acts);
+    box.hidden = false;
+  }
+
+  function renderLearning() {
+    const box = document.getElementById("learnCard");
+    if (!box) return;
+    /* A closed retrospective also ends the wind-down mood, even if `on` was left true. */
+    const on = !!(windDown && windDown.on === true && !windDown.retroClosedAt);
+    if (on) document.documentElement.dataset.winddown = "1"; else delete document.documentElement.dataset.winddown;
+    windSky(on);
+    box.replaceChildren();
+    /* A closed retrospective (meta/winddown.retroClosedAt) shows no cards at all. */
+    const list = (windDown && windDown.retroClosedAt ? [] : learnings).map((l) => (learnLocal[l.id] ? Object.assign({}, l, learnLocal[l.id]) : l)).sort((x, y) => (Number(x.order) || 0) - (Number(y.order) || 0));
+    const open = list.filter((l) => l.status !== "done");
+    /* learnView is the card the developer stepped back to (Back); otherwise the first card not done. */
+    const viewed = learnView ? list.find((l) => l.id === learnView) : null;
+    if (learnView && !viewed) learnView = null;
+    const cur = viewed || open[0];
+    const idx = cur ? list.indexOf(cur) : list.length;
+    const back = (to) => { const b = el("button", "lcback", "← Back"); b.type = "button"; b.addEventListener("click", () => { learnView = to.id; learnPick = { id: null, picked: new Set(), armed: false }; renderLearning(); }); return b; };
+    /* An action item is addressed once it is declined (read, not ticked) or its acted[i].state is "done".
+       The whole section disappears when every card is read and every confirmed action is done. */
+    const actState = (l, i) => { const a = l.acted && typeof l.acted === "object" ? l.acted[String(i)] : null; return a && typeof a === "object" ? a : null; };
+    const pendingActs = [];
+    for (const l of list) {
+      if (l.status !== "done" || !Array.isArray(l.confirmed)) continue;
+      const as = Array.isArray(l.actions) ? l.actions : [];
+      for (const i of l.confirmed.map(Number)) { if (!as[i]) continue; const st = actState(l, i); if (!st || st.state !== "done") pendingActs.push({ l, i, a: as[i], st }); }
+    }
+    const allAddressed = !open.length && !pendingActs.length;
+    if (!cur && !on && (!list.length || allAddressed)) { box.hidden = true; return; }
+    box.hidden = false;
+    /* The "Winding down · Paused: …" line is only for before the retrospective is read: once every
+       card is read it goes, and closing the retrospective ends the wind-down mood too. */
+    if (on && open.length) {
+      const n = el("p", "wdnote", "Winding down" + (windDown.note ? " · " + String(windDown.note) : "") + (Array.isArray(windDown.paused) && windDown.paused.length ? " · Paused: " + windDown.paused.map(String).join("; ") : ""));
+      box.append(n);
+    }
+    if (!cur) {
+      if (list.length) {
+        /* A compact summary, never the full list: counts of confirmed actions by state, and declined ones. */
+        let conf = 0, done = 0, doing = 0, declined = 0;
+        for (const l of list) {
+          const n = Array.isArray(l.actions) ? l.actions.length : 0;
+          const c = Array.isArray(l.confirmed) ? l.confirmed.map(Number).filter((i) => i >= 0 && i < n) : [];
+          conf += c.length; declined += n - c.length;
+          for (const i of c) { const st = actState(l, i); if (st && st.state === "done") done++; else if (st && st.state === "doing") doing++; }
+        }
+        const parts = [list.length + " learnings read", conf + " confirmed" + (conf ? " (" + done + " done, " + doing + " in progress" + (conf - done - doing ? ", " + (conf - done - doing) + " not started" : "") + ")" : ""), declined + " declined"];
+        const head2 = el("div", "lchead"); head2.append(el("span", null, "Retrospective summary"));
+        if (!readOnly && db) head2.append(back(list[list.length - 1]));
+        box.append(head2, el("p", null, parts.join(" · ")));
+      }
+      const rep = windDown && typeof windDown.report === "string" && /^https:\/\//.test(windDown.report) ? windDown.report : null;
+      if (list.length) {
+        /* End of the retrospective: the report link and a Close button (two clicks, saved in the background). */
+        const end = el("div", "lcrow");
+        if (rep) { const a = el("a", null, "Retrospective report ↗"); a.href = rep; a.target = "_blank"; a.rel = "noopener"; end.append(a); }
+        else end.append(el("span", "wdnote", "Report not filed yet."));
+        if (!readOnly && db) {
+          const cb = el("button", null, "Close retrospective"); cb.type = "button";
+          let armed = false;
+          cb.addEventListener("click", () => {
+            if (!armed) { armed = true; cb.textContent = "Click again to close"; setTimeout(() => { if (armed) { armed = false; cb.textContent = "Close retrospective"; } }, 5000); return; }
+            const at = new Date().toISOString(); const before = windDown;
+            windDown = Object.assign({}, windDown || {}, { retroClosedAt: at, on: false });
+            renderLearning();
+            db.doc("meta/winddown").update({ retroClosedAt: at, on: false }).catch(() => { windDown = before; learnErr = "Couldn't close the retrospective. Please try again."; renderLearning(); });
+          });
+          end.append(cb);
+        }
+        box.append(end);
+      }
+      /* Never leave an empty card on the page. */
+      if (!box.childElementCount) box.hidden = true;
+      return;
+    }
+    const head = el("div", "lchead");
+    head.append(el("span", null, "Retrospective" + (cur.status === "done" ? " · editing" : "")), el("span", null, "Learning " + (idx + 1) + " of " + list.length));
+    box.append(head, el("h3", null, String(cur.title || "")));
+    if (learnErr) box.append(el("p", "wdnote", learnErr));
+    const obs = cur.observation || cur.happened;
+    if (obs) { const p = el("div", "lcpart"); p.append(el("b", null, "Observation"), el("p", null, String(obs))); box.append(p); }
+    const acts = Array.isArray(cur.actions) ? cur.actions.filter((a) => a && a.text) : [];
+    if (learnPick.id !== cur.id) learnPick = { id: cur.id, picked: new Set(cur.status === "done" && Array.isArray(cur.confirmed) ? cur.confirmed.map(Number).filter((i) => i >= 0 && i < acts.length) : []), armed: false };
+    const nextCard = list[idx + 1];
+    const goesTo = nextCard && nextCard.status === "done" ? "next" : open.filter((l) => l !== cur).length ? "next" : "finish";
+    const canWrite = !readOnly && !!db;
+    const btn = el("button");
+    btn.type = "button";
+    const label = () => {
+      const n = learnPick.picked.size;
+      const tail = goesTo === "next" ? " and go to next" : " and finish";
+      btn.textContent = learnPick.armed ? "Click again to confirm" : n ? (cur.status === "done" ? "Save " : "Confirm ") + n + (n === 1 ? " action" : " actions") + tail : "None confirmed" + (goesTo === "next" ? ", go to next" : ", finish");
+    };
+    if (acts.length) {
+      const p = el("div", "lcpart"); const ul = el("ul", "lcacts");
+      acts.forEach((a, i) => {
+        const li = el("li"); const lab = el("label", "lcact"); const cb = el("input");
+        cb.type = "checkbox"; cb.checked = learnPick.picked.has(i); cb.disabled = !canWrite;
+        cb.addEventListener("change", () => { if (cb.checked) learnPick.picked.add(i); else learnPick.picked.delete(i); learnPick.armed = false; label(); });
+        const txt = el("span"); txt.append(el("p", null, String(a.text))); if (a.rec) txt.append(el("p", "lcrec", "Claude recommends: " + String(a.rec)));
+        const st = actState(cur, i);
+        if (st && st.state) txt.append(el("p", "wdnote", (st.state === "done" ? "Done" : "In progress") + (st.outcome ? ": " + String(st.outcome) : "")));
+        lab.append(cb, txt); li.append(lab); ul.append(li);
+      });
+      p.append(el("b", null, "Recommended action items · tick the ones you confirm"), ul); box.append(p);
+    }
+    const row = el("div", "lcrow");
+    const left = el("span", "lcnav");
+    if (idx > 0 && !readOnly && db) left.append(back(list[idx - 1]));
+    const rest = open.filter((l) => l !== cur).length;
+    left.append(el("span", "wdnote", rest ? rest + " not read yet" : "All read after this"));
+    row.append(left);
+    if (canWrite) {
+      label();
+      /* Two clicks: the first arms the button, the second saves the ticked actions and moves on. */
+      btn.addEventListener("click", async () => {
+        if (!learnPick.armed) { learnPick.armed = true; label(); setTimeout(() => { if (learnPick.id === cur.id && learnPick.armed) { learnPick.armed = false; label(); } }, 5000); return; }
+        /* Move on at once: the save is shown as done locally (learnLocal) and written in the background,
+           so the button never waits on the network. A failed save puts the card back with a note. */
+        const confirmed = Array.from(learnPick.picked).sort((x, y) => x - y);
+        const patch = { status: "done", doneAt: new Date().toISOString(), confirmed };
+        const wasDone = cur.status === "done";
+        learnLocal[cur.id] = patch;
+        learnPick = { id: null, picked: new Set(), armed: false };
+        /* After editing an earlier card, step forward through the cards already read; else back to the first unread. */
+        learnView = nextCard && nextCard.status === "done" && wasDone ? nextCard.id : null;
+        learnErr = null;
+        renderLearning();
+        db.doc("learnings/" + cur.id).update(patch)
+          .catch(() => { learnErr = "Couldn't save that card. Please try again."; learnView = cur.id; })
+          .finally(() => { delete learnLocal[cur.id]; renderLearning(); });
+      });
+      row.append(btn);
+    }
+    box.append(row);
+  }
   function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
   function safeUrl(u) { try { const x = new URL(String(u)); return x.protocol === "https:" ? x.href : null; } catch { return null; } }
   function goodLinks(list) { return (Array.isArray(list) ? list : []).map((l) => ({ label: l && l.label, url: safeUrl(l && l.url) })).filter((l) => l.url); }
@@ -1589,6 +1917,16 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
       const named = [].concat(n.cardId ? n.cardId : [], Array.isArray(n.cardIds) ? n.cardIds : []).map(String);
       if (named.length && !named.some((id) => todos.some((t) => String(t.id) === id && t.status !== "done"))) n = null;
     }
+    /* A production check waiting for its output is what the session is waiting on: it is the next step,
+       whatever meta/next says, until Claude records the answer. A meta/next that names an answered or
+       dropped check is stale. */
+    const pcOpen = (typeof prodChecks !== "undefined" ? prodChecks : []).filter((c) => c && c.status !== "answered" && c.status !== "dropped" && typeof c.query === "string" && c.query.trim())
+      .sort((x, y) => String(x.askedAt || "").localeCompare(String(y.askedAt || "")));
+    if (n && n.prodCheckId && pcLoaded && !pcOpen.some((c) => String(c.id) === String(n.prodCheckId))) n = null;
+    if (pcOpen.length && !(n && n.prodCheckId && String(n.prodCheckId) === String(pcOpen[0].id))) {
+      const c = pcOpen[0];
+      n = { title: "Run the production check: " + String(c.title || "a read-only check"), text: String(c.why || ""), how: "Copy the command on the card above, run it" + (c.where ? " (" + String(c.where) + ")" : "") + ", and paste the output in the Claude Code chat.", prodCheckId: c.id, at: c.askedAt };
+    }
     if (!n) {
       /* Anything waiting on the developer counts: the first open to-do by rank that is a decision or a "now",
          unless a PR card whose current step is theirs comes first. */
@@ -1617,7 +1955,7 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     /* The title scrolls to the card, which flashes an accent outline when reached. */
     const goCard = (e) => {
       if (e) e.preventDefault();
-      const c = n.cardId && document.querySelector('.focus[data-id="' + CSS.escape(String(n.cardId)) + '"]');
+      const c = n.prodCheckId ? $("prodCheck") : n.cardId && document.querySelector('.focus[data-id="' + CSS.escape(String(n.cardId)) + '"]');
       if (!c) return;
       c.scrollIntoView({ behavior: "smooth", block: "start" });
       c.classList.remove("flash"); void c.offsetWidth; c.classList.add("flash");
@@ -1631,6 +1969,15 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     /* meta/next.how: the exact instruction, where and what to type or click. */
     if (n.how) { const h = el("p", "nshow"); h.append(el("b", null, "How: "), document.createTextNode(String(n.how))); box.append(h); }
     if (n.text) box.append(el("p", "nstext", String(n.text)));
+    /* A step that is a message shows its draft in full and where it goes; to send it, the developer asks in the chat. */
+    const d = n.draft && typeof n.draft === "object" ? n.draft : (typeof n.draft === "string" ? { text: n.draft } : null);
+    if (d && d.text) {
+      const wrap = el("div", "nsdraft");
+      if (d.to) wrap.append(el("span", "nsdto", "Draft · to " + String(d.to)));
+      else wrap.append(el("span", "nsdto", "Draft"));
+      const q = el("blockquote", null, String(d.text)); wrap.append(q);
+      box.append(wrap);
+    }
     const row = el("div", "nsrow");
     const url = safeUrl(n.url);
     if (url) row.append(anchor(n.cardId ? ((todos.find((t) => String(t.id) === String(n.cardId)) || {}).kind === "issue" ? "Open the issue ↗" : "Open the PR on GitHub ↗") : "Open ↗", url));
@@ -1862,6 +2209,10 @@ body::after{inset:0;background-image:radial-gradient(color-mix(in srgb,var(--ink
     db.collection("work").onSnapshot((snap) => { work = rows(snap); loaded.work = true; renderWork(); renderMood(); }, onErr);
     db.doc("meta/session").onSnapshot((snap) => { session = data(snap); renderSession(); }, onErr);
     db.doc("meta/next").onSnapshot((snap) => { nextMeta = data(snap); renderWork(); }, onErr);
+    db.collection("prodChecks").onSnapshot((snap) => { prodChecks = snap.docs.map((d) => Object.assign({}, d.data(), { id: d.id })); pcLoaded = true; renderProdCheck(); renderWork(); }, onErr);
+    db.collection("learnings").onSnapshot((snap) => { learnings = snap.docs.map((d) => Object.assign({}, d.data(), { id: d.id })); renderLearning(); }, onErr);
+    db.doc("meta/winddown").onSnapshot((snap) => { windDown = snap.exists ? snap.data() : null; renderLearning(); }, onErr);
+    db.doc("meta/wave").onSnapshot((snap) => { showWave(snap.exists ? snap.data() : null); }, onErr);
     db.doc("meta/settings").onSnapshot((snap) => {
       const s = data(snap) || {};
       const sec = Number(s.refreshSeconds), m = Number(s.atMinute);

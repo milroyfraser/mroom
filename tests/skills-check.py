@@ -8,7 +8,7 @@ root = os.environ["MROOM_ROOT_DIR"]
 skills_dir = os.environ["SKILLS_DIR"]
 commands_dir = os.environ["COMMANDS_DIR"]
 
-SKILLS = ["correct", "deliver", "fix-issue", "forge", "implement", "refine", "release"]
+SKILLS = ["correct", "deliver", "fix-issue", "forge", "implement", "refine", "release", "wind-down"]
 COMMANDS = ["clean-review", "crap"]
 SKILL_KEYS = {"name", "description", "disable-model-invocation", "argument-hint", "allowed-tools", "model"}
 COMMAND_KEYS = {"description", "argument-hint", "allowed-tools", "model"}
