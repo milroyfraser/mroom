@@ -111,6 +111,8 @@ brief: {
 
 **A step's text** says what is decided or done and why it matters, in one or two plain sentences, and leaves PR lists and details to the table.
 
+**Issue and PR work is always a card with tabs.** As soon as Claude starts work on a tracker issue or a PR (an investigation, a fix, a review), its card is a PR card with a `brief` (the Build tab, then the five tabs), not a plain to-do, even while it only waits on a decision. Convert an existing plain to-do in the same write that starts the work, and give a fix that has its own issue its own card. A plain to-do is only for things with no issue or PR (a message to send, a setting to change).
+
 **Build tab.** Until a PR exists, the card's first tab is "Build" (`who` Claude), followed by the five tabs below, with `current` 0 so the card opens on it. Its text starts "Last 10 minutes: …". It has three `rows`, Done, Now and Next, each with a verdict in `verdicts`. Refresh it at every check, and remove it when the PR opens.
 
 **Once its PR exists, a PR card has exactly five tabs**, in this order, each answering one question:
